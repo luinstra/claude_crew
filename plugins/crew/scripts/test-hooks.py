@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """
 Test script for claude-crew hooks
 Run from project root: python3 scripts/test-hooks.py

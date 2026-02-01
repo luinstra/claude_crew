@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Crew state management CLI for feedback-loop and measure-twice persistence."""
 
 import argparse

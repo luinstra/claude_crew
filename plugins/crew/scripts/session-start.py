@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """
 Claude Crew Session Start Hook
 Restores persistent mode states and injects plugin integration guidance.
