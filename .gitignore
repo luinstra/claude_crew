@@ -1,0 +1,19 @@
+# Runtime state (created per-project, not part of plugin source)
+.crew/
+**/.crew/
+
+# Local Claude settings (user-specific permissions)
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp

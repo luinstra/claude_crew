@@ -1,0 +1,29 @@
+{
+  "description": "Claude Crew hooks for session restoration and persistence enforcement",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/session-start.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/persistent-mode.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-crew",
+  "description": "Persistence, specialized agents, and tech-stack guidance for Claude Code",
+  "owner": {
+    "name": "Jeremy Luinstra",
+    "email": "luinstra@gmail.com"
+  },
+  "metadata": {
+    "version": "0.0.0",
+    "pluginRoot": "./plugins"
+  },
+  "plugins": [
+    {
+      "name": "crew",
+      "source": "./plugins/crew",
+      "description": "6 specialized agents, 13 commands, feedback loops, session persistence"
+    },
+    {
+      "name": "sk",
+      "source": "./plugins/sk",
+      "description": "Tech-stack skills: Kotlin, Exposed, Gradle, Trino patterns"
+    }
+  ]
+}
