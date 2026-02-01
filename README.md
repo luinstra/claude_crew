@@ -233,12 +233,14 @@ claude-crew/
 │   │   ├── commands/         # Slash commands
 │   │   ├── hooks/
 │   │   │   └── hooks.json    # Hook configuration
-│   │   └── scripts/
-│   │       ├── crew-state.py       # Loop state CLI
-│   │       ├── models.py           # Dataclasses for JSON structures
-│   │       ├── persistent-mode.py  # Feedback loop + todo enforcement
-│   │       ├── session-start.py    # State restoration
-│   │       └── test-hooks.py       # Test suite
+│   │   ├── scripts/
+│   │   │   ├── crew-state.py       # Loop state CLI
+│   │   │   ├── models.py           # Dataclasses for JSON structures
+│   │   │   ├── persistent-mode.py  # Feedback loop + todo enforcement
+│   │   │   ├── session-start.py    # State restoration
+│   │   │   └── test-hooks.py       # Test suite
+│   │   └── docs/
+│   │       └── CLAUDE.md     # User config template
 │   └── sk/
 │       ├── .claude-plugin/
 │       │   └── plugin.json   # Plugin manifest
@@ -249,7 +251,6 @@ claude-crew/
 │           ├── exposed/
 │           ├── gradle/
 │           └── trino/
-├── docs/                     # Development documentation
 └── README.md
 ```
 
