@@ -73,3 +73,10 @@ Task(subagent_type="media-reader", prompt="What error is shown: /path/to/error.p
 ```
 Task(subagent_type="media-reader", prompt="Extract config values from page 2: /path/to/doc.pdf")
 ```
+
+## Tool Availability
+
+**Core tools (always available):**
+- Read
+
+This agent requires no MCP tools and works in any environment.

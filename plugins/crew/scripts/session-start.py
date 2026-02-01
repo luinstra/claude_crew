@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """
 Claude Crew Session Start Hook
 Restores persistent mode states and injects plugin integration guidance.
@@ -42,12 +42,14 @@ def cleanup_stale_files(directory: Path) -> None:
             try:
                 age = now - json_file.stat().st_mtime
                 if age > MAX_AGE_SECONDS:
-                    # Don't delete files with active sessions
-                    state = FeedbackLoopState.load(json_file)
-                    if not state.active:
-                        json_file.unlink()
+                    # Only check active state for actual state files
+                    if "state.json" in json_file.name:
+                        state = FeedbackLoopState.load(json_file)
+                        if state.active:
+                            continue  # Don't delete active sessions
+                    json_file.unlink()
             except (OSError, AttributeError, KeyError, ValueError):
-                pass  # Skip files that can't be loaded as state
+                pass  # Skip files that can't be processed
 
 
 def detect_project_stack(directory: Path) -> list[str]:

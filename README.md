@@ -58,7 +58,7 @@ This split is automatically injected into every session via the session-start ho
 
 ```bash
 git clone https://github.com/luinstra/claude_crew.git
-cd claude-crew
+cd claude_crew
 # Install from plugins directory
 cd plugins/crew && /plugin && cd ../..
 cd plugins/sk && /plugin && cd ../..
@@ -141,6 +141,7 @@ For work requiring verification before declaring "done," use `/crew:feedback-loo
 |---------|-------------|
 | `/crew:code-search "query"` | Search codebase via file-reader agent |
 | `/crew:analyze "target"` | Deep analysis via advisor agent |
+| `/crew:status` | Show active loops and crew state |
 | `/crew:deepinit` | Initialize CLAUDE.md hierarchy for a codebase |
 | `/crew:save-context` | Save context snapshot for session recovery |
 | `/crew:restore-context` | Restore a previously saved context snapshot |

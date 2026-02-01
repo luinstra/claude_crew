@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Crew state management CLI for feedback-loop and measure-twice persistence."""
 
 import argparse
@@ -58,6 +58,8 @@ def coerce_value(value: str, field_type: type):
 
 def slugify(text: str, max_length: int = 50) -> str:
     """Convert text to a filename-safe slug."""
+    if text is None:
+        return "plan"
     # Lowercase, replace spaces with hyphens, keep only alphanumeric and hyphens
     slug = text.lower()
     slug = re.sub(r'\s+', '-', slug)

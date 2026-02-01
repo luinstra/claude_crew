@@ -4,6 +4,7 @@ model: inherit
 description: Use when implementing features, writing code, making changes, or executing plan tasks. Activates on "implement", "create", "add", "fix", "build", "write code".
 disallowedTools: Task
 tools: Read, Grep, Glob, Write, Edit, Bash, mcp__jetbrains__get_file_text_by_path, mcp__jetbrains__replace_text_in_file, mcp__jetbrains__create_new_file, mcp__jetbrains__search_in_files_by_text, mcp__jetbrains__find_files_by_name_keyword, mcp__jetbrains__rename_refactoring, mcp__jetbrains__execute_terminal_command, mcp__jetbrains__reformat_file, mcp__jetbrains__get_file_problems, mcp__MCP_DOCKER__git_status, mcp__MCP_DOCKER__git_add, mcp__MCP_DOCKER__git_commit, mcp__MCP_DOCKER__git_diff_unstaged, mcp__MCP_DOCKER__create_or_update_file
+# Note: MCP tools (mcp__jetbrains__*, mcp__MCP_DOCKER__*) are optional and only available when configured
 ---
 
 # Executor Agent
@@ -90,6 +91,17 @@ Bad prompts (use different agent):
 - "Figure out why auth is slow" → use advisor
 - "Research how Kafka consumers work" → use researcher
 - "Find all usages of deprecated API" → use file-reader
+
+## Tool Availability
+
+**Core tools (always available):**
+- Read, Grep, Glob, Write, Edit, Bash
+
+**Optional MCP tools (when configured):**
+- **JetBrains IDE MCP**: `mcp__jetbrains__*` - IDE integration for refactoring, file operations, code analysis
+- **Docker MCP**: `mcp__MCP_DOCKER__*` - Container-based git and file operations
+
+The agent works without MCP tools but has enhanced capabilities when they're available.
 
 ## Style
 

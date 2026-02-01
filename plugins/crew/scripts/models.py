@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """
 Data models for Claude Crew hooks.
 
@@ -181,7 +181,7 @@ class FeedbackLoopState:
                 active=data.get("active", False),
                 prompt=data.get("prompt", ""),
                 iteration=data.get("iteration", 1),
-                max_iterations=data.get("max_iterations", 100),
+                max_iterations=data.get("max_iterations", 20),
                 completion_promise=data.get("completion_promise", "DONE"),
             )
         except (OSError, json.JSONDecodeError):

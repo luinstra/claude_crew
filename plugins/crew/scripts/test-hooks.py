@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """
 Test script for claude-crew hooks
 Run from project root: python3 scripts/test-hooks.py
@@ -462,6 +462,36 @@ def main():
             # Clean up state files for subsequent tests
             for f in crew_dir.glob("*-state.json"):
                 f.unlink()
+
+            # =========================================================================
+            # SLUGIFY TESTS
+            # =========================================================================
+            log_section("slugify()")
+
+            # Import slugify from crew-state.py (hyphenated filename requires importlib)
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("crew_state", SCRIPT_DIR / "crew-state.py")
+            crew_state_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(crew_state_module)
+            slugify = crew_state_module.slugify
+
+            # Test null handling
+            if slugify(None) == "plan":
+                log_pass("slugify(None) returns default 'plan'")
+            else:
+                log_fail("slugify(None) returns default 'plan'", "plan", slugify(None))
+
+            # Test normal string
+            if slugify("Build Auth System") == "build-auth-system":
+                log_pass("slugify('Build Auth System') returns 'build-auth-system'")
+            else:
+                log_fail("slugify('Build Auth System') returns 'build-auth-system'", "build-auth-system", slugify("Build Auth System"))
+
+            # Test empty string
+            if slugify("") == "plan":
+                log_pass("slugify('') returns default 'plan'")
+            else:
+                log_fail("slugify('') returns default 'plan'", "plan", slugify(""))
 
             # Test with incomplete todos (create in home todos dir)
             todos_dir = Path.home() / ".claude" / "todos"

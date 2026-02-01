@@ -2,6 +2,7 @@
 name: file-reader
 description: Use when searching the codebase for files, patterns, or implementations. Activates on "find", "where is", "which files", "search for", "locate".
 tools: Read, Grep, Glob, mcp__jetbrains__get_file_text_by_path, mcp__jetbrains__search_in_files_by_text, mcp__jetbrains__search_in_files_by_regex, mcp__jetbrains__find_files_by_name_keyword, mcp__jetbrains__find_files_by_glob, mcp__jetbrains__list_directory_tree, mcp__MCP_DOCKER__read_file, mcp__MCP_DOCKER__list_directory, mcp__MCP_DOCKER__directory_tree
+# Note: MCP tools (mcp__jetbrains__*, mcp__MCP_DOCKER__*) are optional and only available when configured
 model: haiku
 ---
 
@@ -73,6 +74,17 @@ Your response has **FAILED** if:
 | Found code but need to understand WHY | Recommend advisor for architecture review |
 | Need external docs to interpret results | Recommend researcher agent |
 | Results too large (50+ matches) | Return top matches, note total, suggest refinement |
+
+## Tool Availability
+
+**Core tools (always available):**
+- Read, Grep, Glob
+
+**Optional MCP tools (when configured):**
+- **JetBrains IDE MCP**: `mcp__jetbrains__*` - Enhanced search, symbol info, directory trees
+- **Docker MCP**: `mcp__MCP_DOCKER__*` - Container-based file and directory operations
+
+The agent works without MCP tools but has enhanced search capabilities when they're available.
 
 ## Constraints
 

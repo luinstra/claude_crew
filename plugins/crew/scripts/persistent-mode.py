@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """
 Claude Crew Persistent Mode Hook
 Handles feedback-loop persistence and todo continuation.

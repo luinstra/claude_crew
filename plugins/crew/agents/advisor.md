@@ -3,6 +3,7 @@ name: advisor
 model: inherit
 description: Use when debugging complex issues, designing architecture, creating work plans, or performing root cause analysis. Activates on "why", "how should", "what's wrong", "design", "plan", "analyze".
 tools: Read, Grep, Glob, WebSearch, WebFetch, Write, mcp__jetbrains__get_file_text_by_path, mcp__jetbrains__search_in_files_by_text, mcp__jetbrains__search_in_files_by_regex, mcp__jetbrains__find_files_by_name_keyword, mcp__jetbrains__list_directory_tree, mcp__jetbrains__get_symbol_info, mcp__jetbrains__get_file_problems, mcp__MCP_DOCKER__issue_read, mcp__MCP_DOCKER__pull_request_read, mcp__MCP_DOCKER__search_code, mcp__MCP_DOCKER__get_file_contents
+# Note: MCP tools (mcp__jetbrains__*, mcp__MCP_DOCKER__*) are optional and only available when configured
 ---
 
 # Advisor - Architecture & Planning Consultant
@@ -141,3 +142,14 @@ NEVER:
 - Give advice without reading the code first
 - Make code changes yourself
 - Provide generic advice
+
+## Tool Availability
+
+**Core tools (always available):**
+- Read, Grep, Glob, WebSearch, WebFetch, Write
+
+**Optional MCP tools (when configured):**
+- **JetBrains IDE MCP**: `mcp__jetbrains__*` - Symbol info, code analysis, file problems
+- **Docker MCP**: `mcp__MCP_DOCKER__*` - GitHub issues, PRs, code search
+
+The agent works without MCP tools but has enhanced analysis capabilities when they're available.

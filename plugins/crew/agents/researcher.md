@@ -74,6 +74,13 @@ Link: [URL]
 - [Title](URL)
 ```
 
+## Tool Availability
+
+**Core tools (always available):**
+- WebSearch, WebFetch, Read, Grep, Glob
+
+This agent requires no MCP tools and works in any environment.
+
 ## Quality Rules
 
 - Always cite sources with URLs

@@ -54,7 +54,7 @@ Skills provide specialized guidance that activates automatically based on contex
 
 | Skill | Purpose | Triggers |
 |-------|---------|----------|
-| `git` | Commits, rebasing, history search | "commit this", "rebase", "when was X added?" |
+| `sk:git` | Commits, rebasing, history search | "commit this", "rebase", "when was X added?" |
 
 ## Slash Commands
 
@@ -76,6 +76,7 @@ Skills provide specialized guidance that activates automatically based on contex
 |---------|-------------|
 | `/crew:code-search "query"` | Search codebase via file-reader agent |
 | `/crew:analyze "target"` | Deep analysis via advisor agent |
+| `/crew:status` | Show active loops and crew state |
 | `/crew:save-context` | Save context snapshot for session recovery |
 | `/crew:restore-context` | Restore a previously saved context snapshot |
 | `/crew:deepinit` | Initialize CLAUDE.md hierarchy for a codebase |
