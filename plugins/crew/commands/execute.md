@@ -6,6 +6,10 @@ description: Execute a plan or task via the executor agent (saves main context)
 
 **Task:** $ARGUMENTS
 
+### Step 0: Consider Workspace Isolation
+
+For multi-file features or significant changes, consider suggesting `/superpowers:using-git-worktrees` to work in an isolated workspace — especially if the main branch needs to stay clean during development.
+
 ### Step 1: Check for Plan File
 
 If `$ARGUMENTS` references a plan (e.g., "the plan", a plan name, or a path like `.crew/plans/something.md`):
