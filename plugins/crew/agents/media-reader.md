@@ -66,12 +66,12 @@ Every response MUST include:
 
 **Screenshot analysis:**
 ```
-Task(subagent_type="media-reader", prompt="What error is shown: /path/to/error.png")
+Task(subagent_type="crew:media-reader", prompt="What error is shown: /path/to/error.png")
 ```
 
 **PDF extraction:**
 ```
-Task(subagent_type="media-reader", prompt="Extract config values from page 2: /path/to/doc.pdf")
+Task(subagent_type="crew:media-reader", prompt="Extract config values from page 2: /path/to/doc.pdf")
 ```
 
 ## Tool Availability

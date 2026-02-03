@@ -6,7 +6,7 @@ Spawn a **file-reader agent** to search for: $ARGUMENTS
 
 ```
 Task(
-  subagent_type="file-reader",
+  subagent_type="crew:file-reader",
   prompt="Search the codebase for: $ARGUMENTS\n\nBe thorough - try multiple search strategies, naming conventions, and common locations. Report ALL relevant matches with absolute paths.",
   model="haiku"
 )

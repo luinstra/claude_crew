@@ -11,7 +11,7 @@ The user has requested early exit from the feedback loop.
 Execute this command to fully cancel the feedback loop:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate fl --reason "User cancelled via /cancel-feedback-loop"
+${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate fl --reason "User cancelled via /crew:cancel-feedback-loop"
 ```
 
 ## After Running

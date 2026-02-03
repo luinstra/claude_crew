@@ -118,11 +118,11 @@ def check_for_conflicts():
 
     fl_state = FeedbackLoopState.load(crew_dir / LOOP_FILES["fl"])
     if fl_state.active:
-        return "ERROR: feedback-loop is already active. Run /cancel-feedback-loop first or let it complete."
+        return "ERROR: feedback-loop is already active. Run /crew:cancel-feedback-loop first or let it complete."
 
     mt_state = MeasureTwiceState.load(crew_dir / LOOP_FILES["mt"])
     if mt_state.active:
-        return "ERROR: measure-twice loop is already active. Run /cancel-measure-twice first or let it complete."
+        return "ERROR: measure-twice loop is already active. Run /crew:cancel-measure-twice first or let it complete."
 
     return None
 

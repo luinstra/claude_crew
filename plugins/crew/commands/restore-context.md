@@ -4,7 +4,7 @@ description: Restore context from a saved snapshot
 
 [RESTORE CONTEXT]
 
-Check if `.crew/context-snapshot.md` exists. If not, inform the user: "No context snapshot found. Use /save-context to create one."
+Check if `.crew/context-snapshot.md` exists. If not, inform the user: "No context snapshot found. Use /crew:save-context to create one."
 
 If the snapshot exists:
 

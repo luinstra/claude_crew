@@ -62,7 +62,7 @@ ${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py show mt
 Summarize what you learned from the interview, then spawn the **advisor agent** to create the plan:
 
 ```
-Task(subagent_type="advisor", prompt="Create an implementation plan for: [summary of task]
+Task(subagent_type="crew:advisor", prompt="Create an implementation plan for: [summary of task]
 
 Requirements:
 - [requirement 1 from interview]
@@ -92,7 +92,7 @@ Focus on clarity and executability — this plan will be reviewed by another adv
 Spawn the **advisor agent** using the Task tool:
 
 ```
-Task(subagent_type="advisor", prompt="REVIEW THIS PLAN for clarity, completeness, and executability.
+Task(subagent_type="crew:advisor", prompt="REVIEW THIS PLAN for clarity, completeness, and executability.
 
 Plan file: [plan_file from state]
 

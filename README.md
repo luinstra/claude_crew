@@ -155,7 +155,7 @@ For work requiring verification before declaring "done," use `/crew:feedback-loo
 
 ## Agents
 
-Specialized agents for different tasks. Use via `Task(subagent_type="agent-name", prompt="...")`.
+Specialized agents for different tasks. Use via `Task(subagent_type="crew:agent-name", prompt="...")`.
 
 | Agent | Use For | Example |
 |-------|---------|---------|

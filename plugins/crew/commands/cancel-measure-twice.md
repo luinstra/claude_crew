@@ -11,7 +11,7 @@ The user has requested early exit from the measure-twice loop.
 Execute this command to fully cancel the measure-twice loop:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate mt --reason "User cancelled via /cancel-measure-twice"
+${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate mt --reason "User cancelled via /crew:cancel-measure-twice"
 ```
 
 ## After Running

@@ -6,7 +6,7 @@ Spawn an **advisor agent** to analyze: $ARGUMENTS
 
 ```
 Task(
-  subagent_type="advisor",
+  subagent_type="crew:advisor",
   prompt="Analyze: $ARGUMENTS"
 )
 ```

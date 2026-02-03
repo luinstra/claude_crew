@@ -98,7 +98,7 @@ Plan: {measure_state.plan_file}
 
 Continue refining the plan:
 1. If you just received advisor feedback, revise the plan to address [BLOCKING] issues
-2. Spawn advisor to re-review using Task(subagent_type="advisor", prompt="...")
+2. Spawn advisor to re-review using Task(subagent_type="crew:advisor", prompt="...")
 3. When APPROVED (or only [MINOR] issues), deactivate the loop and present the final plan
 
 To exit early: `/crew:cancel-measure-twice`

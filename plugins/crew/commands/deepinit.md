@@ -44,7 +44,7 @@ Nested CLAUDE.md files aren't auto-loaded, but Claude reads them via the Documen
 ### Phase 1: Analyze Structure
 
 ```
-Task(subagent_type="file-reader",
+Task(subagent_type="crew:file-reader",
   prompt="Map the project structure. Identify:
     1. Build system (gradle, npm, cargo, etc.)
     2. Main architectural layers

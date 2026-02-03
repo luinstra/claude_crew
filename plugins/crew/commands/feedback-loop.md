@@ -24,7 +24,7 @@ ${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py init fl --prompt "$ARGUMENTS"
 When you believe the task is complete, spawn an advisor:
 
 ```
-Task(subagent_type="advisor", prompt="VERIFY TASK COMPLETION:
+Task(subagent_type="crew:advisor", prompt="VERIFY TASK COMPLETION:
 
 Task: $ARGUMENTS
 

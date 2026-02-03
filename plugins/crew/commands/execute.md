@@ -18,7 +18,7 @@ Spawn the **executor agent**:
 
 ```
 Task(
-  subagent_type="executor",
+  subagent_type="crew:executor",
   prompt="Execute: $ARGUMENTS
 
 [Include plan content here if a plan file was found]
