@@ -87,25 +87,40 @@ print(result.to_json())
 
 ## crew-state.py CLI
 
+All subcommands accept `--session-id SESSION_ID` for session-scoped state files.
+If omitted, falls back to `CLAUDE_SESSION_ID` env var, then legacy unsuffixed filenames.
+
 ```bash
 # Show loop state
-crew-state.py show fl          # feedback-loop
-crew-state.py show mt          # measure-twice
+crew-state.py show fl --session-id abc123
+crew-state.py show mt
 
 # Check if active (exit code 0=active, 1=inactive)
-crew-state.py is-active fl
+crew-state.py is-active fl --session-id abc123
 
 # Initialize a loop
-crew-state.py init fl --task "Fix the auth bug"
-crew-state.py init mt --task "Add user profiles" --auto-plan
+crew-state.py init fl --prompt "Fix the auth bug" --session-id abc123
+crew-state.py init mt --task "Add user profiles" --auto-plan --session-id abc123
+
+# Check if this session has conflicts (other sessions ignored)
+crew-state.py check-conflicts --session-id abc123
 
 # Set specific fields
-crew-state.py set fl iteration 5
-crew-state.py set mt last_verdict REVISE
+crew-state.py set fl iteration 5 --session-id abc123
+crew-state.py set mt last_verdict REVISE --session-id abc123
 
-# Deactivate (deletes state file)
-crew-state.py deactivate fl --reason "User cancelled"
+# Deactivate
+crew-state.py deactivate fl --reason "User cancelled" --session-id abc123
 ```
+
+**Session ID resolution order:**
+1. `--session-id` CLI argument (highest priority)
+2. `CLAUDE_SESSION_ID` environment variable
+3. Empty string -- legacy unsuffixed filenames (backward compatible)
+
+**Session-scoped filename pattern:**
+- `feedback-loop-state-{session_id}.json`
+- `measure-twice-state-{session_id}.json`
 
 **Loop aliases:**
 - `fl` = `feedback-loop`
@@ -138,6 +153,7 @@ class FeedbackLoopState:
     iteration: int = 1
     max_iterations: int = 20
     completion_promise: str = "DONE"
+    session_id: str = ""          # Session that owns this loop
 ```
 
 ### MeasureTwiceState
@@ -151,6 +167,7 @@ class MeasureTwiceState:
     iteration: int = 1
     max_iterations: int = 10
     last_verdict: str = ""        # APPROVED, REVISE, REJECT
+    session_id: str = ""          # Session that owns this loop
 ```
 
 ## Common Mistakes
@@ -193,6 +210,14 @@ with open(state_file) as f:
 state = FeedbackLoopState.load(state_file)  # Returns default if missing
 ```
 
+## Orphan Cleanup
+
+The `session-start.py` hook cleans up stale state files on every session start:
+
+- **Inactive** state files older than **1 day**: deleted
+- **Active** state files older than **7 days**: force-deleted (safety limit for abandoned sessions)
+- Applies to both legacy (`feedback-loop-state.json`) and session-scoped (`feedback-loop-state-abc123.json`) files
+
 ## Testing
 
 ```bash
@@ -207,7 +232,10 @@ Tests cover:
 - Model serialization/deserialization
 - State file operations
 - Hook result formatting
-- CLI commands
+- CLI commands (legacy and session-scoped)
+- Multi-session isolation (concurrent loops, conflict detection)
+- Orphan cleanup (stale inactive and very old active files)
+- `CLAUDE_SESSION_ID` env var fallback
 
 ## Working Here Checklist
 

@@ -306,7 +306,7 @@ def main():
                 return result.stdout.strip(), result.stderr.strip(), result.returncode
 
             # Clean up any existing state
-            for f in crew_dir.glob("*-state.json"):
+            for f in crew_dir.glob("*-state*.json"):
                 f.unlink()
 
             # Test init fl
@@ -369,7 +369,7 @@ def main():
                 log_fail("init mt - creates measure-twice state", "task_description field", stdout2)
 
             # Test error: missing --prompt for fl (clean up first to avoid conflict error)
-            for f in crew_dir.glob("*-state.json"):
+            for f in crew_dir.glob("*-state*.json"):
                 f.unlink()
             stdout, stderr, code = run_crew_state(["init", "fl"], test_path)
             if code == 1 and "--prompt required" in stderr:
@@ -401,7 +401,7 @@ def main():
                 log_fail("is-active fl (inactive) - exits with code 1", "exit 1", f"exit {code}")
 
             # Test is-active when active (clean up first to allow init)
-            for f in crew_dir.glob("*-state.json"):
+            for f in crew_dir.glob("*-state*.json"):
                 f.unlink()
             run_crew_state(["init", "fl", "--prompt", "Test"], test_path)
             stdout, stderr, code = run_crew_state(["is-active", "fl"], test_path)
@@ -411,7 +411,7 @@ def main():
                 log_fail("is-active fl (active) - exits with code 0", "exit 0", f"exit {code}")
 
             # Test --auto-plan for mt (clean up all state to avoid conflicts)
-            for f in crew_dir.glob("*-state.json"):
+            for f in crew_dir.glob("*-state*.json"):
                 f.unlink()
             stdout, stderr, code = run_crew_state(["init", "mt", "--task", "Build Auth System", "--auto-plan"], test_path)
             if code == 0 and ".crew/plans/build-auth-system.md" in stdout:
@@ -427,7 +427,7 @@ def main():
                 log_fail("init mt --auto-plan - stores derived path in state", "plan_file with derived path", stdout2)
 
             # Test check-conflicts with no active loops
-            for f in crew_dir.glob("*-state.json"):
+            for f in crew_dir.glob("*-state*.json"):
                 f.unlink()
             stdout, stderr, code = run_crew_state(["check-conflicts"], test_path)
             if code == 0:
@@ -460,7 +460,216 @@ def main():
                 log_fail("init fl (mt active) - rejects with conflict error", "exit 1 with conflict", f"exit {code}, stderr: {stderr}")
 
             # Clean up state files for subsequent tests
-            for f in crew_dir.glob("*-state.json"):
+            for f in crew_dir.glob("*-state*.json"):
+                f.unlink()
+
+            # =========================================================================
+            # SESSION-SCOPED CREW STATE TESTS
+            # =========================================================================
+            log_section("crew-state.py (session-scoped)")
+
+            # Two sessions can each init a feedback-loop
+            stdout, stderr, code = run_crew_state(
+                ["init", "fl", "--prompt", "Task for s1", "--session-id", "s1"], test_path)
+            if code == 0 and (crew_dir / "feedback-loop-state-s1.json").exists():
+                log_pass("session init fl s1 - creates session-scoped file")
+            else:
+                log_fail("session init fl s1 - creates session-scoped file",
+                         "exit 0 and file exists", f"exit {code}, stderr: {stderr}")
+
+            stdout, stderr, code = run_crew_state(
+                ["init", "fl", "--prompt", "Task for s2", "--session-id", "s2"], test_path)
+            if code == 0 and (crew_dir / "feedback-loop-state-s2.json").exists():
+                log_pass("session init fl s2 - creates second session file")
+            else:
+                log_fail("session init fl s2 - creates second session file",
+                         "exit 0 and file exists", f"exit {code}, stderr: {stderr}")
+
+            # check-conflicts --session-id s1 fails (s1 has active fl)
+            stdout, stderr, code = run_crew_state(
+                ["check-conflicts", "--session-id", "s1"], test_path)
+            if code == 1 and "feedback-loop is already active" in stderr:
+                log_pass("check-conflicts s1 - detects own active loop")
+            else:
+                log_fail("check-conflicts s1 - detects own active loop",
+                         "exit 1 with fl error", f"exit {code}, stderr: {stderr}")
+
+            # check-conflicts --session-id s3 succeeds (s3 has no loops)
+            stdout, stderr, code = run_crew_state(
+                ["check-conflicts", "--session-id", "s3"], test_path)
+            if code == 0:
+                log_pass("check-conflicts s3 - no conflict for different session")
+            else:
+                log_fail("check-conflicts s3 - no conflict for different session",
+                         "exit 0", f"exit {code}, stderr: {stderr}")
+
+            # show fl --session-id s1 shows s1's state
+            stdout, stderr, code = run_crew_state(
+                ["show", "fl", "--session-id", "s1"], test_path)
+            if code == 0 and '"prompt": "Task for s1"' in stdout:
+                log_pass("show fl s1 - shows session-specific state")
+            else:
+                log_fail("show fl s1 - shows session-specific state",
+                         "prompt: Task for s1", stdout)
+
+            # deactivate fl --session-id s1 only deactivates s1
+            stdout, stderr, code = run_crew_state(
+                ["deactivate", "fl", "--reason", "done", "--session-id", "s1"], test_path)
+            stdout2, _, _ = run_crew_state(
+                ["show", "fl", "--session-id", "s2"], test_path)
+            if code == 0 and '"active": true' in stdout2:
+                log_pass("deactivate s1 - s2 remains active")
+            else:
+                log_fail("deactivate s1 - s2 remains active",
+                         "s2 still active", stdout2)
+
+            # session_id stored in state
+            stdout, stderr, code = run_crew_state(
+                ["show", "fl", "--session-id", "s2"], test_path)
+            if '"session_id": "s2"' in stdout:
+                log_pass("init stores session_id in state JSON")
+            else:
+                log_fail("init stores session_id in state JSON",
+                         'session_id: s2', stdout)
+
+            # CLAUDE_SESSION_ID env var fallback
+            env_with_session = {**os.environ, "CLAUDE_PROJECT_DIR": str(test_path), "CLAUDE_SESSION_ID": "s2"}
+            result = subprocess.run(
+                [sys.executable, str(crew_state), "show", "fl"],
+                capture_output=True, text=True, cwd=test_path, env=env_with_session)
+            if result.returncode == 0 and '"prompt": "Task for s2"' in result.stdout:
+                log_pass("CLAUDE_SESSION_ID env var fallback works")
+            else:
+                log_fail("CLAUDE_SESSION_ID env var fallback works",
+                         "prompt: Task for s2", result.stdout.strip())
+
+            # Clean up session-scoped files
+            for f in crew_dir.glob("*-state*.json"):
+                f.unlink()
+
+            # =========================================================================
+            # SESSION-SCOPED PERSISTENT MODE TESTS
+            # =========================================================================
+            log_section("persistent-mode.py (session-scoped)")
+
+            # s1 has active fl, s2 does not
+            (crew_dir / "feedback-loop-state-s1.json").write_text(
+                '{"active": true, "prompt": "s1 task", "iteration": 1, "max_iterations": 10, "session_id": "s1"}')
+
+            # Stop hook with session_id=s1 blocks
+            test_contains(
+                "Stop hook s1 - blocks when s1 has active loop",
+                persistent_mode,
+                json.dumps({"directory": str(test_path), "session_id": "s1"}),
+                '"continue": false',
+            )
+
+            # Stop hook with session_id=s2 allows
+            test_equals(
+                "Stop hook s2 - allows when only s1 has active loop",
+                persistent_mode,
+                json.dumps({"directory": str(test_path), "session_id": "s2"}),
+                '{"continue": true}',
+            )
+
+            # Stop hook with empty session_id only checks legacy files
+            test_equals(
+                "Stop hook no session - allows (no legacy file)",
+                persistent_mode,
+                json.dumps({"directory": str(test_path)}),
+                '{"continue": true}',
+            )
+
+            # Legacy file with no session_id is claimed by session that has one
+            (crew_dir / "feedback-loop-state-s1.json").unlink()
+            (crew_dir / "feedback-loop-state.json").write_text(
+                '{"active": true, "prompt": "legacy task", "iteration": 1, "max_iterations": 10}')
+
+            test_contains(
+                "Stop hook session claims legacy file (no session_id in file)",
+                persistent_mode,
+                json.dumps({"directory": str(test_path), "session_id": "any-session"}),
+                '"continue": false',
+            )
+
+            # Clean up
+            for f in crew_dir.glob("*-state*.json"):
+                f.unlink()
+
+            # =========================================================================
+            # SESSION-SCOPED SESSION START TESTS
+            # =========================================================================
+            log_section("session-start.py (session-scoped)")
+
+            # Session ID injection
+            test_contains(
+                "SessionStart injects session ID into context",
+                session_start,
+                json.dumps({"directory": str(test_path), "session_id": "test-sess-123"}),
+                "Session ID: test-sess-123",
+            )
+
+            # Session-scoped fl detected for this session
+            (crew_dir / "feedback-loop-state-mysess.json").write_text(
+                '{"active": true, "prompt": "My task", "iteration": 2, "max_iterations": 10, "session_id": "mysess"}')
+
+            test_contains(
+                "SessionStart detects session-scoped fl for this session",
+                session_start,
+                json.dumps({"directory": str(test_path), "session_id": "mysess"}),
+                "Feedback Loop Active",
+            )
+
+            # Other session's loop shown as "Other Sessions"
+            test_contains(
+                "SessionStart shows other session loops",
+                session_start,
+                json.dumps({"directory": str(test_path), "session_id": "different"}),
+                "Other Sessions",
+            )
+
+            # Clean up
+            for f in crew_dir.glob("*-state*.json"):
+                f.unlink()
+
+            # =========================================================================
+            # ORPHAN CLEANUP TESTS
+            # =========================================================================
+            log_section("Orphan cleanup")
+
+            # Create a stale inactive session-scoped state file (>1 day old)
+            stale_file = crew_dir / "feedback-loop-state-stale123.json"
+            stale_file.write_text('{"active": false, "prompt": "old task", "session_id": "stale123"}')
+            # Set mtime to 2 days ago
+            import time as _time
+            old_mtime = _time.time() - (2 * 86400)
+            os.utime(stale_file, (old_mtime, old_mtime))
+
+            # Run session-start which triggers cleanup
+            run_script(session_start, json.dumps({"directory": str(test_path)}))
+
+            if not stale_file.exists():
+                log_pass("Cleanup removes stale inactive session-scoped state file")
+            else:
+                log_fail("Cleanup removes stale inactive session-scoped state file",
+                         "file deleted", "file still exists")
+
+            # Create a stale active session-scoped state file (>7 days old)
+            stale_active = crew_dir / "feedback-loop-state-oldactive.json"
+            stale_active.write_text('{"active": true, "prompt": "ancient task", "session_id": "oldactive"}')
+            very_old_mtime = _time.time() - (8 * 86400)
+            os.utime(stale_active, (very_old_mtime, very_old_mtime))
+
+            run_script(session_start, json.dumps({"directory": str(test_path)}))
+
+            if not stale_active.exists():
+                log_pass("Cleanup removes very old active session-scoped state file")
+            else:
+                log_fail("Cleanup removes very old active session-scoped state file",
+                         "file deleted", "file still exists")
+
+            # Clean up
+            for f in crew_dir.glob("*-state*.json"):
                 f.unlink()
 
             # =========================================================================

@@ -6,10 +6,16 @@ description: Start verified development loop with advisor feedback before comple
 
 $ARGUMENTS
 
+## Session ID
+
+Use the session ID from your SessionStart context (shown as `[Session ID: ...]`).
+Pass it as `--session-id SESSION_ID` to all `crew-state.py` commands below.
+The `CLAUDE_SESSION_ID` environment variable serves as an automatic fallback.
+
 ## MANDATORY: Activate the Loop
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py init fl --prompt "$ARGUMENTS"
+${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py init fl --prompt "$ARGUMENTS" --session-id SESSION_ID
 ```
 
 ## How This Works
@@ -49,7 +55,7 @@ When the advisor verifies your work is complete:
 
 1. **Deactivate the loop:**
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate fl --reason "Advisor verified complete"
+${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate fl --reason "Advisor verified complete" --session-id SESSION_ID
 ```
 
 2. **Summarize what was accomplished** and let the user know the task is complete.

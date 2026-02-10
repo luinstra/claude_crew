@@ -168,6 +168,7 @@ class FeedbackLoopState:
     iteration: int = 1
     max_iterations: int = 20
     completion_promise: str = "DONE"
+    session_id: str = ""
 
     @classmethod
     def load(cls, path: Path) -> "FeedbackLoopState":
@@ -183,6 +184,7 @@ class FeedbackLoopState:
                 iteration=data.get("iteration", 1),
                 max_iterations=data.get("max_iterations", 20),
                 completion_promise=data.get("completion_promise", "DONE"),
+                session_id=data.get("session_id", ""),
             )
         except (OSError, json.JSONDecodeError):
             return cls()
@@ -308,6 +310,7 @@ class MeasureTwiceState:
     iteration: int = 1
     max_iterations: int = 10
     last_verdict: str = ""  # APPROVED, REVISE, REJECT, or empty
+    session_id: str = ""
 
     @classmethod
     def load(cls, path: Path) -> "MeasureTwiceState":
@@ -324,6 +327,7 @@ class MeasureTwiceState:
                 iteration=data.get("iteration", 1),
                 max_iterations=data.get("max_iterations", 10),
                 last_verdict=data.get("last_verdict", ""),
+                session_id=data.get("session_id", ""),
             )
         except (OSError, json.JSONDecodeError):
             return cls()

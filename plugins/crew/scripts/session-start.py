@@ -4,6 +4,7 @@ Claude Crew Session Start Hook
 Restores persistent mode states and injects plugin integration guidance.
 """
 
+import json
 import time
 from pathlib import Path
 
@@ -21,35 +22,70 @@ from models import (
 
 MAX_AGE_DAYS = 7
 MAX_AGE_SECONDS = MAX_AGE_DAYS * 86400
+STALE_INACTIVE_DAYS = 1
+STALE_INACTIVE_SECONDS = STALE_INACTIVE_DAYS * 86400
+
+
+def is_loop_state_file(filename: str) -> bool:
+    """Check if a filename is a loop state file (legacy or session-scoped).
+
+    Matches:
+    - feedback-loop-state.json (legacy)
+    - measure-twice-state.json (legacy)
+    - feedback-loop-state-abc123.json (session-scoped)
+    - measure-twice-state-xyz789.json (session-scoped)
+    """
+    return (
+        (filename.startswith("feedback-loop-state") or filename.startswith("measure-twice-state"))
+        and filename.endswith(".json")
+    )
 
 
 def cleanup_stale_files(directory: Path) -> None:
-    """Remove stale state files older than MAX_AGE_DAYS, preserving active sessions."""
+    """Remove stale state files, preserving active sessions.
+
+    - Inactive state files older than 1 day: delete
+    - Active state files older than MAX_AGE_DAYS (7): force-deactivate and delete
+    - Non-state files (breadcrumb, context-snapshot): delete if older than MAX_AGE_DAYS
+    """
     if not directory.is_dir():
         return
 
-    # Only clean up crew state files, not Claude Code's internal files
-    state_file_patterns = [
-        "feedback-loop-state.json",
-        "measure-twice-state.json",
+    # Patterns for non-state crew files
+    non_state_patterns = [
         "session-breadcrumb.json",
         "context-snapshot-*.json",
     ]
 
     now = time.time()
-    for pattern in state_file_patterns:
+
+    # Clean up loop state files (both legacy and session-scoped)
+    for json_file in directory.glob("*.json"):
+        try:
+            if is_loop_state_file(json_file.name):
+                age = now - json_file.stat().st_mtime
+                # Load state to check active flag
+                state = FeedbackLoopState.load(json_file)
+                if state.active:
+                    # Active but very old (>7 days) — force-deactivate and delete
+                    if age > MAX_AGE_SECONDS:
+                        json_file.unlink()
+                else:
+                    # Inactive — delete if older than 1 day
+                    if age > STALE_INACTIVE_SECONDS:
+                        json_file.unlink()
+        except (OSError, AttributeError, KeyError, ValueError):
+            pass  # Skip files that can't be processed
+
+    # Clean up non-state files
+    for pattern in non_state_patterns:
         for json_file in directory.glob(pattern):
             try:
                 age = now - json_file.stat().st_mtime
                 if age > MAX_AGE_SECONDS:
-                    # Only check active state for actual state files
-                    if "state.json" in json_file.name:
-                        state = FeedbackLoopState.load(json_file)
-                        if state.active:
-                            continue  # Don't delete active sessions
                     json_file.unlink()
             except (OSError, AttributeError, KeyError, ValueError):
-                pass  # Skip files that can't be processed
+                pass
 
 
 def detect_project_stack(directory: Path) -> list[str]:
@@ -132,35 +168,94 @@ def build_session_status(
     directory: Path,
     home: Path,
     stack_hints: list[str],
+    session_id: str = "",
 ) -> list[str]:
-    """Build session status messages."""
+    """Build session status messages.
+
+    When session_id is provided, shows detailed status for this session's loops
+    and brief mentions of other sessions' active loops.
+    """
     messages: list[str] = []
 
     # Project stack detection
     if stack_hints:
         messages.append(f"[Project: {', '.join(stack_hints)}]")
 
-    # Check for feedback loop state
-    loop_state = FeedbackLoopState.load(directory / ".crew" / "feedback-loop-state.json")
-    if loop_state.active:
+    # Session ID injection for Claude to use in commands
+    if session_id:
         messages.append(
-            f"[Feedback Loop Active - {loop_state.iteration}/{loop_state.max_iterations}]\n"
-            f"Task: {loop_state.prompt}\n"
-            f"Continue until advisor verifies completion."
+            f"[Session ID: {session_id}]\n"
+            f"Pass this session ID when invoking crew-state.py commands: --session-id {session_id}\n"
+            f"Also exported as CLAUDE_SESSION_ID environment variable."
         )
 
-    # Check for measure-twice loop state
-    measure_state = MeasureTwiceState.load(directory / ".crew" / "measure-twice-state.json")
-    if measure_state.active:
+    crew_dir = directory / ".crew"
+
+    # Collect all active loop state files
+    this_session_loops: list[str] = []
+    other_session_loops: list[str] = []
+
+    if crew_dir.is_dir():
+        for json_file in crew_dir.glob("*.json"):
+            if not is_loop_state_file(json_file.name):
+                continue
+
+            try:
+                with open(json_file) as f:
+                    data = json.load(f)
+                if not data.get("active", False):
+                    continue
+
+                file_session = data.get("session_id", "")
+                is_this_session = (
+                    not session_id  # No session_id means treat all as current
+                    or file_session == session_id
+                    or file_session == ""  # Pre-migration files belong to current session
+                )
+
+                # Build status line
+                if json_file.name.startswith("feedback-loop-state"):
+                    iteration = data.get("iteration", 1)
+                    max_iter = data.get("max_iterations", 20)
+                    prompt = data.get("prompt", "")
+                    if is_this_session:
+                        this_session_loops.append(
+                            f"[Feedback Loop Active - {iteration}/{max_iter}]\n"
+                            f"Task: {prompt}\n"
+                            f"Continue until advisor verifies completion."
+                        )
+                    else:
+                        other_session_loops.append(
+                            f"Feedback loop (session {file_session[:8]}...): {prompt[:50]}"
+                        )
+                elif json_file.name.startswith("measure-twice-state"):
+                    iteration = data.get("iteration", 1)
+                    max_iter = data.get("max_iterations", 10)
+                    task = data.get("task_description", "")
+                    plan = data.get("plan_file", "")
+                    if is_this_session:
+                        this_session_loops.append(
+                            f"[Measure-Twice Loop Active - {iteration}/{max_iter}]\n"
+                            f"Task: {task}\n"
+                            f"Plan: {plan}\n"
+                            f"Continue until advisor approves the plan."
+                        )
+                    else:
+                        other_session_loops.append(
+                            f"Measure-twice loop (session {file_session[:8]}...): {task[:50]}"
+                        )
+            except (OSError, json.JSONDecodeError, KeyError, ValueError):
+                continue
+
+    messages.extend(this_session_loops)
+
+    if other_session_loops:
         messages.append(
-            f"[Measure-Twice Loop Active - {measure_state.iteration}/{measure_state.max_iterations}]\n"
-            f"Task: {measure_state.task_description}\n"
-            f"Plan: {measure_state.plan_file}\n"
-            f"Continue until advisor approves the plan."
+            "[Other Sessions]\n" + "\n".join(f"- {l}" for l in other_session_loops)
         )
 
     # Check for saved context snapshot
-    context_snapshot = directory / ".crew" / "context-snapshot.md"
+    context_snapshot = crew_dir / "context-snapshot.md"
     if context_snapshot.is_file():
         age_days = get_file_age_days(context_snapshot)
         if age_days < 7:
@@ -170,7 +265,7 @@ def build_session_status(
             )
 
     # Check for session breadcrumb
-    breadcrumb = SessionBreadcrumb.load(directory / ".crew" / "session-breadcrumb.json")
+    breadcrumb = SessionBreadcrumb.load(crew_dir / "session-breadcrumb.json")
     if breadcrumb:
         messages.append(f"[Previous Session]\nLast exit: {breadcrumb.last_session}")
 
@@ -191,6 +286,7 @@ def main():
     data = read_hook_input()
     hook_input = SessionStartInput.from_dict(data)
     directory = hook_input.directory_path
+    session_id = hook_input.session_id
     home = Path.home()
 
     # Run cleanup (silent, best-effort)
@@ -204,8 +300,8 @@ def main():
     # Build plugin integration guidance
     guidance = build_plugin_guidance(stack_hints)
 
-    # Build session status messages
-    status_messages = build_session_status(directory, home, stack_hints)
+    # Build session status messages (session-scoped)
+    status_messages = build_session_status(directory, home, stack_hints, session_id)
 
     # Combine guidance and status into additionalContext
     context_parts = [guidance]
