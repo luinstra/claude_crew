@@ -1,5 +1,5 @@
 {
   "name": "crew",
   "description": "Persistence, specialized agents, and workflow commands for Claude Code",
-  "version": "0.2.2"
+  "version": "0.3.0"
 }
