@@ -174,18 +174,6 @@ def main():
             # Clean up measure-twice state for next test
             (crew_dir / "measure-twice-state.json").unlink()
 
-            # Test with session breadcrumb
-            (crew_dir / "session-breadcrumb.json").write_text(
-                '{"last_session": "2024-01-15T10:00:00", "directory": "/test", "clean_exit": true}'
-            )
-
-            test_contains(
-                "Detects session breadcrumb",
-                session_start,
-                json.dumps({"directory": str(test_path)}),
-                "Previous Session",
-            )
-
             # =========================================================================
             # PERSISTENT MODE TESTS
             # =========================================================================

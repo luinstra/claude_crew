@@ -13,7 +13,6 @@ from models import (
     HookResult,
     FeedbackLoopState,
     MeasureTwiceState,
-    SessionBreadcrumb,
     read_hook_input,
     count_incomplete_todos,
 )
@@ -170,13 +169,6 @@ Continue working on incomplete tasks.
 """
         print(HookResult.block(message).to_json())
         return
-
-    # Auto-save session breadcrumb on clean exit
-    try:
-        breadcrumb = SessionBreadcrumb.create_now(directory, hook_input.session_id)
-        breadcrumb.save(directory / ".crew" / "session-breadcrumb.json")
-    except OSError:
-        pass  # Best effort
 
     # No blocking needed
     print(HookResult.allow().to_json())

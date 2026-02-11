@@ -263,7 +263,6 @@ The plugin creates state files in `.crew/`:
 |------|---------|
 | `.crew/feedback-loop-state.json` | Active feedback loop state |
 | `.crew/measure-twice-state.json` | Active measure-twice loop state |
-| `.crew/session-breadcrumb.json` | Last session info |
 | `.crew/context-snapshot.md` | Saved context (via /crew:save-context) |
 | `.crew/plans/*.md` | Generated plans |
 

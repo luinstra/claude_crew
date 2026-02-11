@@ -13,7 +13,6 @@ from models import (
     SessionStartResult,
     FeedbackLoopState,
     MeasureTwiceState,
-    SessionBreadcrumb,
     read_hook_input,
     get_file_age_days,
     count_incomplete_todos,
@@ -46,14 +45,13 @@ def cleanup_stale_files(directory: Path) -> None:
 
     - Inactive state files older than 1 day: delete
     - Active state files older than MAX_AGE_DAYS (7): force-deactivate and delete
-    - Non-state files (breadcrumb, context-snapshot): delete if older than MAX_AGE_DAYS
+    - Non-state files (context-snapshot): delete if older than MAX_AGE_DAYS
     """
     if not directory.is_dir():
         return
 
     # Patterns for non-state crew files
     non_state_patterns = [
-        "session-breadcrumb.json",
         "context-snapshot-*.json",
     ]
 
@@ -263,11 +261,6 @@ def build_session_status(
                 f"[Context Snapshot Available]\n"
                 f"`.crew/context-snapshot.md` ({age_days}d old) - read to restore context."
             )
-
-    # Check for session breadcrumb
-    breadcrumb = SessionBreadcrumb.load(crew_dir / "session-breadcrumb.json")
-    if breadcrumb:
-        messages.append(f"[Previous Session]\nLast exit: {breadcrumb.last_session}")
 
     # Check for incomplete todos
     todos_dir = home / ".claude" / "todos"

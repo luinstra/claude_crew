@@ -195,7 +195,6 @@ Loop complete → crew-state.py deactivate → JSON deleted
 **State files** (in project's `.crew/`):
 - `feedback-loop-state.json` — Active feedback loop
 - `measure-twice-state.json` — Active measure-twice loop
-- `session-breadcrumb.json` — Last session info
 - `context-snapshot.md` — Saved context
 
 ## Testing

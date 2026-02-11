@@ -7,7 +7,6 @@ for type safety, validation, and self-documentation.
 """
 
 from dataclasses import dataclass, asdict, field
-from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any
 import json
@@ -195,49 +194,6 @@ class FeedbackLoopState:
         with open(path, "w") as f:
             json.dump(asdict(self), f, indent=2)
         os.chmod(path, 0o600)
-
-
-@dataclass
-class SessionBreadcrumb:
-    """Breadcrumb saved on clean session exit for recovery."""
-    last_session: str = ""
-    directory: str = ""
-    session_id: str = ""
-    clean_exit: bool = True
-
-    @classmethod
-    def load(cls, path: Path) -> Optional["SessionBreadcrumb"]:
-        """Load from file, returning None if file doesn't exist."""
-        if not path.is_file():
-            return None
-        try:
-            with open(path) as f:
-                data = json.load(f)
-            return cls(
-                last_session=data.get("last_session", ""),
-                directory=data.get("directory", ""),
-                session_id=data.get("session_id", ""),
-                clean_exit=data.get("clean_exit", True),
-            )
-        except (OSError, json.JSONDecodeError):
-            return None
-
-    def save(self, path: Path) -> None:
-        """Save to file with restrictive permissions."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(asdict(self), f, indent=2)
-        os.chmod(path, 0o600)
-
-    @classmethod
-    def create_now(cls, directory: Path, session_id: str) -> "SessionBreadcrumb":
-        """Create a breadcrumb for the current moment."""
-        return cls(
-            last_session=datetime.now().isoformat(),
-            directory=str(directory),
-            session_id=session_id,
-            clean_exit=True,
-        )
 
 
 @dataclass
