@@ -86,6 +86,37 @@ def cleanup_stale_files(directory: Path) -> None:
                 pass
 
 
+def cleanup_stale_todos(todos_dir: Path) -> None:
+    """Remove stale todo files from ~/.claude/todos/.
+
+    - Empty todo files ([] arrays): delete immediately
+    - Todo files older than MAX_AGE_DAYS with no incomplete tasks: delete
+    - Todo files older than MAX_AGE_DAYS with incomplete tasks: delete (abandoned)
+    """
+    if not todos_dir.is_dir():
+        return
+
+    now = time.time()
+
+    for todo_file in todos_dir.glob("*.json"):
+        try:
+            with open(todo_file) as f:
+                todos = json.load(f)
+
+            # Empty array — always safe to remove
+            if isinstance(todos, list) and len(todos) == 0:
+                todo_file.unlink()
+                continue
+
+            # Old files — remove regardless (abandoned sessions)
+            age = now - todo_file.stat().st_mtime
+            if age > MAX_AGE_SECONDS:
+                todo_file.unlink()
+
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+
+
 def detect_project_stack(directory: Path) -> list[str]:
     """Detect project tech stack and return skill trigger hints."""
     hints = []
@@ -262,12 +293,13 @@ def build_session_status(
                 f"`.crew/context-snapshot.md` ({age_days}d old) - read to restore context."
             )
 
-    # Check for incomplete todos
+    # Check for incomplete todos (scoped to current session)
     todos_dir = home / ".claude" / "todos"
     incomplete_count = 0
-    if todos_dir.is_dir():
+    if todos_dir.is_dir() and session_id:
         for todo_file in todos_dir.glob("*.json"):
-            incomplete_count += count_incomplete_todos(todo_file)
+            if todo_file.stem.startswith(session_id):
+                incomplete_count += count_incomplete_todos(todo_file)
 
     if incomplete_count > 0:
         messages.append(f"[{incomplete_count} pending tasks from previous session]")
@@ -283,7 +315,7 @@ def main():
     home = Path.home()
 
     # Run cleanup (silent, best-effort)
-    cleanup_stale_files(home / ".claude" / "todos")
+    cleanup_stale_todos(home / ".claude" / "todos")
     cleanup_stale_files(home / ".claude")
     cleanup_stale_files(directory / ".crew")
 

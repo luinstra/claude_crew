@@ -18,16 +18,22 @@ from models import (
 )
 
 
-def count_all_incomplete_todos(directory: Path) -> int:
-    """Count all incomplete todos across global and project locations."""
+def count_session_incomplete_todos(directory: Path, session_id: str) -> int:
+    """Count incomplete todos scoped to the current session.
+
+    Global todos (~/.claude/todos/) are filtered by session_id to avoid
+    stale tasks from dead sessions blocking the current one.
+    Project todos are always checked (they're project-scoped, not session-scoped).
+    """
     count = 0
     home = Path.home()
 
-    # Global todos
+    # Global todos — only check file belonging to this session
     todos_dir = home / ".claude" / "todos"
-    if todos_dir.is_dir():
+    if todos_dir.is_dir() and session_id:
         for todo_file in todos_dir.glob("*.json"):
-            count += count_incomplete_todos(todo_file)
+            if todo_file.stem.startswith(session_id):
+                count += count_incomplete_todos(todo_file)
 
     # Project todos
     for todo_path in [
@@ -160,8 +166,8 @@ Present the current plan to the user and explain where it stands.
             print(HookResult.block(message).to_json())
             return
 
-    # Priority 3: Todo Continuation (baseline persistence)
-    incomplete_count = count_all_incomplete_todos(directory)
+    # Priority 3: Todo Continuation (session-scoped)
+    incomplete_count = count_session_incomplete_todos(directory, session_id)
     if incomplete_count > 0:
         message = f"""[{incomplete_count} tasks remaining]
 

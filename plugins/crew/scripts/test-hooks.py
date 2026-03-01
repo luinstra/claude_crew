@@ -661,6 +661,51 @@ def main():
                 f.unlink()
 
             # =========================================================================
+            # STALE TODO CLEANUP TESTS
+            # =========================================================================
+            log_section("Stale todo cleanup")
+
+            todos_dir = Path.home() / ".claude" / "todos"
+            todos_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create empty todo file — should be cleaned up immediately
+            empty_todo = todos_dir / "empty-session-agent-empty.json"
+            empty_todo.write_text("[]")
+
+            # Create old todo with incomplete tasks (>7 days) — should be cleaned up
+            old_todo = todos_dir / "old-abandoned-agent-old.json"
+            old_todo.write_text('[{"content": "Ancient task", "status": "in_progress"}]')
+            very_old = _time.time() - (8 * 86400)
+            os.utime(old_todo, (very_old, very_old))
+
+            # Create recent todo with incomplete tasks (<7 days) — should survive
+            recent_todo = todos_dir / "recent-session-agent-recent.json"
+            recent_todo.write_text('[{"content": "Fresh task", "status": "pending"}]')
+
+            # Run session-start to trigger cleanup
+            run_script(session_start, json.dumps({"directory": str(test_path)}))
+
+            if not empty_todo.exists():
+                log_pass("Cleanup removes empty todo file")
+            else:
+                log_fail("Cleanup removes empty todo file", "file deleted", "file still exists")
+                empty_todo.unlink(missing_ok=True)
+
+            if not old_todo.exists():
+                log_pass("Cleanup removes abandoned todo file (>7 days)")
+            else:
+                log_fail("Cleanup removes abandoned todo file (>7 days)", "file deleted", "file still exists")
+                old_todo.unlink(missing_ok=True)
+
+            if recent_todo.exists():
+                log_pass("Cleanup preserves recent todo file (<7 days)")
+            else:
+                log_fail("Cleanup preserves recent todo file (<7 days)", "file exists", "file deleted")
+
+            # Clean up
+            recent_todo.unlink(missing_ok=True)
+
+            # =========================================================================
             # SLUGIFY TESTS
             # =========================================================================
             log_section("slugify()")
@@ -690,23 +735,36 @@ def main():
             else:
                 log_fail("slugify('') returns default 'plan'", "plan", slugify(""))
 
-            # Test with incomplete todos (create in home todos dir)
+            # Test with incomplete todos — session-scoped (must match session_id)
             todos_dir = Path.home() / ".claude" / "todos"
             todos_dir.mkdir(parents=True, exist_ok=True)
-            todo_file = todos_dir / f"test-session-{os.getpid()}.json"
+            test_session_id = f"test-session-{os.getpid()}"
+            todo_file = todos_dir / f"{test_session_id}-agent-{test_session_id}.json"
+            other_todo_file = todos_dir / f"other-dead-session-agent-other.json"
 
             todo_file.write_text('[{"content": "Test task", "status": "pending"}]')
+            other_todo_file.write_text('[{"content": "Stale task", "status": "in_progress"}]')
 
             try:
+                # Own session's todos should block
                 test_contains(
-                    "Incomplete todos - blocks stop",
+                    "Incomplete todos - blocks stop (own session)",
                     persistent_mode,
-                    json.dumps({"directory": str(test_path)}),
+                    json.dumps({"directory": str(test_path), "session_id": test_session_id}),
                     "tasks remaining",
                 )
+
+                # Other session's todos should NOT block
+                test_contains(
+                    "Incomplete todos - allows stop (other session)",
+                    persistent_mode,
+                    json.dumps({"directory": str(test_path), "session_id": "different-session-id"}),
+                    '"continue": true',
+                )
             finally:
-                # Clean up todo file
+                # Clean up todo files
                 todo_file.unlink(missing_ok=True)
+                other_todo_file.unlink(missing_ok=True)
 
     finally:
         # Restore global todos
