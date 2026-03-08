@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Claude Crew Persistent Mode Hook
-Handles feedback-loop persistence and todo continuation.
+Handles build loop persistence and todo continuation.
 Prevents stopping when work remains incomplete.
 """
 
@@ -11,7 +11,7 @@ from pathlib import Path
 from models import (
     StopInput,
     HookResult,
-    FeedbackLoopState,
+    BuildState,
     MeasureTwiceState,
     read_hook_input,
     count_incomplete_todos,
@@ -94,25 +94,26 @@ def main():
 
     crew_dir = directory / ".crew"
 
-    # Priority 1: Feedback Loop (session-scoped lookup)
-    loop_file = find_session_state_file(crew_dir, "feedback-loop-state", session_id)
+    # Priority 1: Build Loop (session-scoped lookup)
+    loop_file = find_session_state_file(crew_dir, "build-state", session_id)
     if loop_file:
-        loop_state = FeedbackLoopState.load(loop_file)
+        loop_state = BuildState.load(loop_file)
 
         if loop_state.active:
             if loop_state.iteration < loop_state.max_iterations:
                 loop_state.iteration += 1
                 loop_state.save(loop_file)
 
-                message = f"""[Feedback Loop - Iteration {loop_state.iteration}/{loop_state.max_iterations}]
+                message = f"""[Build Loop - Iteration {loop_state.iteration}/{loop_state.max_iterations}]
 
 Task: {loop_state.prompt}
 
 Continue working. When complete:
-1. Spawn advisor to verify your work
-2. If approved, deactivate the loop and summarize what was accomplished
+1. Spawn advisor to verify and review your work
+2. If APPROVED, deactivate the loop and summarize what was accomplished
+3. If REVISE with [BLOCKING] issues, fix them and re-verify
 
-To exit early: `/crew:cancel-feedback-loop`
+To exit early: `/crew:cancel-build`
 """
                 print(HookResult.block(message).to_json())
                 return
@@ -120,7 +121,7 @@ To exit early: `/crew:cancel-feedback-loop`
             # Max iterations reached - force exit
             loop_state.active = False
             loop_state.save(loop_file)
-            message = f"""[Feedback Loop - Safety Limit Reached]
+            message = f"""[Build Loop - Safety Limit Reached]
 
 Maximum iterations ({loop_state.max_iterations}) reached. Loop deactivated.
 

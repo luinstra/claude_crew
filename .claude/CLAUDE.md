@@ -61,7 +61,7 @@ The workflow is smart about what it bumps:
 git commit -m "feat(crew): add code-review agent"
 
 # Patch bump (bug fix)
-git commit -m "fix: correct command prefix in feedback-loop docs"
+git commit -m "fix: correct command prefix in build-loop docs"
 
 # Major bump (breaking change)
 git commit -m "feat!: change state file location from .crew to .claude-crew"
@@ -78,7 +78,7 @@ git commit -m "ci: update workflow permissions"
 |---------|---------|
 | `/plugin` | Install plugin from current directory (run from `plugins/crew/` or `plugins/sk/`) |
 | `python plugins/crew/scripts/test-hooks.py` | Run hook unit tests |
-| `python plugins/crew/scripts/crew-state.py show fl` | Debug feedback loop state |
+| `python plugins/crew/scripts/crew-state.py show bl` | Debug build loop state |
 
 ### Install Git Hook (Required for Contributors)
 
@@ -193,7 +193,7 @@ Loop complete → crew-state.py deactivate → JSON deleted
 ```
 
 **State files** (in project's `.crew/`):
-- `feedback-loop-state.json` — Active feedback loop
+- `build-state.json` — Active build loop
 - `measure-twice-state.json` — Active measure-twice loop
 - `context-snapshot.md` — Saved context
 
@@ -204,7 +204,7 @@ Loop complete → crew-state.py deactivate → JSON deleted
 python plugins/crew/scripts/test-hooks.py
 
 # Manual state inspection
-python plugins/crew/scripts/crew-state.py show fl
+python plugins/crew/scripts/crew-state.py show bl
 python plugins/crew/scripts/crew-state.py show mt
 ```
 
@@ -215,8 +215,8 @@ python plugins/crew/scripts/crew-state.py show mt
 All command references in documentation must use `/crew:` prefix:
 
 ```markdown
-❌ `/feedback-loop "task"`
-✅ `/crew:feedback-loop "task"`
+❌ `/build "task"`
+✅ `/crew:build "task"`
 ```
 
 ### Agent Delegation Pattern
@@ -249,12 +249,12 @@ print(HookResult.block("Reason to block").to_json())
 
 ❌ **Referencing commands without prefix**
 ```markdown
-Use `/feedback-loop` to start
+Use `/build` to start
 ```
 
 ✅ **Always include plugin prefix**
 ```markdown
-Use `/crew:feedback-loop` to start
+Use `/crew:build` to start
 ```
 
 ---

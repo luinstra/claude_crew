@@ -7,8 +7,8 @@ description: Show active loops, iteration counts, and crew state
 Check the state of active loops by running these commands:
 
 ```bash
-# Check feedback loop
-FL_STATE=$(${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py show fl 2>/dev/null)
+# Check build loop
+BL_STATE=$(${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py show bl 2>/dev/null)
 
 # Check measure-twice loop
 MT_STATE=$(${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py show mt 2>/dev/null)
@@ -18,7 +18,7 @@ MT_STATE=$(${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py show mt 2>/dev/null)
 
 After running both commands, report the status in this format:
 
-**Feedback Loop:**
+**Build Loop:**
 - Status: [Active/Inactive]
 - If active: Iteration X/Y, Task: "..."
 

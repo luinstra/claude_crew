@@ -62,8 +62,8 @@ Skills provide specialized guidance that activates automatically based on contex
 
 | Command | Description |
 |---------|-------------|
-| `/crew:feedback-loop "task"` | Start verified persistence loop — requires advisor approval before completion |
-| `/crew:cancel-feedback-loop` | Exit an active feedback loop |
+| `/crew:build "task"` | Start verified persistence loop — requires advisor approval before completion |
+| `/crew:cancel-build` | Exit an active build loop |
 | `/crew:measure-twice "task"` | Start self-refining plan loop — advisor reviews until approved |
 | `/crew:cancel-measure-twice` | Exit an active measure-twice loop |
 | `/crew:plan "description"` | Start planning session |
@@ -98,14 +98,14 @@ Skills provide specialized guidance that activates automatically based on contex
 
 **Measure-Twice Loop:** For critical tasks, `/crew:measure-twice` iterates until an advisor approves the plan (handling BLOCKING issues automatically, accepting MINOR issues).
 
-## Feedback Loop (Verified Persistence)
+## Build Loop (Verified Persistence)
 
 For tasks requiring advisor verification before completion:
 
-1. Start with `/crew:feedback-loop "your task description"`
+1. Start with `/crew:build "your task description"`
 2. Claude works until the task appears complete
-3. Advisor agent must verify completion before accepting "done"
-4. Use `/crew:cancel-feedback-loop` to exit early if needed
+3. Advisor agent must verify and approve completion before accepting "done"
+4. Use `/crew:cancel-build` to exit early if needed
 
 **Note:** For simpler persistence without advisor verification, consider the official `ralph-wiggum` plugin.
 

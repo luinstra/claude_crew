@@ -56,14 +56,14 @@ State is stored as JSON in `.crew/`:
 
 ```python
 from pathlib import Path
-from models import FeedbackLoopState
+from models import BuildState
 
 # Get project directory (from env or cwd)
 directory = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()))
 
 # Load state (returns default if file missing)
-state_file = directory / ".crew" / "feedback-loop-state.json"
-state = FeedbackLoopState.load(state_file)
+state_file = directory / ".crew" / "build-state.json"
+state = BuildState.load(state_file)
 
 # Modify and save
 state.iteration += 1
@@ -92,25 +92,25 @@ If omitted, falls back to `CLAUDE_SESSION_ID` env var, then legacy unsuffixed fi
 
 ```bash
 # Show loop state
-crew-state.py show fl --session-id abc123
+crew-state.py show bl --session-id abc123
 crew-state.py show mt
 
 # Check if active (exit code 0=active, 1=inactive)
-crew-state.py is-active fl --session-id abc123
+crew-state.py is-active bl --session-id abc123
 
 # Initialize a loop
-crew-state.py init fl --prompt "Fix the auth bug" --session-id abc123
+crew-state.py init bl --prompt "Fix the auth bug" --session-id abc123
 crew-state.py init mt --task "Add user profiles" --auto-plan --session-id abc123
 
 # Check if this session has conflicts (other sessions ignored)
 crew-state.py check-conflicts --session-id abc123
 
 # Set specific fields
-crew-state.py set fl iteration 5 --session-id abc123
+crew-state.py set bl iteration 5 --session-id abc123
 crew-state.py set mt last_verdict REVISE --session-id abc123
 
 # Deactivate
-crew-state.py deactivate fl --reason "User cancelled" --session-id abc123
+crew-state.py deactivate bl --reason "User cancelled" --session-id abc123
 ```
 
 **Session ID resolution order:**
@@ -119,11 +119,11 @@ crew-state.py deactivate fl --reason "User cancelled" --session-id abc123
 3. Empty string -- legacy unsuffixed filenames (backward compatible)
 
 **Session-scoped filename pattern:**
-- `feedback-loop-state-{session_id}.json`
+- `build-state-{session_id}.json`
 - `measure-twice-state-{session_id}.json`
 
 **Loop aliases:**
-- `fl` = `feedback-loop`
+- `bl` = `build`
 - `mt` = `measure-twice`
 
 ## Data Models
@@ -143,15 +143,15 @@ HookResult.allow("Info message")      # {"continue": true, "message": "..."}
 HookResult.block("Must continue")     # {"continue": false, "reason": "..."}
 ```
 
-### FeedbackLoopState
+### BuildState
 
 ```python
 @dataclass
-class FeedbackLoopState:
+class BuildState:
     active: bool = False
     prompt: str = ""              # Original task
     iteration: int = 1
-    max_iterations: int = 20
+    max_iterations: int = 10
     completion_promise: str = "DONE"
     session_id: str = ""          # Session that owns this loop
 ```
@@ -207,7 +207,7 @@ with open(state_file) as f:
 
 ✅ **Use model's load() method**
 ```python
-state = FeedbackLoopState.load(state_file)  # Returns default if missing
+state = BuildState.load(state_file)  # Returns default if missing
 ```
 
 ## Orphan Cleanup
@@ -216,7 +216,7 @@ The `session-start.py` hook cleans up stale state files on every session start:
 
 - **Inactive** state files older than **1 day**: deleted
 - **Active** state files older than **7 days**: force-deleted (safety limit for abandoned sessions)
-- Applies to both legacy (`feedback-loop-state.json`) and session-scoped (`feedback-loop-state-abc123.json`) files
+- Applies to `build-state-*` and `measure-twice-state-*` files
 
 ## Testing
 

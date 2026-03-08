@@ -115,18 +115,33 @@ Before finalizing:
 
 # MODE 3: VERIFICATION
 
-Activated when asked to verify task completion (feedback loops, completion claims).
+Activated when asked to verify task completion (build loops, completion claims).
 
-## Verification Checklist
+## Task Completion Checklist
 1. **Requirements Met**: Does implementation address ALL points from the original task?
 2. **Completeness**: Is this full implementation, not partial/stubbed?
 3. **Functionality**: Does the code compile/run without errors?
 4. **Tests**: Do tests pass? (if applicable)
-5. **Obvious Issues**: Any bugs, edge cases, or issues visible in the code?
+
+## Code Quality Checklist (when code review context is provided)
+5. **Style Consistency**: Does the code follow existing codebase patterns and conventions?
+6. **Security**: Input validation, auth checks, data exposure risks?
+7. **Performance**: N+1 queries, unnecessary allocations, missing pagination?
+8. **Error Handling**: Are errors caught, logged, and surfaced appropriately?
+
+## Gathering Review Context
+- Run `git diff` to see all changes made
+- Read modified files for full context
+- Compare with existing patterns in the codebase
 
 ## Output
-- **APPROVED**: If all checks pass, state clearly: "Verification: APPROVED"
-- **REJECTED**: If issues found, list what needs fixing
+- **APPROVED**: All checks pass. State: `VERDICT: APPROVED`
+- **REVISE**: Issues found. Classify each as:
+  - `[BLOCKING]` -- Must be fixed before accepting
+  - `[MINOR]` -- Nice to fix but acceptable as-is
+
+  If only [MINOR] issues, state: `VERDICT: APPROVED` (with noted minor items)
+  If any [BLOCKING] issues, state: `VERDICT: REVISE` with list of blocking issues
 
 ---
 

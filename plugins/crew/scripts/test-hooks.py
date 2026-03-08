@@ -144,20 +144,20 @@ def main():
                 "Context Snapshot Available",
             )
 
-            # Test with feedback loop state
-            (crew_dir / "feedback-loop-state.json").write_text(
+            # Test with build loop state
+            (crew_dir / "build-state.json").write_text(
                 '{"active": true, "prompt": "Test task", "iteration": 2, "max_iterations": 10}'
             )
 
             test_contains(
-                "Detects active feedback loop",
+                "Detects active build loop",
                 session_start,
                 json.dumps({"directory": str(test_path)}),
-                "Feedback Loop Active",
+                "Build Loop Active",
             )
 
-            # Clean up feedback loop state for next test
-            (crew_dir / "feedback-loop-state.json").unlink()
+            # Clean up build loop state for next test
+            (crew_dir / "build-state.json").unlink()
 
             # Test with measure-twice loop state
             (crew_dir / "measure-twice-state.json").write_text(
@@ -192,39 +192,39 @@ def main():
                 '{"continue": true}',
             )
 
-            # Test with active feedback loop
-            (crew_dir / "feedback-loop-state.json").write_text(
+            # Test with active build loop
+            (crew_dir / "build-state.json").write_text(
                 '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
             )
 
             test_contains(
-                "Active feedback loop - blocks stop",
+                "Active build loop - blocks stop",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
                 '"continue": false',
             )
 
             test_contains(
-                "Active feedback loop - shows iteration",
+                "Active build loop - shows iteration",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                "Feedback Loop",
+                "Build Loop",
             )
 
-            # Test with inactive feedback loop
-            (crew_dir / "feedback-loop-state.json").write_text(
+            # Test with inactive build loop
+            (crew_dir / "build-state.json").write_text(
                 '{"active": false, "prompt": "Old task"}'
             )
 
             test_equals(
-                "Inactive feedback loop - allows stop",
+                "Inactive build loop - allows stop",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
                 '{"continue": true}',
             )
 
-            # Clean up feedback loop state
-            (crew_dir / "feedback-loop-state.json").unlink()
+            # Clean up build loop state
+            (crew_dir / "build-state.json").unlink()
 
             # Test with active measure-twice loop
             (crew_dir / "measure-twice-state.json").write_text(
@@ -257,23 +257,23 @@ def main():
                 '{"continue": true}',
             )
 
-            # Test priority: feedback-loop takes precedence over measure-twice
-            (crew_dir / "feedback-loop-state.json").write_text(
-                '{"active": true, "prompt": "Feedback task", "iteration": 1, "max_iterations": 10}'
+            # Test priority: build loop takes precedence over measure-twice
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "Build task", "iteration": 1, "max_iterations": 10}'
             )
             (crew_dir / "measure-twice-state.json").write_text(
                 '{"active": true, "task_description": "Navel task", "plan_file": ".crew/plans/test.md", "iteration": 1, "max_iterations": 10}'
             )
 
             test_contains(
-                "Feedback-loop takes priority over measure-twice",
+                "Build loop takes priority over measure-twice",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                "Feedback Loop",  # Should show feedback loop, not measure-twice
+                "Build Loop",  # Should show build loop, not measure-twice
             )
 
             # Clean up both state files
-            (crew_dir / "feedback-loop-state.json").unlink()
+            (crew_dir / "build-state.json").unlink()
             (crew_dir / "measure-twice-state.json").unlink()
 
             # =========================================================================
@@ -297,56 +297,56 @@ def main():
             for f in crew_dir.glob("*-state*.json"):
                 f.unlink()
 
-            # Test init fl
-            stdout, stderr, code = run_crew_state(["init", "fl", "--prompt", "Test task"], test_path)
-            if code == 0 and (crew_dir / "feedback-loop-state.json").exists():
-                log_pass("init fl - creates state file")
+            # Test init bl
+            stdout, stderr, code = run_crew_state(["init", "bl", "--prompt", "Test task"], test_path)
+            if code == 0 and (crew_dir / "build-state.json").exists():
+                log_pass("init bl - creates state file")
             else:
-                log_fail("init fl - creates state file", "exit 0 and file exists", f"exit {code}, stderr: {stderr}")
+                log_fail("init bl - creates state file", "exit 0 and file exists", f"exit {code}, stderr: {stderr}")
 
-            # Test show fl
-            stdout, stderr, code = run_crew_state(["show", "fl"], test_path)
+            # Test show bl
+            stdout, stderr, code = run_crew_state(["show", "bl"], test_path)
             if code == 0 and '"active": true' in stdout and '"prompt": "Test task"' in stdout:
-                log_pass("show fl - outputs JSON with expected fields")
+                log_pass("show bl - outputs JSON with expected fields")
             else:
-                log_fail("show fl - outputs JSON with expected fields", "JSON with active and prompt", stdout)
+                log_fail("show bl - outputs JSON with expected fields", "JSON with active and prompt", stdout)
 
-            # Test set fl
-            stdout, stderr, code = run_crew_state(["set", "fl", "iteration", "5"], test_path)
-            stdout2, _, _ = run_crew_state(["show", "fl"], test_path)
+            # Test set bl
+            stdout, stderr, code = run_crew_state(["set", "bl", "iteration", "5"], test_path)
+            stdout2, _, _ = run_crew_state(["show", "bl"], test_path)
             if code == 0 and '"iteration": 5' in stdout2:
-                log_pass("set fl - changes field value")
+                log_pass("set bl - changes field value")
             else:
-                log_fail("set fl - changes field value", "iteration: 5", stdout2)
+                log_fail("set bl - changes field value", "iteration: 5", stdout2)
 
-            # Test set fl active false (bool coercion)
-            stdout, stderr, code = run_crew_state(["set", "fl", "active", "false"], test_path)
-            stdout2, _, _ = run_crew_state(["show", "fl"], test_path)
+            # Test set bl active false (bool coercion)
+            stdout, stderr, code = run_crew_state(["set", "bl", "active", "false"], test_path)
+            stdout2, _, _ = run_crew_state(["show", "bl"], test_path)
             if code == 0 and '"active": false' in stdout2:
-                log_pass("set fl - bool coercion works")
+                log_pass("set bl - bool coercion works")
             else:
-                log_fail("set fl - bool coercion works", "active: false", stdout2)
+                log_fail("set bl - bool coercion works", "active: false", stdout2)
 
             # Reset for increment test
-            run_crew_state(["set", "fl", "active", "true"], test_path)
-            run_crew_state(["set", "fl", "iteration", "5"], test_path)
+            run_crew_state(["set", "bl", "active", "true"], test_path)
+            run_crew_state(["set", "bl", "iteration", "5"], test_path)
 
-            # Test increment fl
-            stdout, stderr, code = run_crew_state(["increment", "fl", "iteration"], test_path)
-            stdout2, _, _ = run_crew_state(["show", "fl"], test_path)
+            # Test increment bl
+            stdout, stderr, code = run_crew_state(["increment", "bl", "iteration"], test_path)
+            stdout2, _, _ = run_crew_state(["show", "bl"], test_path)
             if code == 0 and '"iteration": 6' in stdout2:
-                log_pass("increment fl - bumps counter")
+                log_pass("increment bl - bumps counter")
             else:
-                log_fail("increment fl - bumps counter", "iteration: 6", stdout2)
+                log_fail("increment bl - bumps counter", "iteration: 6", stdout2)
 
-            # Test deactivate fl
-            stdout, stderr, code = run_crew_state(["deactivate", "fl", "--reason", "Test done"], test_path)
-            with open(crew_dir / "feedback-loop-state.json") as f:
+            # Test deactivate bl
+            stdout, stderr, code = run_crew_state(["deactivate", "bl", "--reason", "Test done"], test_path)
+            with open(crew_dir / "build-state.json") as f:
                 data = json.load(f)
             if code == 0 and data.get("active") == False and "completed_at" in data and data.get("reason") == "Test done":
-                log_pass("deactivate fl - sets active=false and adds metadata")
+                log_pass("deactivate bl - sets active=false and adds metadata")
             else:
-                log_fail("deactivate fl - sets active=false and adds metadata", "active=false, completed_at, reason", json.dumps(data))
+                log_fail("deactivate bl - sets active=false and adds metadata", "active=false, completed_at, reason", json.dumps(data))
 
             # Test init mt
             stdout, stderr, code = run_crew_state(["init", "mt", "--task", "Build auth", "--plan-file", ".crew/plans/auth.md"], test_path)
@@ -356,47 +356,47 @@ def main():
             else:
                 log_fail("init mt - creates measure-twice state", "task_description field", stdout2)
 
-            # Test error: missing --prompt for fl (clean up first to avoid conflict error)
+            # Test error: missing --prompt for bl (clean up first to avoid conflict error)
             for f in crew_dir.glob("*-state*.json"):
                 f.unlink()
-            stdout, stderr, code = run_crew_state(["init", "fl"], test_path)
+            stdout, stderr, code = run_crew_state(["init", "bl"], test_path)
             if code == 1 and "--prompt required" in stderr:
-                log_pass("init fl without --prompt - exits with error")
+                log_pass("init bl without --prompt - exits with error")
             else:
-                log_fail("init fl without --prompt - exits with error", "exit 1 with error message", f"exit {code}, stderr: {stderr}")
+                log_fail("init bl without --prompt - exits with error", "exit 1 with error message", f"exit {code}, stderr: {stderr}")
 
             # Test error: invalid field name
-            stdout, stderr, code = run_crew_state(["set", "fl", "nonexistent_field", "value"], test_path)
+            stdout, stderr, code = run_crew_state(["set", "bl", "nonexistent_field", "value"], test_path)
             if code == 1 and "has no field" in stderr:
                 log_pass("set invalid field - exits with error")
             else:
                 log_fail("set invalid field - exits with error", "exit 1 with error message", f"exit {code}, stderr: {stderr}")
 
             # Test show on missing file returns default state
-            (crew_dir / "feedback-loop-state.json").unlink(missing_ok=True)
-            stdout, stderr, code = run_crew_state(["show", "fl"], test_path)
+            (crew_dir / "build-state.json").unlink(missing_ok=True)
+            stdout, stderr, code = run_crew_state(["show", "bl"], test_path)
             if code == 0 and '"active": false' in stdout:
-                log_pass("show fl missing file - returns default state")
+                log_pass("show bl missing file - returns default state")
             else:
-                log_fail("show fl missing file - returns default state", "default state JSON", stdout)
+                log_fail("show bl missing file - returns default state", "default state JSON", stdout)
 
             # Test is-active when inactive (no state file)
-            (crew_dir / "feedback-loop-state.json").unlink(missing_ok=True)
-            stdout, stderr, code = run_crew_state(["is-active", "fl"], test_path)
+            (crew_dir / "build-state.json").unlink(missing_ok=True)
+            stdout, stderr, code = run_crew_state(["is-active", "bl"], test_path)
             if code == 1:
-                log_pass("is-active fl (inactive) - exits with code 1")
+                log_pass("is-active bl (inactive) - exits with code 1")
             else:
-                log_fail("is-active fl (inactive) - exits with code 1", "exit 1", f"exit {code}")
+                log_fail("is-active bl (inactive) - exits with code 1", "exit 1", f"exit {code}")
 
             # Test is-active when active (clean up first to allow init)
             for f in crew_dir.glob("*-state*.json"):
                 f.unlink()
-            run_crew_state(["init", "fl", "--prompt", "Test"], test_path)
-            stdout, stderr, code = run_crew_state(["is-active", "fl"], test_path)
+            run_crew_state(["init", "bl", "--prompt", "Test"], test_path)
+            stdout, stderr, code = run_crew_state(["is-active", "bl"], test_path)
             if code == 0:
-                log_pass("is-active fl (active) - exits with code 0")
+                log_pass("is-active bl (active) - exits with code 0")
             else:
-                log_fail("is-active fl (active) - exits with code 0", "exit 0", f"exit {code}")
+                log_fail("is-active bl (active) - exits with code 0", "exit 0", f"exit {code}")
 
             # Test --auto-plan for mt (clean up all state to avoid conflicts)
             for f in crew_dir.glob("*-state*.json"):
@@ -423,16 +423,16 @@ def main():
             else:
                 log_fail("check-conflicts (no active) - exits with code 0", "exit 0", f"exit {code}, stderr: {stderr}")
 
-            # Test check-conflicts with fl active
-            run_crew_state(["init", "fl", "--prompt", "Test"], test_path)
+            # Test check-conflicts with bl active
+            run_crew_state(["init", "bl", "--prompt", "Test"], test_path)
             stdout, stderr, code = run_crew_state(["check-conflicts"], test_path)
-            if code == 1 and "feedback-loop is already active" in stderr:
-                log_pass("check-conflicts (fl active) - exits with error")
+            if code == 1 and "build loop is already active" in stderr:
+                log_pass("check-conflicts (bl active) - exits with error")
             else:
-                log_fail("check-conflicts (fl active) - exits with error", "exit 1 with fl error", f"exit {code}, stderr: {stderr}")
+                log_fail("check-conflicts (bl active) - exits with error", "exit 1 with bl error", f"exit {code}, stderr: {stderr}")
 
             # Test check-conflicts with mt active
-            (crew_dir / "feedback-loop-state.json").unlink(missing_ok=True)
+            (crew_dir / "build-state.json").unlink(missing_ok=True)
             run_crew_state(["init", "mt", "--task", "Test", "--auto-plan"], test_path)
             stdout, stderr, code = run_crew_state(["check-conflicts"], test_path)
             if code == 1 and "measure-twice loop is already active" in stderr:
@@ -441,11 +441,11 @@ def main():
                 log_fail("check-conflicts (mt active) - exits with error", "exit 1 with mt error", f"exit {code}, stderr: {stderr}")
 
             # Test init rejects when another loop is active
-            stdout, stderr, code = run_crew_state(["init", "fl", "--prompt", "Should fail"], test_path)
+            stdout, stderr, code = run_crew_state(["init", "bl", "--prompt", "Should fail"], test_path)
             if code == 1 and "measure-twice loop is already active" in stderr:
-                log_pass("init fl (mt active) - rejects with conflict error")
+                log_pass("init bl (mt active) - rejects with conflict error")
             else:
-                log_fail("init fl (mt active) - rejects with conflict error", "exit 1 with conflict", f"exit {code}, stderr: {stderr}")
+                log_fail("init bl (mt active) - rejects with conflict error", "exit 1 with conflict", f"exit {code}, stderr: {stderr}")
 
             # Clean up state files for subsequent tests
             for f in crew_dir.glob("*-state*.json"):
@@ -456,31 +456,31 @@ def main():
             # =========================================================================
             log_section("crew-state.py (session-scoped)")
 
-            # Two sessions can each init a feedback-loop
+            # Two sessions can each init a build loop
             stdout, stderr, code = run_crew_state(
-                ["init", "fl", "--prompt", "Task for s1", "--session-id", "s1"], test_path)
-            if code == 0 and (crew_dir / "feedback-loop-state-s1.json").exists():
-                log_pass("session init fl s1 - creates session-scoped file")
+                ["init", "bl", "--prompt", "Task for s1", "--session-id", "s1"], test_path)
+            if code == 0 and (crew_dir / "build-state-s1.json").exists():
+                log_pass("session init bl s1 - creates session-scoped file")
             else:
-                log_fail("session init fl s1 - creates session-scoped file",
+                log_fail("session init bl s1 - creates session-scoped file",
                          "exit 0 and file exists", f"exit {code}, stderr: {stderr}")
 
             stdout, stderr, code = run_crew_state(
-                ["init", "fl", "--prompt", "Task for s2", "--session-id", "s2"], test_path)
-            if code == 0 and (crew_dir / "feedback-loop-state-s2.json").exists():
-                log_pass("session init fl s2 - creates second session file")
+                ["init", "bl", "--prompt", "Task for s2", "--session-id", "s2"], test_path)
+            if code == 0 and (crew_dir / "build-state-s2.json").exists():
+                log_pass("session init bl s2 - creates second session file")
             else:
-                log_fail("session init fl s2 - creates second session file",
+                log_fail("session init bl s2 - creates second session file",
                          "exit 0 and file exists", f"exit {code}, stderr: {stderr}")
 
-            # check-conflicts --session-id s1 fails (s1 has active fl)
+            # check-conflicts --session-id s1 fails (s1 has active bl)
             stdout, stderr, code = run_crew_state(
                 ["check-conflicts", "--session-id", "s1"], test_path)
-            if code == 1 and "feedback-loop is already active" in stderr:
+            if code == 1 and "build loop is already active" in stderr:
                 log_pass("check-conflicts s1 - detects own active loop")
             else:
                 log_fail("check-conflicts s1 - detects own active loop",
-                         "exit 1 with fl error", f"exit {code}, stderr: {stderr}")
+                         "exit 1 with bl error", f"exit {code}, stderr: {stderr}")
 
             # check-conflicts --session-id s3 succeeds (s3 has no loops)
             stdout, stderr, code = run_crew_state(
@@ -491,20 +491,20 @@ def main():
                 log_fail("check-conflicts s3 - no conflict for different session",
                          "exit 0", f"exit {code}, stderr: {stderr}")
 
-            # show fl --session-id s1 shows s1's state
+            # show bl --session-id s1 shows s1's state
             stdout, stderr, code = run_crew_state(
-                ["show", "fl", "--session-id", "s1"], test_path)
+                ["show", "bl", "--session-id", "s1"], test_path)
             if code == 0 and '"prompt": "Task for s1"' in stdout:
-                log_pass("show fl s1 - shows session-specific state")
+                log_pass("show bl s1 - shows session-specific state")
             else:
-                log_fail("show fl s1 - shows session-specific state",
+                log_fail("show bl s1 - shows session-specific state",
                          "prompt: Task for s1", stdout)
 
-            # deactivate fl --session-id s1 only deactivates s1
+            # deactivate bl --session-id s1 only deactivates s1
             stdout, stderr, code = run_crew_state(
-                ["deactivate", "fl", "--reason", "done", "--session-id", "s1"], test_path)
+                ["deactivate", "bl", "--reason", "done", "--session-id", "s1"], test_path)
             stdout2, _, _ = run_crew_state(
-                ["show", "fl", "--session-id", "s2"], test_path)
+                ["show", "bl", "--session-id", "s2"], test_path)
             if code == 0 and '"active": true' in stdout2:
                 log_pass("deactivate s1 - s2 remains active")
             else:
@@ -513,7 +513,7 @@ def main():
 
             # session_id stored in state
             stdout, stderr, code = run_crew_state(
-                ["show", "fl", "--session-id", "s2"], test_path)
+                ["show", "bl", "--session-id", "s2"], test_path)
             if '"session_id": "s2"' in stdout:
                 log_pass("init stores session_id in state JSON")
             else:
@@ -523,7 +523,7 @@ def main():
             # CLAUDE_SESSION_ID env var fallback
             env_with_session = {**os.environ, "CLAUDE_PROJECT_DIR": str(test_path), "CLAUDE_SESSION_ID": "s2"}
             result = subprocess.run(
-                [sys.executable, str(crew_state), "show", "fl"],
+                [sys.executable, str(crew_state), "show", "bl"],
                 capture_output=True, text=True, cwd=test_path, env=env_with_session)
             if result.returncode == 0 and '"prompt": "Task for s2"' in result.stdout:
                 log_pass("CLAUDE_SESSION_ID env var fallback works")
@@ -540,8 +540,8 @@ def main():
             # =========================================================================
             log_section("persistent-mode.py (session-scoped)")
 
-            # s1 has active fl, s2 does not
-            (crew_dir / "feedback-loop-state-s1.json").write_text(
+            # s1 has active bl, s2 does not
+            (crew_dir / "build-state-s1.json").write_text(
                 '{"active": true, "prompt": "s1 task", "iteration": 1, "max_iterations": 10, "session_id": "s1"}')
 
             # Stop hook with session_id=s1 blocks
@@ -568,13 +568,13 @@ def main():
                 '{"continue": true}',
             )
 
-            # Legacy file with no session_id is claimed by session that has one
-            (crew_dir / "feedback-loop-state-s1.json").unlink()
-            (crew_dir / "feedback-loop-state.json").write_text(
+            # File with no session_id is claimed by session that has one
+            (crew_dir / "build-state-s1.json").unlink()
+            (crew_dir / "build-state.json").write_text(
                 '{"active": true, "prompt": "legacy task", "iteration": 1, "max_iterations": 10}')
 
             test_contains(
-                "Stop hook session claims legacy file (no session_id in file)",
+                "Stop hook session claims file (no session_id in file)",
                 persistent_mode,
                 json.dumps({"directory": str(test_path), "session_id": "any-session"}),
                 '"continue": false',
@@ -597,15 +597,15 @@ def main():
                 "Session ID: test-sess-123",
             )
 
-            # Session-scoped fl detected for this session
-            (crew_dir / "feedback-loop-state-mysess.json").write_text(
+            # Session-scoped bl detected for this session
+            (crew_dir / "build-state-mysess.json").write_text(
                 '{"active": true, "prompt": "My task", "iteration": 2, "max_iterations": 10, "session_id": "mysess"}')
 
             test_contains(
-                "SessionStart detects session-scoped fl for this session",
+                "SessionStart detects session-scoped bl for this session",
                 session_start,
                 json.dumps({"directory": str(test_path), "session_id": "mysess"}),
-                "Feedback Loop Active",
+                "Build Loop Active",
             )
 
             # Other session's loop shown as "Other Sessions"
@@ -626,7 +626,7 @@ def main():
             log_section("Orphan cleanup")
 
             # Create a stale inactive session-scoped state file (>1 day old)
-            stale_file = crew_dir / "feedback-loop-state-stale123.json"
+            stale_file = crew_dir / "build-state-stale123.json"
             stale_file.write_text('{"active": false, "prompt": "old task", "session_id": "stale123"}')
             # Set mtime to 2 days ago
             import time as _time
@@ -643,7 +643,7 @@ def main():
                          "file deleted", "file still exists")
 
             # Create a stale active session-scoped state file (>7 days old)
-            stale_active = crew_dir / "feedback-loop-state-oldactive.json"
+            stale_active = crew_dir / "build-state-oldactive.json"
             stale_active.write_text('{"active": true, "prompt": "ancient task", "session_id": "oldactive"}')
             very_old_mtime = _time.time() - (8 * 86400)
             os.utime(stale_active, (very_old_mtime, very_old_mtime))

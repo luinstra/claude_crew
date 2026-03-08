@@ -160,17 +160,17 @@ class SessionStartResult:
 # =============================================================================
 
 @dataclass
-class FeedbackLoopState:
-    """State for feedback loop persistence with advisor verification."""
+class BuildState:
+    """State for build loop persistence with advisor verification."""
     active: bool = False
     prompt: str = ""
     iteration: int = 1
-    max_iterations: int = 20
+    max_iterations: int = 10
     completion_promise: str = "DONE"
     session_id: str = ""
 
     @classmethod
-    def load(cls, path: Path) -> "FeedbackLoopState":
+    def load(cls, path: Path) -> "BuildState":
         """Load from file, returning default state if file doesn't exist."""
         if not path.is_file():
             return cls()
@@ -181,7 +181,7 @@ class FeedbackLoopState:
                 active=data.get("active", False),
                 prompt=data.get("prompt", ""),
                 iteration=data.get("iteration", 1),
-                max_iterations=data.get("max_iterations", 20),
+                max_iterations=data.get("max_iterations", 10),
                 completion_promise=data.get("completion_promise", "DONE"),
                 session_id=data.get("session_id", ""),
             )

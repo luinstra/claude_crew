@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Crew state management CLI for feedback-loop and measure-twice persistence."""
+"""Crew state management CLI for build and measure-twice persistence."""
 
 import argparse
 import json
@@ -11,22 +11,22 @@ from datetime import datetime
 from pathlib import Path
 
 # Import from models.py (same directory)
-from models import FeedbackLoopState, MeasureTwiceState
+from models import BuildState, MeasureTwiceState
 
 LOOP_ALIASES = {
-    "feedback-loop": "fl", "fl": "fl",
+    "build": "bl", "bl": "bl",
     "measure-twice": "mt", "mt": "mt",
 }
 
 LOOP_CLASSES = {
-    "fl": FeedbackLoopState,
+    "bl": BuildState,
     "mt": MeasureTwiceState,
 }
 
 
 def get_loop_filename(canonical: str, session_id: str = "") -> str:
     """Get the state filename for a loop, optionally scoped to a session."""
-    base = {"fl": "feedback-loop-state", "mt": "measure-twice-state"}[canonical]
+    base = {"bl": "build-state", "mt": "measure-twice-state"}[canonical]
     if session_id:
         return f"{base}-{session_id}.json"
     return f"{base}.json"
@@ -146,10 +146,10 @@ def check_for_conflicts(session_id: str = ""):
     project_dir = get_project_dir()
     crew_dir = project_dir / ".crew"
 
-    fl_path = crew_dir / get_loop_filename("fl", session_id)
-    fl_state = FeedbackLoopState.load(fl_path)
-    if fl_state.active:
-        return "ERROR: feedback-loop is already active. Run /crew:cancel-feedback-loop first or let it complete."
+    bl_path = crew_dir / get_loop_filename("bl", session_id)
+    bl_state = BuildState.load(bl_path)
+    if bl_state.active:
+        return "ERROR: build loop is already active. Run /crew:cancel-build first or let it complete."
 
     mt_path = crew_dir / get_loop_filename("mt", session_id)
     mt_state = MeasureTwiceState.load(mt_path)
@@ -172,15 +172,15 @@ def cmd_init(args):
     canonical = LOOP_ALIASES[args.loop]
     path = get_state_path(args.loop, session_id)
 
-    if canonical == "fl":
+    if canonical == "bl":
         if not args.prompt:
-            print("Error: --prompt required for feedback-loop", file=sys.stderr)
+            print("Error: --prompt required for build loop", file=sys.stderr)
             sys.exit(1)
-        state = FeedbackLoopState(
+        state = BuildState(
             active=True,
             prompt=args.prompt,
             iteration=1,
-            max_iterations=args.max_iterations or 20,
+            max_iterations=args.max_iterations or 10,
             completion_promise="DONE",
             session_id=session_id,
         )
@@ -289,7 +289,7 @@ def main():
     # init
     p_init = subparsers.add_parser("init", help="Initialize a loop")
     p_init.add_argument("loop", choices=list(LOOP_ALIASES.keys()))
-    p_init.add_argument("--prompt", help="Task prompt (for feedback-loop)")
+    p_init.add_argument("--prompt", help="Task prompt (for build loop)")
     p_init.add_argument("--task", help="Task description (for measure-twice)")
     p_init.add_argument("--plan-file", help="Plan file path (for measure-twice)")
     p_init.add_argument("--auto-plan", action="store_true", help="Auto-derive plan file from task (for measure-twice)")

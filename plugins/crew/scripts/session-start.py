@@ -11,7 +11,7 @@ from pathlib import Path
 from models import (
     SessionStartInput,
     SessionStartResult,
-    FeedbackLoopState,
+    BuildState,
     MeasureTwiceState,
     read_hook_input,
     get_file_age_days,
@@ -29,13 +29,12 @@ def is_loop_state_file(filename: str) -> bool:
     """Check if a filename is a loop state file (legacy or session-scoped).
 
     Matches:
-    - feedback-loop-state.json (legacy)
-    - measure-twice-state.json (legacy)
-    - feedback-loop-state-abc123.json (session-scoped)
-    - measure-twice-state-xyz789.json (session-scoped)
+    - build-state.json / build-state-abc123.json
+    - measure-twice-state.json / measure-twice-state-xyz789.json
     """
     return (
-        (filename.startswith("feedback-loop-state") or filename.startswith("measure-twice-state"))
+        (filename.startswith("build-state")
+         or filename.startswith("measure-twice-state"))
         and filename.endswith(".json")
     )
 
@@ -63,7 +62,7 @@ def cleanup_stale_files(directory: Path) -> None:
             if is_loop_state_file(json_file.name):
                 age = now - json_file.stat().st_mtime
                 # Load state to check active flag
-                state = FeedbackLoopState.load(json_file)
+                state = BuildState.load(json_file)
                 if state.active:
                     # Active but very old (>7 days) — force-deactivate and delete
                     if age > MAX_AGE_SECONDS:
@@ -243,19 +242,19 @@ def build_session_status(
                 )
 
                 # Build status line
-                if json_file.name.startswith("feedback-loop-state"):
+                if json_file.name.startswith("build-state"):
                     iteration = data.get("iteration", 1)
-                    max_iter = data.get("max_iterations", 20)
+                    max_iter = data.get("max_iterations", 10)
                     prompt = data.get("prompt", "")
                     if is_this_session:
                         this_session_loops.append(
-                            f"[Feedback Loop Active - {iteration}/{max_iter}]\n"
+                            f"[Build Loop Active - {iteration}/{max_iter}]\n"
                             f"Task: {prompt}\n"
-                            f"Continue until advisor verifies completion."
+                            f"Continue until advisor verifies and approves completion."
                         )
                     else:
                         other_session_loops.append(
-                            f"Feedback loop (session {file_session[:8]}...): {prompt[:50]}"
+                            f"Build loop (session {file_session[:8]}...): {prompt[:50]}"
                         )
                 elif json_file.name.startswith("measure-twice-state"):
                     iteration = data.get("iteration", 1)
