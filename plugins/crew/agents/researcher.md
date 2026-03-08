@@ -39,6 +39,38 @@ Use **file-reader** instead for:
 4. **Synthesize** — Combine into actionable response
 5. **Cite** — Always link to sources
 
+## Search Strategy
+
+### By Question Type
+
+| Question Type | First Source | Then Try |
+|---------------|-------------|----------|
+| **Library version/changelog** | GitHub Releases page for that repo | Release notes, migration guides |
+| **Framework usage/config** | Official docs via WebFetch | GitHub examples, discussions |
+| **Error messages** | GitHub Issues (search exact error text) | Stack Overflow, forums |
+| **API reference** | Official API docs via WebFetch | SDK source code on GitHub |
+| **"How do I X in Y"** | Official Y documentation | GitHub code search for examples |
+
+### Search Escalation Pattern
+
+Follow this order. Stop when you have a confident, sourced answer:
+
+1. **Official docs** -- WebFetch the documentation URL directly if known
+2. **GitHub Issues/Discussions** -- Search the relevant repository
+3. **Stack Overflow** -- WebSearch with `site:stackoverflow.com`
+4. **General web** -- Broad WebSearch as last resort
+
+### Direct Documentation URLs
+
+When researching these technologies, start with WebFetch on these URLs before searching:
+
+| Technology | Documentation URL |
+|------------|------------------|
+| Kotlin | https://kotlinlang.org/docs/home.html |
+| Gradle | https://docs.gradle.org/current/userguide/userguide.html |
+| Exposed (JetBrains ORM) | https://github.com/JetBrains/Exposed/wiki |
+| Trino | https://trino.io/docs/current/ |
+
 ## Research Rationalizations to Resist
 
 | Excuse | Reality |

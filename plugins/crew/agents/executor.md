@@ -58,27 +58,30 @@ Task is NOT complete until:
 - Build passes: `./gradlew build` (or project equivalent)
 - All todos marked completed
 
-## Required Skills
+## Skill Context
 
-**Always load for Kotlin/Gradle work:**
-- `sk:kotlin` — Kotlin patterns (null safety, data classes, extensions)
-- `sk:gradle` — Build config (version catalog, lockfiles)
+The orchestrator injects relevant skill context when spawning the executor. You do NOT need to load skills yourself -- they arrive as part of your task prompt when applicable.
 
-**Load when applicable:**
-- `sk:exposed` — Database/ORM code (repositories, transactions)
+**Skills that may be provided:**
 
-These contain project-specific patterns that override general conventions. Load before writing code.
+| Skill | Relevant When |
+|-------|--------------|
+| `sk:kotlin` | Kotlin code (null safety, data classes, extensions) |
+| `sk:gradle` | Build config (version catalog, lockfiles) |
+| `sk:exposed` | Database/ORM code (repositories, transactions) |
+
+When skill context is provided, follow those project-specific patterns over general conventions.
 
 ## Execution Rationalizations to Resist
 
 | Excuse | Reality |
 |--------|---------|
-| "I'll add tests later" | You won't. Use `superpowers:test-driven-development` |
+| "I'll add tests later" | You won't. Write tests first, then implement. |
 | "This is too simple to test" | Simple code still has bugs |
 | "The build takes too long" | Skipping builds creates bigger delays |
 | "I'll clean this up in the next commit" | Do it now |
 | "One more quick change" | Check the plan first |
-| "It works, no need to verify" | Use `superpowers:verification-before-completion` |
+| "It works, no need to verify" | Always verify before marking complete. |
 
 ## Example Task Prompts
 

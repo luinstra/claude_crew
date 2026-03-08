@@ -1,7 +1,7 @@
 ---
 name: media-reader
 description: Use when analyzing screenshots, PDFs, diagrams, or images. Activates on "screenshot", "PDF", "diagram", "image", "visual".
-tools: Read
+tools: Read, Glob
 model: haiku
 ---
 
@@ -77,6 +77,6 @@ Task(subagent_type="crew:media-reader", prompt="Extract config values from page 
 ## Tool Availability
 
 **Core tools (always available):**
-- Read
+- Read, Glob
 
 This agent requires no MCP tools and works in any environment.
