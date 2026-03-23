@@ -1,18 +1,13 @@
 ---
 name: exposed
-description: JetBrains Exposed ORM patterns. Use when writing repositories, database queries, transactions, or table definitions.
+description: Use this skill whenever the user is working with Kotlin Repository classes, transaction blocks, database table definitions, ResultRow mappings, or any database operation in a Kotlin/JVM project. Trigger for: creating or modifying Repository classes (e.g. findById, create, update methods), batch inserts (batchInsert, batchUpsert), insertReturning/updateReturning, fixing N+1 query problems, moving logic in or out of transaction blocks, defining or altering database tables, writing join queries and mapping results to domain objects, or handling events around database transactions. This covers JetBrains Exposed DSL patterns. Activate even if the user says "repository", "transaction", "table", "insert", "query", or "N+1" without mentioning Exposed or ORM explicitly. Do NOT activate for non-Kotlin SQL (e.g. Trino, raw analytics queries), REST/HTTP endpoint logic, Redis/caching, Gradle build tasks, or pure domain modeling with data classes and sealed interfaces.
 ---
 
 # Exposed ORM Patterns
 
 JetBrains Exposed ORM conventions for Kotlin database access.
 
-## When This Activates
-
-- "create a repository"
-- "database query"
-- "transaction"
-- "exposed table"
+**This project uses Exposed's DSL API exclusively** (not the DAO/Entity API). All database access goes through the typesafe DSL with explicit `transaction` blocks.
 
 ## Repository Pattern
 
@@ -49,6 +44,39 @@ class UserRepository(private val database: Database) {
     }
 }
 ```
+
+## ResultRow Mapping
+
+Map `ResultRow` to domain models with an extension function on the table's companion or as a private function:
+
+```kotlin
+// Extension on ResultRow
+private fun ResultRow.toUser() = User(
+    id = UserId(this[UserTable.id].value),
+    name = this[UserTable.name],
+    email = this[UserTable.email],
+    createdAt = this[UserTable.createdAt],
+)
+
+// Usage in repository
+fun findById(id: UserId): User? = transaction(database) {
+    UserTable.selectAll()
+        .where { UserTable.id eq id.value }
+        .firstOrNull()
+        ?.toUser()
+}
+
+// For joins, accept the specific tables as context
+private fun ResultRow.toOrderWithCustomer() = OrderWithCustomer(
+    order = Order(
+        id = OrderId(this[OrderTable.id].value),
+        status = this[OrderTable.status],
+    ),
+    customerName = this[CustomerTable.name],
+)
+```
+
+**Keep mapping functions close to the repository that uses them.** Don't scatter them across the codebase.
 
 ## Transaction Management
 
@@ -174,6 +202,34 @@ users.forEach { user ->
     UserTable.update({ UserTable.id eq user.id.value }) {
         it[name] = user.name
     }
+}
+```
+
+### Upsert (Insert or Update)
+
+```kotlin
+// Insert or update on conflict
+UserTable.upsert(UserTable.email) {
+    it[name] = "John"
+    it[email] = "john@example.com"
+    it[updatedAt] = Instant.now()
+}
+
+// Batch upsert
+UserTable.batchUpsert(users, UserTable.email) { user ->
+    this[UserTable.name] = user.name
+    this[UserTable.email] = user.email
+    this[UserTable.updatedAt] = Instant.now()
+}
+```
+
+### Insert Ignore
+
+```kotlin
+// Skip rows that violate unique constraints
+UserTable.insertIgnore {
+    it[email] = "john@example.com"
+    it[name] = "John"
 }
 ```
 

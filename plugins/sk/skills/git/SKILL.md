@@ -1,20 +1,11 @@
 ---
 name: git
-description: Git expert for commits, rebasing, and history. Use when committing changes, writing commit messages, rebasing branches, resolving conflicts, or searching git history.
+description: Use this skill for ANY git-related task. Activate immediately when the user mentions: commit, stash, rebase, squash, cherry-pick, merge, push, pull, branch, diff, blame, log, reset, conflict resolution, or commit messages. This includes asking to commit staged changes, writing or improving commit messages, squashing or reordering commits, rebasing onto main, managing git stashes (list/apply/pop/drop), cherry-picking specific commits, searching git history, resolving merge conflicts, or any other git version control operation. If the user's request involves git or version control in any way — even just "commit this" or "stash that" — use this skill. Do NOT use for CI/CD pipeline configuration, Docker, code refactoring, or general development tasks unless they specifically involve a git operation.
 ---
 
 # Git Skill
 
 Expert guidance for git operations: commits, rebasing, history search, and conflict resolution.
-
-## When This Activates
-
-- "commit this" / "commit my changes"
-- "write a commit message"
-- "rebase my branch"
-- "squash these commits"
-- "when was X added?" / "find when this broke"
-- "resolve these conflicts"
 
 ## Core Principle: Logical Cohesion
 
@@ -128,18 +119,34 @@ fix: null check
 - **Squashed PRs**: List intermediate commits as bullet points
 - **Complex changes**: Explain the "why" not the "what"
 
-## Interactive Rebase Workflow
+## Rebase Workflow
 
 ```bash
-# Rebase last N commits
-git rebase -i HEAD~N
-
 # Rebase onto updated main
 git fetch origin
-git rebase -i origin/main
+git rebase origin/main
 ```
 
-Common operations in interactive rebase:
+**Note:** Claude Code cannot run interactive rebase (`git rebase -i`) since it requires an interactive editor. For interactive rebasing, squashing, or reordering commits, suggest the user run it themselves:
+
+```
+# Tell the user:
+# "You'll want to run this yourself since it needs an interactive editor:"
+# git rebase -i HEAD~N
+```
+
+Common non-interactive alternatives:
+```bash
+# Squash last N commits into one (non-interactive)
+git reset --soft HEAD~N
+git commit -m "combined commit message"
+
+# Fixup a specific commit (auto-squash)
+git commit --fixup=<sha>
+git rebase --autosquash origin/main
+```
+
+Operations in interactive rebase (for user reference):
 - `pick` - keep commit as-is
 - `reword` - change commit message
 - `squash` - combine with previous commit
@@ -173,7 +180,7 @@ git push --force-with-lease
 
 # Stash before rebasing
 git stash
-git rebase -i origin/main
+git rebase origin/main
 git stash pop
 
 # Check status before committing

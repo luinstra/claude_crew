@@ -1,19 +1,11 @@
 ---
 name: trino
-description: Trino query patterns for analytics. Use when writing Trino queries, analytics queries, data warehouse queries, or configuring query routing.
+description: Use this skill whenever a query involves Trino in any capacity — writing Trino SQL, optimizing Trino queries, defining Kotlin/Exposed tables backed by Trino, or configuring query routing (e.g., QueryRouter, DataSource.TRINO). Trigger on any of these signals: the word "Trino" anywhere in the request; catalog-qualified table paths like `hive.analytics.*`, `iceberg.warehouse.*`, or any `catalog.schema.table` pattern; Trino-specific functions such as `approx_distinct`, `approx_percentile`, or HyperLogLog; discussions about cursor-based pagination or streaming for large analytical result sets; OLAP patterns like window functions (ROW_NUMBER, RANK, LAG/LEAD) over analytical tables; or read-only analytics table definitions. Also activate when the user asks about partition pruning, column pruning, limit pushdown, or offset-vs-cursor pagination in an analytics context. If the request references a hive or iceberg catalog, or mentions routing queries to different data sources, this skill applies.
 ---
 
 # Trino Patterns
 
 Trino integration for OLAP queries and analytics workloads.
-
-## When This Activates
-
-- "trino query"
-- "analytics query"
-- "data warehouse"
-- "query router"
-- "olap query"
 
 ## When to Use Trino vs Postgres
 
@@ -73,19 +65,36 @@ Write to your OLTP database, read aggregations from Trino.
 
 ### Large Result Sets
 
-Use batching for large results:
+Avoid offset-based pagination — Trino re-executes the full query for each page. Instead, use cursor-based iteration or streaming:
 
 ```kotlin
-fun processLargeDataset(query: Query) {
-    var offset = 0
+// DO: Cursor-based — filter by last seen value
+fun processLargeDataset(database: Database, afterTimestamp: Instant?) {
     val batchSize = 10000
 
+    var cursor = afterTimestamp
     while (true) {
-        val batch = query.limit(batchSize).offset(offset).toList()
+        val batch = transaction(database) {
+            UserEventsTable.selectAll()
+                .apply { cursor?.let { where { UserEventsTable.timestamp greater it } } }
+                .orderBy(UserEventsTable.timestamp)
+                .limit(batchSize)
+                .map { it.toEvent() }
+        }
         if (batch.isEmpty()) break
 
-        batch.forEach { row -> processRow(row) }
-        offset += batchSize
+        batch.forEach { processEvent(it) }
+        cursor = batch.last().timestamp
+    }
+}
+
+// DON'T: Offset-based — re-scans from the start every time
+fun processLargeDataset(query: Query) {
+    var offset = 0
+    while (true) {
+        val batch = query.limit(10000).offset(offset).toList()  // Gets slower with each page
+        if (batch.isEmpty()) break
+        offset += 10000
     }
 }
 ```
@@ -118,6 +127,107 @@ UserEventsTable.select(UserEventsTable.userId, UserEventsTable.total)
 UserEventsTable.selectAll()
     .where { ... }
 ```
+
+## Window Functions
+
+Window functions are the bread and butter of analytical queries in Trino:
+
+### Ranking
+
+```kotlin
+// In raw SQL via Exposed's custom expressions or literal SQL
+// ROW_NUMBER, RANK, DENSE_RANK
+
+// Example: find each customer's most recent order
+val sql = """
+    SELECT * FROM (
+        SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY customer_id
+            ORDER BY created_at DESC
+        ) AS rn
+        FROM iceberg.warehouse.orders
+    ) WHERE rn = 1
+""".trimIndent()
+```
+
+### Running Aggregations
+
+```sql
+-- Running total of sales per customer
+SELECT
+    customer_id,
+    order_date,
+    amount,
+    SUM(amount) OVER (
+        PARTITION BY customer_id
+        ORDER BY order_date
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS running_total
+FROM hive.analytics.orders
+
+-- Moving average (last 7 days)
+SELECT
+    event_date,
+    daily_revenue,
+    AVG(daily_revenue) OVER (
+        ORDER BY event_date
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS moving_avg_7d
+FROM hive.analytics.daily_revenue
+```
+
+### LAG / LEAD
+
+```sql
+-- Compare each day to previous day
+SELECT
+    event_date,
+    revenue,
+    LAG(revenue) OVER (ORDER BY event_date) AS prev_day_revenue,
+    revenue - LAG(revenue) OVER (ORDER BY event_date) AS day_over_day_change
+FROM hive.analytics.daily_revenue
+```
+
+## Approximate Aggregations
+
+For large datasets where exact counts aren't needed, approximate functions are significantly faster:
+
+```sql
+-- Approximate distinct count (HyperLogLog, ~2% error)
+SELECT approx_distinct(user_id) AS unique_users
+FROM hive.analytics.page_views
+WHERE event_date >= DATE '2025-01-01'
+
+-- Approximate percentiles
+SELECT
+    approx_percentile(response_time_ms, 0.50) AS p50,
+    approx_percentile(response_time_ms, 0.95) AS p95,
+    approx_percentile(response_time_ms, 0.99) AS p99
+FROM hive.analytics.api_requests
+
+-- Use exact COUNT(DISTINCT ...) only when precision matters (billing, compliance)
+```
+
+## Partition Pruning
+
+Trino can skip reading entire partitions if your filter matches the partition column. This is often the single biggest performance lever:
+
+```sql
+-- DO: Filter on partition column (only reads matching partitions)
+SELECT * FROM hive.analytics.events
+WHERE event_date = DATE '2025-03-01'
+  AND event_type = 'purchase'
+
+-- DON'T: Filter only on non-partition column (full table scan)
+SELECT * FROM hive.analytics.events
+WHERE event_type = 'purchase'
+
+-- DON'T: Wrap partition column in function (defeats pruning)
+SELECT * FROM hive.analytics.events
+WHERE YEAR(event_date) = 2025  -- Scans ALL partitions
+```
+
+**Tip:** Check the table's partition columns with `SHOW CREATE TABLE catalog.schema.table` before writing queries.
 
 ## Query Router Pattern
 
@@ -211,6 +321,18 @@ UserEventsTable.selectAll().limit(10000)
 // Each query is independent, not transactional
 ```
 
+---
+
+**Wrapping partition columns in functions**
+```sql
+-- DON'T — defeats partition pruning
+WHERE YEAR(event_date) = 2025
+
+-- DO — direct comparison enables pruning
+WHERE event_date >= DATE '2025-01-01'
+  AND event_date < DATE '2026-01-01'
+```
+
 ## Checklist
 
 When working with Trino:
@@ -218,5 +340,7 @@ When working with Trino:
 - [ ] Table names include `catalog.schema.table`
 - [ ] Query includes reasonable `limit`
 - [ ] Only SELECT operations (no INSERT/UPDATE/DELETE)
-- [ ] Column pruning - select only needed fields
-- [ ] Use batching for large result sets
+- [ ] Column pruning — select only needed fields
+- [ ] Partition columns filtered directly (no wrapping functions)
+- [ ] Use cursor-based iteration for large result sets (not offset)
+- [ ] Consider `approx_distinct` / `approx_percentile` for large datasets

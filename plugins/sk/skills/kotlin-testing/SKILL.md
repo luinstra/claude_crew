@@ -1,21 +1,9 @@
 ---
 name: kotlin-testing
-description: Kotlin testing patterns. Use when writing tests, test classes, Kotest specs, MockK mocks, TestIdProvider, TestDateTimeProvider, DatabaseTest, Testcontainers, or integration tests.
+description: Use this skill any time the user wants to write, add, or modify tests in Kotlin. This includes unit tests, integration tests, mocking, verification, assertions, or test infrastructure. Trigger for any mention of: writing tests for a class or method, mocking dependencies, verifying arguments, capturing arguments with slots, soft assertions, test providers, Kotest, MockK, FunSpec, Testcontainers, DatabaseTest, TestIdProvider, TestDateTimeProvider, returnsMany, or flaky test fixes. Also trigger when the user says "add tests", "test this", "write a test for", or asks how to test any Kotlin code — even without naming a specific framework. This skill defines the project's required testing conventions and must be consulted before writing any test code.
 ---
 
 # Kotlin Testing Patterns
-
-## When This Activates
-
-- "write a test" / "add tests" / "test this"
-- "kotest" / "funspec" / "test spec" / "junit"
-- "mockk" / "mock" / "stub" / "verify"
-- "TestIdProvider" / "TestDateTimeProvider"
-- "DatabaseTest" / "integration test"
-- "testcontainers" / "postgres container"
-- "slot" / "capture" / "verify"
-
----
 
 ## Quick Reference
 
@@ -240,6 +228,78 @@ captured.created shouldBe dateTimeProvider.now()
 - Verify mapped objects have correct field values
 - Test that transformations work correctly
 - Debug test failures by inspecting captured values
+
+---
+
+## Kotest Matchers
+
+Beyond `shouldBe`, Kotest provides expressive matchers for common assertions:
+
+### Exception Testing
+
+```kotlin
+// Verify exception type and message
+val exception = shouldThrow<IllegalArgumentException> {
+    service.create(invalidOrder)
+}
+exception.message shouldContain "must have items"
+
+// Verify no exception thrown
+shouldNotThrowAny {
+    service.create(validOrder)
+}
+```
+
+### Collection Matchers
+
+```kotlin
+// Exact contents (order matters)
+result.items shouldContainExactly listOf(item1, item2)
+
+// Contains subset (order doesn't matter)
+result.tags shouldContainAll listOf("active", "verified")
+
+// Size and emptiness
+result.errors.shouldBeEmpty()
+result.items shouldHaveSize 3
+
+// Single element matching
+result.items shouldContain item1
+result.items shouldHaveAtLeastSize 1
+```
+
+### Type and Null Matchers
+
+```kotlin
+// Type checking
+result shouldBeInstanceOf<SuccessResponse>()
+result.shouldBeTypeOf<OrderCreatedEvent>()  // exact type, no subtypes
+
+// Null assertions
+result.shouldNotBeNull()
+optionalValue.shouldBeNull()
+```
+
+### String Matchers
+
+```kotlin
+result.message shouldStartWith "Order"
+result.email shouldMatch Regex(".+@.+\\..+")
+result.name.shouldNotBeBlank()
+```
+
+### Soft Assertions
+
+When you want to see ALL failures at once instead of stopping at the first:
+
+```kotlin
+assertSoftly {
+    captured.name shouldBe "Test"
+    captured.email shouldBe "test@example.com"
+    captured.status shouldBe Status.ACTIVE
+    captured.createdAt shouldBe dateTimeProvider.now()
+}
+```
 
 ---
 

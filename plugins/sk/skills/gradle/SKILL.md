@@ -1,19 +1,11 @@
 ---
 name: gradle
-description: Gradle Kotlin DSL patterns. Use when adding dependencies, configuring builds, writing gradle tasks, or working with version catalogs.
+description: Use this skill for ANY work involving Gradle builds, including: modifying build.gradle.kts, settings.gradle.kts, or libs.versions.toml files; adding, removing, or bumping dependency versions; working with Gradle version catalogs (adding libraries, bundles, or plugins to the catalog); regenerating or fixing lockfiles; configuring Gradle tasks like test, compile, or custom tasks (e.g., setting JVM args, parallelism, heap size); troubleshooting build failures related to dependencies or stale lockfiles; and running or writing ./gradlew commands. Activate whenever the user mentions version catalogs, dependency management in Kotlin/JVM projects, lockfile errors, Gradle task configuration, or any reference to toml-based dependency definitions. Also activate when moving hardcoded dependency versions into a version catalog, creating dependency bundles, or resolving "lockfile out of date" errors.
 ---
 
 # Gradle Kotlin DSL Patterns
 
 Gradle build configuration conventions for Kotlin projects.
-
-## When This Activates
-
-- "add dependency"
-- "build.gradle"
-- "gradle task"
-- "version catalog"
-- "gradle plugin"
 
 ## Version Catalog
 

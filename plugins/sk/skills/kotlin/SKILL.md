@@ -1,6 +1,6 @@
 ---
 name: kotlin
-description: Kotlin patterns and best practices. Use when writing Kotlin code, .kt files, .kts files, data classes, coroutines, null safety, extension functions, or Kotlin services.
+description: Activate this skill whenever the user's request involves Kotlin code or Kotlin-specific concepts. This includes: writing or modifying .kt/.kts files; using data classes, copy(), sealed classes/interfaces, value classes, or @JvmInline; working with coroutines, async, structured concurrency, or suspend functions; handling nullability (e.g., ?., !!, requireNotNull, checkNotNull, elvis operator); writing extension functions; running or fixing detekt/spotless linting issues; converting Java patterns to idiomatic Kotlin; or discussing Kotlin best practices. Trigger even when "Kotlin" isn't explicitly mentioned — if the user references Kotlin-specific syntax like data class, sealed interface, value class, coroutineScope, or null-safety operators, this skill applies.
 ---
 
 # Kotlin Patterns
@@ -37,6 +37,35 @@ fun findOrder(id: OrderId): Order?
 // DON'T: - Raw types
 fun findOrder(id: UUID): Order?
 fun findOrder(id: Long): Order?  // Ambiguous!
+```
+
+## Sealed Classes & Interfaces
+
+Model restricted type hierarchies — the compiler enforces exhaustive `when`:
+
+```kotlin
+sealed interface PaymentResult {
+    data class Success(val transactionId: TransactionId) : PaymentResult
+    data class Declined(val reason: String) : PaymentResult
+    data class Error(val exception: Throwable) : PaymentResult
+}
+
+// Compiler enforces all branches — no `else` needed
+fun handle(result: PaymentResult): String = when (result) {
+    is PaymentResult.Success -> "Paid: ${result.transactionId}"
+    is PaymentResult.Declined -> "Declined: ${result.reason}"
+    is PaymentResult.Error -> "Error: ${result.exception.message}"
+}
+```
+
+**Prefer `sealed interface` over `sealed class`** — interfaces allow implementing multiple sealed hierarchies and don't waste the single inheritance slot.
+
+```kotlin
+// DO: sealed interface (flexible)
+sealed interface OrderStatus
+
+// DON'T: sealed class (unless you need shared state)
+sealed class OrderStatus
 ```
 
 ## Null Safety (Strict)
@@ -104,6 +133,62 @@ val orderIds = orders.map { it.id }.toSet()
 
 // Avoid multiple iterations
 // DON'T: orders.filter { }.map { }.filter { } when one pass suffices
+```
+
+## Coroutines
+
+### Structured Concurrency
+
+Always use structured concurrency — never launch unstructured coroutines:
+
+```kotlin
+// DO: Structured — cancellation propagates, failures surface
+suspend fun processOrders(orders: List<Order>) = coroutineScope {
+    orders.map { order ->
+        async { processOrder(order) }
+    }.awaitAll()
+}
+
+// DON'T: Unstructured — fire-and-forget, leaks on failure
+fun processOrders(orders: List<Order>) {
+    orders.forEach { order ->
+        GlobalScope.launch { processOrder(order) }  // NEVER do this
+    }
+}
+```
+
+### Dispatcher Selection
+
+| Dispatcher | Use For |
+|------------|---------|
+| `Dispatchers.IO` | Database calls, file I/O, network |
+| `Dispatchers.Default` | CPU-intensive computation |
+| `Dispatchers.Main` | UI updates (Android/desktop only) |
+
+```kotlin
+// Switch dispatcher for blocking I/O
+suspend fun fetchUser(id: UserId): User = withContext(Dispatchers.IO) {
+    repository.findById(id) ?: throw UserNotFoundException(id)
+}
+```
+
+### Suspend vs Blocking
+
+Mark functions `suspend` when they perform I/O or call other suspend functions. Never block a coroutine with `Thread.sleep` or blocking I/O without switching dispatchers.
+
+```kotlin
+// DO: suspend function for async work
+suspend fun sendNotification(user: User) {
+    withContext(Dispatchers.IO) {
+        emailClient.send(user.email, buildMessage())
+    }
+}
+
+// DON'T: blocking call on coroutine thread
+fun sendNotification(user: User) {
+    Thread.sleep(1000)  // Blocks the coroutine thread
+    emailClient.send(user.email, buildMessage())
+}
 ```
 
 ## Logging
