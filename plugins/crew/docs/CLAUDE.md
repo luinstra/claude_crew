@@ -42,11 +42,9 @@ Use the Task tool to delegate to specialized agents:
 | Agent | Purpose | When to Use |
 |-------|---------|-------------|
 | `advisor` | Architecture, debugging & planning | Complex problems, root cause analysis, work plans |
-| `file-reader` | Fast codebase search | Quick file/pattern searches |
-| `researcher` | Documentation & external research | Finding docs, external references |
+| `reader` | Information finding | Codebase search, external docs, images, code graph |
 | `executor` | Focused execution | Direct task implementation |
 | `document-writer` | Documentation | README, API docs, comments |
-| `media-reader` | Visual analysis | Screenshots, diagrams |
 
 ## Skills
 
@@ -74,7 +72,7 @@ Skills provide specialized guidance that activates automatically based on contex
 
 | Command | Description |
 |---------|-------------|
-| `/crew:code-search "query"` | Search codebase via file-reader agent |
+| `/crew:code-search "query"` | Search codebase via reader agent |
 | `/crew:analyze "target"` | Deep analysis via advisor agent |
 | `/crew:status` | Show active loops and crew state |
 | `/crew:save-context` | Save context snapshot for session recovery |

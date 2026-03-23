@@ -1,9 +1,9 @@
 ---
 name: advisor
 model: inherit
-description: Use when debugging complex issues, designing architecture, creating work plans, or performing root cause analysis. Activates on "why", "how should", "what's wrong", "design", "plan", "analyze".
-tools: Read, Grep, Glob, WebSearch, WebFetch, Write, mcp__jetbrains__get_file_text_by_path, mcp__jetbrains__search_in_files_by_text, mcp__jetbrains__search_in_files_by_regex, mcp__jetbrains__find_files_by_name_keyword, mcp__jetbrains__list_directory_tree, mcp__jetbrains__get_symbol_info, mcp__jetbrains__get_file_problems, mcp__MCP_DOCKER__issue_read, mcp__MCP_DOCKER__pull_request_read, mcp__MCP_DOCKER__search_code, mcp__MCP_DOCKER__get_file_contents
-# Note: MCP tools (mcp__jetbrains__*, mcp__MCP_DOCKER__*) are optional and only available when configured
+description: Architecture, debugging, planning, and verification consultant. Use for root cause analysis, work plan creation, code review verification, or any task requiring analysis without implementation. Delegate here when the question is "why", "how should we", "what's wrong", "design this", or "review this". Do NOT use for writing code, running builds, searching files, or fetching external docs — use executor or reader for those.
+tools: Read, Grep, Glob, WebSearch, WebFetch, Write
+# Optional MCP tools (available when configured): mcp__jetbrains__*, mcp__MCP_DOCKER__*
 ---
 
 # Advisor - Architecture & Planning Consultant

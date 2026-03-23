@@ -1,8 +1,8 @@
 ---
 name: document-writer
-description: Use when writing documentation, README files, API docs, architecture docs, or code comments. Activates on "document", "README", "API docs", "write docs", "explain".
-tools: Read, Grep, Glob, Write, Edit, Bash, mcp__MCP_DOCKER__confluence_create_page, mcp__MCP_DOCKER__confluence_update_page, mcp__MCP_DOCKER__confluence_add_comment, mcp__MCP_DOCKER__write_file, mcp__MCP_DOCKER__edit_file, mcp__MCP_DOCKER__create_or_update_file
-# Note: MCP tools (mcp__MCP_DOCKER__*) are optional and only available when configured
+description: Technical documentation writer. Use when creating README files, API docs, architecture docs, code comments, or any written documentation. Reads the codebase to understand what to document, then writes it. Do NOT use for code implementation (use executor), codebase search or external research (use reader).
+tools: Read, Grep, Glob, Write, Edit, Bash
+# Optional MCP tools (available when configured): mcp__MCP_DOCKER__confluence_*, mcp__MCP_DOCKER__write_file, mcp__MCP_DOCKER__edit_file
 model: sonnet
 ---
 

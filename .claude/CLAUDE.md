@@ -129,8 +129,7 @@ plugins/
 **Tool access patterns:**
 - `advisor`: All tools (analysis needs everything)
 - `executor`: All tools (implementation needs everything)
-- `file-reader`: Read-only (Glob, Grep, Read)
-- `researcher`: Web + Read (WebFetch, WebSearch, Read)
+- `reader`: Read + Web + Graph (Glob, Grep, Read, WebSearch, WebFetch, Bash)
 
 ### Adding a Command
 

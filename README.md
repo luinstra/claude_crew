@@ -139,7 +139,7 @@ For work requiring verification before declaring "done," use `/crew:build` inste
 
 | Command | Description |
 |---------|-------------|
-| `/crew:code-search "query"` | Search codebase via file-reader agent |
+| `/crew:code-search "query"` | Search codebase via reader agent |
 | `/crew:analyze "target"` | Deep analysis via advisor agent |
 | `/crew:status` | Show active loops and crew state |
 | `/crew:deepinit` | Initialize CLAUDE.md hierarchy for a codebase |
@@ -160,21 +160,19 @@ Specialized agents for different tasks. Use via `Task(subagent_type="crew:agent-
 | Agent | Use For | Example |
 |-------|---------|---------|
 | **advisor** | Architecture decisions, debugging, root cause analysis | "Why is the auth service slow?" |
-| **file-reader** | Finding files and code patterns in the codebase | "Where is the payment logic?" |
+| **reader** | Finding code, external docs, images, code graph analysis | "Where is the payment logic?" |
 | **executor** | Implementing well-defined tasks (no delegation) | "Add createdAt field to User entity" |
-| **researcher** | External docs, APIs, open source examples | "How do I configure Kafka consumers?" |
 | **document-writer** | README, API docs, technical writing | "Document the OrderService API" |
-| **media-reader** | Screenshots, PDFs, diagrams | "What error is in this screenshot?" |
 
 ### Quick Reference
 
 ```
-Need to find code?           → file-reader
+Need to find code?           → reader
 Need to understand code?     → advisor
 Need to write code?          → executor
-Need external docs?          → researcher
+Need external docs?          → reader
 Need to write docs?          → document-writer
-Need to read an image/PDF?   → media-reader
+Need to read an image/PDF?   → reader
 ```
 
 ## Skills

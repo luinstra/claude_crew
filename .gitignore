@@ -5,6 +5,9 @@
 # Local Claude settings (user-specific permissions)
 .claude/settings.local.json
 
+# Eval workspace
+skill-eval-workspace/
+
 # Python
 __pycache__/
 *.pyc
