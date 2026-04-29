@@ -1,5 +1,6 @@
 ---
 description: Start verified development loop with advisor review before completion
+argument-hint: "<task description>"
 ---
 
 [BUILD LOOP STARTING]

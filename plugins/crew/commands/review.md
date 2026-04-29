@@ -1,5 +1,6 @@
 ---
 description: Review an existing plan
+argument-hint: "<plan path (optional)>"
 ---
 
 [PLAN REVIEW MODE]

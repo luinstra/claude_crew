@@ -1,5 +1,6 @@
 ---
 description: Create hierarchical CLAUDE.md documentation for the codebase
+argument-hint: "<directory path (optional)> | --update | --dry-run"
 ---
 
 Target: $ARGUMENTS

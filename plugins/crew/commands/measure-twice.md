@@ -1,5 +1,6 @@
 ---
 description: Start a self-refining plan loop until advisor approves
+argument-hint: "<task description or .md path>"
 ---
 
 [MEASURE-TWICE MODE STARTING]
