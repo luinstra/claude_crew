@@ -1,9 +1,9 @@
 ---
 name: document-writer
 description: Technical documentation writer. Use when creating README files, API docs, architecture docs, code comments, or any written documentation. Reads the codebase to understand what to document, then writes it. Do NOT use for code implementation (use executor), codebase search or external research (use reader).
-tools: Read, Grep, Glob, Write, Edit, Bash
-# Optional MCP tools (available when configured): mcp__MCP_DOCKER__confluence_*, mcp__MCP_DOCKER__write_file, mcp__MCP_DOCKER__edit_file
 model: sonnet
+color: yellow
+tools: Read, Grep, Glob, Write, Edit, Bash
 ---
 
 # Document Writer Agent

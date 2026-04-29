@@ -1,10 +1,9 @@
 ---
 name: executor
-model: inherit
 description: Focused task executor for writing code and making changes. Use when the approach is already decided and you need implementation — creating files, editing code, running builds, fixing errors. Do NOT use for analysis, planning, research, or file search — use advisor or reader for those.
-disallowedTools: Task
+model: inherit
+color: green
 tools: Read, Grep, Glob, Write, Edit, Bash
-# Optional MCP tools (available when configured): mcp__jetbrains__*, mcp__MCP_DOCKER__*
 ---
 
 # Executor Agent

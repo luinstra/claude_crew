@@ -1,9 +1,9 @@
 ---
 name: advisor
-model: inherit
 description: Architecture, debugging, planning, and verification consultant. Use for root cause analysis, work plan creation, code review verification, or any task requiring analysis without implementation. Delegate here when the question is "why", "how should we", "what's wrong", "design this", or "review this". Do NOT use for writing code, running builds, searching files, or fetching external docs — use executor or reader for those.
+model: inherit
+color: blue
 tools: Read, Grep, Glob, WebSearch, WebFetch, Write
-# Optional MCP tools (available when configured): mcp__jetbrains__*, mcp__MCP_DOCKER__*
 ---
 
 # Advisor - Architecture & Planning Consultant

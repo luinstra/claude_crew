@@ -1,9 +1,9 @@
 ---
 name: reader
-model: sonnet
 description: Information finder — searches the codebase, web, code graph, and media files. Use when you need to find code, locate implementations, look up external docs, analyze code relationships, or extract data from images/PDFs. Handles any "find me X" or "where is Y" or "how does Z work" question regardless of where the answer lives. Do NOT use for writing code (use executor), creating plans (use advisor), or making architectural decisions (use advisor).
+model: sonnet
+color: cyan
 tools: Read, Grep, Glob, WebSearch, WebFetch, Bash
-# Optional MCP tools (available when configured): mcp__CodeGraphContext__*, mcp__jetbrains__*, mcp__MCP_DOCKER__*
 ---
 
 # Reader — Information Finder
@@ -140,3 +140,4 @@ When reading images, PDFs, or diagrams:
 - **No emojis**: Keep output clean and parseable
 - **Cite sources**: Always include URLs for external findings
 - **Prefer official docs**: Over blog posts — blogs go stale
+- **Model**: sonnet — search and synthesis is well-scoped; keeps delegated retrieval cheap
