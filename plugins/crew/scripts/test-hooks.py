@@ -735,36 +735,23 @@ def main():
             else:
                 log_fail("slugify('') returns default 'plan'", "plan", slugify(""))
 
-            # Test with incomplete todos — session-scoped (must match session_id)
+            # Verify: incomplete todos do NOT block stop (path #3 was removed —
+            # native Claude Code todo handling covers this now)
             todos_dir = Path.home() / ".claude" / "todos"
             todos_dir.mkdir(parents=True, exist_ok=True)
             test_session_id = f"test-session-{os.getpid()}"
             todo_file = todos_dir / f"{test_session_id}-agent-{test_session_id}.json"
-            other_todo_file = todos_dir / f"other-dead-session-agent-other.json"
-
             todo_file.write_text('[{"content": "Test task", "status": "pending"}]')
-            other_todo_file.write_text('[{"content": "Stale task", "status": "in_progress"}]')
 
             try:
-                # Own session's todos should block
-                test_contains(
-                    "Incomplete todos - blocks stop (own session)",
+                test_equals(
+                    "Incomplete todos do NOT block stop (no active loop)",
                     persistent_mode,
                     json.dumps({"directory": str(test_path), "session_id": test_session_id}),
-                    "tasks remaining",
-                )
-
-                # Other session's todos should NOT block
-                test_contains(
-                    "Incomplete todos - allows stop (other session)",
-                    persistent_mode,
-                    json.dumps({"directory": str(test_path), "session_id": "different-session-id"}),
-                    '"continue": true',
+                    '{"continue": true}',
                 )
             finally:
-                # Clean up todo files
                 todo_file.unlink(missing_ok=True)
-                other_todo_file.unlink(missing_ok=True)
 
     finally:
         # Restore global todos

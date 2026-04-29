@@ -185,7 +185,7 @@ def build_plugin_guidance(stack_hints: list[str]) -> str:
         "- Analysis/debugging/planning: `advisor` agent",
         "- Implementation: `executor` agent",
         "- Documentation: `document-writer` agent",
-        "- Codebase search: `file-reader` agent",
+        "- Codebase search: `reader` agent",
         "</system-reminder>",
     ])
 

@@ -129,13 +129,7 @@ For long-running operations, use `run_in_background: true`:
 - Quick file reads
 - Simple commands
 
-## CONTINUATION ENFORCEMENT
-
-If you have incomplete tasks and attempt to stop, you will receive:
-
-> [SYSTEM REMINDER] Incomplete tasks remain. Continue working. Do not stop until all tasks are done.
-
-### Completion Checklist
+## Completion Checklist
 
 Before concluding ANY work session, verify:
 - [ ] TODO LIST: Zero pending/in_progress tasks
@@ -144,3 +138,5 @@ Before concluding ANY work session, verify:
 - [ ] ERRORS: Zero unaddressed errors
 
 **If ANY checkbox is unchecked, CONTINUE WORKING.**
+
+Active build / measure-twice loops are enforced by the Stop hook — they won't end until the advisor approves (or you cancel via `/crew:cancel-build` or `/crew:cancel-measure-twice`).

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Claude Crew Persistent Mode Hook
-Handles build loop persistence and todo continuation.
-Prevents stopping when work remains incomplete.
+Blocks Stop while a build or measure-twice loop is active.
+Generic todo continuation is handled by Claude Code natively.
 """
 
 import json
@@ -14,35 +14,7 @@ from models import (
     BuildState,
     MeasureTwiceState,
     read_hook_input,
-    count_incomplete_todos,
 )
-
-
-def count_session_incomplete_todos(directory: Path, session_id: str) -> int:
-    """Count incomplete todos scoped to the current session.
-
-    Global todos (~/.claude/todos/) are filtered by session_id to avoid
-    stale tasks from dead sessions blocking the current one.
-    Project todos are always checked (they're project-scoped, not session-scoped).
-    """
-    count = 0
-    home = Path.home()
-
-    # Global todos — only check file belonging to this session
-    todos_dir = home / ".claude" / "todos"
-    if todos_dir.is_dir() and session_id:
-        for todo_file in todos_dir.glob("*.json"):
-            if todo_file.stem.startswith(session_id):
-                count += count_incomplete_todos(todo_file)
-
-    # Project todos
-    for todo_path in [
-        directory / ".crew" / "todos.json",
-        directory / ".claude" / "todos.json",
-    ]:
-        count += count_incomplete_todos(todo_path)
-
-    return count
 
 
 def find_session_state_file(
@@ -167,17 +139,7 @@ Present the current plan to the user and explain where it stands.
             print(HookResult.block(message).to_json())
             return
 
-    # Priority 3: Todo Continuation (session-scoped)
-    incomplete_count = count_session_incomplete_todos(directory, session_id)
-    if incomplete_count > 0:
-        message = f"""[{incomplete_count} tasks remaining]
-
-Continue working on incomplete tasks.
-"""
-        print(HookResult.block(message).to_json())
-        return
-
-    # No blocking needed
+    # No active loop — allow stop
     print(HookResult.allow().to_json())
 
 
