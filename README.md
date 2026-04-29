@@ -82,7 +82,7 @@ This allows the `crew-state.py` script (used by `/crew:build`, `/crew:measure-tw
 
 ### Requirements
 
-- **Python 3.9+** — macOS 12+ and most modern Linux distributions include this. Check with `python3 --version`.
+- **Python 3.10+** — macOS 12+ and most modern Linux distributions include this. Check with `python3 --version`.
 
 ## Usage
 

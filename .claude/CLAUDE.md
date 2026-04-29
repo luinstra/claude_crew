@@ -2,7 +2,7 @@
 
 > **Type:** Claude Code Plugin Marketplace
 > **Plugins:** `crew` (agents, commands, persistence), `sk` (tech-stack skills)
-> **Python:** 3.9+ required for hook scripts
+> **Python:** 3.10+ required for hook scripts
 
 ## Overview
 
