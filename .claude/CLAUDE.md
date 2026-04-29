@@ -94,11 +94,10 @@ This enables automatic version bumping after each commit based on conventional c
 .claude-plugin/marketplace.json     ← Marketplace registry
 plugins/
 ├── crew/                           ← Core plugin
-│   ├── agents/                     ← 6 execution contexts
-│   ├── commands/                   ← 13 slash commands
+│   ├── agents/                     ← 4 execution contexts
+│   ├── commands/                   ← 14 slash commands
 │   ├── hooks/hooks.json            ← Lifecycle integration
-│   ├── scripts/                    ← Python state machine
-│   └── skills/git/                 ← Git skill
+│   └── scripts/                    ← Python state machine
 └── sk/                             ← Tech-stack plugin
     └── skills/                     ← 5 tech-stack skills
 ```
@@ -265,7 +264,7 @@ state_file = "/Users/me/project/.crew/state.json"
 
 ✅ **Use working directory from environment**
 ```python
-directory = Path(os.environ.get("CLAUDE_WORKING_DIRECTORY", os.getcwd()))
+directory = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()))
 state_file = directory / ".crew" / "state.json"
 ```
 
