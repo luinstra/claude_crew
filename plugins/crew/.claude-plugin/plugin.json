@@ -1,7 +1,7 @@
 {
   "name": "crew",
   "description": "Persistence, specialized agents, and workflow commands for Claude Code",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "author": {
     "name": "Jeremy Luinstra",
     "email": "luinstra@gmail.com"
