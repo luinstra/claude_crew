@@ -8,11 +8,10 @@ The user has requested early exit from the measure-twice loop.
 
 ## MANDATORY ACTION
 
-Use the session ID from your SessionStart context (shown as `[Session ID: ...]`).
 Execute this command to fully cancel the measure-twice loop:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate mt --reason "User cancelled via /crew:cancel-measure-twice" --session-id SESSION_ID
+${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate mt --reason "User cancelled via /crew:cancel-measure-twice"
 ```
 
 ## After Running

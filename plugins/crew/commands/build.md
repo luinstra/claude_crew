@@ -7,16 +7,10 @@ argument-hint: "<task description>"
 
 $ARGUMENTS
 
-## Session ID
-
-Use the session ID from your SessionStart context (shown as `[Session ID: ...]`).
-Pass it as `--session-id SESSION_ID` to all `crew-state.py` commands below.
-The `CLAUDE_SESSION_ID` environment variable serves as an automatic fallback.
-
 ## MANDATORY: Activate the Loop
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py init bl --prompt "$ARGUMENTS" --session-id SESSION_ID
+${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py init bl --prompt "$ARGUMENTS"
 ```
 
 ## How This Works
@@ -67,7 +61,7 @@ When the advisor approves your work (or only [MINOR] issues remain):
 
 1. **Deactivate the loop:**
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate bl --reason "Advisor verified complete" --session-id SESSION_ID
+${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate bl --reason "Advisor verified complete"
 ```
 
 2. **Summarize what was accomplished** and let the user know the task is complete.

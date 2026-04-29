@@ -8,11 +8,10 @@ The user has requested early exit from the build loop.
 
 ## MANDATORY ACTION
 
-Use the session ID from your SessionStart context (shown as `[Session ID: ...]`).
 Execute this command to fully cancel the build loop:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate bl --reason "User cancelled via /crew:cancel-build" --session-id SESSION_ID
+${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate bl --reason "User cancelled via /crew:cancel-build"
 ```
 
 ## After Running

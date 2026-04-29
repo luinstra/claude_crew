@@ -42,12 +42,6 @@ Ask 2-3 clarifying questions. Don't over-interview — get enough context to bri
 
 ---
 
-## Session ID
-
-Use the session ID from your SessionStart context (shown as `[Session ID: ...]`).
-Pass it as `--session-id SESSION_ID` to all `crew-state.py` commands below.
-The `CLAUDE_SESSION_ID` environment variable serves as an automatic fallback.
-
 ## Phase 2: Plan Generation
 
 When the user says "create the plan", "generate the plan", or "I'm ready" — **or if a design doc was referenced**:
@@ -55,13 +49,13 @@ When the user says "create the plan", "generate the plan", or "I'm ready" — **
 ### Step 1: Activate the Loop
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py init mt --task "$ARGUMENTS" --auto-plan --session-id SESSION_ID
+${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py init mt --task "$ARGUMENTS" --auto-plan
 ```
 
 Then get the state to find the plan file path:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py show mt --session-id SESSION_ID
+${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py show mt
 ```
 
 ### Step 2: Generate Initial Plan
@@ -146,7 +140,7 @@ When advisor returns **APPROVED** (or REVISE with only [MINOR] issues):
 
 1. **Deactivate the loop:**
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate mt --reason "Advisor approved" --session-id SESSION_ID
+${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate mt --reason "Advisor approved"
 ```
 
 2. **Present the final plan to the user:**
