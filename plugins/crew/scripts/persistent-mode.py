@@ -5,7 +5,6 @@ Blocks Stop while a build or measure-twice loop is active.
 Generic todo continuation is handled by Claude Code natively.
 """
 
-import json
 from pathlib import Path
 
 from models import (
@@ -15,47 +14,7 @@ from models import (
     MeasureTwiceState,
     read_hook_input,
 )
-
-
-def find_session_state_file(
-    crew_dir: Path,
-    loop_prefix: str,
-    session_id: str,
-) -> Path | None:
-    """Find the state file for a given loop and session.
-
-    When session_id is non-empty: look for session-scoped file first,
-    then check legacy unsuffixed file if it matches this session.
-    When session_id is empty: use legacy unsuffixed file only.
-
-    Returns the path to the state file or None if not found.
-    """
-    if session_id:
-        # Primary: session-scoped file
-        scoped_path = crew_dir / f"{loop_prefix}-{session_id}.json"
-        if scoped_path.is_file():
-            return scoped_path
-
-        # Fallback: legacy unsuffixed file if it belongs to this session
-        legacy_path = crew_dir / f"{loop_prefix}.json"
-        if legacy_path.is_file():
-            try:
-                with open(legacy_path) as f:
-                    data = json.load(f)
-                file_session = data.get("session_id", "")
-                # Owned by this session, or pre-migration (no session_id field)
-                if file_session == session_id or file_session == "":
-                    return legacy_path
-            except (OSError, json.JSONDecodeError):
-                pass
-
-        return None
-    else:
-        # No session_id: legacy behavior — check unsuffixed file only
-        legacy_path = crew_dir / f"{loop_prefix}.json"
-        if legacy_path.is_file():
-            return legacy_path
-        return None
+from state_discovery import find_session_state_file
 
 
 def main():

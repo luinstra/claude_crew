@@ -735,6 +735,62 @@ def main():
             else:
                 log_fail("slugify('') returns default 'plan'", "plan", slugify(""))
 
+            # =========================================================================
+            # STATE DISCOVERY TESTS
+            # =========================================================================
+            log_section("state_discovery")
+
+            sd_spec = importlib.util.spec_from_file_location("state_discovery", SCRIPT_DIR / "state_discovery.py")
+            sd_module = importlib.util.module_from_spec(sd_spec)
+            sd_spec.loader.exec_module(sd_module)
+            is_loop_state_file = sd_module.is_loop_state_file
+            is_active_state_file = sd_module.is_active_state_file
+
+            # is_loop_state_file — positive cases
+            for fname in ["build-state.json", "build-state-abc123.json", "measure-twice-state-xyz789.json"]:
+                if is_loop_state_file(fname):
+                    log_pass(f"is_loop_state_file('{fname}') -> True")
+                else:
+                    log_fail(f"is_loop_state_file('{fname}')", "True", "False")
+
+            # is_loop_state_file — negative cases
+            for fname in ["context-snapshot.json", "build-state.txt", "random.json"]:
+                if not is_loop_state_file(fname):
+                    log_pass(f"is_loop_state_file('{fname}') -> False")
+                else:
+                    log_fail(f"is_loop_state_file('{fname}')", "False", "True")
+
+            # is_active_state_file — set up test files
+            sd_dir = test_path / "sd-test"
+            sd_dir.mkdir(parents=True, exist_ok=True)
+
+            active_file = sd_dir / "active.json"
+            active_file.write_text('{"active": true}')
+            if is_active_state_file(active_file):
+                log_pass("is_active_state_file(active=true) -> True")
+            else:
+                log_fail("is_active_state_file(active=true)", "True", "False")
+
+            inactive_file = sd_dir / "inactive.json"
+            inactive_file.write_text('{"active": false}')
+            if not is_active_state_file(inactive_file):
+                log_pass("is_active_state_file(active=false) -> False")
+            else:
+                log_fail("is_active_state_file(active=false)", "False", "True")
+
+            missing_file = sd_dir / "missing.json"
+            if not is_active_state_file(missing_file):
+                log_pass("is_active_state_file(missing) -> False")
+            else:
+                log_fail("is_active_state_file(missing)", "False", "True")
+
+            malformed_file = sd_dir / "malformed.json"
+            malformed_file.write_text("{not valid json")
+            if not is_active_state_file(malformed_file):
+                log_pass("is_active_state_file(malformed) -> False")
+            else:
+                log_fail("is_active_state_file(malformed)", "False", "True")
+
             # Verify: incomplete todos do NOT block stop (path #3 was removed —
             # native Claude Code todo handling covers this now)
             todos_dir = Path.home() / ".claude" / "todos"

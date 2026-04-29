@@ -11,32 +11,17 @@ from pathlib import Path
 from models import (
     SessionStartInput,
     SessionStartResult,
-    BuildState,
-    MeasureTwiceState,
     read_hook_input,
     get_file_age_days,
     count_incomplete_todos,
 )
+from state_discovery import is_loop_state_file, is_active_state_file
 
 
 MAX_AGE_DAYS = 7
 MAX_AGE_SECONDS = MAX_AGE_DAYS * 86400
 STALE_INACTIVE_DAYS = 1
 STALE_INACTIVE_SECONDS = STALE_INACTIVE_DAYS * 86400
-
-
-def is_loop_state_file(filename: str) -> bool:
-    """Check if a filename is a loop state file (legacy or session-scoped).
-
-    Matches:
-    - build-state.json / build-state-abc123.json
-    - measure-twice-state.json / measure-twice-state-xyz789.json
-    """
-    return (
-        (filename.startswith("build-state")
-         or filename.startswith("measure-twice-state"))
-        and filename.endswith(".json")
-    )
 
 
 def cleanup_stale_files(directory: Path) -> None:
@@ -61,9 +46,7 @@ def cleanup_stale_files(directory: Path) -> None:
         try:
             if is_loop_state_file(json_file.name):
                 age = now - json_file.stat().st_mtime
-                # Load state to check active flag
-                state = BuildState.load(json_file)
-                if state.active:
+                if is_active_state_file(json_file):
                     # Active but very old (>7 days) — force-deactivate and delete
                     if age > MAX_AGE_SECONDS:
                         json_file.unlink()
