@@ -1,5 +1,5 @@
 {
-  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "$schema": "https://code.claude.com/marketplace.schema.json",
   "name": "claude-crew",
   "description": "Persistence, specialized agents, and tech-stack guidance for Claude Code",
   "owner": {

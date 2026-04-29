@@ -1,4 +1,5 @@
 {
+  "$schema": "https://code.claude.com/plugin.schema.json",
   "name": "crew",
   "description": "Persistence, specialized agents, and workflow commands for Claude Code",
   "version": "0.7.2",
