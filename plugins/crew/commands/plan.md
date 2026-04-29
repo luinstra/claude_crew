@@ -1,6 +1,7 @@
 ---
 description: Start a planning session
 argument-hint: "<task description or .md path>"
+allowed-tools: Task, Read
 ---
 
 [PLANNING MODE]

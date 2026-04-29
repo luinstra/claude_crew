@@ -1,6 +1,7 @@
 ---
 description: Create hierarchical CLAUDE.md documentation for the codebase
 argument-hint: "<directory path (optional)> | --update | --dry-run"
+allowed-tools: Task, Read, Glob, Grep, Bash
 ---
 
 Target: $ARGUMENTS

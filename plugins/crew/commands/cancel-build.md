@@ -1,5 +1,6 @@
 ---
 description: Cancel active Build Loop
+allowed-tools: Bash
 ---
 
 [BUILD LOOP CANCELLED]

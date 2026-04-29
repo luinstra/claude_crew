@@ -1,5 +1,6 @@
 ---
 description: Configure Claude Crew for current project or globally
+allowed-tools: Bash
 ---
 
 ## Configure Claude Crew

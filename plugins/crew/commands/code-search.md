@@ -1,6 +1,7 @@
 ---
 description: Search codebase for files, patterns, and implementations
 argument-hint: "<search query>"
+allowed-tools: Task
 ---
 
 Spawn a **reader agent** to search for: $ARGUMENTS

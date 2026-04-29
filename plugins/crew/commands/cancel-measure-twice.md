@@ -1,5 +1,6 @@
 ---
 description: Cancel active measure-twice loop
+allowed-tools: Bash
 ---
 
 [MEASURE-TWICE CANCELLED]

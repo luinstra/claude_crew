@@ -1,5 +1,6 @@
 ---
 description: Show active loops, iteration counts, and crew state
+allowed-tools: Bash
 ---
 
 ## Current Crew Status

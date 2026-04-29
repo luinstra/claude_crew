@@ -1,6 +1,7 @@
 ---
 description: Start verified development loop with advisor review before completion
 argument-hint: "<task description>"
+allowed-tools: Bash, Task
 ---
 
 [BUILD LOOP STARTING]

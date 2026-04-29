@@ -1,6 +1,7 @@
 ---
 description: Execute a plan or task via the executor agent (saves main context)
 argument-hint: "<task or plan path>"
+allowed-tools: Task, Read, Glob
 ---
 
 ## Execute via Executor Agent

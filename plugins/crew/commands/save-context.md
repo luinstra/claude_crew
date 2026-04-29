@@ -1,5 +1,6 @@
 ---
 description: Save current working context to survive compaction
+allowed-tools: Bash, Write
 ---
 
 [CONTEXT SNAPSHOT]

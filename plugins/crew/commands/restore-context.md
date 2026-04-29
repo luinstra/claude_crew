@@ -1,5 +1,6 @@
 ---
 description: Restore context from a saved snapshot
+allowed-tools: Read, Bash
 ---
 
 [RESTORE CONTEXT]

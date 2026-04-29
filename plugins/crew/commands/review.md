@@ -1,6 +1,7 @@
 ---
 description: Review an existing plan
 argument-hint: "<plan path (optional)>"
+allowed-tools: Task, Read, Glob
 ---
 
 [PLAN REVIEW MODE]
