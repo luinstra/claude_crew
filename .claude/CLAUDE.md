@@ -94,8 +94,8 @@ This enables automatic version bumping after each commit based on conventional c
 .claude-plugin/marketplace.json     ← Marketplace registry
 plugins/
 ├── crew/                           ← Core plugin
-│   ├── agents/                     ← 4 execution contexts
-│   ├── commands/                   ← 14 slash commands
+│   ├── agents/                     ← 5 execution contexts
+│   ├── commands/                   ← 15 slash commands
 │   ├── hooks/hooks.json            ← Lifecycle integration
 │   └── scripts/                    ← Python state machine
 └── sk/                             ← Tech-stack plugin

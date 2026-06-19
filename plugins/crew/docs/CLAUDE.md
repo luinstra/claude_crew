@@ -45,6 +45,7 @@ Use the Task tool to delegate to specialized agents:
 | `reader` | Information finding | Codebase search, external docs, images, code graph |
 | `executor` | Focused execution | Direct task implementation |
 | `document-writer` | Documentation | README, API docs, comments |
+| `reviewer` | Read-only review-panel seat | Driven by `/crew:review` (spawned at `model: opus` / `model: sonnet`) |
 
 ## Skills
 
@@ -66,7 +67,8 @@ Skills provide specialized guidance that activates automatically based on contex
 | `/crew:cancel-measure-twice` | Exit an active measure-twice loop |
 | `/crew:plan "description"` | Start planning session |
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (saves context) |
-| `/crew:review` | Review an existing plan |
+| `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (codex + agy + opus + sonnet) → `APPROVED`/`REVISE` verdict |
+| `/crew:debate "topic"` | Multi-model debate — thin shim to `/octo:debate` (requires the `octo` plugin) |
 
 ### Utilities
 

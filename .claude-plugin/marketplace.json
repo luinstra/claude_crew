@@ -14,7 +14,7 @@
     {
       "name": "crew",
       "source": "./plugins/crew",
-      "description": "4 specialized agents, 14 commands, build loops, session persistence"
+      "description": "5 specialized agents, 15 commands, multi-model review, build loops, session persistence"
     },
     {
       "name": "sk",

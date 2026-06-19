@@ -115,7 +115,7 @@ For non-trivial work, use the **plan → execute** workflow to keep your main co
 
 1. **Explore** — Ask questions, `/crew:analyze` to understand the codebase
 2. **Plan** — `/crew:plan "the feature"` to design the approach
-3. **Review** — `/crew:review` to sanity-check (optional)
+3. **Review** — `/crew:review` for a multi-model sanity-check of the plan or diff (optional)
 4. **Execute** — `/crew:execute` to implement via executor agent
 5. **Verify** — Check results, iterate if needed
 
@@ -129,7 +129,8 @@ For work requiring verification before declaring "done," use `/crew:build` inste
 |---------|-------------|
 | `/crew:plan "description"` | Start a planning session with the advisor agent |
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (keeps main context clean) |
-| `/crew:review` | Review an existing plan |
+| `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (natural-language dispatch) → `APPROVED`/`REVISE` verdict |
+| `/crew:debate "topic"` | Multi-model debate (thin shim to `/octo:debate`) |
 | `/crew:build "task"` | Start a persistence loop — Claude won't stop until task is verified complete |
 | `/crew:cancel-build` | Exit an active build loop early |
 | `/crew:measure-twice "task"` | Start a self-refining plan loop — generates plan, reviews, revises until approved |
@@ -153,6 +154,19 @@ For work requiring verification before declaring "done," use `/crew:build` inste
 | `/crew:crew-config` | Copy CLAUDE.md to current project |
 | `/crew:crew-config global` | Copy CLAUDE.md to global config |
 
+### Multi-Model Review
+
+`/crew:review` fans the same review prompt across a panel of models and
+synthesizes one verdict. The default panel is **codex + agy + opus + sonnet**:
+`codex` and `agy` run via the bundled `multiagent` engine
+(`plugins/crew/scripts/multiagent/`), while the two Claude voices are the
+`crew:reviewer` agent spawned twice (at `model: opus` and `model: sonnet`).
+Narrow the panel with an explicit `--seats` (e.g. `--seats codex`). It
+dispatches plan-vs-code from natural language and reports `APPROVED`/`REVISE`
+with `[BLOCKING]`/`[MINOR]` findings. A skipped or failed seat (any kind) is
+reported but never sinks the panel — the verdict is synthesized from whichever
+seats succeed, and only an all-seats-failed panel skips the verdict.
+
 ## Agents
 
 Specialized agents for different tasks. Use via `Task(subagent_type="crew:agent-name", prompt="...")`.
@@ -163,6 +177,7 @@ Specialized agents for different tasks. Use via `Task(subagent_type="crew:agent-
 | **reader** | Finding code, external docs, images, code graph analysis | "Where is the payment logic?" |
 | **executor** | Implementing well-defined tasks (no delegation) | "Add createdAt field to User entity" |
 | **document-writer** | README, API docs, technical writing | "Document the OrderService API" |
+| **reviewer** | Read-only panel seat for `/crew:review` (spawned at `model: opus` / `model: sonnet`) | (driven by `/crew:review`) |
 
 ### Quick Reference
 

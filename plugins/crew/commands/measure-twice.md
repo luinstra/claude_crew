@@ -1,7 +1,7 @@
 ---
-description: Start a self-refining plan loop until advisor approves
+description: Start a self-refining plan loop until a multi-model panel approves
 argument-hint: "<task description or .md path>"
-allowed-tools: Bash, Task
+allowed-tools: Bash, Task, Read, Glob
 ---
 
 [MEASURE-TWICE MODE STARTING]
@@ -12,9 +12,9 @@ $ARGUMENTS
 
 1. **Gather Requirements** - Interview user to understand the task (or skip if design doc provided)
 2. **Generate Plan** - Advisor creates the plan
-3. **Review** - Another advisor evaluates (with BLOCKING/MINOR classification)
+3. **Review** - A multi-model panel (codex + agy + opus + sonnet) evaluates (with BLOCKING/MINOR classification)
 4. **Iterate** - If BLOCKING issues: revise and re-review. If REJECT: rethink approach.
-5. **Complete** - When advisor returns APPROVED (or only MINOR issues)
+5. **Complete** - When the panel's verdict is APPROVED (or only MINOR issues)
 
 ---
 
@@ -82,31 +82,98 @@ The plan must include:
 - Risks and mitigations
 - Acceptance criteria
 
-Focus on clarity and executability — this plan will be reviewed by another advisor.")
+Focus on clarity and executability — this plan will be reviewed by a multi-model panel.")
 ```
 
 ---
 
 ## Phase 3: Review Loop
 
-### Step 3: Get Advisor Review
+### Step 3: Get a Multi-Model Plan Review
 
-Spawn the **advisor agent** using the Task tool:
+Review the plan with a multi-model panel instead of a single advisor. The same
+plan-review criteria fan out across several AI seats in parallel, and you
+synthesize the results into the existing verdict. Two seat kinds:
+
+- **subprocess seats** — `codex` and `agy` via the Python engine.
+- **task seats** — `crew:reviewer` spawned twice (at `model: opus` and
+  `model: sonnet`) via the Task tool (in-session, on the subscription — no
+  `claude -p`, no API key).
+
+Default panel: **codex + agy + opus + sonnet**. A failed/skipped seat NEVER
+aborts the review (see "Synthesize" below) — the verdict is synthesized from
+whichever seats succeed.
+
+> **`allowed-tools` scopes THIS orchestrator only.** It grants nothing to the
+> seats spawned below — seat tool access is governed per-seat by the reviewer
+> agent frontmatter (`Read, Grep, Glob`) and the engine's sandbox flags.
+
+#### 3a — Fan out subprocess seats (one Bash call)
+
+Run the engine once over the plan file (`[plan_file from state]`). Use the
+bare-script path (its top-of-file `sys.path` guard makes package imports
+resolve):
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review "[plan_file from state]" --seats codex,agy --json
+```
+
+- The engine returns a JSON array of result objects, each with the six fields:
+  `name, model, ok, output, error, elapsed`.
+- **Never choke on a seat failure:** the engine NEVER raises out of the fan-out.
+  Any failed/skipped subprocess seat comes back as an `ok=False` entry with a
+  diagnostic in `error`; the other seats still return. The engine exits nonzero
+  with an `all N seats failed: <diagnostics>` message on stderr ONLY when every
+  subprocess seat failed — and even then emits the full JSON array (no
+  traceback). A nonzero engine exit does NOT abort the review: fold in the Task
+  seats and synthesize from whatever succeeded.
+
+#### 3b — Fan out Task seats (parallel)
+
+Spawn the reviewer seats **in parallel**, passing each a **criteria-equivalent**
+plan-review prompt to the engine's (same clarity / testability / completeness /
+context criteria — NOT byte-identical). Include the plan body so every seat
+reviews the same thing. Both seats are the SAME agent (`crew:reviewer`) with a
+per-spawn `model` override selecting the voice:
 
 ```
-Task(subagent_type="crew:advisor", prompt="REVIEW THIS PLAN for clarity, completeness, and executability.
+Task(subagent_type="crew:reviewer", model="opus",   prompt="<the assembled plan-review prompt>")
+Task(subagent_type="crew:reviewer", model="sonnet", prompt="<the assembled plan-review prompt>")
+```
 
-Plan file: [plan_file from state]
+The assembled review prompt must state this is a **plan review**, list the
+criteria (clarity, testability, completeness, context), ask for per-criterion
+PASS/FAIL + `[BLOCKING]`/`[MINOR]` findings + a one-line verdict, and include the
+plan body.
 
-Evaluation criteria:
-- **Clarity**: Can someone execute this without guessing?
-- **Testability**: Are acceptance criteria concrete and measurable?
-- **Completeness**: Are edge cases and dependencies addressed?
-- **Context**: Does the plan explain WHY, not just WHAT?
+**Never choke on a Task-seat failure:** a `crew:reviewer` spawn that errors,
+times out, returns no usable block, or is reported missing/failed by the harness
+MUST NOT abort the review. Catch it, normalize it to the six-field `ok=False`
+shape (3c), and continue. A failed Task seat is treated identically to a failed
+subprocess seat.
 
-## Verdict Format (REQUIRED)
+#### 3c — Normalize Task-seat results to the six-field shape
 
-You MUST use one of these verdicts:
+For each Task seat, normalize its return into the SAME six fields as the
+subprocess results:
+
+- `name` = `opus` / `sonnet` (the seat name).
+- `model` = the pinned model (`opus` / `sonnet`).
+- `ok` = True if the seat returned a usable review block; **False** if it
+  returned no usable block, errored, or the harness reports it missing/failed.
+- `error` = a populated diagnostic when `ok=False` (never a fabricated empty
+  `ok=True` block).
+- `elapsed` = best-effort wall time (0.0 if unavailable — diagnostic only).
+- `output` = the seat's review text.
+
+A failed Task seat renders exactly like a failed subprocess seat. A
+skipped/unspawnable seat renders a clearly-marked skipped block and is excluded
+from the verdict math.
+
+#### 3d — Synthesize the verdict
+
+Read the full panel (subprocess + normalized Task seats, in stable order) and
+emit the existing verdict format. You MUST use one of these verdicts:
 
 **APPROVED** - Plan is ready for execution. No blocking issues.
 
@@ -123,8 +190,13 @@ Example:
 
 **REJECT** - Fundamental problems requiring complete replanning.
 
-Provide your verdict with detailed reasoning.")
-```
+**Never choke — synthesize from whatever succeeded.** A failed/skipped seat
+(subprocess OR Task) NEVER aborts the review and is NEVER silently dropped:
+synthesize the verdict from the seats that produced usable output, and render
+each failed/skipped seat's block with its diagnostic alongside the successful
+ones. ONLY when **zero** seats produced usable output (every subprocess seat
+failed AND both Task seats failed) do you skip the verdict and instead report:
+`could not review — all seats failed: <per-seat diagnostics>`.
 
 ### Step 4: Handle Verdict
 
@@ -137,7 +209,7 @@ Provide your verdict with detailed reasoning.")
 
 ## Completing the Loop
 
-When advisor returns **APPROVED** (or REVISE with only [MINOR] issues):
+When the panel's verdict is **APPROVED** (or REVISE with only [MINOR] issues):
 
 1. **Deactivate the loop:**
 ```bash
@@ -152,8 +224,8 @@ ${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate mt --reason "Advisor appr
 
 ## Exit Conditions
 
-- Advisor returns **APPROVED**
-- Advisor returns **REVISE** but ALL issues are marked [MINOR]
+- Panel verdict is **APPROVED**
+- Panel verdict is **REVISE** but ALL issues are marked [MINOR]
 - Max iterations (10) reached (safety limit)
 - User runs `/crew:cancel-measure-twice`
 
