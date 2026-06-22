@@ -30,8 +30,10 @@ if _PKG_PARENT not in sys.path:
 
 import argparse
 import concurrent.futures
+import datetime
 import json
 import os
+import re
 
 from multiagent import prompts, render, targets
 from multiagent.providers import ProviderResult, available_seats, get_provider
@@ -252,6 +254,84 @@ def cmd_council(args: argparse.Namespace) -> int:
     return _all_failed_exit(results)
 
 
+def _slugify(text: str, max_words: int = 6) -> str:
+    """Derive a short kebab-case slug from the question's first words."""
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    slug = "-".join(words[:max_words])
+    return slug[:60] or "debate"
+
+
+def cmd_debate(args: argparse.Namespace) -> int:
+    """Scaffold a debate dir + run the codex+agy council in ONE allowlistable call.
+
+    Folds the steps /crew:debate used to do in the shell — `mkdir` the dir, a
+    heredoc to write the question, a redirect to capture results — into a single
+    ``python cli.py debate …`` invocation that matches the allowlist rule (so it
+    never prompts). Creates ``<base-dir>/<timestamp>-<slug>/``, writes
+    ``question.txt`` + ``subprocess.json`` into it, and prints a JSON summary
+    (including ``dir``) so the orchestrator knows where to drop the Claude-seat
+    outputs + synthesis. The opus/sonnet Task seats are still spawned by the
+    orchestrator — the engine cannot spawn in-session Claude agents.
+    """
+    # Exactly one question source: -f <file> XOR positional <question>.
+    if args.file and args.question is not None:
+        print(
+            "error: provide either -f <question-file> OR a positional "
+            "<question>, not both",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.file and args.question is None:
+        print(
+            "error: no question given; provide -f <question-file> or a "
+            "positional <question>",
+            file=sys.stderr,
+        )
+        return 2
+    if args.file:
+        try:
+            question = Path(args.file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot read question file {args.file!r}: {exc}", file=sys.stderr)
+            return 2
+    else:
+        question = args.question
+
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    slug = args.slug or _slugify(question)
+    debate_dir = Path(args.base_dir) / f"{ts}-{slug}"
+    try:
+        debate_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"error: cannot create debate dir {debate_dir}: {exc}", file=sys.stderr)
+        return 2
+    (debate_dir / "question.txt").write_text(question, encoding="utf-8")
+
+    seats = _resolve_seats(args.seats)
+    if not seats:
+        print("error: no subprocess seats requested", file=sys.stderr)
+        return 2
+
+    timeout = _resolve_timeout(args.timeout)
+    results = _fan_out(seats, prompts.council(question), timeout)
+    (debate_dir / "subprocess.json").write_text(
+        render.render_json(results), encoding="utf-8"
+    )
+
+    # The orchestrator reads this to find the dir + see how the subprocess seats
+    # fared, then spawns the opus/sonnet Task seats and writes the synthesis here.
+    print(json.dumps({
+        "dir": str(debate_dir),
+        "question_file": str(debate_dir / "question.txt"),
+        "subprocess_results": str(debate_dir / "subprocess.json"),
+        "seats": [
+            {"name": r.name, "ok": r.ok, "elapsed": round(r.elapsed, 1)}
+            for r in results
+        ],
+    }, indent=2))
+    return _all_failed_exit(results)
+
+
 _SUBPROCESS_SEATS = ("codex", "agy")
 
 
@@ -387,6 +467,36 @@ def build_parser() -> argparse.ArgumentParser:
              "shell-redirect-free and allowlistable)",
     )
     council.set_defaults(func=cmd_council)
+
+    debate = sub.add_parser(
+        "debate",
+        help="Scaffold a debate dir + run the codex+agy council in one call "
+             "(no mkdir/heredoc/redirect to approve).",
+    )
+    debate.add_argument(
+        "question",
+        nargs="?",
+        default=None,
+        help="the debate question (omit when using -f)",
+    )
+    debate.add_argument(
+        "-f", "--file",
+        default=None,
+        help="read the question from this file instead of the positional string",
+    )
+    debate.add_argument(
+        "--slug",
+        default=None,
+        help="short kebab-case slug for the dir name (default: derived from the question)",
+    )
+    debate.add_argument(
+        "--base-dir",
+        default=".crew/debates",
+        help="parent dir for debate logs (default: .crew/debates)",
+    )
+    debate.add_argument("--seats", default=None, help="comma-separated subprocess seats (codex,agy)")
+    debate.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
+    debate.set_defaults(func=cmd_debate)
 
     run = sub.add_parser(
         "run",

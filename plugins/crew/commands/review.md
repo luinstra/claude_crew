@@ -14,7 +14,7 @@ $ARGUMENTS
 
 > **`allowed-tools` scopes THIS orchestrator only.** It grants nothing to the
 > seats spawned below — seat tool access is governed per-seat by the reviewer
-> agent frontmatter (`Read, Grep, Glob`) and the engine's sandbox flags.
+> agent frontmatter (`Read, Grep, Glob, Bash`) and the engine's sandbox flags.
 
 ## What this does
 
@@ -100,7 +100,9 @@ criteria — NOT byte-identical). Like the subprocess seats, the Task seats
 **fetch the target themselves** — do NOT paste the plan body or diff into the
 prompt. Tell each seat where to look: `Read` the plan file at its path, or run
 the diff command (`git diff HEAD` for a working tree, `git diff <base>...HEAD`
-for a branch) and read the changed files. `crew:reviewer` has
+for a branch — the three-dot form diffs from the merge-base, identical to the
+diff the engine pins for its subprocess seats) and read the changed files.
+`crew:reviewer` has
 `Read, Grep, Glob, Bash` for exactly this (read-only git/inspection). This keeps
 all four seats reviewing the SAME source by the SAME means — no
 embedded-vs-referenced divergence. Both seats are the SAME agent

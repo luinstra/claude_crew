@@ -1,7 +1,7 @@
 ---
 description: Crew-native council — single-round multi-model take on a question (codex + agy + opus + sonnet)
 argument-hint: "<question>"
-allowed-tools: Bash, Task, Read, Glob
+allowed-tools: Bash, Task, Read, Glob, Write
 ---
 
 [CREW-NATIVE COUNCIL]
@@ -10,7 +10,7 @@ $ARGUMENTS
 
 > **`allowed-tools` scopes THIS orchestrator only.** It grants nothing to the
 > seats spawned below — seat tool access is governed per-seat by the reviewer
-> agent frontmatter (`Read, Grep, Glob`) and the engine's sandbox flags.
+> agent frontmatter (`Read, Grep, Glob, Bash`) and the engine's sandbox flags.
 
 ## What this does
 
@@ -32,42 +32,47 @@ Default panel: **codex + agy + opus + sonnet** (agy is best-effort). This is
 safe because a failed/skipped seat NEVER sinks the council (see Step 5) — the
 synthesis is built from whichever seats succeed.
 
-## Step 1 — Fan out subprocess seats (one Bash call)
+## Step 1 — Scaffold the debate + fan out subprocess seats (one call)
 
-Run the engine once for the subprocess seats. Use the bare-script path (its
-top-of-file `sys.path` guard makes package imports resolve). **Write the question
-to a file and pass it with `-f`** — a positional question is brittle for quotes,
-newlines, and shell metacharacters, and `-f` sidesteps all of it. Write the file
-with a **quoted** heredoc (`<<'EOF'` — no shell expansion, so the question text
-stays literal):
+The engine's `debate` subcommand does the scaffolding AND the codex+agy fan-out
+in a SINGLE allowlistable call — no `mkdir`, heredoc, or redirect to approve.
+
+First write the question to a file with the **Write tool** (robust for quotes /
+newlines / shell metacharacters — no shell quoting, no heredoc), e.g.
+`.crew/debates/.question.txt`. Then run the engine over it:
 
 ```bash
-mkdir -p .crew/debates
-cat > .crew/debates/.council-question.txt <<'CREW_QUESTION_EOF'
-<the question text, verbatim — exactly what the user asked>
-CREW_QUESTION_EOF
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" council -f .crew/debates/.council-question.txt --seats codex,agy --json
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" debate -f .crew/debates/.question.txt --slug <short-kebab-slug> --seats codex,agy
 ```
 
-- Use this stable `python …cli.py council …` form (it hits the allowlist).
-  NEVER call `agy -p` / `codex exec` directly, and NEVER hand off to any
-  external debate plugin/shell — this council is fully self-contained in crew.
-- Pick a heredoc delimiter the question can't contain (`CREW_QUESTION_EOF` is
-  safe in practice).
+(For a short, simple question you may pass it positionally instead of `-f`:
+`… debate "<question>" --slug <slug>`. Prefer `-f` for anything with quotes or
+newlines. Omit `--slug` to auto-derive it from the question.)
+
+The subcommand creates `.crew/debates/<timestamp>-<slug>/`, writes `question.txt`
+and `subprocess.json` (the codex+agy results) into it, and prints a JSON summary:
+
+```json
+{ "dir": "...", "question_file": "...", "subprocess_results": "...", "seats": [ {"name": "...", "ok": true, "elapsed": 0.0} ] }
+```
+
+- Read **`dir`** from that summary — it's where you write the Claude-seat outputs
+  and the synthesis (Step 5). `subprocess.json` there holds the six-field result
+  objects (`name, model, ok, output, error, elapsed`).
+- Use this stable `python …cli.py debate …` form (it hits the allowlist). NEVER
+  call `agy -p` / `codex exec` directly, and NEVER hand off to any external
+  debate plugin/shell — this council is fully self-contained in crew.
 - **Reference code, don't paste it.** The seats run in the repo. If the question
   is about a diff, branch, or files, point them at it — *"review the changes on
   branch X vs main: run `git diff main...HEAD` and read the files"* — rather than
   inlining a large diff. Keeps the prompt small, sidesteps agy's ARG_MAX cap, and
   avoids synthesis-context bloat.
-- The engine returns a JSON array of result objects, each with the six fields:
-  `name, model, ok, output, error, elapsed`.
-- **Never choke on a seat failure:** the engine NEVER raises out of the
-  fan-out. Any failed/skipped subprocess seat comes back as an `ok=False` entry
-  with a diagnostic in `error`; the other seats still return. The engine exits
-  nonzero with an `all N seats failed: <diagnostics>` message on stderr ONLY
-  when every subprocess seat failed — and even then it emits the full JSON
-  array (no traceback). A nonzero engine exit does NOT abort the council: fold
-  the Task seats in and synthesize from whatever succeeded.
+- **Never choke on a seat failure:** the engine NEVER raises out of the fan-out.
+  A failed/skipped subprocess seat is an `ok=False` entry in `subprocess.json`
+  with a diagnostic in `error`; the others still return. The subcommand exits
+  nonzero ONLY when every subprocess seat failed (and still writes the full
+  array — no traceback). A nonzero exit does NOT abort the council: fold the
+  Task seats in and synthesize from whatever succeeded.
 
 ## Step 2 — Fan out Task seats (parallel)
 
@@ -131,18 +136,14 @@ skip the synthesis and report: `could not convene — all seats failed:
 
 ## Step 5 — Log the transcript
 
-Write the per-seat outputs and your synthesis to a timestamped directory under
-`.crew/debates/`. Build the directory with a Bash `date` call (slugify the
-question into a short kebab-case slug — first few words, lowercased,
-non-alphanumerics to `-`):
+The debate dir already exists (Step 1's subcommand created it and wrote
+`question.txt` + `subprocess.json`). Using the **Write tool**, write into that
+same `dir`:
 
-```bash
-DIR=".crew/debates/$(date +%Y%m%d-%H%M%S)-<slug>"
-mkdir -p "$DIR"
-```
+- the Claude-seat outputs (e.g. `opus.md`, `sonnet.md`), and
+- `synthesis.md` — the agreement / disagreement / recommendation.
 
-Then write the panel + synthesis into that directory (e.g. `transcript.md` with
-each seat's block and the agreement/disagreement/recommendation synthesis).
+No `mkdir`/`date` needed — the dir name already carries the timestamp + slug.
 Tell the user the path you logged to.
 
 ---

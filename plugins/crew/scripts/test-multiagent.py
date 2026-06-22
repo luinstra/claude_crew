@@ -1232,6 +1232,97 @@ def test_council_subcommand():
           "help ok", f"{proc.returncode}: {proc.stderr[:120]}")
 
 
+def test_debate_subcommand():
+    log_section("debate subcommand (scaffold dir + council in one allowlistable call)")
+
+    codex_echo = """
+    import sys
+    a = sys.argv[1:]
+    out = None
+    for i, x in enumerate(a):
+        if x == "-o":
+            out = a[i + 1]
+    body = sys.stdin.read()
+    with open(out, "w") as f:
+        f.write("COUNCIL-TAKE :: " + body[:60])
+    sys.exit(0)
+    """
+
+    # positional question + --slug: scaffolds <base>/<ts>-<slug>/ with question.txt
+    # and subprocess.json, prints a JSON summary with the dir.
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        bins = d / "bin"
+        bins.mkdir()
+        make_fake_bin(bins, "codex", codex_echo)
+        env = path_with(bins)
+        base = d / "debates"
+        proc = _run_cli(
+            ["debate", "Is X better than Y?", "--seats", "codex",
+             "--slug", "x-vs-y", "--base-dir", str(base)],
+            env=env, timeout=30,
+        )
+        check("debate: exit 0",
+              proc.returncode == 0, "0", f"{proc.returncode}: {proc.stderr[:200]}")
+        info = {}
+        try:
+            info = json.loads(proc.stdout)
+        except Exception:
+            info = {}
+        ddir = Path(info["dir"]) if info.get("dir") else None
+        check("debate: prints JSON summary with a created dir path",
+              bool(ddir) and ddir.exists(), "dir created", proc.stdout[:200])
+        check("debate: dir name is <timestamp>-<slug>",
+              bool(ddir) and "x-vs-y" in ddir.name and ddir.name[:8].isdigit(),
+              "<ts>-x-vs-y", str(ddir.name if ddir else None))
+        check("debate: question.txt written into the dir",
+              bool(ddir) and (ddir / "question.txt").exists()
+              and "Is X better than Y?" in (ddir / "question.txt").read_text(),
+              "question.txt holds the question", "?")
+        ok_json = False
+        if ddir and (ddir / "subprocess.json").exists():
+            try:
+                arr = json.loads((ddir / "subprocess.json").read_text())
+                ok_json = isinstance(arr, list) and arr and arr[0]["name"] == "codex"
+            except Exception:
+                ok_json = False
+        check("debate: subprocess.json written (six-field array)",
+              ok_json, "subprocess.json array", "?")
+
+    # -f reads the question from a file; auto-slug when --slug omitted.
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        bins = d / "bin"
+        bins.mkdir()
+        make_fake_bin(bins, "codex", codex_echo)
+        env = path_with(bins)
+        base = d / "debates"
+        qf = d / "q.txt"
+        qf.write_text("Should we adopt approach Zeta now?")
+        proc = _run_cli(
+            ["debate", "-f", str(qf), "--seats", "codex", "--base-dir", str(base)],
+            env=env, timeout=30,
+        )
+        ddir = None
+        try:
+            ddir = Path(json.loads(proc.stdout)["dir"])
+        except Exception:
+            ddir = None
+        check("debate -f: reads question file and scaffolds the dir",
+              proc.returncode == 0 and bool(ddir) and ddir.exists()
+              and (ddir / "question.txt").exists(),
+              "exit0 + dir + question.txt", f"{proc.returncode}: {proc.stdout[:160]}")
+        check("debate: auto-slug derived from the question when --slug omitted",
+              bool(ddir) and "should-we-adopt" in ddir.name,
+              "slug from first words", str(ddir.name if ddir else None))
+
+    # neither prompt source -> clean error.
+    proc = _run_cli(["debate"], timeout=30)
+    check("debate with neither -f nor question -> nonzero error",
+          proc.returncode != 0 and "no question" in proc.stderr,
+          "nonzero + 'no question'", f"{proc.returncode}: {proc.stderr!r}")
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -1250,6 +1341,7 @@ def main():
     test_production_invocation_and_fanout()
     test_run_subcommand()
     test_council_subcommand()
+    test_debate_subcommand()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")

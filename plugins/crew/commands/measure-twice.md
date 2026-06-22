@@ -106,7 +106,7 @@ whichever seats succeed.
 
 > **`allowed-tools` scopes THIS orchestrator only.** It grants nothing to the
 > seats spawned below — seat tool access is governed per-seat by the reviewer
-> agent frontmatter (`Read, Grep, Glob`) and the engine's sandbox flags.
+> agent frontmatter (`Read, Grep, Glob, Bash`) and the engine's sandbox flags.
 
 #### 3a — Fan out subprocess seats (one Bash call)
 
