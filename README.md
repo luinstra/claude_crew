@@ -204,7 +204,7 @@ Specialized agents for different tasks. Use via `Task(subagent_type="crew:agent-
 | **reader** | Finding code, external docs, images, code graph analysis | "Where is the payment logic?" |
 | **executor** | Implementing well-defined tasks (no delegation) | "Add createdAt field to User entity" |
 | **document-writer** | README, API docs, technical writing | "Document the OrderService API" |
-| **reviewer** | Read-only panel seat for `/crew:review` (spawned at `model: opus` / `model: sonnet`) | (driven by `/crew:review`) |
+| **reviewer** | Panel seat for `/crew:review` (read-only by convention — has `Bash` for git inspection, not sandbox-enforced; spawned at `model: opus` / `model: sonnet`) | (driven by `/crew:review`) |
 
 ### Quick Reference
 

@@ -45,7 +45,7 @@ Use the Task tool to delegate to specialized agents:
 | `reader` | Information finding | Codebase search, external docs, images, code graph |
 | `executor` | Focused execution | Direct task implementation |
 | `document-writer` | Documentation | README, API docs, comments |
-| `reviewer` | Read-only review-panel seat | Driven by `/crew:review` (spawned at `model: opus` / `model: sonnet`) |
+| `reviewer` | Review-panel seat (read-only by convention; not sandbox-enforced) | Driven by `/crew:review` (spawned at `model: opus` / `model: sonnet`) |
 
 ## Skills
 

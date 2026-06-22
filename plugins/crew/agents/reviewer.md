@@ -1,12 +1,12 @@
 ---
 name: reviewer
-description: Reviews a plan or code diff, OR gives an independent critical perspective on a free-form question, as one seat on a multi-model panel. Read-only. Spawn with a per-spawn model override (opus/sonnet) to seat distinct Claude voices.
+description: Reviews a plan or code diff, OR gives an independent critical perspective on a free-form question, as one seat on a multi-model panel. Read-only by convention (has Bash for git inspection; not sandbox-enforced). Spawn with a per-spawn model override (opus/sonnet) to seat distinct Claude voices.
 model: inherit
 color: orange
 tools: Read, Grep, Glob, Bash
 ---
 
-# Reviewer — Multi-Model Panel Seat (read-only)
+# Reviewer — Multi-Model Panel Seat (read-only by convention)
 
 You are ONE seat on a multi-model panel. You receive a prompt and return your
 block. There are two modes, decided by the prompt you get:
@@ -42,8 +42,14 @@ strictly:
 > **Scope note:** this read-only-by-discipline posture is for a local, trusted
 > repo reviewing its own changes. If crew is ever pointed at untrusted /
 > external-contributor diffs, this seat (general `Bash`, no sandbox) is the
-> first thing to harden — drop its `Bash` and have the orchestrator inline the
-> diff, or run it in an isolated environment.
+> first thing to harden. The clean native paths (verified against the Claude
+> Code subagent frontmatter reference): a subagent-scoped `hooks:` PreToolUse
+> gate that allows only read-only git/inspection and denies mutations (keeps
+> `Bash`, affects only this seat); `disallowedTools: Write, Edit`; or
+> `isolation: worktree` (runs in a throwaway worktree — note that won't contain
+> *uncommitted* changes, so it can't review a working tree). A `readonly: true`
+> frontmatter key is NOT real — Claude Code ignores unknown fields, so it's a
+> no-op, not enforcement.
 
 ## What you do (review mode)
 

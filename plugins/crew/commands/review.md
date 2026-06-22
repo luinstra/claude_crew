@@ -8,9 +8,11 @@ allowed-tools: Bash, Task, Read, Glob
 
 $ARGUMENTS
 
-> **Note (Claude seats):** the two Claude voices are a single read-only agent,
-> `crew:reviewer`, spawned twice in parallel with a per-spawn `model` override —
-> once at `model: opus` and once at `model: sonnet`.
+> **Note (Claude seats):** the two Claude voices are a single agent,
+> `crew:reviewer` (read-only by convention — it has `Bash` for git inspection
+> but is instructed not to mutate; not sandbox-enforced), spawned twice in
+> parallel with a per-spawn `model` override — once at `model: opus` and once at
+> `model: sonnet`.
 
 > **`allowed-tools` scopes THIS orchestrator only.** It grants nothing to the
 > seats spawned below — seat tool access is governed per-seat by the reviewer

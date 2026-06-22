@@ -49,8 +49,10 @@ Key contracts (do NOT regress):
 - **Reference mode is the default** — seats fetch the diff/plan themselves (the
   engine passes `targets.Target.diff_cmd` / `ref_path`); `--inline-diff` embeds it.
   The Claude Task seats (`crew:reviewer`) have `Read, Grep, Glob, Bash` and fetch
-  the target the same way — run the diff command, or read the plan path —
-  Bash scoped to read-only inspection (git diff/show/log, reads); never mutate.
+  the target the same way — run the diff command, or read the plan path. Its
+  `Bash` is read-only by CONVENTION (instructed to git diff/show/log + reads,
+  never mutate) — NOT sandbox-enforced; see `reviewer.md` for the honest posture
+  + the native enforcement paths if it's ever pointed at untrusted diffs.
 - **`--out <file>`** writes results to a file so the call needs no shell redirect
   (stays permission-allowlistable).
 - Tuning env: `CREW_MA_SEATS`, `CREW_MA_TIMEOUT`, `CREW_MA_CODEX_MODEL`,
