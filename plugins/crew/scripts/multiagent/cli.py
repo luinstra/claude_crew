@@ -58,6 +58,15 @@ def _default_subprocess_seats() -> list[str]:
 
 
 def _resolve_timeout(arg: int | None) -> int:
+    # Default per-seat wall-clock ceiling. Reference mode (the default) makes the
+    # seat do its own fetch + scoped read, which is more work than reviewing an
+    # inlined diff — a thorough seat (codex) can legitimately need several
+    # minutes on a large review. We'd rather give a real review room than
+    # silently drop a default seat to a too-short timeout, so the floor is
+    # generous (10 min). The reference prompt keeps the seat SCOPED to the diff
+    # so normal reviews finish well under this; genuinely large reviews still
+    # get the headroom. Override with --timeout or CREW_MA_TIMEOUT (either
+    # direction) for faster interactive loops or bigger jobs.
     if arg is not None:
         return arg
     env = os.environ.get("CREW_MA_TIMEOUT")
@@ -66,7 +75,7 @@ def _resolve_timeout(arg: int | None) -> int:
             return int(env)
         except ValueError:
             pass
-    return 300
+    return 600
 
 
 def _codex_model() -> str | None:
@@ -144,6 +153,24 @@ def _all_failed_exit(results: list[ProviderResult]) -> int:
     return 0
 
 
+def _emit(text: str, out_path: str | None) -> None:
+    """Write engine output to a file (``--out``) or stdout.
+
+    A file destination is what keeps the whole invocation a single,
+    allowlistable ``python cli.py …`` command: callers no longer wrap it in
+    ``> "$dir/file"`` (an output redirect the permission matcher can't whitelist)
+    or a ``$(…)``-derived path. The engine owns the write; the shell stays out of
+    it. stderr (the all-seats-failed diagnostic) is intentionally NOT redirected
+    here — it only fires on total failure and belongs on the terminal.
+    """
+    if out_path:
+        Path(out_path).write_text(
+            text if text.endswith("\n") else text + "\n", encoding="utf-8"
+        )
+    else:
+        print(text)
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     try:
         target = targets.resolve(args.target, base=args.base)
@@ -151,7 +178,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    prompt = prompts.build_prompt(target)
+    prompt = prompts.build_prompt(target, inline=args.inline_diff)
 
     seats = _resolve_seats(args.seats)
     if not seats:
@@ -162,13 +189,13 @@ def cmd_review(args: argparse.Namespace) -> int:
     results = _fan_out(seats, prompt, timeout)
 
     if args.json:
-        print(render.render_json(results))
+        body = render.render_json(results)
     else:
-        print(f"TARGET: {target.descriptor}")
-        for note in target.notes:
-            print(f"NOTE: {note}")
-        print()
-        print(render.render_panel(results))
+        lines = [f"TARGET: {target.descriptor}"]
+        lines += [f"NOTE: {note}" for note in target.notes]
+        lines += ["", render.render_panel(results)]
+        body = "\n".join(lines)
+    _emit(body, args.out)
 
     return _all_failed_exit(results)
 
@@ -217,11 +244,10 @@ def cmd_council(args: argparse.Namespace) -> int:
     results = _fan_out(seats, prompt, timeout)
 
     if args.json:
-        print(render.render_json(results))
+        body = render.render_json(results)
     else:
-        print("COUNCIL (single round)")
-        print()
-        print(render.render_panel(results))
+        body = "COUNCIL (single round)\n\n" + render.render_panel(results)
+    _emit(body, args.out)
 
     return _all_failed_exit(results)
 
@@ -297,13 +323,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
 
     if args.json:
-        print(json.dumps(result.to_dict()))
+        _emit(json.dumps(result.to_dict()), args.out)
         return 0
 
     if not result.ok:
         print(result.error or "unknown error", file=sys.stderr)
         return 1
-    print(result.output)
+    _emit(result.output, args.out)
     return 0
 
 
@@ -325,6 +351,16 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--json", action="store_true", help="emit a JSON array of results")
     review.add_argument("--base", default="main", help="base ref for branch/auto diffs")
     review.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
+    review.add_argument(
+        "--inline-diff", action="store_true",
+        help="embed the diff/plan in the prompt instead of referencing it "
+             "(seats fetch it themselves by default — smaller, no ARG_MAX cap)",
+    )
+    review.add_argument(
+        "-o", "--out", default=None,
+        help="write results to this file instead of stdout (keeps the call "
+             "shell-redirect-free and allowlistable)",
+    )
     review.set_defaults(func=cmd_review)
 
     council = sub.add_parser(
@@ -345,6 +381,11 @@ def build_parser() -> argparse.ArgumentParser:
     council.add_argument("--seats", default=None, help="comma-separated subprocess seats (codex,agy)")
     council.add_argument("--json", action="store_true", help="emit a JSON array of results")
     council.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
+    council.add_argument(
+        "-o", "--out", default=None,
+        help="write results to this file instead of stdout (keeps the call "
+             "shell-redirect-free and allowlistable)",
+    )
     council.set_defaults(func=cmd_council)
 
     run = sub.add_parser(
@@ -372,6 +413,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--json", action="store_true", help="emit the six-field result as JSON")
     run.add_argument("--timeout", type=int, default=None, help="wall-clock timeout (s)")
+    run.add_argument(
+        "-o", "--out", default=None,
+        help="write output to this file instead of stdout (keeps the call "
+             "shell-redirect-free and allowlistable)",
+    )
     run.set_defaults(func=cmd_run)
 
     return parser

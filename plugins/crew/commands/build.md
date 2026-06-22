@@ -88,10 +88,14 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review working-tree --s
 
 Spawn the reviewer seats **in parallel**, passing each a **criteria-equivalent**
 code-review prompt to the engine's (same completeness / code-quality / security /
-error-handling criteria — NOT byte-identical). Include the working-tree diff and
-the executor's summary so every seat reviews the same thing. Both seats are the
-SAME agent (`crew:reviewer`) with a per-spawn `model` override selecting the
-voice:
+error-handling criteria — NOT byte-identical). Like the subprocess seats, the
+Task seats **fetch the diff themselves** — do NOT paste the diff into the prompt.
+Tell each seat to run `git diff HEAD` (and read any untracked files the executor
+created) in the repo it is already in. Pass the executor's summary inline (it's
+small) so every seat shares the same intent. This keeps all four seats reviewing
+the SAME source by the SAME means — no embedded-vs-referenced divergence. Both
+seats are the SAME agent (`crew:reviewer`) with a per-spawn `model` override
+selecting the voice:
 
 ```
 Task(subagent_type="crew:reviewer", model="opus",   prompt="<the assembled code-review prompt>")
@@ -99,10 +103,10 @@ Task(subagent_type="crew:reviewer", model="sonnet", prompt="<the assembled code-
 ```
 
 The assembled review prompt must state this is a **code review** of the task
-(`$ARGUMENTS`), include the executor's summary and the working-tree diff, list
-the criteria (completeness, code quality, security, performance, error
-handling), and ask for findings tagged `[BLOCKING]`/`[MINOR]` + a one-line
-verdict.
+(`$ARGUMENTS`), include the executor's summary, tell the seat to inspect the
+changes itself via `git diff HEAD` (plus any untracked files), list the criteria
+(completeness, code quality, security, performance, error handling), and ask for
+findings tagged `[BLOCKING]`/`[MINOR]` + a one-line verdict.
 
 **Never choke on a Task-seat failure:** a `crew:reviewer` spawn that errors,
 times out, returns no usable block, or is reported missing/failed by the harness

@@ -5,11 +5,22 @@ Verified against agy 1.0.10 ``--help``. Invocation:
     ["agy", "-p", "<prompt-as-its-own-positional-element>",
      "--model", "Gemini 3.1 Pro (High)",
      "--print-timeout", "8m",
-     "--dangerously-skip-permissions"]
+     "--sandbox"]
 
 Key facts (do NOT regress these):
   * ``-p``/``--print`` is the BOOLEAN print-mode flag. It does NOT take the
     prompt as its value. The prompt is a SEPARATE positional argv element.
+  * ``--sandbox`` (NOT ``--dangerously-skip-permissions``) is how we run
+    headless. A review only needs to run git + read files (in-workspace),
+    which the sandbox auto-allows WITHOUT a permission prompt (so print mode
+    does not hang). What the sandbox BLOCKS is the dangerous part:
+    out-of-workspace writes/exec. ``--dangerously-skip-permissions`` would
+    instead auto-approve EVERYTHING system-wide — wrong for a read-only review
+    and a real prompt-injection surface (adversarial diff content steering an
+    unconfined agent). Empirically verified: under ``--sandbox`` agy runs
+    ``git status`` fine but an out-of-workspace write to ``/tmp`` is blocked.
+    (Residual: in-workspace writes are still allowed, but those land in git and
+    are recoverable — a vastly smaller blast radius than a system-wide bypass.)
   * ``stdin=subprocess.DEVNULL``. No ``pty``/``script`` wrapper, no
     ``--prompt-file`` (that flag does not exist). The earlier
     ``script: write master: I/O error`` was a prompt-file-into-stdin bug.
@@ -168,6 +179,13 @@ class AgyProvider(Provider):
             )
 
         # -p and the prompt are DISTINCT argv elements; prompt is positional.
+        # ``--sandbox`` confines agy (out-of-workspace writes/exec blocked) while
+        # still auto-allowing the in-workspace git + file reads a review needs —
+        # NOT ``--dangerously-skip-permissions`` (system-wide auto-approve). The
+        # ``sandbox`` argument is accepted for Provider-ABC parity with codex;
+        # agy's ``--sandbox`` is a single confinement mode (it cannot express
+        # codex's read-only vs workspace-write split), so any non-empty value
+        # maps to confined, and we never run agy unconfined.
         argv = [
             "agy",
             "-p",
@@ -176,7 +194,7 @@ class AgyProvider(Provider):
             resolved_model,
             "--print-timeout",
             self._print_timeout(),
-            "--dangerously-skip-permissions",
+            "--sandbox",
         ]
 
         wall_clock = self.effective_timeout(timeout)

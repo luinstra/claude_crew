@@ -81,6 +81,71 @@ TARGET: {descriptor}{notes_block}
 """
 
 
+def plan_review_ref(ref_path: str, descriptor: str = "plan") -> str:
+    """Plan-review prompt that points the seat at the file to READ ITSELF.
+
+    Reference mode (the default): the plan body is NOT inlined. The seat opens
+    the file in the repository it is already running in. Keeps the prompt tiny
+    (no payload transport, no ARG_MAX pressure, no synthesis-context bloat).
+    """
+    return f"""You are one reviewer on a multi-model review panel. Review a \
+PLAN as a single seat. Be specific and terse.
+
+TARGET: {descriptor}
+
+The plan is NOT inlined below — open and read it yourself in the current \
+repository:
+  read:  {ref_path}
+
+{_PLAN_CRITERIA}
+
+{_rubric_footer()}
+"""
+
+
+def code_review_ref(diff_cmd: str | None, descriptor: str = "code diff", notes: str = "") -> str:
+    """Code-review prompt that points the seat at the diff to FETCH ITSELF.
+
+    Reference mode (the default): the diff is NOT inlined. The seat runs the
+    given git command in the repository it is already in, and reads the changed
+    files for context. If there is no diff command (e.g. no commits yet), it is
+    told to inspect the working tree directly.
+    """
+    notes_block = f"\nCONTEXT NOTES:\n{notes}\n" if notes else ""
+    if diff_cmd:
+        how = (
+            "The diff is NOT inlined below — reproduce it yourself in the "
+            "current repository:\n"
+            f"  run:  {diff_cmd}\n"
+            "Then review the changes that command shows. You MAY open the "
+            "changed files for surrounding context, but keep your investigation "
+            "SCOPED to this diff: review what changed and its immediate "
+            "context — do NOT audit, crawl, or re-review the rest of the "
+            "repository. Spend your effort on the change, not the codebase."
+        )
+    else:
+        how = (
+            "The diff is NOT inlined below — there is no diff command for this "
+            "target (e.g. no commits yet). Inspect the working-tree files "
+            "directly in the current repository and review them. Keep your "
+            "investigation SCOPED to the new/changed files — do not audit the "
+            "whole repository."
+        )
+    return f"""You are one reviewer on a multi-model review panel. Review a \
+CODE DIFF as a single seat. Be specific and terse.
+
+TARGET: {descriptor}{notes_block}
+
+{how}
+If any untracked/new files are noted above, read those files directly too — \
+they are not part of the diff command.
+
+{_CODE_CRITERIA}
+
+{_rubric_footer()}
+"""
+
+
 def council(question: str) -> str:
     """Build the single-round council prompt for one seat.
 
@@ -113,9 +178,25 @@ strongest objection and the real tradeoffs.
 """
 
 
-def build_prompt(target) -> str:
-    """Dispatch to the right template based on a targets.Target.kind."""
-    if target.kind == "plan":
-        return plan_review(target.content, target.descriptor)
+def build_prompt(target, *, inline: bool = False) -> str:
+    """Dispatch to the right template based on a targets.Target.kind.
+
+    ``inline=False`` (the default) is REFERENCE mode: the seat is told where to
+    find the target (a git command for diffs, a file path for plans) and fetches
+    it itself in the repo it is already running in. ``inline=True`` embeds the
+    pre-computed ``content`` in the prompt (the legacy behavior) — use it when a
+    seat can't reach the repo, or for an uncommitted working tree you want
+    pinned to the exact bytes reviewed.
+    """
     notes = "\n".join(target.notes) if getattr(target, "notes", None) else ""
-    return code_review(target.content, target.descriptor, notes)
+    if target.kind == "plan":
+        if inline:
+            return plan_review(target.content, target.descriptor)
+        return plan_review_ref(
+            getattr(target, "ref_path", None) or target.scope, target.descriptor
+        )
+    if inline:
+        return code_review(target.content, target.descriptor, notes)
+    return code_review_ref(
+        getattr(target, "diff_cmd", None), target.descriptor, notes
+    )

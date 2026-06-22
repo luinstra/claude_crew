@@ -336,8 +336,10 @@ def test_agy_run():
           "--model" in args and "Gemini 3.1 Pro (High)" in args,
           "--model 'Gemini 3.1 Pro (High)'", str(args))
     check("agy: --print-timeout present", "--print-timeout" in args, "present", str(args))
-    check("agy: --dangerously-skip-permissions present",
-          "--dangerously-skip-permissions" in args, "present", str(args))
+    check("agy: --sandbox present (confined, not a system-wide bypass)",
+          "--sandbox" in args, "present", str(args))
+    check("agy: --dangerously-skip-permissions NOT used (no auto-approve-all)",
+          "--dangerously-skip-permissions" not in args, "absent", str(args))
     check("agy: stdin is DEVNULL (fake saw no stdin / empty)",
           cap["stdin"] in ("", "<no-stdin>"), "empty/no stdin", cap["stdin"])
 
@@ -427,6 +429,32 @@ def test_default_seats():
             os.environ.pop("CREW_MA_SEATS", None)
         else:
             os.environ["CREW_MA_SEATS"] = saved
+
+
+def test_resolve_timeout():
+    log_section("default per-seat timeout")
+    from multiagent.cli import _resolve_timeout  # noqa: E402
+    saved = os.environ.get("CREW_MA_TIMEOUT")
+    try:
+        os.environ.pop("CREW_MA_TIMEOUT", None)
+        # Generous default: reference mode + thorough seats need room; better
+        # than silently dropping a default seat on a large review.
+        check("default per-seat timeout is generous (>= 600s)",
+              _resolve_timeout(None) >= 600, ">=600", str(_resolve_timeout(None)))
+        # explicit arg wins over the default and the env.
+        os.environ["CREW_MA_TIMEOUT"] = "120"
+        check("--timeout arg overrides default and env",
+              _resolve_timeout(45) == 45, "45", str(_resolve_timeout(45)))
+        check("CREW_MA_TIMEOUT overrides the default when no arg given",
+              _resolve_timeout(None) == 120, "120", str(_resolve_timeout(None)))
+        os.environ["CREW_MA_TIMEOUT"] = "not-an-int"
+        check("bad CREW_MA_TIMEOUT falls back to the default (no crash)",
+              _resolve_timeout(None) >= 600, ">=600", str(_resolve_timeout(None)))
+    finally:
+        if saved is None:
+            os.environ.pop("CREW_MA_TIMEOUT", None)
+        else:
+            os.environ["CREW_MA_TIMEOUT"] = saved
 
 
 def test_registry():
@@ -533,6 +561,47 @@ def test_prompts():
     plan = prompts.plan_review("PLAN-BODY", "plan: x.md")
     check("plan_review contains rubric criteria (Clarity/Testability)",
           "Clarity" in plan and "Testability" in plan, "criteria", plan[:120])
+
+    # Reference-mode builders (the default) point seats at the target instead of
+    # embedding it: no payload, no ARG_MAX pressure.
+    code_ref = prompts.code_review_ref("git diff abc123..HEAD", "code: branch")
+    check("code_review_ref names the git command, embeds NO diff body",
+          "git diff abc123..HEAD" in code_ref and "DIFF-HERE" not in code_ref
+          and "--- BEGIN DIFF ---" not in code_ref,
+          "references the diff cmd", code_ref[:200])
+    check("code_review_ref keeps the rubric + severity tags",
+          "[BLOCKING]" in code_ref and "Correctness" in code_ref,
+          "rubric intact", code_ref[:160])
+    code_ref_nocmd = prompts.code_review_ref(None, "code: working-tree (no commits yet)")
+    check("code_review_ref with no diff_cmd tells the seat to inspect the tree",
+          "working-tree" in code_ref_nocmd and "--- BEGIN DIFF ---" not in code_ref_nocmd,
+          "tree-inspect fallback", code_ref_nocmd[:200])
+    plan_ref = prompts.plan_review_ref(".crew/plans/foo.md", "plan: foo.md")
+    check("plan_review_ref names the file path, embeds NO plan body",
+          ".crew/plans/foo.md" in plan_ref and "PLAN-BODY" not in plan_ref
+          and "--- BEGIN PLAN ---" not in plan_ref,
+          "references the plan path", plan_ref[:200])
+
+    # build_prompt switch: reference by default, inline when asked.
+    code_tgt = targets.Target(
+        kind="code", scope="branch vs main", content="THE-DIFF-BYTES",
+        descriptor="code: branch", diff_cmd="git diff dead..HEAD",
+    )
+    bp_ref = prompts.build_prompt(code_tgt)
+    bp_inline = prompts.build_prompt(code_tgt, inline=True)
+    check("build_prompt defaults to reference (cmd in, content out)",
+          "git diff dead..HEAD" in bp_ref and "THE-DIFF-BYTES" not in bp_ref,
+          "reference default", bp_ref[:160])
+    check("build_prompt(inline=True) embeds the content",
+          "THE-DIFF-BYTES" in bp_inline, "inline embeds", bp_inline[:160])
+    plan_tgt = targets.Target(
+        kind="plan", scope="p.md", content="PLAN-BYTES",
+        descriptor="plan: p.md", ref_path="p.md",
+    )
+    check("build_prompt plan reference names path, not body",
+          "p.md" in prompts.build_prompt(plan_tgt)
+          and "PLAN-BYTES" not in prompts.build_prompt(plan_tgt),
+          "plan reference", "?")
     check("prompts has NO multi-round debate template",
           not hasattr(prompts, "debate") and not hasattr(prompts, "debate_round"),
           "no debate fn", "has debate fn")
@@ -584,6 +653,8 @@ def test_targets():
         t = targets.resolve(str(p))
         check("plan target reads .md", t.kind == "plan" and "body" in t.content,
               "kind=plan, body", f"kind={t.kind}")
+        check("plan target carries ref_path for reference mode",
+              t.ref_path == str(p), str(p), str(t.ref_path))
 
     # plan missing
     try:
@@ -621,6 +692,8 @@ def test_targets():
               "staged" in t.content, "staged content", t.content[:80])
         check("working-tree surfaces untracked file by path",
               any("b.txt" in n for n in t.notes), "untracked note b.txt", str(t.notes))
+        check("working-tree diff_cmd is 'git diff HEAD' (seat reproduces it)",
+              t.diff_cmd == "git diff HEAD", "git diff HEAD", str(t.diff_cmd))
 
     # clean repo -> last commit vs base (auto)
     with tempfile.TemporaryDirectory() as td:
@@ -631,6 +704,9 @@ def test_targets():
         t = targets.resolve("auto", base="main", cwd=td)
         check("auto clean repo -> branch diff vs base",
               t.kind == "code" and "feature" in t.content, "feature diff", f"scope={t.scope}")
+        mb = _git(["merge-base", "main", "HEAD"], td).stdout.strip()
+        check("branch diff_cmd pins the merge-base SHA (deterministic)",
+              t.diff_cmd == f"git diff {mb}..HEAD", f"git diff {mb}..HEAD", str(t.diff_cmd))
 
     # no commits yet
     with tempfile.TemporaryDirectory() as td:
@@ -1115,6 +1191,35 @@ def test_council_subcommand():
               proc.returncode != 0 and "not both" in proc.stderr,
               "nonzero + 'not both'", f"{proc.returncode}: {proc.stderr!r}")
 
+    # --out writes results to a file (no shell redirect needed) and keeps stdout
+    # clean. This is what makes the whole call allowlistable: a literal-path
+    # `python cli.py council … --out <file>` with no `> "$dir/file"` redirect and
+    # no `$(…)`-derived path for the permission matcher to choke on.
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        bins = d / "bin"
+        bins.mkdir()
+        make_fake_bin(bins, "codex", codex_echo)
+        env = path_with(bins)
+        outf = d / "results.json"
+        proc = _run_cli(
+            ["council", "Q?", "--seats", "codex", "--json", "--out", str(outf)],
+            env=env, timeout=30,
+        )
+        check("council --out: exit 0",
+              proc.returncode == 0, "0", f"{proc.returncode}: {proc.stderr[:200]}")
+        check("council --out: stdout stays clean (nothing redirected by shell)",
+              proc.stdout.strip() == "", "empty stdout", repr(proc.stdout[:120]))
+        wrote_ok = False
+        try:
+            arr = json.loads(outf.read_text())
+            wrote_ok = (isinstance(arr, list) and len(arr) == 1
+                        and arr[0]["name"] == "codex" and arr[0]["ok"] is True)
+        except Exception:
+            wrote_ok = False
+        check("council --out: six-field JSON array written to the file",
+              wrote_ok, "results.json holds the panel", f"exists={outf.exists()}")
+
     # -m invocation path reaches council too.
     env3 = dict(os.environ)
     env3["PYTHONPATH"] = str(SCRIPT_DIR) + os.pathsep + env3.get("PYTHONPATH", "")
@@ -1131,6 +1236,7 @@ def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
     test_default_seats()
+    test_resolve_timeout()
     test_registry()
     test_codex()
     test_agy_helpers()

@@ -35,16 +35,30 @@ synthesis is built from whichever seats succeed.
 ## Step 1 — Fan out subprocess seats (one Bash call)
 
 Run the engine once for the subprocess seats. Use the bare-script path (its
-top-of-file `sys.path` guard makes package imports resolve). Pass the user's
-question as the positional argument:
+top-of-file `sys.path` guard makes package imports resolve). **Write the question
+to a file and pass it with `-f`** — a positional question is brittle for quotes,
+newlines, and shell metacharacters, and `-f` sidesteps all of it. Write the file
+with a **quoted** heredoc (`<<'EOF'` — no shell expansion, so the question text
+stays literal):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" council "<$ARGUMENTS>" --seats codex,agy --json
+mkdir -p .crew/debates
+cat > .crew/debates/.council-question.txt <<'CREW_QUESTION_EOF'
+<the question text, verbatim — exactly what the user asked>
+CREW_QUESTION_EOF
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" council -f .crew/debates/.council-question.txt --seats codex,agy --json
 ```
 
 - Use this stable `python …cli.py council …` form (it hits the allowlist).
   NEVER call `agy -p` / `codex exec` directly, and NEVER hand off to any
   external debate plugin/shell — this council is fully self-contained in crew.
+- Pick a heredoc delimiter the question can't contain (`CREW_QUESTION_EOF` is
+  safe in practice).
+- **Reference code, don't paste it.** The seats run in the repo. If the question
+  is about a diff, branch, or files, point them at it — *"review the changes on
+  branch X vs main: run `git diff main...HEAD` and read the files"* — rather than
+  inlining a large diff. Keeps the prompt small, sidesteps agy's ARG_MAX cap, and
+  avoids synthesis-context bloat.
 - The engine returns a JSON array of result objects, each with the six fields:
   `name, model, ok, output, error, elapsed`.
 - **Never choke on a seat failure:** the engine NEVER raises out of the

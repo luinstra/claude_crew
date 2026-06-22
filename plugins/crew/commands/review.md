@@ -67,9 +67,11 @@ Run the engine once for the subprocess seats. Use the bare-script path (its
 top-of-file `sys.path` guard makes package imports resolve):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review <TARGET> --seats codex,agy --json --base <BASE>
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review "<TARGET>" --seats codex,agy --json --base "<BASE>"
 ```
 
+- **Quote `"<TARGET>"` and `"<BASE>"`** — a plan path can contain spaces, and
+  quoting is harmless for `working-tree`/`auto`/`main`.
 - `<TARGET>` is the resolved plan `.md` path or git scope from Step 1.
 - For a code review of the working tree, `<TARGET>` is typically `working-tree`
   or `auto`.
@@ -90,18 +92,24 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review <TARGET> --seats
 
 Spawn the reviewer seats **in parallel**, passing each a
 **criteria-equivalent** prompt to the engine's (same plan-review or code-review
-criteria — NOT byte-identical). Include the same target content (plan body or
-diff) so every seat reviews the same thing. Both seats are the SAME agent
-(`crew:reviewer`) with a per-spawn `model` override selecting the voice:
+criteria — NOT byte-identical). Like the subprocess seats, the Task seats
+**fetch the target themselves** — do NOT paste the plan body or diff into the
+prompt. Tell each seat where to look in the repo it is already in: read the plan
+file at its path, or run the diff command (`git diff HEAD` for a working tree,
+`git diff <base>...HEAD` for a branch) and read the changed files. This keeps all
+four seats reviewing the SAME source by the SAME means — no embedded-vs-
+referenced divergence. Both seats are the SAME agent (`crew:reviewer`) with a
+per-spawn `model` override selecting the voice:
 
 ```
 Task(subagent_type="crew:reviewer", model="opus",   prompt="<the assembled review prompt>")
 Task(subagent_type="crew:reviewer", model="sonnet", prompt="<the assembled review prompt>")
 ```
 
-The assembled review prompt must state plan-vs-code, list the criteria, ask for
-per-criterion PASS/FAIL + `[BLOCKING]`/`[MINOR]` findings + a one-line verdict,
-and include the target content.
+The assembled review prompt must state plan-vs-code, tell the seat how to reach
+the target itself (plan file path, or the diff command + changed files), list the
+criteria, and ask for per-criterion PASS/FAIL + `[BLOCKING]`/`[MINOR]` findings +
+a one-line verdict.
 
 **Never choke on a Task-seat failure:** a `crew:reviewer` spawn that errors,
 times out, returns no usable block, or is reported missing/failed by the

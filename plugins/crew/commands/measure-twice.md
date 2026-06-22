@@ -132,19 +132,22 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review "[plan_file from
 
 Spawn the reviewer seats **in parallel**, passing each a **criteria-equivalent**
 plan-review prompt to the engine's (same clarity / testability / completeness /
-context criteria — NOT byte-identical). Include the plan body so every seat
-reviews the same thing. Both seats are the SAME agent (`crew:reviewer`) with a
-per-spawn `model` override selecting the voice:
+context criteria — NOT byte-identical). Like the subprocess seats, the Task
+seats **read the plan file themselves** — do NOT paste the plan body into the
+prompt. Tell each seat to read the plan at `[plan_file from state]` in the repo
+it is already in. This keeps all four seats reviewing the SAME source by the
+SAME means — no embedded-vs-referenced divergence. Both seats are the SAME agent
+(`crew:reviewer`) with a per-spawn `model` override selecting the voice:
 
 ```
 Task(subagent_type="crew:reviewer", model="opus",   prompt="<the assembled plan-review prompt>")
 Task(subagent_type="crew:reviewer", model="sonnet", prompt="<the assembled plan-review prompt>")
 ```
 
-The assembled review prompt must state this is a **plan review**, list the
-criteria (clarity, testability, completeness, context), ask for per-criterion
-PASS/FAIL + `[BLOCKING]`/`[MINOR]` findings + a one-line verdict, and include the
-plan body.
+The assembled review prompt must state this is a **plan review**, tell the seat
+to read the plan at `[plan_file from state]` itself, list the criteria (clarity,
+testability, completeness, context), and ask for per-criterion PASS/FAIL +
+`[BLOCKING]`/`[MINOR]` findings + a one-line verdict.
 
 **Never choke on a Task-seat failure:** a `crew:reviewer` spawn that errors,
 times out, returns no usable block, or is reported missing/failed by the harness
