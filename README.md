@@ -130,7 +130,7 @@ For work requiring verification before declaring "done," use `/crew:build` inste
 | `/crew:plan "description"` | Start a planning session with the advisor agent |
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (keeps main context clean) |
 | `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (natural-language dispatch) → `APPROVED`/`REVISE` verdict |
-| `/crew:debate "topic"` | Multi-model debate (thin shim to `/octo:debate`) |
+| `/crew:debate "question"` | Crew-native council — single-round multi-model take on a question (codex + agy + opus + sonnet), synthesized into agreement/disagreement/recommendation |
 | `/crew:build "task"` | Start a persistence loop — Claude won't stop until task is verified complete |
 | `/crew:cancel-build` | Exit an active build loop early |
 | `/crew:measure-twice "task"` | Start a self-refining plan loop — generates plan, reviews, revises until approved |
@@ -166,6 +166,31 @@ dispatches plan-vs-code from natural language and reports `APPROVED`/`REVISE`
 with `[BLOCKING]`/`[MINOR]` findings. A skipped or failed seat (any kind) is
 reported but never sinks the panel — the verdict is synthesized from whichever
 seats succeed, and only an all-seats-failed panel skips the verdict.
+
+#### Ad-hoc single-provider runs
+
+To call **one** provider directly (no fan-out, no review rubric) — e.g. for a
+quick codex/agy query — use the engine's `run` subcommand instead of a
+hand-built `agy -p "$(cat …)"`. That raw form can't be permission-allowlisted
+because the prompt path changes every time; the `run` wrapper is one stable,
+allowlistable command:
+
+```bash
+# prompt from a file (handles "the cat" for you)
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" run agy -f <prompt-file>
+
+# or a direct prompt string
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" run codex "summarize this"
+```
+
+`run <seat>` accepts `codex` or `agy`, plus `-m/--model`,
+`-s/--sandbox read-only|workspace-write`, `--timeout N`, and `--json` (emits the
+same six-field result). It reuses the exact provider classes the review panel
+uses, so ANSI-stripping, agy auth-banner detection, timeout floors, and the
+`CREW_MA_*` env all apply unchanged. On success it prints the cleaned output and
+exits 0; on failure it prints the error to stderr and exits nonzero (in `--json`
+mode it always exits 0 with the `ok` flag in the JSON). **Always use this wrapper
+for ad-hoc calls — never raw `agy -p` / `codex exec`.**
 
 ## Agents
 

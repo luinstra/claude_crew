@@ -1,14 +1,16 @@
 """Prompt templates for the review panel — pure string builders.
 
-ONLY two templates: ``plan_review`` and ``code_review``. NO debate templates
-(native debate is CUT — /crew:debate shims to octopus). No SEAT/ROUND headers,
-no DEBATE_INTEGRITY / NO_EXPLORE constraint blocks.
+Templates: ``plan_review``, ``code_review``, and ``council`` (a single-round
+free-form council seat). NO multi-round debate machinery — no SEAT/ROUND
+headers, no rounds/rebuttals, no DEBATE_INTEGRITY / NO_EXPLORE constraint
+blocks, no state-threading. ``council`` is a LIGHTWEIGHT single-round
+structured-independent-critical stance, not a grapple debate.
 
-Both templates ask each seat to SCORE the target against its named criteria
-(a short rubric -> per-criterion pass/fail + an overall confidence), not just
-free-text findings — a lightweight rubric (adapted from ECC's gan evaluator
-loop, affaan-m/ECC, MIT) so the measure-twice/build loops have an explicit
-threshold to iterate against.
+The review templates ask each seat to SCORE the target against its named
+criteria (a short rubric -> per-criterion pass/fail + an overall confidence),
+not just free-text findings — a lightweight rubric (adapted from ECC's gan
+evaluator loop, affaan-m/ECC, MIT) so the measure-twice/build loops have an
+explicit threshold to iterate against.
 
 Both seat kinds (subprocess + Task) get CRITERIA-EQUIVALENT wording from these
 builders (same content; byte-identical is NOT required).
@@ -76,6 +78,38 @@ TARGET: {descriptor}{notes_block}
 --- BEGIN DIFF ---
 {content}
 --- END DIFF ---
+"""
+
+
+def council(question: str) -> str:
+    """Build the single-round council prompt for one seat.
+
+    Structured-independent-critical stance: each seat gives its OWN take on the
+    question, plus the strongest objection and the key risks/tradeoffs others
+    might miss. Evidence-based — no manufactured contrarianism, no
+    rubber-stamping. Single round only; no rebuttals, no judge step (the
+    orchestrating Claude synthesizes). Both seat kinds get this same wording.
+    """
+    return f"""You are one seat on a multi-model council. You are given a \
+QUESTION and must give an INDEPENDENT, CRITICAL take. You are NOT reviewing a \
+plan or diff — you are weighing in on a free-form question alongside other \
+seats whose answers you cannot see. Be specific and terse.
+
+Give exactly these three things:
+1. DIRECT TAKE: your direct answer / recommendation, stated plainly up front.
+2. STRONGEST OBJECTION: the single strongest objection to your own take — the \
+case against it, argued honestly.
+3. RISKS / TRADEOFFS: the key risks, costs, or tradeoffs others on the panel \
+might miss.
+
+Ground every claim in evidence or concrete reasoning. Do NOT manufacture \
+contrarianism for its own sake, and do NOT rubber-stamp the obvious answer — \
+if the answer really is clear, say so and say why, then still surface the \
+strongest objection and the real tradeoffs.
+
+--- QUESTION ---
+{question}
+--- END QUESTION ---
 """
 
 

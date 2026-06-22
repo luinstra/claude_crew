@@ -533,11 +533,26 @@ def test_prompts():
     plan = prompts.plan_review("PLAN-BODY", "plan: x.md")
     check("plan_review contains rubric criteria (Clarity/Testability)",
           "Clarity" in plan and "Testability" in plan, "criteria", plan[:120])
-    check("prompts has NO debate template",
+    check("prompts has NO multi-round debate template",
           not hasattr(prompts, "debate") and not hasattr(prompts, "debate_round"),
           "no debate fn", "has debate fn")
     check("prompts has NO SEAT/ROUND header text",
           "SEAT:" not in code and "ROUND:" not in code, "no SEAT/ROUND", "present")
+
+    # council template — single-round structured-independent-critical stance.
+    cncl = prompts.council("Is X better than Y?")
+    check("council includes the question", "Is X better than Y?" in cncl,
+          "question body", cncl[:120])
+    check("council asks for direct take + objection + risks/tradeoffs",
+          "DIRECT TAKE" in cncl and "OBJECTION" in cncl
+          and ("RISK" in cncl or "TRADEOFF" in cncl),
+          "the three asks", cncl[:200])
+    check("council forbids rubber-stamp / manufactured contrarianism",
+          "rubber-stamp" in cncl.lower() and "contrarian" in cncl.lower(),
+          "no-rubber-stamp/contrarian framing", cncl)
+    check("council is single-round (no SEAT/ROUND/rounds machinery)",
+          "ROUND:" not in cncl and "SEAT:" not in cncl and "rebuttal" not in cncl.lower(),
+          "no multi-round machinery", cncl[:200])
 
 
 # =============================================================================
@@ -810,6 +825,308 @@ def test_production_invocation_and_fanout():
           "help ok", f"{proc3.returncode}: {proc3.stderr[:120]}")
 
 
+def test_run_subcommand():
+    log_section("run subcommand (single seat, bare-script cli.py)")
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        bins = d / "bin"
+        bins.mkdir()
+        # fake codex: write the -o file from stdin so we can confirm dispatch.
+        make_fake_bin(bins, "codex", """
+        import sys
+        a = sys.argv[1:]
+        out = None
+        for i, x in enumerate(a):
+            if x == "-o":
+                out = a[i + 1]
+        body = sys.stdin.read()
+        with open(out, "w") as f:
+            f.write("RAN:" + body.strip())
+        sys.exit(0)
+        """)
+        env = path_with(bins)
+
+        # -f <file> reads the prompt and dispatches.
+        pf = d / "prompt.txt"
+        pf.write_text("FROM-FILE-PROMPT")
+        proc = _run_cli(["run", "codex", "-f", str(pf)], env=env, timeout=30)
+        check("run -f reads prompt file and dispatches",
+              proc.returncode == 0 and "RAN:FROM-FILE-PROMPT" in proc.stdout,
+              "exit0 + RAN:FROM-FILE-PROMPT", f"{proc.returncode}: {proc.stdout!r} {proc.stderr!r}")
+
+        # direct <prompt-string> dispatches.
+        proc = _run_cli(["run", "codex", "DIRECT-PROMPT"], env=env, timeout=30)
+        check("run direct prompt-string dispatches",
+              proc.returncode == 0 and "RAN:DIRECT-PROMPT" in proc.stdout,
+              "exit0 + RAN:DIRECT-PROMPT", f"{proc.returncode}: {proc.stdout!r} {proc.stderr!r}")
+
+        # --json emits the six-field shape, exit 0 even though ok is in the JSON.
+        proc = _run_cli(["run", "codex", "X", "--json"], env=env, timeout=30)
+        ok_json = False
+        try:
+            obj = json.loads(proc.stdout)
+            ok_json = (set(obj.keys())
+                       == {"name", "model", "ok", "output", "error", "elapsed"}
+                       and obj["name"] == "codex" and obj["ok"] is True)
+        except Exception:
+            ok_json = False
+        check("run --json emits six-field object, exit 0",
+              proc.returncode == 0 and ok_json,
+              "exit0 + six fields", f"{proc.returncode}: {proc.stdout!r}")
+
+    # unknown / non-subprocess seat -> clear error + nonzero exit.
+    proc = _run_cli(["run", "opus", "hi"], timeout=30)
+    check("run unknown/non-subprocess seat -> nonzero + clear error",
+          proc.returncode != 0
+          and "opus" in proc.stderr and "subprocess seat" in proc.stderr,
+          "nonzero + 'opus'/'subprocess seat'", f"{proc.returncode}: {proc.stderr!r}")
+
+    # neither prompt source -> error.
+    proc = _run_cli(["run", "codex"], timeout=30)
+    check("run with neither -f nor prompt-string -> nonzero error",
+          proc.returncode != 0 and "no prompt" in proc.stderr,
+          "nonzero + 'no prompt'", f"{proc.returncode}: {proc.stderr!r}")
+
+    # both prompt sources -> error.
+    with tempfile.TemporaryDirectory() as td:
+        pf = Path(td) / "p.txt"
+        pf.write_text("x")
+        proc = _run_cli(["run", "codex", "STR", "-f", str(pf)], timeout=30)
+        check("run with BOTH -f and prompt-string -> nonzero error",
+              proc.returncode != 0 and "not both" in proc.stderr,
+              "nonzero + 'not both'", f"{proc.returncode}: {proc.stderr!r}")
+
+    # ok=False (nonzero provider exit) -> nonzero exit in non-json mode, error to stderr.
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        bins = d / "bin"
+        bins.mkdir()
+        make_fake_bin(bins, "codex", """
+        import sys
+        sys.stderr.write("codex boom")
+        sys.exit(1)
+        """)
+        env = path_with(bins)
+        proc = _run_cli(["run", "codex", "p"], env=env, timeout=30)
+        check("run ok=False -> nonzero exit, error to stderr (non-json)",
+              proc.returncode != 0 and "boom" in proc.stderr,
+              "nonzero + error on stderr", f"{proc.returncode}: out={proc.stdout!r} err={proc.stderr!r}")
+        # same failure with --json -> exit 0, ok=False in the JSON.
+        proc = _run_cli(["run", "codex", "p", "--json"], env=env, timeout=30)
+        ok_json = False
+        try:
+            obj = json.loads(proc.stdout)
+            ok_json = obj["ok"] is False and bool(obj["error"])
+        except Exception:
+            ok_json = False
+        check("run --json on failure -> exit 0 with ok=False in JSON",
+              proc.returncode == 0 and ok_json,
+              "exit0 + ok=False JSON", f"{proc.returncode}: {proc.stdout!r}")
+
+    # -m invocation path reaches `run` too.
+    env3 = dict(os.environ)
+    env3["PYTHONPATH"] = str(SCRIPT_DIR) + os.pathsep + env3.get("PYTHONPATH", "")
+    proc = subprocess.run(
+        [sys.executable, "-m", "multiagent.cli", "run", "--help"],
+        capture_output=True, text=True, env=env3, timeout=30,
+    )
+    check("python -m multiagent.cli run --help works",
+          proc.returncode == 0 and "run" in (proc.stdout + proc.stderr).lower(),
+          "help ok", f"{proc.returncode}: {proc.stderr[:120]}")
+
+
+def test_council_subcommand():
+    log_section("council subcommand (free-form fan-out, bare-script cli.py)")
+
+    # A fake codex that echoes the stdin prompt body into the -o file, so we can
+    # confirm the council prompt (not a review prompt) reached the seat.
+    codex_echo = """
+    import sys
+    a = sys.argv[1:]
+    out = None
+    for i, x in enumerate(a):
+        if x == "-o":
+            out = a[i + 1]
+    body = sys.stdin.read()
+    with open(out, "w") as f:
+        f.write("COUNCIL-TAKE :: " + body[:60])
+    sys.exit(0)
+    """
+
+    # direct <question> string, single seat, --json six-field shape.
+    with tempfile.TemporaryDirectory() as td:
+        bins = Path(td) / "bin"
+        bins.mkdir()
+        make_fake_bin(bins, "codex", codex_echo)
+        env = path_with(bins)
+        proc = _run_cli(
+            ["council", "Is X better than Y?", "--seats", "codex", "--json"],
+            env=env, timeout=30,
+        )
+        check("council direct question -> exit 0",
+              proc.returncode == 0, "0", f"{proc.returncode}: {proc.stderr[:200]}")
+        ok_json = False
+        try:
+            arr = json.loads(proc.stdout)
+            ok_json = (
+                isinstance(arr, list) and len(arr) == 1
+                and set(arr[0].keys())
+                == {"name", "model", "ok", "output", "error", "elapsed"}
+                and arr[0]["name"] == "codex" and arr[0]["ok"] is True
+            )
+        except Exception:
+            ok_json = False
+        check("council --json emits six-field array, one entry per seat",
+              ok_json, "six-field array len 1", f"{proc.stdout[:200]}")
+        check("council fed the council prompt (not a review prompt)",
+              "QUESTION" in proc.stdout or "council" in proc.stdout.lower(),
+              "council framing reached the seat", proc.stdout[:200])
+
+    # -f <file> reads the question from a file. Echo the FULL prompt body so we
+    # can confirm the file's question made it into the assembled council prompt.
+    codex_echo_full = """
+    import sys
+    a = sys.argv[1:]
+    out = None
+    for i, x in enumerate(a):
+        if x == "-o":
+            out = a[i + 1]
+    body = sys.stdin.read()
+    with open(out, "w") as f:
+        f.write("COUNCIL-TAKE :: " + body)
+    sys.exit(0)
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        bins = d / "bin"
+        bins.mkdir()
+        make_fake_bin(bins, "codex", codex_echo_full)
+        env = path_with(bins)
+        qf = d / "question.txt"
+        qf.write_text("Should we adopt approach Z?")
+        proc = _run_cli(
+            ["council", "-f", str(qf), "--seats", "codex", "--json"],
+            env=env, timeout=30,
+        )
+        ok = False
+        try:
+            arr = json.loads(proc.stdout)
+            ok = (proc.returncode == 0 and len(arr) == 1
+                  and "Should we adopt approach Z?" in arr[0]["output"])
+        except Exception:
+            ok = False
+        check("council -f reads the question file and fans it out",
+              ok, "exit0 + question in seat output", f"{proc.returncode}: {proc.stdout[:200]}")
+
+    # default subprocess seats = codex,agy (no --seats given).
+    with tempfile.TemporaryDirectory() as td:
+        bins = Path(td) / "bin"
+        bins.mkdir()
+        make_fake_bin(bins, "codex", codex_echo)
+        # fake agy succeeds too
+        make_fake_bin(bins, "agy", """
+        import sys
+        sys.stdout.write("AGY COUNCIL TAKE")
+        sys.exit(0)
+        """)
+        env = path_with(bins)
+        env["CREW_MA_AGY_PRINT_TIMEOUT"] = "1s"
+        proc = _run_cli(
+            ["council", "Pick one.", "--json", "--timeout", "5"],
+            env=env, timeout=60,
+        )
+        names = []
+        try:
+            arr = json.loads(proc.stdout)
+            names = sorted(r["name"] for r in arr)
+        except Exception:
+            names = []
+        check("council default seats == codex,agy",
+              names == ["agy", "codex"], "['agy', 'codex']", str(names))
+
+    # one seat fails, the other still returns (graceful degradation).
+    with tempfile.TemporaryDirectory() as td:
+        bins = Path(td) / "bin"
+        bins.mkdir()
+        make_fake_bin(bins, "codex", codex_echo)
+        make_fake_bin(bins, "agy", """
+        import sys
+        sys.stderr.write("agy boom")
+        sys.exit(1)
+        """)
+        env = path_with(bins)
+        env["CREW_MA_AGY_PRINT_TIMEOUT"] = "1s"
+        proc = _run_cli(
+            ["council", "Q?", "--seats", "codex,agy", "--json", "--timeout", "5"],
+            env=env, timeout=60,
+        )
+        by_name = {}
+        try:
+            by_name = {r["name"]: r for r in json.loads(proc.stdout)}
+        except Exception:
+            by_name = {}
+        check("council one-seat-fails: codex still returns ok=True",
+              by_name.get("codex", {}).get("ok") is True,
+              "codex ok=True", str(by_name.get("codex")))
+        check("council one-seat-fails: agy ok=False, didn't sink the council",
+              by_name.get("agy", {}).get("ok") is False,
+              "agy ok=False", str(by_name.get("agy")))
+        check("council partial panel -> exit 0 (not all-failed)",
+              proc.returncode == 0, "0", f"{proc.returncode}: {proc.stderr[:200]}")
+
+    # ALL seats fail -> nonzero exit, clear all-failed signal, no traceback.
+    with tempfile.TemporaryDirectory() as td:
+        bins = Path(td) / "bin"
+        bins.mkdir()
+        make_fake_bin(bins, "codex", """
+        import sys
+        sys.stderr.write("codex boom")
+        sys.exit(1)
+        """)
+        make_fake_bin(bins, "agy", """
+        import sys
+        sys.stderr.write("agy boom")
+        sys.exit(1)
+        """)
+        env = path_with(bins)
+        env["CREW_MA_AGY_PRINT_TIMEOUT"] = "1s"
+        proc = _run_cli(
+            ["council", "Q?", "--seats", "codex,agy", "--json", "--timeout", "5"],
+            env=env, timeout=60,
+        )
+        check("council all-fail: no traceback",
+              "Traceback" not in proc.stderr, "no traceback", proc.stderr[:200])
+        check("council all-fail: nonzero exit",
+              proc.returncode != 0, "nonzero", str(proc.returncode))
+        check("council all-fail: clear 'all N seats failed' on stderr",
+              "all 2 seats failed" in proc.stderr, "all 2 seats failed", proc.stderr[:200])
+
+    # neither prompt source -> error; both -> error.
+    proc = _run_cli(["council"], timeout=30)
+    check("council with neither -f nor question -> nonzero error",
+          proc.returncode != 0 and "no question" in proc.stderr,
+          "nonzero + 'no question'", f"{proc.returncode}: {proc.stderr!r}")
+    with tempfile.TemporaryDirectory() as td:
+        qf = Path(td) / "q.txt"
+        qf.write_text("x")
+        proc = _run_cli(["council", "STR", "-f", str(qf)], timeout=30)
+        check("council with BOTH -f and question -> nonzero error",
+              proc.returncode != 0 and "not both" in proc.stderr,
+              "nonzero + 'not both'", f"{proc.returncode}: {proc.stderr!r}")
+
+    # -m invocation path reaches council too.
+    env3 = dict(os.environ)
+    env3["PYTHONPATH"] = str(SCRIPT_DIR) + os.pathsep + env3.get("PYTHONPATH", "")
+    proc = subprocess.run(
+        [sys.executable, "-m", "multiagent.cli", "council", "--help"],
+        capture_output=True, text=True, env=env3, timeout=30,
+    )
+    check("python -m multiagent.cli council --help works",
+          proc.returncode == 0 and "council" in (proc.stdout + proc.stderr).lower(),
+          "help ok", f"{proc.returncode}: {proc.stderr[:120]}")
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -825,6 +1142,8 @@ def main():
     test_prompts()
     test_targets()
     test_production_invocation_and_fanout()
+    test_run_subcommand()
+    test_council_subcommand()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")

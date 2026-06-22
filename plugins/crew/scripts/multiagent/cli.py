@@ -9,9 +9,12 @@ package-relative imports (``from multiagent...``) resolve when run as a bare
 script. ``python -m multiagent.cli`` also works (the guard is a harmless no-op
 when the parent is already importable).
 
-Only a ``review`` subcommand exists. There is NO ``debate`` subcommand — native
-debate is CUT; /crew:debate is a command-level shim to octopus, not an engine
-code path. Task seats (opus/sonnet) are added by the orchestrator, not here.
+Subcommands: ``review`` (fan-out over a resolved target), ``council`` (fan-out
+of a free-form question — the engine half of /crew:debate's crew-native
+council), and ``run`` (one seat ad-hoc). ``council`` reuses the SAME parallel
+fan-out + ``ProviderResult`` + render + graceful-degradation paths as
+``review``; it just feeds a free-form prompt instead of resolving a target.
+Task seats (opus/sonnet) are added by the orchestrator, not here.
 """
 
 from __future__ import annotations
@@ -27,10 +30,11 @@ if _PKG_PARENT not in sys.path:
 
 import argparse
 import concurrent.futures
+import json
 import os
 
 from multiagent import prompts, render, targets
-from multiagent.providers import ProviderResult, available_seats
+from multiagent.providers import ProviderResult, available_seats, get_provider
 
 
 def _default_subprocess_seats() -> list[str]:
@@ -84,30 +88,26 @@ def _run_seat(name: str, prompt: str, timeout: int) -> ProviderResult:
     return provider.run(prompt, model=model, timeout=timeout)
 
 
-def cmd_review(args: argparse.Namespace) -> int:
-    try:
-        target = targets.resolve(args.target, base=args.base)
-    except targets.TargetError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
-    prompt = prompts.build_prompt(target)
-
+def _resolve_seats(seats_arg: str | None) -> list[str]:
+    """Resolve the comma-separated --seats arg to subprocess seats only."""
     seats = (
-        [s.strip() for s in args.seats.split(",") if s.strip()]
-        if args.seats
+        [s.strip() for s in seats_arg.split(",") if s.strip()]
+        if seats_arg
         else _default_subprocess_seats()
     )
     # Engine drives subprocess seats only.
-    seats = [s for s in seats if s in ("codex", "agy")]
-    if not seats:
-        print("error: no subprocess seats requested", file=sys.stderr)
-        return 2
+    return [s for s in seats if s in ("codex", "agy")]
 
-    timeout = _resolve_timeout(args.timeout)
 
-    # Pool sized to absorb one hung thread (>= number of seats) so a hung agy
-    # thread cannot block codex's collected result.
+def _fan_out(seats: list[str], prompt: str, timeout: int) -> list[ProviderResult]:
+    """Run the subprocess seats in parallel over one prompt.
+
+    Shared by ``review`` and ``council``: same parallel fan-out, same
+    ``ProviderResult`` shape, same graceful degradation (one seat failing or
+    hanging never sinks the panel). Pool sized to absorb one hung thread
+    (>= number of seats) so a hung agy thread cannot block codex's result.
+    Returns results in stable seat order (as requested).
+    """
     results_by_name: dict[str, ProviderResult] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(seats), 2)) as pool:
         futures = {
@@ -122,9 +122,44 @@ def cmd_review(args: argparse.Namespace) -> int:
                     name=name, model=None, ok=False, output="",
                     error=f"seat raised: {exc}", elapsed=0.0,
                 )
+    return [results_by_name[name] for name in seats]
 
-    # Stable seat order (as requested).
-    results = [results_by_name[name] for name in seats]
+
+def _all_failed_exit(results: list[ProviderResult]) -> int:
+    """Never-choke guarantee: a partial panel (>=1 ok seat) is a success.
+
+    ONLY when EVERY seat failed/was skipped do we surface a clear all-failed
+    signal (nonzero exit + an stderr summary) — still a clean list of all-failed
+    results, never a traceback.
+    """
+    if results and not any(r.ok for r in results):
+        diags = "; ".join(
+            f"{r.name}: {(r.error or 'unknown error').strip()}" for r in results
+        )
+        print(
+            f"error: all {len(results)} seats failed: {diags}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    try:
+        target = targets.resolve(args.target, base=args.base)
+    except targets.TargetError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    prompt = prompts.build_prompt(target)
+
+    seats = _resolve_seats(args.seats)
+    if not seats:
+        print("error: no subprocess seats requested", file=sys.stderr)
+        return 2
+
+    timeout = _resolve_timeout(args.timeout)
+    results = _fan_out(seats, prompt, timeout)
 
     if args.json:
         print(render.render_json(results))
@@ -135,19 +170,140 @@ def cmd_review(args: argparse.Namespace) -> int:
         print()
         print(render.render_panel(results))
 
-    # Never-choke guarantee: a partial panel (>=1 ok seat) is a success. ONLY
-    # when EVERY seat failed/was skipped do we surface a clear all-failed signal
-    # (nonzero exit + an stderr summary) — still a clean list of all-failed
-    # results above, never a traceback.
-    if results and not any(r.ok for r in results):
-        diags = "; ".join(
-            f"{r.name}: {(r.error or 'unknown error').strip()}" for r in results
-        )
+    return _all_failed_exit(results)
+
+
+def cmd_council(args: argparse.Namespace) -> int:
+    """Fan a free-form QUESTION across the subprocess council seats.
+
+    The engine half of the crew-native council (/crew:debate): single round,
+    free-form prompt, REUSING ``review``'s fan-out + ``ProviderResult`` + render
+    + graceful-degradation. No target resolution. The orchestrator adds the
+    opus/sonnet Task seats and synthesizes.
+    """
+    # Exactly one prompt source: -f <file> XOR positional <question>.
+    if args.file and args.question is not None:
         print(
-            f"error: all {len(results)} seats failed: {diags}",
+            "error: provide either -f <question-file> OR a positional "
+            "<question>, not both",
             file=sys.stderr,
         )
+        return 2
+    if not args.file and args.question is None:
+        print(
+            "error: no question given; provide -f <question-file> or a "
+            "positional <question>",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.file:
+        try:
+            question = Path(args.file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot read question file {args.file!r}: {exc}", file=sys.stderr)
+            return 2
+    else:
+        question = args.question
+
+    prompt = prompts.council(question)
+
+    seats = _resolve_seats(args.seats)
+    if not seats:
+        print("error: no subprocess seats requested", file=sys.stderr)
+        return 2
+
+    timeout = _resolve_timeout(args.timeout)
+    results = _fan_out(seats, prompt, timeout)
+
+    if args.json:
+        print(render.render_json(results))
+    else:
+        print("COUNCIL (single round)")
+        print()
+        print(render.render_panel(results))
+
+    return _all_failed_exit(results)
+
+
+_SUBPROCESS_SEATS = ("codex", "agy")
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    """Run ONE subprocess seat ad-hoc via the existing provider classes.
+
+    This is the single, allowlistable entry point for ad-hoc codex/agy calls:
+    instead of hand-constructing ``agy -p "$(cat …)"`` (whose path varies every
+    time and so can't be permission-allowlisted), callers invoke
+    ``cli.py run <seat> -f <prompt-file>`` (or a direct prompt string). The seat
+    is dispatched through the SAME ``get_provider``/``Provider`` machinery as
+    ``review`` so invocation shape, ANSI-strip, agy auth/error-banner detection,
+    timeout floor, ARG_MAX guard, and ``CREW_MA_*`` env all apply unchanged.
+    """
+    seat = args.seat
+    if seat not in _SUBPROCESS_SEATS:
+        known = ", ".join(_SUBPROCESS_SEATS)
+        print(
+            f"error: unknown or non-subprocess seat {seat!r}; "
+            f"valid subprocess seats: {known}",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Exactly one prompt source: -f <file> XOR positional <prompt-string>.
+    if args.file and args.prompt is not None:
+        print(
+            "error: provide either -f <prompt-file> OR a positional "
+            "<prompt-string>, not both",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.file and args.prompt is None:
+        print(
+            "error: no prompt given; provide -f <prompt-file> or a positional "
+            "<prompt-string>",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.file:
+        try:
+            prompt = Path(args.file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot read prompt file {args.file!r}: {exc}", file=sys.stderr)
+            return 2
+    else:
+        prompt = args.prompt
+
+    provider = get_provider(seat)
+    avail, diag = provider.is_available()
+    if not avail:
+        result = ProviderResult(
+            name=seat, model=None, ok=False, output="",
+            error=f"skipped: {diag}", elapsed=0.0,
+        )
+    else:
+        # Same model resolution as the review path: --model overrides the
+        # CREW_MA_* default; agy resolves its own default internally.
+        if args.model:
+            model = args.model
+        elif seat == "codex":
+            model = _codex_model()
+        else:
+            model = None
+        timeout = _resolve_timeout(args.timeout)
+        result = provider.run(
+            prompt, sandbox=args.sandbox, model=model, timeout=timeout,
+        )
+
+    if args.json:
+        print(json.dumps(result.to_dict()))
+        return 0
+
+    if not result.ok:
+        print(result.error or "unknown error", file=sys.stderr)
         return 1
+    print(result.output)
     return 0
 
 
@@ -170,6 +326,53 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--base", default="main", help="base ref for branch/auto diffs")
     review.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
     review.set_defaults(func=cmd_review)
+
+    council = sub.add_parser(
+        "council",
+        help="Fan a free-form question across subprocess seats (single round).",
+    )
+    council.add_argument(
+        "question",
+        nargs="?",
+        default=None,
+        help="the council question (omit when using -f)",
+    )
+    council.add_argument(
+        "-f", "--file",
+        default=None,
+        help="read the question from this file instead of the positional string",
+    )
+    council.add_argument("--seats", default=None, help="comma-separated subprocess seats (codex,agy)")
+    council.add_argument("--json", action="store_true", help="emit a JSON array of results")
+    council.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
+    council.set_defaults(func=cmd_council)
+
+    run = sub.add_parser(
+        "run",
+        help="Run ONE subprocess seat (codex|agy) ad-hoc through the engine.",
+    )
+    run.add_argument("seat", help="subprocess seat name (codex or agy)")
+    run.add_argument(
+        "prompt",
+        nargs="?",
+        default=None,
+        help="prompt string (omit when using -f)",
+    )
+    run.add_argument(
+        "-f", "--file",
+        default=None,
+        help="read the prompt from this file instead of the positional string",
+    )
+    run.add_argument("-m", "--model", default=None, help="override the seat's model")
+    run.add_argument(
+        "-s", "--sandbox",
+        choices=["read-only", "workspace-write"],
+        default="read-only",
+        help="sandbox mode (default: read-only)",
+    )
+    run.add_argument("--json", action="store_true", help="emit the six-field result as JSON")
+    run.add_argument("--timeout", type=int, default=None, help="wall-clock timeout (s)")
+    run.set_defaults(func=cmd_run)
 
     return parser
 
