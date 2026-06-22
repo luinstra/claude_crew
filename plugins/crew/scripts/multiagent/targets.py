@@ -166,7 +166,9 @@ def _resolve_working_tree(cwd: str | None) -> Target:
         content=content,
         descriptor="code: working-tree (uncommitted, staged + unstaged)",
         notes=notes,
-        diff_cmd="git diff HEAD",
+        # --no-pager: a seat reproducing this in a TTY shell would otherwise
+        # page a large diff through `less` and hang to its timeout.
+        diff_cmd="git --no-pager diff HEAD",
     )
 
 
@@ -199,8 +201,8 @@ def _resolve_branch(base: str, cwd: str | None) -> Target:
         descriptor=f"code: branch diff vs merge-base({base})",
         notes=notes,
         # Merge-base SHA is pinned, so this stays deterministic even as the base
-        # branch advances.
-        diff_cmd=f"git diff {mb}..HEAD",
+        # branch advances. --no-pager guards against a TTY pager hang.
+        diff_cmd=f"git --no-pager diff {mb}..HEAD",
     )
 
 
@@ -211,15 +213,15 @@ def _resolve_commit(sha: str, cwd: str | None) -> Target:
     resolved = verify.stdout.strip()
     # Diff the commit against its first parent; falls back to empty-tree for the
     # root commit.
-    diff_cmd = f"git diff {resolved}^!"
-    cp = _git(["diff", f"{resolved}^!", ], cwd=cwd)
+    diff_cmd = f"git --no-pager diff {resolved}^!"
+    cp = _git(["diff", f"{resolved}^!"], cwd=cwd)
     if cp.returncode != 0:
         # Root commit (no parent): diff against the empty tree.
         empty = _git(["hash-object", "-t", "tree", "/dev/null"], cwd=cwd)
         if empty.returncode == 0:
             tree = empty.stdout.strip()
             cp = _git(["diff", tree, resolved], cwd=cwd)
-            diff_cmd = f"git diff {tree} {resolved}"
+            diff_cmd = f"git --no-pager diff {tree} {resolved}"
         if cp.returncode != 0:
             raise TargetError(f"git diff for commit {sha!r} failed: {cp.stderr.strip()}")
     return Target(

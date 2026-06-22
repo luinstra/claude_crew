@@ -34,6 +34,7 @@ import datetime
 import json
 import os
 import re
+import shutil
 
 from multiagent import prompts, render, targets
 from multiagent.providers import ProviderResult, available_seats, get_provider
@@ -298,14 +299,44 @@ def cmd_debate(args: argparse.Namespace) -> int:
         question = args.question
 
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    slug = args.slug or _slugify(question)
-    debate_dir = Path(args.base_dir) / f"{ts}-{slug}"
+    # Sanitize BOTH slug sources through _slugify so an explicit --slug like
+    # "../../etc/foo" can't escape --base-dir (path traversal) — the result is
+    # always restricted to [a-z0-9-].
+    slug = _slugify(args.slug) if args.slug else _slugify(question)
+
+    # Unique dir: NEVER silently overwrite a same-second/same-slug debate
+    # (exist_ok=True would merge two debates' question.txt/subprocess.json).
+    base = Path(args.base_dir)
+    debate_dir = base / f"{ts}-{slug}"
+    suffix = 2
+    while True:
+        try:
+            debate_dir.mkdir(parents=True, exist_ok=False)
+            break
+        except FileExistsError:
+            debate_dir = base / f"{ts}-{slug}-{suffix}"
+            suffix += 1
+        except OSError as exc:
+            print(f"error: cannot create debate dir {debate_dir}: {exc}", file=sys.stderr)
+            return 2
+
+    # Guard the writes: an IO failure (full disk, bad perms) must not dump a
+    # traceback or leave an orphan dir — clean up and exit nonzero cleanly.
     try:
-        debate_dir.mkdir(parents=True, exist_ok=True)
+        (debate_dir / "question.txt").write_text(question, encoding="utf-8")
     except OSError as exc:
-        print(f"error: cannot create debate dir {debate_dir}: {exc}", file=sys.stderr)
+        shutil.rmtree(debate_dir, ignore_errors=True)
+        print(f"error: cannot write question.txt: {exc}", file=sys.stderr)
         return 2
-    (debate_dir / "question.txt").write_text(question, encoding="utf-8")
+
+    # --consume: the question is now safely in the dir, so the CLI removes the
+    # transient -f staging file the orchestrator wrote (best-effort; the CLI was
+    # told to own it). Nothing lingers in .crew/debates/.
+    if args.consume and args.file:
+        try:
+            Path(args.file).unlink()
+        except OSError:
+            pass
 
     seats = _resolve_seats(args.seats)
     if not seats:
@@ -314,9 +345,13 @@ def cmd_debate(args: argparse.Namespace) -> int:
 
     timeout = _resolve_timeout(args.timeout)
     results = _fan_out(seats, prompts.council(question), timeout)
-    (debate_dir / "subprocess.json").write_text(
-        render.render_json(results), encoding="utf-8"
-    )
+    try:
+        (debate_dir / "subprocess.json").write_text(
+            render.render_json(results), encoding="utf-8"
+        )
+    except OSError as exc:
+        print(f"error: cannot write subprocess.json to {debate_dir}: {exc}", file=sys.stderr)
+        return 2
 
     # The orchestrator reads this to find the dir + see how the subprocess seats
     # fared, then spawns the opus/sonnet Task seats and writes the synthesis here.
@@ -496,6 +531,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     debate.add_argument("--seats", default=None, help="comma-separated subprocess seats (codex,agy)")
     debate.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
+    debate.add_argument(
+        "--consume", action="store_true",
+        help="delete the -f staging file after copying the question into the "
+             "debate dir (so no transient question file lingers)",
+    )
     debate.set_defaults(func=cmd_debate)
 
     run = sub.add_parser(

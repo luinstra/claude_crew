@@ -38,16 +38,20 @@ The engine's `debate` subcommand does the scaffolding AND the codex+agy fan-out
 in a SINGLE allowlistable call — no `mkdir`, heredoc, or redirect to approve.
 
 First write the question to a file with the **Write tool** (robust for quotes /
-newlines / shell metacharacters — no shell quoting, no heredoc), e.g.
-`.crew/debates/.question.txt`. Then run the engine over it:
+newlines / shell metacharacters — no shell quoting, no heredoc). Use a visible,
+slugged staging name — NOT a hidden dot-file — e.g.
+`.crew/debates/staged-question-<slug>.txt`. Then run the engine over it with
+`--consume` (the CLI copies the question into the debate dir, then deletes the
+staging file, so nothing lingers):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" debate -f .crew/debates/.question.txt --slug <short-kebab-slug> --seats codex,agy
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" debate -f .crew/debates/staged-question-<slug>.txt --slug <short-kebab-slug> --seats codex,agy --consume
 ```
 
 (For a short, simple question you may pass it positionally instead of `-f`:
-`… debate "<question>" --slug <slug>`. Prefer `-f` for anything with quotes or
-newlines. Omit `--slug` to auto-derive it from the question.)
+`… debate "<question>" --slug <slug>` — no staging file needed. Prefer `-f` for
+anything with quotes or newlines. Omit `--slug` to auto-derive it from the
+question. `--slug` is sanitized to `[a-z0-9-]`, so it can't escape `.crew/debates/`.)
 
 The subcommand creates `.crew/debates/<timestamp>-<slug>/`, writes `question.txt`
 and `subprocess.json` (the codex+agy results) into it, and prints a JSON summary:

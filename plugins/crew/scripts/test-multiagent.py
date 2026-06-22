@@ -692,8 +692,8 @@ def test_targets():
               "staged" in t.content, "staged content", t.content[:80])
         check("working-tree surfaces untracked file by path",
               any("b.txt" in n for n in t.notes), "untracked note b.txt", str(t.notes))
-        check("working-tree diff_cmd is 'git diff HEAD' (seat reproduces it)",
-              t.diff_cmd == "git diff HEAD", "git diff HEAD", str(t.diff_cmd))
+        check("working-tree diff_cmd is 'git --no-pager diff HEAD' (seat reproduces it)",
+              t.diff_cmd == "git --no-pager diff HEAD", "git --no-pager diff HEAD", str(t.diff_cmd))
 
     # clean repo -> last commit vs base (auto)
     with tempfile.TemporaryDirectory() as td:
@@ -705,8 +705,9 @@ def test_targets():
         check("auto clean repo -> branch diff vs base",
               t.kind == "code" and "feature" in t.content, "feature diff", f"scope={t.scope}")
         mb = _git(["merge-base", "main", "HEAD"], td).stdout.strip()
-        check("branch diff_cmd pins the merge-base SHA (deterministic)",
-              t.diff_cmd == f"git diff {mb}..HEAD", f"git diff {mb}..HEAD", str(t.diff_cmd))
+        check("branch diff_cmd pins the merge-base SHA (deterministic, --no-pager)",
+              t.diff_cmd == f"git --no-pager diff {mb}..HEAD",
+              f"git --no-pager diff {mb}..HEAD", str(t.diff_cmd))
 
     # no commits yet
     with tempfile.TemporaryDirectory() as td:
@@ -1315,6 +1316,61 @@ def test_debate_subcommand():
         check("debate: auto-slug derived from the question when --slug omitted",
               bool(ddir) and "should-we-adopt" in ddir.name,
               "slug from first words", str(ddir.name if ddir else None))
+
+    # malicious --slug is sanitized (no path traversal) + --consume deletes staging.
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        bins = d / "bin"
+        bins.mkdir()
+        make_fake_bin(bins, "codex", codex_echo)
+        env = path_with(bins)
+        base = d / "debates"
+        staging = d / "staged.txt"
+        staging.write_text("Traversal attempt?")
+        proc = _run_cli(
+            ["debate", "-f", str(staging), "--slug", "../../pwned",
+             "--seats", "codex", "--base-dir", str(base), "--consume"],
+            env=env, timeout=30,
+        )
+        ddir = None
+        try:
+            ddir = Path(json.loads(proc.stdout)["dir"])
+        except Exception:
+            ddir = None
+        check("debate: malicious --slug can't escape --base-dir (path traversal)",
+              bool(ddir) and base.resolve() in ddir.resolve().parents
+              and ".." not in ddir.parts,
+              "dir under base, no '..'", str(ddir))
+        check("debate: --slug sanitized to [a-z0-9-] (../../pwned -> ...-pwned)",
+              bool(ddir) and ddir.name.endswith("-pwned"),
+              "<ts>-pwned", str(ddir.name if ddir else None))
+        check("debate --consume: staging file deleted after copy into dir",
+              not staging.exists() and bool(ddir) and (ddir / "question.txt").exists(),
+              "staging gone, question.txt present", f"staging_exists={staging.exists()}")
+
+    # dir uniqueness: two same-slug debates never share a dir (no silent overwrite).
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        bins = d / "bin"
+        bins.mkdir()
+        make_fake_bin(bins, "codex", codex_echo)
+        env = path_with(bins)
+        base = d / "debates"
+        dirs = []
+        for _ in range(2):
+            proc = _run_cli(
+                ["debate", "Same question?", "--slug", "dup", "--seats", "codex",
+                 "--base-dir", str(base)],
+                env=env, timeout=30,
+            )
+            try:
+                dirs.append(json.loads(proc.stdout)["dir"])
+            except Exception:
+                pass
+        check("debate: two same-slug debates get distinct dirs (no overwrite)",
+              len(dirs) == 2 and dirs[0] != dirs[1]
+              and all(Path(x).exists() for x in dirs),
+              "two distinct dirs", str(dirs))
 
     # neither prompt source -> clean error.
     proc = _run_cli(["debate"], timeout=30)
