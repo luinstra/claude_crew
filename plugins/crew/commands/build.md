@@ -91,11 +91,12 @@ code-review prompt to the engine's (same completeness / code-quality / security 
 error-handling criteria — NOT byte-identical). Like the subprocess seats, the
 Task seats **fetch the diff themselves** — do NOT paste the diff into the prompt.
 Tell each seat to run `git diff HEAD` (and read any untracked files the executor
-created) in the repo it is already in. Pass the executor's summary inline (it's
-small) so every seat shares the same intent. This keeps all four seats reviewing
-the SAME source by the SAME means — no embedded-vs-referenced divergence. Both
-seats are the SAME agent (`crew:reviewer`) with a per-spawn `model` override
-selecting the voice:
+created); `crew:reviewer` has `Read, Grep, Glob, Bash` for exactly this
+(read-only git/inspection). Pass the executor's summary inline (it's small) so
+every seat shares the same intent. This keeps all four seats reviewing the SAME
+source by the SAME means — no embedded-vs-referenced divergence. Both seats are
+the SAME agent (`crew:reviewer`) with a per-spawn `model` override selecting the
+voice:
 
 ```
 Task(subagent_type="crew:reviewer", model="opus",   prompt="<the assembled code-review prompt>")

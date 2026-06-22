@@ -80,6 +80,10 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review "<TARGET>" --sea
   `--seats codex`).
 - The engine returns a JSON array of result objects, each with the six fields:
   `name, model, ok, output, error, elapsed`.
+- By default the subprocess seats **fetch the target themselves** (reference
+  mode — they run the git command / read the plan file). Pass `--inline-diff` to
+  embed the diff in the prompt instead (rarely needed). `--out <file>` writes the
+  JSON to a file (no shell redirect — keeps the call allowlistable).
 - **Never choke on a seat failure:** the engine NEVER raises out of the fan-out.
   Any failed/skipped subprocess seat comes back as an `ok=False` entry with a
   diagnostic in `error`; the other seats still return. The engine exits nonzero
@@ -94,12 +98,13 @@ Spawn the reviewer seats **in parallel**, passing each a
 **criteria-equivalent** prompt to the engine's (same plan-review or code-review
 criteria — NOT byte-identical). Like the subprocess seats, the Task seats
 **fetch the target themselves** — do NOT paste the plan body or diff into the
-prompt. Tell each seat where to look in the repo it is already in: read the plan
-file at its path, or run the diff command (`git diff HEAD` for a working tree,
-`git diff <base>...HEAD` for a branch) and read the changed files. This keeps all
-four seats reviewing the SAME source by the SAME means — no embedded-vs-
-referenced divergence. Both seats are the SAME agent (`crew:reviewer`) with a
-per-spawn `model` override selecting the voice:
+prompt. Tell each seat where to look: `Read` the plan file at its path, or run
+the diff command (`git diff HEAD` for a working tree, `git diff <base>...HEAD`
+for a branch) and read the changed files. `crew:reviewer` has
+`Read, Grep, Glob, Bash` for exactly this (read-only git/inspection). This keeps
+all four seats reviewing the SAME source by the SAME means — no
+embedded-vs-referenced divergence. Both seats are the SAME agent
+(`crew:reviewer`) with a per-spawn `model` override selecting the voice:
 
 ```
 Task(subagent_type="crew:reviewer", model="opus",   prompt="<the assembled review prompt>")
@@ -107,9 +112,9 @@ Task(subagent_type="crew:reviewer", model="sonnet", prompt="<the assembled revie
 ```
 
 The assembled review prompt must state plan-vs-code, tell the seat how to reach
-the target itself (plan file path, or the diff command + changed files), list the
-criteria, and ask for per-criterion PASS/FAIL + `[BLOCKING]`/`[MINOR]` findings +
-a one-line verdict.
+the target itself (the plan file path, or the diff command), list the criteria,
+and ask for per-criterion PASS/FAIL + `[BLOCKING]`/`[MINOR]` findings + a
+one-line verdict.
 
 **Never choke on a Task-seat failure:** a `crew:reviewer` spawn that errors,
 times out, returns no usable block, or is reported missing/failed by the

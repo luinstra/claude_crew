@@ -21,6 +21,10 @@ Key facts (do NOT regress these):
     ``git status`` fine but an out-of-workspace write to ``/tmp`` is blocked.
     (Residual: in-workspace writes are still allowed, but those land in git and
     are recoverable — a vastly smaller blast radius than a system-wide bypass.)
+    POSTURE (accepted): for a local, single-author repo reviewing its own
+    commits the in-workspace-write residual is accepted. REVISIT if this ever
+    reviews untrusted / external-contributor diffs — then run agy in a disposable
+    git worktree or copy for true isolation (or make it opt-in for code review).
   * ``stdin=subprocess.DEVNULL``. No ``pty``/``script`` wrapper, no
     ``--prompt-file`` (that flag does not exist). The earlier
     ``script: write master: I/O error`` was a prompt-file-into-stdin bug.
@@ -80,7 +84,7 @@ _AUTH_MARKERS = (
 )
 
 
-def parse_timeout_to_seconds(value: str, default_seconds: float = 480.0) -> float:
+def parse_timeout_to_seconds(value: str | None, default_seconds: float = 480.0) -> float:
     """Parse an agy-style timeout (e.g. ``8m``, ``480s``, ``480``) to seconds."""
     if value is None:
         return default_seconds

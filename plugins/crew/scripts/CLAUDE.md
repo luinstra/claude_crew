@@ -1,22 +1,62 @@
 # Scripts - Claude Code Guidance
 
-> **Context:** Python state machine for persistence loops and session lifecycle
+> **Context:** Python state machine for persistence loops + the multi-model review engine
 > **Parent Guide:** [Project Root](../../../.claude/CLAUDE.md)
 
 ## Quick Reference
 
-This directory contains the Python backend for crew's persistence features. Hooks receive JSON on stdin, process state, and output JSON results. The `crew-state.py` CLI manages loop state files.
+This directory contains the Python backend for crew's persistence features. Hooks receive JSON on stdin, process state, and output JSON results. The `crew-state.py` CLI manages loop state files. The `multiagent/` package is the review/council engine that fans a prompt across subprocess seats.
 
 ## Structure
 
 ```
 scripts/
-├── crew-state.py       # CLI for loop state management
-├── models.py           # Dataclasses for all JSON structures
-├── persistent-mode.py  # Stop hook: enforces continuation
-├── session-start.py    # SessionStart hook: restores state
-└── test-hooks.py       # Unit tests
+├── crew-state.py        # CLI for loop state management
+├── models.py            # Dataclasses for all JSON structures
+├── persistent-mode.py   # Stop hook: enforces continuation
+├── session-start.py     # SessionStart hook: restores state
+├── test-hooks.py        # Unit tests (state machine + hooks)
+├── test-multiagent.py   # Unit tests for the multiagent engine
+└── multiagent/          # Multi-model review/council engine (see below)
 ```
+
+## Multi-Model Review Engine (`multiagent/`)
+
+The engine that powers `/crew:review`, `/crew:debate`, and the review steps of
+`/crew:build` and `/crew:measure-twice`. It drives **subprocess seats** only —
+the external CLIs `codex` and `agy`. The **Claude seats** (opus/sonnet) are NOT
+in here: they're spawned by the orchestrating command as `crew:reviewer` Task
+subagents (in-session, on the subscription), and the orchestrator normalizes
+their results into the same six-field shape the engine returns.
+
+```
+multiagent/
+├── cli.py               # argparse entry: `review` | `council` | `run` subcommands
+├── prompts.py           # plan/code/council prompt builders (reference + inline modes)
+├── targets.py           # resolve a plan .md or a git diff target (+ the diff_cmd/ref_path a seat reproduces)
+├── render.py            # side-by-side panel + --json rendering
+└── providers/
+    ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC, registry
+    ├── codex.py         # CodexProvider — `codex exec - --sandbox read-only -o <tmp>`, prompt via stdin
+    └── agy.py           # AgyProvider — `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions)
+```
+
+Key contracts (do NOT regress):
+- **Six-field `ProviderResult`** (`name, model, ok, output, error, elapsed`) — the
+  one shape every seat (subprocess AND normalized Task seat) returns.
+- **Never choke** — a failed/skipped seat returns `ok=False`; the fan-out only
+  exits nonzero when EVERY seat failed (and still emits the full array, no traceback).
+- **Reference mode is the default** — seats fetch the diff/plan themselves (the
+  engine passes `targets.Target.diff_cmd` / `ref_path`); `--inline-diff` embeds it.
+  The Claude Task seats (`crew:reviewer`) have `Read, Grep, Glob, Bash` and fetch
+  the target the same way — run the diff command, or read the plan path —
+  Bash scoped to read-only inspection (git diff/show/log, reads); never mutate.
+- **`--out <file>`** writes results to a file so the call needs no shell redirect
+  (stays permission-allowlistable).
+- Tuning env: `CREW_MA_SEATS`, `CREW_MA_TIMEOUT`, `CREW_MA_CODEX_MODEL`,
+  `CREW_MA_AGY_MODEL`, `CREW_MA_AGY_PRINT_TIMEOUT`.
+
+Run its tests with `python plugins/crew/scripts/test-multiagent.py`.
 
 ## Key Patterns
 

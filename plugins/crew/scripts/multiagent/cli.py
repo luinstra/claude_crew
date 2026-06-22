@@ -409,7 +409,8 @@ def build_parser() -> argparse.ArgumentParser:
         "-s", "--sandbox",
         choices=["read-only", "workspace-write"],
         default="read-only",
-        help="sandbox mode (default: read-only)",
+        help="sandbox mode for codex (default: read-only); agy maps any value "
+             "to its single confined --sandbox mode",
     )
     run.add_argument("--json", action="store_true", help="emit the six-field result as JSON")
     run.add_argument("--timeout", type=int, default=None, help="wall-clock timeout (s)")

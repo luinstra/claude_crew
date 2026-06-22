@@ -76,7 +76,8 @@ Spawn the reviewer seats **in parallel**, passing each the SAME council prompt
 for a direct take + the strongest objection + key risks/tradeoffs;
 evidence-based, no rubber-stamp, no manufactured contrarianism. Both seats are
 the SAME agent (`crew:reviewer`) with a per-spawn `model` override selecting the
-voice:
+voice (it has `Read, Grep, Glob, Bash`, so if the question references a
+diff/branch it can fetch and read that itself):
 
 ```
 Task(subagent_type="crew:reviewer", model="opus",   prompt="<the council prompt with the question inlined>")

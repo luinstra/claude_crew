@@ -61,14 +61,14 @@ Skills provide specialized guidance that activates automatically based on contex
 
 | Command | Description |
 |---------|-------------|
-| `/crew:build "task"` | Start verified persistence loop — requires advisor approval before completion |
+| `/crew:build "task"` | Start verified persistence loop — requires a multi-model panel to approve before completion |
 | `/crew:cancel-build` | Exit an active build loop |
-| `/crew:measure-twice "task"` | Start self-refining plan loop — advisor reviews until approved |
+| `/crew:measure-twice "task"` | Start self-refining plan loop — a multi-model panel reviews until approved |
 | `/crew:cancel-measure-twice` | Exit an active measure-twice loop |
 | `/crew:plan "description"` | Start planning session |
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (saves context) |
 | `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (codex + agy + opus + sonnet) → `APPROVED`/`REVISE` verdict |
-| `/crew:debate "topic"` | Multi-model debate — thin shim to `/octo:debate` (requires the `octo` plugin) |
+| `/crew:debate "question"` | Crew-native council — single-round multi-model take (codex + agy + opus + sonnet), synthesized into agreement/disagreement/recommendation (self-contained, no external plugin) |
 
 ### Utilities
 
@@ -90,24 +90,24 @@ Skills provide specialized guidance that activates automatically based on contex
 
 ## Planning Workflow
 
-1. Use `/crew:plan` to start a planning session (or `/crew:measure-twice` for advisor-verified plans)
+1. Use `/crew:plan` to start a planning session (or `/crew:measure-twice` for panel-verified plans)
 2. Answer clarifying questions about preferences and requirements
 3. Say "Create the plan" when ready
 4. Use `/crew:review` to evaluate the plan if needed
 5. Use `/crew:execute` to run the plan via executor agent (keeps main context clean)
 
-**Measure-Twice Loop:** For critical tasks, `/crew:measure-twice` iterates until an advisor approves the plan (handling BLOCKING issues automatically, accepting MINOR issues).
+**Measure-Twice Loop:** For critical tasks, `/crew:measure-twice` iterates until a multi-model panel approves the plan (handling BLOCKING issues automatically, accepting MINOR issues).
 
 ## Build Loop (Verified Persistence)
 
-For tasks requiring advisor verification before completion:
+For tasks requiring multi-model panel verification before completion:
 
 1. Start with `/crew:build "your task description"`
 2. Claude works until the task appears complete
-3. Advisor agent must verify and approve completion before accepting "done"
+3. A multi-model panel must verify and approve completion before accepting "done"
 4. Use `/crew:cancel-build` to exit early if needed
 
-**Note:** For simpler persistence without advisor verification, consider the official `ralph-wiggum` plugin.
+**Note:** For simpler persistence without panel verification, consider the official `ralph-wiggum` plugin.
 
 ## Working Principles
 
@@ -141,4 +141,4 @@ Before concluding ANY work session, verify:
 
 **If ANY checkbox is unchecked, CONTINUE WORKING.**
 
-Active build / measure-twice loops are enforced by the Stop hook — they won't end until the advisor approves (or you cancel via `/crew:cancel-build` or `/crew:cancel-measure-twice`).
+Active build / measure-twice loops are enforced by the Stop hook — they won't end until the multi-model panel approves (or you cancel via `/crew:cancel-build` or `/crew:cancel-measure-twice`).

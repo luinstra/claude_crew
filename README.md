@@ -161,8 +161,10 @@ synthesizes one verdict. The default panel is **codex + agy + opus + sonnet**:
 `codex` and `agy` run via the bundled `multiagent` engine
 (`plugins/crew/scripts/multiagent/`), while the two Claude voices are the
 `crew:reviewer` agent spawned twice (at `model: opus` and `model: sonnet`).
-Narrow the panel with an explicit `--seats` (e.g. `--seats codex`). It
-dispatches plan-vs-code from natural language and reports `APPROVED`/`REVISE`
+Narrow the subprocess seats via the engine's `--seats` flag or the
+`CREW_MA_SEATS` env (e.g. just `codex`) — that's an engine/CLI option, not a
+slash-command flag. It dispatches plan-vs-code from natural language and reports
+`APPROVED`/`REVISE`
 with `[BLOCKING]`/`[MINOR]` findings. A skipped or failed seat (any kind) is
 reported but never sinks the panel — the verdict is synthesized from whichever
 seats succeed, and only an all-seats-failed panel skips the verdict.

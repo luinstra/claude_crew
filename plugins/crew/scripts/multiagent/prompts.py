@@ -112,24 +112,27 @@ def code_review_ref(diff_cmd: str | None, descriptor: str = "code diff", notes: 
     told to inspect the working tree directly.
     """
     notes_block = f"\nCONTEXT NOTES:\n{notes}\n" if notes else ""
+    scope_rule = (
+        "Read what you need to judge the change well: the changed files, AND any "
+        "file the change AFFECTS even if it wasn't itself modified — callers of "
+        "changed code, tests, and docs/configs/READMEs that describe or reference "
+        "the changed behavior (flag any the change leaves stale, inconsistent, or "
+        "unupdated; that is a real finding). What to AVOID is a ground-up audit of "
+        "unrelated subsystems the change doesn't touch — follow the change's blast "
+        "radius, don't re-review the whole repository for its own sake."
+    )
     if diff_cmd:
         how = (
             "The diff is NOT inlined below — reproduce it yourself in the "
             "current repository:\n"
             f"  run:  {diff_cmd}\n"
-            "Then review the changes that command shows. You MAY open the "
-            "changed files for surrounding context, but keep your investigation "
-            "SCOPED to this diff: review what changed and its immediate "
-            "context — do NOT audit, crawl, or re-review the rest of the "
-            "repository. Spend your effort on the change, not the codebase."
+            f"Then review the changes that command shows. {scope_rule}"
         )
     else:
         how = (
             "The diff is NOT inlined below — there is no diff command for this "
-            "target (e.g. no commits yet). Inspect the working-tree files "
-            "directly in the current repository and review them. Keep your "
-            "investigation SCOPED to the new/changed files — do not audit the "
-            "whole repository."
+            "target (e.g. no commits yet). Inspect the new/changed working-tree "
+            f"files directly in the current repository and review them. {scope_rule}"
         )
     return f"""You are one reviewer on a multi-model review panel. Review a \
 CODE DIFF as a single seat. Be specific and terse.
