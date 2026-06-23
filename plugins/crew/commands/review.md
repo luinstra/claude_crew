@@ -1,5 +1,5 @@
 ---
-description: Multi-model review of a plan OR code diff (codex + agy + opus + sonnet)
+description: Multi-model review of a plan OR code diff (default panel codex + agy + opus + sonnet; narrow with --panel/--seats)
 argument-hint: "<the plan | the code | a .md path | a git scope>"
 allowed-tools: Bash, Task, Read, Glob
 ---

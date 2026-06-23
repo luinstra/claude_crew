@@ -167,6 +167,8 @@ divergence. Each seat is the SAME agent (`crew:reviewer`) with a per-spawn
 `model` override selecting the voice (spawn only the ones in the panel):
 
 ```
+# Spawn ONLY the opus/sonnet seats in the resolved panel — e.g. --panel solo
+# spawns just the opus line; --panel lite spawns both; full spawns both too.
 Task(subagent_type="crew:reviewer", model="opus",   prompt="<the assembled plan-review prompt>")
 Task(subagent_type="crew:reviewer", model="sonnet", prompt="<the assembled plan-review prompt>")
 ```

@@ -128,6 +128,8 @@ SAME means — no embedded-vs-referenced divergence. Each seat is the SAME agent
 only the ones in the panel):
 
 ```
+# Spawn ONLY the opus/sonnet seats in the resolved panel — e.g. --panel solo
+# spawns just the opus line; --panel lite spawns both; full spawns both too.
 Task(subagent_type="crew:reviewer", model="opus",   prompt="<the assembled code-review prompt>")
 Task(subagent_type="crew:reviewer", model="sonnet", prompt="<the assembled code-review prompt>")
 ```

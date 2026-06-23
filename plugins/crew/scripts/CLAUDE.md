@@ -31,7 +31,7 @@ their results into the same six-field shape the engine returns.
 
 ```
 multiagent/
-├── cli.py               # argparse entry: `review` | `council` | `run` subcommands
+├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` subcommands
 ├── prompts.py           # plan/code/council prompt builders (reference + inline modes)
 ├── targets.py           # resolve a plan .md or a git diff target (+ the diff_cmd/ref_path a seat reproduces)
 ├── render.py            # side-by-side panel + --json rendering
@@ -55,6 +55,14 @@ Key contracts (do NOT regress):
   + the native enforcement paths if it's ever pointed at untrusted diffs.
 - **`--out <file>`** writes results to a file so the call needs no shell redirect
   (stays permission-allowlistable).
+- **Panel selection** — the commands accept `--panel full|lite|solo` / `--seats
+  <subset>`; the ORCHESTRATOR resolves those to a seat list and passes only the
+  `codex`/`agy` subset to the engine's `--seats` (skipping the engine when there
+  are none). The engine itself only knows subprocess seats. One engine-side
+  affordance: `cli.py debate --seats none` (or `""`) scaffolds the dir + writes an
+  empty `subprocess.json` (exit 0) instead of erroring — so a Claude-only
+  `lite`/`solo` council still gets its log dir. `review`/`council` intentionally
+  do NOT support empty seats (they're pure fan-out; the orchestrator skips them).
 - Tuning env: `CREW_MA_SEATS`, `CREW_MA_TIMEOUT`, `CREW_MA_CODEX_MODEL`,
   `CREW_MA_AGY_MODEL`, `CREW_MA_AGY_PRINT_TIMEOUT`.
 

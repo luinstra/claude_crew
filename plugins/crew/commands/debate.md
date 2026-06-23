@@ -1,5 +1,5 @@
 ---
-description: Crew-native council — single-round multi-model take on a question (codex + agy + opus + sonnet)
+description: Crew-native council — single-round multi-model take on a question (default panel codex + agy + opus + sonnet; narrow with --panel/--seats)
 argument-hint: "<question>"
 allowed-tools: Bash, Task, Read, Glob, Write
 ---
