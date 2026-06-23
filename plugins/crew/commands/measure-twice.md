@@ -8,11 +8,32 @@ allowed-tools: Bash, Task, Read, Glob
 
 $ARGUMENTS
 
+## Panel options (optional)
+
+Flags at the **start** of `$ARGUMENTS` choose which models review the plan; the
+rest is the task / design-doc path. Default (no flag) = the full panel.
+
+- `--panel full` = `codex,agy,opus,sonnet` (default) · `--panel lite` =
+  `opus,sonnet` · `--panel solo` = `opus`
+- `--seats <list>` = an explicit comma-list from `codex,agy,opus,sonnet`
+  (e.g. `--seats codex,opus`). `--seats` wins if both are given.
+
+Resolve the flags to a **seat list** once, then split it:
+- **subprocess seats** = the `codex`/`agy` entries → pass as the engine's
+  `--seats` (Phase 3 Step 3a). **If the list has NO codex/agy, SKIP Step 3a.**
+- **task seats** = the `opus`/`sonnet` entries → in Step 3b spawn `crew:reviewer`
+  ONLY for those (zero, one, or both).
+
+Below, **"the task"** means `$ARGUMENTS` with these panel flags removed — use it
+as the requirements / design-doc path. Keep the raw `$ARGUMENTS` (flags included)
+only in the `crew-state.py --task` so the panel survives across iterations. A
+one-seat panel is fine — synthesis / never-choke handle any count down to one.
+
 ## How This Works
 
 1. **Gather Requirements** - Interview user to understand the task (or skip if design doc provided)
 2. **Generate Plan** - Advisor creates the plan
-3. **Review** - A multi-model panel (codex + agy + opus + sonnet) evaluates (with BLOCKING/MINOR classification)
+3. **Review** - The resolved multi-model panel evaluates (with BLOCKING/MINOR classification)
 4. **Iterate** - If BLOCKING issues: revise and re-review. If REJECT: rethink approach.
 5. **Complete** - When the panel's verdict is APPROVED (or only MINOR issues)
 
@@ -95,14 +116,16 @@ Review the plan with a multi-model panel instead of a single advisor. The same
 plan-review criteria fan out across several AI seats in parallel, and you
 synthesize the results into the existing verdict. Two seat kinds:
 
-- **subprocess seats** — `codex` and `agy` via the Python engine.
-- **task seats** — `crew:reviewer` spawned twice (at `model: opus` and
-  `model: sonnet`) via the Task tool (in-session, on the subscription — no
-  `claude -p`, no API key).
+- **subprocess seats** — the `codex`/`agy` entries of the resolved panel, via
+  the Python engine.
+- **task seats** — the `opus`/`sonnet` entries of the resolved panel, each a
+  `crew:reviewer` spawned via the Task tool (in-session, on the subscription —
+  no `claude -p`, no API key).
 
-Default panel: **codex + agy + opus + sonnet**. A failed/skipped seat NEVER
-aborts the review (see "Synthesize" below) — the verdict is synthesized from
-whichever seats succeed.
+The panel is whatever the Panel-options flags resolved to (default **codex + agy
++ opus + sonnet**). Only fan out the seats in that list. A failed/skipped seat
+NEVER aborts the review (see "Synthesize" below) — the verdict is synthesized
+from whichever seats succeed.
 
 > **`allowed-tools` scopes THIS orchestrator only.** It grants nothing to the
 > seats spawned below — seat tool access is governed per-seat by the reviewer
@@ -110,12 +133,14 @@ whichever seats succeed.
 
 #### 3a — Fan out subprocess seats (one Bash call)
 
-Run the engine once over the plan file (`[plan_file from state]`). Use the
-bare-script path (its top-of-file `sys.path` guard makes package imports
+**Skip this step if the resolved panel has no `codex`/`agy` seat** (e.g.
+`--panel lite`) — go straight to 3b. Otherwise run the engine once over the plan
+file (`[plan_file from state]`), passing ONLY the resolved subprocess seats. Use
+the bare-script path (its top-of-file `sys.path` guard makes package imports
 resolve):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review "[plan_file from state]" --seats codex,agy --json
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review "[plan_file from state]" --seats <resolved codex/agy seats> --json
 ```
 
 - The engine returns a JSON array of result objects, each with the six fields:
@@ -130,14 +155,16 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review "[plan_file from
 
 #### 3b — Fan out Task seats (parallel)
 
-Spawn the reviewer seats **in parallel**, passing each a **criteria-equivalent**
-plan-review prompt to the engine's (same clarity / testability / completeness /
-context criteria — NOT byte-identical). Like the subprocess seats, the Task
-seats **read the plan file themselves** — do NOT paste the plan body into the
-prompt. Tell each seat to read the plan at `[plan_file from state]` in the repo
-it is already in. This keeps all four seats reviewing the SAME source by the
-SAME means — no embedded-vs-referenced divergence. Both seats are the SAME agent
-(`crew:reviewer`) with a per-spawn `model` override selecting the voice:
+Spawn a reviewer seat **in parallel for each `opus`/`sonnet` entry in the
+resolved panel** (zero, one, or both — skip this step if neither is present),
+passing each a **criteria-equivalent** plan-review prompt to the engine's (same
+clarity / testability / completeness / context criteria — NOT byte-identical).
+Like the subprocess seats, the Task seats **read the plan file themselves** — do
+NOT paste the plan body into the prompt. Tell each seat to read the plan at
+`[plan_file from state]` in the repo it is already in. This keeps all seats
+reviewing the SAME source by the SAME means — no embedded-vs-referenced
+divergence. Each seat is the SAME agent (`crew:reviewer`) with a per-spawn
+`model` override selecting the voice (spawn only the ones in the panel):
 
 ```
 Task(subagent_type="crew:reviewer", model="opus",   prompt="<the assembled plan-review prompt>")
@@ -197,8 +224,8 @@ Example:
 (subprocess OR Task) NEVER aborts the review and is NEVER silently dropped:
 synthesize the verdict from the seats that produced usable output, and render
 each failed/skipped seat's block with its diagnostic alongside the successful
-ones. ONLY when **zero** seats produced usable output (every subprocess seat
-failed AND both Task seats failed) do you skip the verdict and instead report:
+ones. ONLY when **zero** seats in the panel produced usable output do you skip
+the verdict and instead report:
 `could not review — all seats failed: <per-seat diagnostics>`.
 
 ### Step 4: Handle Verdict

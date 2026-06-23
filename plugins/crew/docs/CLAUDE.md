@@ -70,6 +70,11 @@ Skills provide specialized guidance that activates automatically based on contex
 | `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (codex + agy + opus + sonnet) → `APPROVED`/`REVISE` verdict |
 | `/crew:debate "question"` | Crew-native council — single-round multi-model take (codex + agy + opus + sonnet), synthesized into agreement/disagreement/recommendation (self-contained, no external plugin) |
 
+**Panel size (build / measure-twice / review / debate):** start the argument with
+`--panel full` (default), `--panel lite` (opus + sonnet), `--panel solo` (opus),
+or `--seats codex,opus` (any subset of `codex,agy,opus,sonnet`). Not every change
+needs all four — e.g. `/crew:build --panel lite "fix the bug"`.
+
 ### Utilities
 
 | Command | Description |

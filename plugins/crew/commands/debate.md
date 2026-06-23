@@ -12,6 +12,23 @@ $ARGUMENTS
 > seats spawned below — seat tool access is governed per-seat by the reviewer
 > agent frontmatter (`Read, Grep, Glob, Bash`) and the engine's sandbox flags.
 
+## Panel options (optional)
+
+Flags at the **start** of `$ARGUMENTS` choose which models sit on the council;
+the rest is the question. Default (no flag) = the full panel.
+
+- `--panel full` = `codex,agy,opus,sonnet` (default) · `--panel lite` =
+  `opus,sonnet` · `--panel solo` = `opus`
+- `--seats <list>` = an explicit comma-list from `codex,agy,opus,sonnet`
+  (e.g. `--seats codex,opus`). `--seats` wins if both are given.
+
+Resolve to a **seat list**, then split it: the `codex`/`agy` entries become the
+`debate` subcommand's `--seats` (Step 1); the `opus`/`sonnet` entries are the
+Task seats (Step 2 — spawn only those). For a **Claude-only panel** (no codex/agy
+— e.g. `--panel lite`/`solo`), pass **`--seats none`** so the subcommand still
+scaffolds the dir + `question.txt` but runs no subprocess seats. Stage the
+question as `$ARGUMENTS` with the flags removed. A one-seat council is fine.
+
 ## What this does
 
 This is a **lightweight, single-round council** — NOT a multi-round debate.
@@ -23,14 +40,16 @@ synthesize: **areas of agreement / key disagreements / recommendation**.
 Single round only — no rebuttals, no round-threading, no judge-as-separate-
 model (you are the synthesizer). Two seat kinds:
 
-- **subprocess seats** — `codex` and `agy` via the Python engine.
-- **task seats** — `crew:reviewer` spawned twice (at `model: opus` and
-  `model: sonnet`) via the Task tool (in-session, on the subscription — no
+- **subprocess seats** — the `codex`/`agy` entries of the resolved panel, via
+  the Python engine.
+- **task seats** — the `opus`/`sonnet` entries of the resolved panel, each a
+  `crew:reviewer` via the Task tool (in-session, on the subscription — no
   `claude -p`, no API key).
 
-Default panel: **codex + agy + opus + sonnet** (agy is best-effort). This is
-safe because a failed/skipped seat NEVER sinks the council (see Step 5) — the
-synthesis is built from whichever seats succeed.
+The panel is whatever the Panel-options flags resolved to (default **codex + agy
++ opus + sonnet**); only seat the models in that list. This is safe because a
+failed/skipped seat NEVER sinks the council (see Step 5) — the synthesis is built
+from whichever seats succeed.
 
 ## Step 1 — Scaffold the debate + fan out subprocess seats (one call)
 
@@ -45,8 +64,11 @@ slugged staging name — NOT a hidden dot-file — e.g.
 staging file, so nothing lingers):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" debate -f .crew/debates/staged-question-<slug>.txt --slug <short-kebab-slug> --seats codex,agy --consume
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" debate -f .crew/debates/staged-question-<slug>.txt --slug <short-kebab-slug> --seats <resolved codex/agy seats, or none> --consume
 ```
+
+(`--seats` carries the resolved `codex`/`agy` seats; pass `none` for a
+Claude-only panel so the dir is still scaffolded with no subprocess seats run.)
 
 (For a short, simple question you may pass it positionally instead of `-f`:
 `… debate "<question>" --slug <slug>` — no staging file needed. Prefer `-f` for
@@ -80,13 +102,15 @@ and `subprocess.json` (the codex+agy results) into it, and prints a JSON summary
 
 ## Step 2 — Fan out Task seats (parallel)
 
-Spawn the reviewer seats **in parallel**, passing each the SAME council prompt
-(criteria-equivalent to the engine's `council` template): the question + ask
-for a direct take + the strongest objection + key risks/tradeoffs;
-evidence-based, no rubber-stamp, no manufactured contrarianism. Both seats are
-the SAME agent (`crew:reviewer`) with a per-spawn `model` override selecting the
-voice (it has `Read, Grep, Glob, Bash`, so if the question references a
-diff/branch it can fetch and read that itself):
+Spawn a reviewer seat **in parallel for each `opus`/`sonnet` entry in the
+resolved panel** (zero, one, or both — skip this step if neither is present),
+passing each the SAME council prompt (criteria-equivalent to the engine's
+`council` template): the question + ask for a direct take + the strongest
+objection + key risks/tradeoffs; evidence-based, no rubber-stamp, no manufactured
+contrarianism. Each seat is the SAME agent (`crew:reviewer`) with a per-spawn
+`model` override selecting the voice (it has `Read, Grep, Glob, Bash`, so if the
+question references a diff/branch it can fetch and read that itself — spawn only
+the ones in the panel):
 
 ```
 Task(subagent_type="crew:reviewer", model="opus",   prompt="<the council prompt with the question inlined>")
@@ -133,10 +157,9 @@ render them side-by-side. Then write a synthesis with exactly these sections:
 **Never choke — synthesize from whatever succeeded.** A failed/skipped seat
 (subprocess OR Task) NEVER aborts the council and is NEVER silently dropped.
 Synthesize from the seats that produced usable output and render the
-failed/skipped ones with their diagnostics. ONLY when **zero** seats produced
-usable output (every subprocess seat failed AND both Task seats failed) do you
-skip the synthesis and report: `could not convene — all seats failed:
-<per-seat diagnostics>`.
+failed/skipped ones with their diagnostics. ONLY when **zero** seats in the panel
+produced usable output do you skip the synthesis and report:
+`could not convene — all seats failed: <per-seat diagnostics>`.
 
 ## Step 5 — Log the transcript
 

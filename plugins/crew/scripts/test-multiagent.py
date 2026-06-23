@@ -1372,6 +1372,35 @@ def test_debate_subcommand():
               and all(Path(x).exists() for x in dirs),
               "two distinct dirs", str(dirs))
 
+    # Claude-only panel: --seats none scaffolds the dir but runs NO subprocess seats.
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        bins = d / "bin"
+        bins.mkdir()
+        make_fake_bin(bins, "codex", codex_echo)  # present, but must NOT be invoked
+        env = path_with(bins)
+        base = d / "debates"
+        proc = _run_cli(
+            ["debate", "Claude only?", "--seats", "none", "--base-dir", str(base)],
+            env=env, timeout=30,
+        )
+        ddir = None
+        try:
+            ddir = Path(json.loads(proc.stdout)["dir"])
+        except Exception:
+            ddir = None
+        is_empty = False
+        if ddir and (ddir / "subprocess.json").exists():
+            try:
+                is_empty = json.loads((ddir / "subprocess.json").read_text()) == []
+            except Exception:
+                is_empty = False
+        check("debate --seats none: scaffolds dir + question.txt, exit 0",
+              proc.returncode == 0 and bool(ddir) and (ddir / "question.txt").exists(),
+              "exit0 + dir + question.txt", f"{proc.returncode}: {proc.stdout[:160]}")
+        check("debate --seats none: subprocess.json is [] (no codex/agy run)",
+              is_empty, "[]", str(ddir))
+
     # neither prompt source -> clean error.
     proc = _run_cli(["debate"], timeout=30)
     check("debate with neither -f nor question -> nonzero error",

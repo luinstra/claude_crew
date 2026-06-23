@@ -8,15 +8,29 @@ allowed-tools: Bash, Task, Read, Glob
 
 $ARGUMENTS
 
-> **Note (Claude seats):** the two Claude voices are a single agent,
-> `crew:reviewer` (read-only by convention — it has `Bash` for git inspection
-> but is instructed not to mutate; not sandbox-enforced), spawned twice in
-> parallel with a per-spawn `model` override — once at `model: opus` and once at
-> `model: sonnet`.
+> **Note (Claude seats):** the Claude voices are a single agent, `crew:reviewer`
+> (read-only by convention — it has `Bash` for git inspection but is instructed
+> not to mutate; not sandbox-enforced), spawned once per `opus`/`sonnet` seat in
+> the panel with a per-spawn `model` override.
 
 > **`allowed-tools` scopes THIS orchestrator only.** It grants nothing to the
 > seats spawned below — seat tool access is governed per-seat by the reviewer
 > agent frontmatter (`Read, Grep, Glob, Bash`) and the engine's sandbox flags.
+
+## Panel options (optional)
+
+Flags at the **start** of `$ARGUMENTS` choose which models review; the rest is
+the review request. Default (no flag) = the full panel.
+
+- `--panel full` = `codex,agy,opus,sonnet` (default) · `--panel lite` =
+  `opus,sonnet` · `--panel solo` = `opus`
+- `--seats <list>` = an explicit comma-list from `codex,agy,opus,sonnet`
+  (e.g. `--seats codex,opus`). `--seats` wins if both are given.
+
+Resolve to a **seat list**, then split it: the `codex`/`agy` entries are the
+engine's `--seats` (Step 3 — **skip Step 3 if there are none**); the
+`opus`/`sonnet` entries are the Task seats (Step 4 — spawn only those). A
+one-seat panel is fine.
 
 ## What this does
 
@@ -24,19 +38,21 @@ The same review prompt fans out across a multi-model panel and you synthesize
 the results into the existing `APPROVED / REVISE / [BLOCKING] / [MINOR]`
 verdict. Two seat kinds:
 
-- **subprocess seats** — `codex` and `agy` via the Python engine.
-- **task seats** — `crew:reviewer` spawned twice (at `model: opus` and
-  `model: sonnet`) via the Task tool (in-session, on the subscription — no
+- **subprocess seats** — the `codex`/`agy` entries of the resolved panel, via
+  the Python engine.
+- **task seats** — the `opus`/`sonnet` entries of the resolved panel, each a
+  `crew:reviewer` via the Task tool (in-session, on the subscription — no
   `claude -p`, no API key).
 
-Default panel: **codex + agy + opus + sonnet**. `agy` is a default subprocess
-seat alongside `codex`; opus and sonnet are the Task seats. This is safe because
-a failed/skipped seat NEVER aborts the review (see Step 6) — the verdict is
+The panel is whatever the Panel-options flags resolved to (default **codex + agy
++ opus + sonnet**); only fan out the seats in that list. This is safe because a
+failed/skipped seat NEVER aborts the review (see Step 6) — the verdict is
 synthesized from whichever seats succeed.
 
 ## Step 1 — Dispatch plan vs code (natural language)
 
-Read `$ARGUMENTS` and pick the target:
+Read the review request (`$ARGUMENTS` with any panel flags removed) and pick the
+target:
 
 - **Plan review** when the argument says "the plan", names a `.md` path, or is
   empty/"latest" (→ use the most recent `.md` in `.crew/plans/`).
@@ -65,11 +81,13 @@ silently guess.
 
 ## Step 3 — Fan out subprocess seats (one Bash call)
 
-Run the engine once for the subprocess seats. Use the bare-script path (its
-top-of-file `sys.path` guard makes package imports resolve):
+**Skip this step if the resolved panel has no `codex`/`agy` seat** (e.g.
+`--panel lite`) — go straight to Step 4. Otherwise run the engine once for the
+resolved subprocess seats. Use the bare-script path (its top-of-file `sys.path`
+guard makes package imports resolve):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review "<TARGET>" --seats codex,agy --json --base "<BASE>"
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review "<TARGET>" --seats <resolved codex/agy seats> --json --base "<BASE>"
 ```
 
 - **Quote `"<TARGET>"` and `"<BASE>"`** — a plan path can contain spaces, and
@@ -77,9 +95,8 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review "<TARGET>" --sea
 - `<TARGET>` is the resolved plan `.md` path or git scope from Step 1.
 - For a code review of the working tree, `<TARGET>` is typically `working-tree`
   or `auto`.
-- `codex,agy` is the default subprocess panel; omitting `--seats` selects the
-  same default. To narrow the panel, pass an explicit `--seats` (e.g. just
-  `--seats codex`).
+- `--seats` carries ONLY the resolved `codex`/`agy` seats (the Panel-options
+  flags already chose them).
 - The engine returns a JSON array of result objects, each with the six fields:
   `name, model, ok, output, error, elapsed`.
 - By default the subprocess seats **fetch the target themselves** (reference
@@ -96,19 +113,20 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review "<TARGET>" --sea
 
 ## Step 4 — Fan out Task seats (parallel)
 
-Spawn the reviewer seats **in parallel**, passing each a
-**criteria-equivalent** prompt to the engine's (same plan-review or code-review
-criteria — NOT byte-identical). Like the subprocess seats, the Task seats
-**fetch the target themselves** — do NOT paste the plan body or diff into the
-prompt. Tell each seat where to look: `Read` the plan file at its path, or run
-the diff command (`git diff HEAD` for a working tree, `git diff <base>...HEAD`
-for a branch — the three-dot form diffs from the merge-base, identical to the
-diff the engine pins for its subprocess seats) and read the changed files.
-`crew:reviewer` has
-`Read, Grep, Glob, Bash` for exactly this (read-only git/inspection). This keeps
-all four seats reviewing the SAME source by the SAME means — no
-embedded-vs-referenced divergence. Both seats are the SAME agent
-(`crew:reviewer`) with a per-spawn `model` override selecting the voice:
+Spawn a reviewer seat **in parallel for each `opus`/`sonnet` entry in the
+resolved panel** (zero, one, or both — skip this step if neither is present),
+passing each a **criteria-equivalent** prompt to the engine's (same plan-review
+or code-review criteria — NOT byte-identical). Like the subprocess seats, the
+Task seats **fetch the target themselves** — do NOT paste the plan body or diff
+into the prompt. Tell each seat where to look: `Read` the plan file at its path,
+or run the diff command (`git diff HEAD` for a working tree, `git diff
+<base>...HEAD` for a branch — the three-dot form diffs from the merge-base,
+identical to the diff the engine pins for its subprocess seats) and read the
+changed files. `crew:reviewer` has `Read, Grep, Glob, Bash` for exactly this
+(read-only git/inspection). This keeps all seats reviewing the SAME source by the
+SAME means — no embedded-vs-referenced divergence. Each seat is the SAME agent
+(`crew:reviewer`) with a per-spawn `model` override selecting the voice (spawn
+only the ones in the panel):
 
 ```
 Task(subagent_type="crew:reviewer", model="opus",   prompt="<the assembled review prompt>")
@@ -158,8 +176,8 @@ emit the existing verdict format:
 - Synthesize the verdict from the seats that produced usable output.
 - Render each failed/skipped seat's block with its diagnostic alongside the
   successful ones.
-- ONLY when **zero** seats produced usable output (every subprocess seat failed
-  AND both Task seats failed) do you skip the verdict and instead report:
+- ONLY when **zero** seats in the panel produced usable output do you skip the
+  verdict and instead report:
   `could not review — all seats failed: <per-seat diagnostics>`.
 
 ---

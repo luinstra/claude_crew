@@ -338,13 +338,17 @@ def cmd_debate(args: argparse.Namespace) -> int:
         except OSError:
             pass
 
-    seats = _resolve_seats(args.seats)
-    if not seats:
-        print("error: no subprocess seats requested", file=sys.stderr)
-        return 2
+    # A Claude-only panel (e.g. --panel lite/solo) has NO codex/agy seat but
+    # still wants the dir + question.txt scaffolded so the orchestrator can run
+    # the opus/sonnet Task seats and log there. `--seats none` (or "") means
+    # exactly that — distinct from OMITTING --seats (which defaults to codex,agy).
+    if args.seats is not None and args.seats.strip().lower() in ("", "none"):
+        seats: list[str] = []
+    else:
+        seats = _resolve_seats(args.seats)
 
     timeout = _resolve_timeout(args.timeout)
-    results = _fan_out(seats, prompts.council(question), timeout)
+    results = _fan_out(seats, prompts.council(question), timeout) if seats else []
     try:
         (debate_dir / "subprocess.json").write_text(
             render.render_json(results), encoding="utf-8"
@@ -529,7 +533,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=".crew/debates",
         help="parent dir for debate logs (default: .crew/debates)",
     )
-    debate.add_argument("--seats", default=None, help="comma-separated subprocess seats (codex,agy)")
+    debate.add_argument(
+        "--seats", default=None,
+        help="comma-separated subprocess seats (codex,agy); 'none' scaffolds the "
+             "dir but runs no subprocess seats (a Claude-only panel)",
+    )
     debate.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
     debate.add_argument(
         "--consume", action="store_true",

@@ -160,14 +160,23 @@ For work requiring verification before declaring "done," use `/crew:build` inste
 synthesizes one verdict. The default panel is **codex + agy + opus + sonnet**:
 `codex` and `agy` run via the bundled `multiagent` engine
 (`plugins/crew/scripts/multiagent/`), while the two Claude voices are the
-`crew:reviewer` agent spawned twice (at `model: opus` and `model: sonnet`).
-Narrow the subprocess seats via the engine's `--seats` flag or the
-`CREW_MA_SEATS` env (e.g. just `codex`) — that's an engine/CLI option, not a
-slash-command flag. It dispatches plan-vs-code from natural language and reports
-`APPROVED`/`REVISE`
-with `[BLOCKING]`/`[MINOR]` findings. A skipped or failed seat (any kind) is
-reported but never sinks the panel — the verdict is synthesized from whichever
-seats succeed, and only an all-seats-failed panel skips the verdict.
+`crew:reviewer` agent spawned at `model: opus` and `model: sonnet`. It dispatches
+plan-vs-code from natural language and reports `APPROVED`/`REVISE` with
+`[BLOCKING]`/`[MINOR]` findings. A skipped or failed seat (any kind) is reported
+but never sinks the panel — the verdict is synthesized from whichever seats
+succeed, and only an all-seats-failed panel skips the verdict.
+
+**Choosing the panel.** `/crew:review`, `/crew:debate`, `/crew:build`, and
+`/crew:measure-twice` all accept panel flags at the start of their argument:
+
+- `--panel full` = `codex,agy,opus,sonnet` (the default) · `--panel lite` =
+  `opus,sonnet` · `--panel solo` = `opus`
+- `--seats <list>` — an explicit subset of `codex,agy,opus,sonnet`
+  (e.g. `/crew:build --seats codex,opus "fix the bug"`).
+
+Not every change needs the full panel — `lite` (the two Claude voices, no
+external CLI) or a single seat is plenty for routine work. (At the engine level,
+`CREW_MA_SEATS` still pins the default subprocess seats.)
 
 #### Ad-hoc single-provider runs
 
