@@ -92,13 +92,16 @@ _AUTH_MARKERS = (
 AUTH_BANNER_MAX_CHARS = 1000
 
 # Tokens distinctive to our review/discuss prompts (review rubric + discuss
-# stance). Chosen NOT to collide with auth-banner wording — e.g. avoid bare
-# "fail"/"pass" since "authentication failed"/"passcode" would mask a real banner.
+# stance). Chosen NOT to collide with auth-banner wording — so they must be
+# bracketed tags or distinctive multi-word headers, NEVER bare English verdict
+# words. We deliberately EXCLUDE "approved"/"revise" (an auth/account banner can
+# say "not approved" / "please revise your credentials" → would mask a real
+# banner = false-negative) and "pass"/"fail" ("authentication failed"). A
+# compliant review still trips this via its bracketed findings, "confidence"
+# line, or discuss headers; if not, length carries it.
 _REVIEW_STRUCTURE_MARKERS = (
     "[blocking]",
     "[minor]",
-    "approved",
-    "revise",
     "confidence",
     "direct take",
     "strongest objection",

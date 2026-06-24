@@ -244,6 +244,15 @@ def test_agy_helpers():
               "sign in to continue: https://accounts.google.com/o/oauth2/auth"
           ) is not None,
           "non-None", "None")
+    # False-NEGATIVE guard: a real auth banner that happens to contain the bare
+    # word "approved" must STILL be flagged (i.e. "approved" is not a structure
+    # marker — else the banner masks itself and slips through as a "review").
+    check("detect_auth_or_error still flags an auth banner containing 'approved'",
+          detect_auth_or_error(
+              "your device is not approved — please sign in at "
+              "https://accounts.google.com/o/oauth2/auth to continue"
+          ) is not None,
+          "non-None", "None")
     check("parse_timeout 8m -> 480s", parse_timeout_to_seconds("8m") == 480.0,
           "480.0", str(parse_timeout_to_seconds("8m")))
     check("parse_timeout 300s -> 300", parse_timeout_to_seconds("300s") == 300.0,
@@ -788,6 +797,20 @@ def test_targets():
               t.diff_cmd is not None and "diff HEAD" not in t.diff_cmd
               and "hash-object -t tree" in t.diff_cmd,
               "empty-tree base, no HEAD", str(t.diff_cmd))
+
+    # no commits yet — DIVERGENT case (staged content != working tree). Pins the
+    # working-tree semantics decision: `git diff <empty-tree>` reads the WORKING
+    # TREE, not the index (no --cached), consistent with the `git diff HEAD` path.
+    # A staged-then-modified file must show its WORKING-TREE version.
+    with tempfile.TemporaryDirectory() as td:
+        _init_repo(td, with_commit=False)
+        (Path(td) / "a.txt").write_text("alpha-staged\n")
+        _git(["add", "a.txt"], td)                       # index: alpha-staged
+        (Path(td) / "a.txt").write_text("beta-working\n")  # working tree: beta-working
+        t = targets.resolve("working-tree", cwd=td)
+        check("unborn staged-then-modified shows the WORKING-TREE version (no --cached)",
+              "beta-working" in t.content and "alpha-staged" not in t.content,
+              "beta-working present, alpha-staged absent", t.content[:160])
 
     # detached HEAD
     with tempfile.TemporaryDirectory() as td:
@@ -1673,11 +1696,16 @@ def test_cursor_dormant():
           "['codex']", str(cli._resolve_seats("cursor,codex")))
 
     # Cursor mirrors agy's banner-shape auth gate: a structured review of auth
-    # code is NOT flagged; a real structureless banner IS.
-    check("cursor auth gate passes a structured review of auth code",
-          cursor._auth_failure_marker(
-              "[blocking] the login token isn't validated. revise"
-          ) is None, "None", "non-None")
+    # code is NOT flagged; a real structureless banner IS. NB the review input
+    # MUST contain a real cursor auth marker ("please login" / "sign in"), else
+    # the test is tautological — it would pass via "no marker found" without ever
+    # exercising the structure gate.
+    review_of_auth_code = (
+        "[BLOCKING] the 'please login' redirect and sign in flow skip token "
+        "validation; the not-logged-in branch is reachable. CONFIDENCE: high."
+    )
+    check("cursor auth gate passes a structured review that quotes auth markers",
+          cursor._auth_failure_marker(review_of_auth_code) is None, "None", "non-None")
     check("cursor auth gate still flags a structureless auth banner",
           cursor._auth_failure_marker(
               "please login at cursor.com/login to continue"

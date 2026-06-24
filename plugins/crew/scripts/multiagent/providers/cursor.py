@@ -60,8 +60,10 @@ _AUTH_MARKERS = (
 # marker-bearing output as an auth failure when it does NOT look like a review,
 # so reviewing auth code doesn't false-positive.
 _AUTH_BANNER_MAX_CHARS = 1000
+# Bracketed tags / distinctive headers only — NOT bare "approved"/"revise"
+# (an auth banner saying "not approved" would mask itself = false-negative).
 _REVIEW_STRUCTURE_MARKERS = (
-    "[blocking]", "[minor]", "approved", "revise", "confidence",
+    "[blocking]", "[minor]", "confidence",
     "direct take", "strongest objection", "risks / tradeoff",
 )
 
@@ -77,12 +79,17 @@ def _looks_like_review(low: str) -> bool:
     )
 
 
-def _auth_failure_marker(combined_lower: str) -> str | None:
-    """The matched auth marker if output is a real auth banner, else None."""
-    if _looks_like_review(combined_lower):
+def _auth_failure_marker(text: str) -> str | None:
+    """The matched auth marker if output is a real auth banner, else None.
+
+    Lowercases internally (no hidden 'caller must pre-lowercase' contract), so
+    it's correct whether handed raw output or an already-lowered string.
+    """
+    low = text.lower()
+    if _looks_like_review(low):
         return None
     for marker in _AUTH_MARKERS:
-        if marker in combined_lower:
+        if marker in low:
             return marker
     return None
 

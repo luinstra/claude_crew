@@ -185,8 +185,12 @@ def _resolve_working_tree(cwd: str | None) -> Target:
     # No commits yet: there is no HEAD to diff against; everything is new.
     if not _has_commits(cwd):
         notes = ["no commits yet (unborn HEAD); all tracked content is new"]
-        # Show staged content as a diff against the empty tree if possible,
-        # plus untracked (unstaged-new) files as new-file diffs.
+        # Diff the empty tree against the WORKING TREE (not the index): `git diff
+        # <tree>` is working-tree semantics, deliberately matching the committed
+        # `git diff HEAD` path — NO `--cached`. Consequences of that decision: a
+        # file staged-then-modified shows its WORKING-TREE version (not the staged
+        # one); a file staged-then-deleted is omitted (it isn't in the working
+        # tree). Untracked (non-ignored) files are appended as new-file diffs.
         empty_tree = _git(["hash-object", "-t", "tree", "/dev/null"], cwd=cwd)
         content = ""
         if empty_tree.returncode == 0:
