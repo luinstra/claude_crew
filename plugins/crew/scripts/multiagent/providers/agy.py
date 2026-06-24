@@ -83,6 +83,28 @@ _AUTH_MARKERS = (
     "https://accounts.google.com",
 )
 
+# An agy auth-failure banner REPLACES the review: it is short and carries no
+# review structure. A genuine review — INCLUDING a review OF auth code, whose
+# prose legitimately quotes these very markers — is long and/or structured. We
+# only treat marker-bearing output as an auth failure when it does NOT look like
+# a real review, so reviewing auth code no longer false-positives (which would
+# silently drop the agy seat).
+AUTH_BANNER_MAX_CHARS = 1000
+
+# Tokens distinctive to our review/discuss prompts (review rubric + discuss
+# stance). Chosen NOT to collide with auth-banner wording — e.g. avoid bare
+# "fail"/"pass" since "authentication failed"/"passcode" would mask a real banner.
+_REVIEW_STRUCTURE_MARKERS = (
+    "[blocking]",
+    "[minor]",
+    "approved",
+    "revise",
+    "confidence",
+    "direct take",
+    "strongest objection",
+    "risks / tradeoff",
+)
+
 
 def parse_timeout_to_seconds(value: str | None, default_seconds: float = 480.0) -> float:
     """Parse an agy-style timeout (e.g. ``8m``, ``480s``, ``480``) to seconds."""
@@ -109,21 +131,39 @@ def strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
+def _looks_like_review(low: str) -> bool:
+    """True if the output reads like a real review/take, not an auth banner.
+
+    A genuine seat response is long and/or carries our review-structure tokens;
+    the auth-failure banner is short and structureless. This is what lets a
+    review OF auth code (which quotes the auth markers) through without a
+    false positive.
+    """
+    return (
+        len(low.strip()) > AUTH_BANNER_MAX_CHARS
+        or any(tok in low for tok in _REVIEW_STRUCTURE_MARKERS)
+    )
+
+
 def detect_auth_or_error(cleaned: str) -> str | None:
     """Return a diagnostic if ``cleaned`` output looks like auth/error noise.
 
     Catches the live failure mode: agy returns an OAuth URL +
     "authentication timed out" with EXIT 0. Returns None when the output looks
-    like a real review.
+    like a real review — including a review that merely DISCUSSES auth (long
+    and/or structured output is trusted even when it quotes the auth markers).
     """
     low = cleaned.lower()
-    for marker in _AUTH_MARKERS:
-        if marker in low:
-            return "agy authentication required / auth output detected (not a review)"
-    # A bare login/auth URL banner with little else.
-    if "http" in low and ("auth" in low or "login" in low or "accounts.google" in low):
-        return "agy authentication required / auth output detected (not a review)"
-    return None
+    has_auth = any(marker in low for marker in _AUTH_MARKERS) or (
+        # A bare login/auth URL banner with little else.
+        "http" in low and ("auth" in low or "login" in low or "accounts.google" in low)
+    )
+    if not has_auth:
+        return None
+    # Don't flag a real review that merely discusses auth code.
+    if _looks_like_review(low):
+        return None
+    return "agy authentication required / auth output detected (not a review)"
 
 
 class AgyProvider(Provider):

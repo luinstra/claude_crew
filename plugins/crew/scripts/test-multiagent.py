@@ -224,6 +224,26 @@ def test_agy_helpers():
     check("detect_auth_or_error passes a real review",
           detect_auth_or_error("Clarity: PASS. [MINOR] tighten naming. APPROVED") is None,
           "None", "non-None")
+    # False-positive guard: a review OF auth code quotes the auth markers but is
+    # a real review — must NOT be flagged (else the agy seat is silently dropped).
+    check("detect_auth_or_error passes a SHORT structured review of auth code",
+          detect_auth_or_error(
+              "[BLOCKING] the oauth token is not validated before use in auth.py; "
+              "authentication required path skips the check. REVISE"
+          ) is None,
+          "None", "non-None")
+    long_auth_review = (
+        "Reviewing the OAuth login flow. "
+        + "The authentication required handling and sign in to continue path look correct. " * 20
+    )
+    check("detect_auth_or_error passes a LONG review that discusses auth (>banner size)",
+          detect_auth_or_error(long_auth_review) is None, "None", "non-None")
+    # Still catches the real failure: a short, structureless auth banner.
+    check("detect_auth_or_error still flags a structureless auth banner",
+          detect_auth_or_error(
+              "sign in to continue: https://accounts.google.com/o/oauth2/auth"
+          ) is not None,
+          "non-None", "None")
     check("parse_timeout 8m -> 480s", parse_timeout_to_seconds("8m") == 480.0,
           "480.0", str(parse_timeout_to_seconds("8m")))
     check("parse_timeout 300s -> 300", parse_timeout_to_seconds("300s") == 300.0,
@@ -1651,6 +1671,17 @@ def test_cursor_dormant():
     check("engine _resolve_seats drops 'cursor' (only codex/agy are subprocess seats)",
           cli._resolve_seats("cursor,codex") == ["codex"],
           "['codex']", str(cli._resolve_seats("cursor,codex")))
+
+    # Cursor mirrors agy's banner-shape auth gate: a structured review of auth
+    # code is NOT flagged; a real structureless banner IS.
+    check("cursor auth gate passes a structured review of auth code",
+          cursor._auth_failure_marker(
+              "[blocking] the login token isn't validated. revise"
+          ) is None, "None", "non-None")
+    check("cursor auth gate still flags a structureless auth banner",
+          cursor._auth_failure_marker(
+              "please login at cursor.com/login to continue"
+          ) is not None, "non-None", "None")
 
 
 def main():

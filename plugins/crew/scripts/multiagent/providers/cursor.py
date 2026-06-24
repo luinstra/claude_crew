@@ -54,9 +54,37 @@ _AUTH_MARKERS = (
     "cursor.com/login", "please login",
 )
 
+# Mirror of agy's banner-shape gate (see agy.py detect_auth_or_error): an auth
+# banner REPLACES the review — short + structureless — whereas a review OF auth
+# code quotes these markers but is long and/or structured. Only treat
+# marker-bearing output as an auth failure when it does NOT look like a review,
+# so reviewing auth code doesn't false-positive.
+_AUTH_BANNER_MAX_CHARS = 1000
+_REVIEW_STRUCTURE_MARKERS = (
+    "[blocking]", "[minor]", "approved", "revise", "confidence",
+    "direct take", "strongest objection", "risks / tradeoff",
+)
+
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
+
+
+def _looks_like_review(low: str) -> bool:
+    return (
+        len(low.strip()) > _AUTH_BANNER_MAX_CHARS
+        or any(tok in low for tok in _REVIEW_STRUCTURE_MARKERS)
+    )
+
+
+def _auth_failure_marker(combined_lower: str) -> str | None:
+    """The matched auth marker if output is a real auth banner, else None."""
+    if _looks_like_review(combined_lower):
+        return None
+    for marker in _AUTH_MARKERS:
+        if marker in combined_lower:
+            return marker
+    return None
 
 
 class CursorProvider(Provider):
@@ -142,14 +170,14 @@ class CursorProvider(Provider):
         elapsed = time.monotonic() - start
         raw_output = _strip_ansi(proc.stdout)
         combined_lower = (raw_output + proc.stderr).lower()
-        for marker in _AUTH_MARKERS:
-            if marker in combined_lower:
-                return ProviderResult(
-                    name=self.name, model=chosen_model, ok=False, output=raw_output,
-                    error=(f"Cursor Agent authentication required (detected: {marker!r}). "
-                           "Sign in at cursor.com/login."),
-                    elapsed=elapsed,
-                )
+        auth_marker = _auth_failure_marker(combined_lower)
+        if auth_marker is not None:
+            return ProviderResult(
+                name=self.name, model=chosen_model, ok=False, output=raw_output,
+                error=(f"Cursor Agent authentication required (detected: {auth_marker!r}). "
+                       "Sign in at cursor.com/login."),
+                elapsed=elapsed,
+            )
         if proc.returncode != 0:
             return ProviderResult(
                 name=self.name, model=chosen_model, ok=False, output=raw_output,
