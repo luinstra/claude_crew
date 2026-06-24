@@ -5,10 +5,16 @@ the text content plus a small descriptor (kind / scope) for the prompt header.
 
 Diff target kinds:
   * ``working-tree`` — uncommitted changes (staged + unstaged) to tracked
-    files; untracked files are surfaced by PATH in the descriptor.
+    files, plus untracked (non-ignored) files rendered as new-file diffs so
+    brand-new files are reviewed too.
   * ``branch``       — diff vs the merge-base with ``--base`` (default ``main``).
+  * ``range``        — an ``A..B`` / ``A...B`` ref range (SHAs pinned).
   * ``commit``       — a single SHA (``<sha>^..<sha>``).
   * ``auto``         — working-tree if dirty, else last commit vs base.
+
+Untracked files are included read-only via ``git ls-files --others
+--exclude-standard -z`` + ``git diff --no-index`` — no index/ref/working-tree
+mutation. All git commands run through ``--no-pager`` to avoid TTY hangs.
 
 Git edge cases (detached HEAD, no commits yet, shallow clone, base-ahead) each
 return a clear message rather than a stack trace.
@@ -49,8 +55,9 @@ class Target:
 
 def _git(args: list[str], cwd: str | None = None) -> subprocess.CompletedProcess:
     try:
+        # --no-pager defends against a TTY pager hanging our captured calls.
         return subprocess.run(
-            ["git", *args],
+            ["git", "--no-pager", *args],
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -76,13 +83,44 @@ def _is_dirty(cwd: str | None = None) -> bool:
     return cp.returncode == 0 and bool(cp.stdout.strip())
 
 
-def _untracked(cwd: str | None = None) -> list[str]:
-    cp = _git(
-        ["ls-files", "--others", "--exclude-standard"], cwd=cwd
-    )
+def _untracked_files(cwd: str | None = None) -> list[str]:
+    """List untracked, non-ignored files (read-only).
+
+    Uses ``-z`` so paths with spaces or unusual characters survive intact
+    (NUL-separated, never shell-quoted).
+    """
+    cp = _git(["ls-files", "--others", "--exclude-standard", "-z"], cwd=cwd)
     if cp.returncode != 0:
         return []
-    return [line for line in cp.stdout.splitlines() if line.strip()]
+    return [f for f in cp.stdout.split("\0") if f]
+
+
+def _untracked_diff(cwd: str | None = None) -> str:
+    """Render untracked files as new-file diffs (read-only).
+
+    ``git diff --no-index -- /dev/null <file>`` produces a full add-diff for
+    each untracked file without touching the index or working tree. That
+    command exits 1 whenever the files differ (always true vs ``/dev/null``),
+    so the return code is intentionally ignored and only stdout is collected.
+    """
+    parts: list[str] = []
+    for f in _untracked_files(cwd):
+        cp = _git(["diff", "--no-index", "--", "/dev/null", f], cwd=cwd)
+        if cp.stdout:
+            parts.append(cp.stdout)
+    return "".join(parts)
+
+
+# Ref-mode command a seat runs to reproduce a *complete* working-tree diff:
+# tracked changes plus untracked (non-ignored) files as new-file diffs. The
+# `--no-index` calls exit 1 when content differs (always, for a new file) —
+# expected and harmless inside the loop. Fully read-only: no index/ref/tree
+# mutation (no `git add -N`).
+_WORKTREE_DIFF_CMD = (
+    "git --no-pager diff HEAD; "
+    "git ls-files --others --exclude-standard | "
+    'while IFS= read -r f; do git --no-pager diff --no-index -- /dev/null "$f"; done'
+)
 
 
 def _merge_base(base: str, cwd: str | None = None) -> str | None:
@@ -120,11 +158,11 @@ def _resolve_plan(path: str) -> Target:
 # =============================================================================
 
 def _untracked_note(cwd: str | None) -> list[str]:
-    untracked = _untracked(cwd)
+    untracked = _untracked_files(cwd)
     if untracked:
         listed = ", ".join(untracked[:20])
         more = "" if len(untracked) <= 20 else f" (+{len(untracked) - 20} more)"
-        return [f"untracked files present (not diffed): {listed}{more}"]
+        return [f"{len(untracked)} untracked file(s) included as new-file diffs: {listed}{more}"]
     return []
 
 
@@ -132,7 +170,8 @@ def _resolve_working_tree(cwd: str | None) -> Target:
     # No commits yet: there is no HEAD to diff against; everything is new.
     if not _has_commits(cwd):
         notes = ["no commits yet (unborn HEAD); all tracked content is new"]
-        # Show staged content as a diff against the empty tree if possible.
+        # Show staged content as a diff against the empty tree if possible,
+        # plus untracked (unstaged-new) files as new-file diffs.
         empty_tree = _git(["hash-object", "-t", "tree", "/dev/null"], cwd=cwd)
         content = ""
         if empty_tree.returncode == 0:
@@ -140,35 +179,47 @@ def _resolve_working_tree(cwd: str | None) -> Target:
             dcp = _git(["diff", tree], cwd=cwd)
             if dcp.returncode == 0:
                 content = dcp.stdout
+        untracked = _untracked_files(cwd)
+        content += _untracked_diff(cwd)
         notes += _untracked_note(cwd)
+        if not content.strip():
+            notes.append("working tree is empty (nothing to review)")
         return Target(
             kind="code",
             scope="working-tree (no commits yet)",
             content=content,
             descriptor="code: working-tree (no commits yet)",
             notes=notes,
-            # No HEAD to diff against — instruct the seat to inspect the tree.
-            diff_cmd=None,
+            # No HEAD; the compound command surfaces untracked files for a seat.
+            diff_cmd=_WORKTREE_DIFF_CMD if untracked else None,
         )
 
-    # Full uncommitted diff (staged + unstaged) to tracked files.
+    # Full uncommitted diff (staged + unstaged) to tracked files, plus
+    # untracked (non-ignored) files rendered as new-file diffs so brand-new
+    # files are reviewed too — not merely listed.
     cp = _git(["diff", "HEAD"], cwd=cwd)
     if cp.returncode != 0:
         raise TargetError(f"git diff failed: {cp.stderr.strip()}")
 
-    notes = _untracked_note(cwd)
-    content = cp.stdout
+    untracked = _untracked_files(cwd)
+    tracked = cp.stdout
+    content = tracked + _untracked_diff(cwd)
+    notes = []
+    if not tracked.strip():
+        notes.append("working tree has no tracked changes")
+    notes += _untracked_note(cwd)
     if not content.strip():
-        notes.append("working tree has no tracked changes (empty diff)")
+        notes = ["working tree is clean (nothing to review)"]
     return Target(
         kind="code",
         scope="working-tree",
         content=content,
         descriptor="code: working-tree (uncommitted, staged + unstaged)",
         notes=notes,
-        # --no-pager: a seat reproducing this in a TTY shell would otherwise
-        # page a large diff through `less` and hang to its timeout.
-        diff_cmd="git --no-pager diff HEAD",
+        # When untracked files are present, plain `git diff HEAD` would miss
+        # them — hand the seat the compound command that includes them.
+        # --no-pager guards against a TTY pager hang on a large diff.
+        diff_cmd=_WORKTREE_DIFF_CMD if untracked else "git --no-pager diff HEAD",
     )
 
 
@@ -234,6 +285,41 @@ def _resolve_commit(sha: str, cwd: str | None) -> Target:
     )
 
 
+def _resolve_ref_range(spec: str, cwd: str | None) -> Target:
+    """Resolve an ``A..B`` or ``A...B`` ref range to a diff.
+
+    Both endpoints are pinned to SHAs so the seat reproduces exactly this range
+    deterministically, even as branches advance.
+    """
+    sep = "..." if "..." in spec else ".."
+    parts = spec.split(sep, 1)
+    if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+        raise TargetError(f"invalid ref range: {spec!r}")
+    left, right = parts[0].strip(), parts[1].strip()
+
+    def _verify(ref: str) -> str:
+        cp = _git(["rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=cwd)
+        if cp.returncode != 0:
+            raise TargetError(f"could not resolve ref {ref!r}: {cp.stderr.strip()}")
+        return cp.stdout.strip()
+
+    diff_arg = f"{_verify(left)}{sep}{_verify(right)}"
+    cp = _git(["diff", diff_arg], cwd=cwd)
+    if cp.returncode != 0:
+        raise TargetError(f"git diff {diff_arg} failed: {cp.stderr.strip()}")
+    notes = []
+    if not cp.stdout.strip():
+        notes.append(f"empty diff for range {spec!r} (zero-change target)")
+    return Target(
+        kind="code",
+        scope=f"range {spec}",
+        content=cp.stdout,
+        descriptor=f"code: diff {spec}",
+        notes=notes,
+        diff_cmd=f"git --no-pager diff {diff_arg}",
+    )
+
+
 def _resolve_auto(base: str, cwd: str | None) -> Target:
     if _is_dirty(cwd):
         return _resolve_working_tree(cwd)
@@ -263,7 +349,8 @@ def resolve(
     """Resolve a target spec to a ``Target``.
 
     ``spec`` is one of: a path to a ``.md`` plan, ``working-tree``, ``branch``,
-    ``commit:<sha>`` (or a bare SHA), or ``auto``.
+    an ``A..B`` / ``A...B`` ref range, ``commit:<sha>`` (or a bare SHA), or
+    ``auto``.
     """
     # Plan target: an explicit .md path.
     if spec.endswith(".md"):
@@ -282,6 +369,10 @@ def resolve(
         return _resolve_working_tree(cwd)
     if spec == "branch":
         return _resolve_branch(base, cwd)
+    # A ref range (``A..B`` / ``A...B``) — checked before the commit fallback
+    # since none of the named kinds above contain "..".
+    if ".." in spec:
+        return _resolve_ref_range(spec, cwd)
     if spec.startswith("commit:"):
         return _resolve_commit(spec.split(":", 1)[1], cwd)
     # A bare value that isn't a known kind: treat as a commit-ish SHA.

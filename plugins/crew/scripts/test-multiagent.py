@@ -681,7 +681,8 @@ def test_targets():
               t.kind == "code" and "working-tree" in t.scope and "changed" in t.content,
               "working-tree w/ change", f"scope={t.scope}")
 
-    # working-tree includes staged + unstaged; untracked surfaced
+    # working-tree includes staged + unstaged tracked changes AND untracked
+    # files rendered as new-file diffs (not merely listed by path).
     with tempfile.TemporaryDirectory() as td:
         _init_repo(td)
         (Path(td) / "a.txt").write_text("hello\nstaged\n")
@@ -690,10 +691,53 @@ def test_targets():
         t = targets.resolve("working-tree", cwd=td)
         check("working-tree includes staged change",
               "staged" in t.content, "staged content", t.content[:80])
-        check("working-tree surfaces untracked file by path",
-              any("b.txt" in n for n in t.notes), "untracked note b.txt", str(t.notes))
-        check("working-tree diff_cmd is 'git --no-pager diff HEAD' (seat reproduces it)",
-              t.diff_cmd == "git --no-pager diff HEAD", "git --no-pager diff HEAD", str(t.diff_cmd))
+        check("working-tree renders untracked file as a new-file diff in content",
+              "b.txt" in t.content and "new untracked" in t.content,
+              "b.txt new-file diff in content", t.content[:200])
+        check("working-tree notes untracked files are included as new-file diffs",
+              any("b.txt" in n and "new-file diff" in n for n in t.notes),
+              "untracked-included note", str(t.notes))
+        check("working-tree diff_cmd is the compound cmd when untracked present",
+              t.diff_cmd == targets._WORKTREE_DIFF_CMD,
+              "compound _WORKTREE_DIFF_CMD", str(t.diff_cmd))
+
+    # working-tree with ONLY tracked changes (no untracked) -> plain diff cmd
+    with tempfile.TemporaryDirectory() as td:
+        _init_repo(td)
+        (Path(td) / "a.txt").write_text("hello\nonly-tracked\n")
+        t = targets.resolve("working-tree", cwd=td)
+        check("working-tree diff_cmd is 'git --no-pager diff HEAD' with no untracked",
+              t.diff_cmd == "git --no-pager diff HEAD",
+              "git --no-pager diff HEAD", str(t.diff_cmd))
+
+    # ref range A..B (and A...B) -> diff between pinned SHAs
+    with tempfile.TemporaryDirectory() as td:
+        _init_repo(td)
+        (Path(td) / "a.txt").write_text("hello\nv2\n")
+        _git(["commit", "-aqm", "v2"], td)
+        (Path(td) / "a.txt").write_text("hello\nv3\n")
+        _git(["commit", "-aqm", "v3"], td)
+        t = targets.resolve("HEAD~2..HEAD", cwd=td)
+        check("ref range resolves to a diff target",
+              t.kind == "code" and "v3" in t.content, "range diff w/ v3", f"scope={t.scope}")
+        head = _git(["rev-parse", "HEAD"], td).stdout.strip()
+        base = _git(["rev-parse", "HEAD~2"], td).stdout.strip()
+        check("ref range diff_cmd pins both SHAs (deterministic, --no-pager)",
+              t.diff_cmd == f"git --no-pager diff {base}..{head}",
+              f"git --no-pager diff {base}..{head}", str(t.diff_cmd))
+        t3 = targets.resolve("HEAD~2...HEAD", cwd=td)
+        check("three-dot ref range A...B resolves and keeps the '...' separator",
+              t3.kind == "code" and "..." in (t3.diff_cmd or ""),
+              "three-dot range", str(t3.diff_cmd))
+
+    # invalid ref range -> TargetError
+    with tempfile.TemporaryDirectory() as td:
+        _init_repo(td)
+        try:
+            targets.resolve("HEAD..nonexistent-ref", cwd=td)
+            check("unresolvable ref range raises TargetError", False, "TargetError", "no raise")
+        except targets.TargetError:
+            check("unresolvable ref range raises TargetError", True)
 
     # clean repo -> last commit vs base (auto)
     with tempfile.TemporaryDirectory() as td:
