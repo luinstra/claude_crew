@@ -1623,6 +1623,29 @@ def test_render_subcommand():
               "identical to build_prompt", rendered[:160])
 
 
+def test_cursor_dormant():
+    log_section("cursor provider — DORMANT (ported for parity, not wired in)")
+    from multiagent.providers import cursor
+    from multiagent.providers import known_seat_names
+    from multiagent import cli
+
+    check("cursor is NOT in the seat registry (codex/agy only)",
+          "cursor" not in known_seat_names(), "absent", str(known_seat_names()))
+
+    p = cursor.CursorProvider()
+    r = p.run("hello")  # no model configured -> must fail loudly, invoke nothing
+    check("dormant cursor.run() with no model fails loudly (ok=False, model error)",
+          r.ok is False and "model" in (r.error or "").lower(),
+          "ok=False + model error", f"ok={r.ok} err={r.error}")
+    check("dormant cursor result is the six-field shape",
+          set(r.to_dict().keys()) == {"name", "model", "ok", "output", "error", "elapsed"},
+          "six fields", str(set(r.to_dict().keys())))
+
+    check("engine _resolve_seats drops 'cursor' (only codex/agy are subprocess seats)",
+          cli._resolve_seats("cursor,codex") == ["codex"],
+          "['codex']", str(cli._resolve_seats("cursor,codex")))
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -1645,6 +1668,7 @@ def main():
     test_rounds()
     test_discuss_and_modes()
     test_render_subcommand()
+    test_cursor_dormant()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")
