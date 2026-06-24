@@ -238,6 +238,22 @@ def count_incomplete_todos(path: Path) -> int:
 # Utility Functions
 # =============================================================================
 
+def is_verbose() -> bool:
+    """Return True when CREW_VERBOSE is set to a truthy value."""
+    return os.environ.get("CREW_VERBOSE", "").lower() in ("1", "true", "yes")
+
+
+def truncate(text: str, max_length: int = 120) -> str:
+    """Truncate text to max_length chars total (including ellipsis).
+
+    If len(text) > max_length, returns text[:max_length-3] + '...' (total = max_length).
+    If len(text) <= max_length, returns text unchanged.
+    """
+    if len(text) <= max_length:
+        return text
+    return text[:max_length - 3] + "..."
+
+
 def read_hook_input() -> dict:
     """Read and parse JSON input from stdin."""
     import sys

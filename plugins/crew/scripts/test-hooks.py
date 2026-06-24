@@ -43,16 +43,27 @@ def log_section(name: str) -> None:
     print(f"{YELLOW}=== {name} ==={NC}")
 
 
-def run_script(script: Path, input_data: str) -> str:
+def run_script(script: Path, input_data: str, extra_env: dict = None) -> str:
     """Run a Python script with input and return output."""
+    env = {**os.environ}
+    # Strip CREW_VERBOSE by default so tests run terse unless specified
+    env.pop("CREW_VERBOSE", None)
+    if extra_env:
+        env.update(extra_env)
     result = subprocess.run(
         [sys.executable, str(script)],
         input=input_data,
         capture_output=True,
         text=True,
         cwd=SCRIPT_DIR,  # Run from scripts dir so imports work
+        env=env,
     )
     return result.stdout.strip()
+
+
+def run_script_verbose(script: Path, input_data: str) -> str:
+    """Run a Python script with CREW_VERBOSE=1."""
+    return run_script(script, input_data, extra_env={"CREW_VERBOSE": "1"})
 
 
 def test_equals(name: str, script: Path, input_data: str, expected: str) -> None:
@@ -277,6 +288,121 @@ def main():
             (crew_dir / "measure-twice-state.json").unlink()
 
             # =========================================================================
+            # PERSISTENT MODE TERSE/VERBOSE TESTS
+            # =========================================================================
+            log_section("persistent-mode.py (terse/verbose)")
+
+            for f in crew_dir.glob("*"):
+                f.unlink()
+
+            # iteration=1 (first Stop fire): display reads "1/N", full recipe present
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "Fix auth bug", "iteration": 1, "max_iterations": 10}'
+            )
+            out_terse_iter1 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if "When complete:" in out_terse_iter1:
+                log_pass("Terse mode + iteration 1 (bl): full recipe present")
+            else:
+                log_fail("Terse mode + iteration 1 (bl): full recipe present",
+                         "contains 'When complete:'", out_terse_iter1[:300])
+
+            # First Stop fire displays "Iteration 1/10" (display-then-increment)
+            if "Iteration 1/10" in out_terse_iter1:
+                log_pass("First Stop fire (bl) displays 'Iteration 1/10'")
+            else:
+                log_fail("First Stop fire (bl) displays 'Iteration 1/10'",
+                         "contains 'Iteration 1/10'", out_terse_iter1[:300])
+
+            # State now has iteration=2. Terse second fire: recipe absent
+            out_terse_iter2 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if "When complete:" not in out_terse_iter2:
+                log_pass("Terse mode + iteration 2 (bl): recipe absent")
+            else:
+                log_fail("Terse mode + iteration 2 (bl): recipe absent",
+                         "does NOT contain 'When complete:'", out_terse_iter2[:300])
+
+            if "cancel-build" not in out_terse_iter2:
+                log_pass("Terse mode + iteration 2 (bl): cancel-build absent")
+            else:
+                log_fail("Terse mode + iteration 2 (bl): cancel-build absent",
+                         "does NOT contain 'cancel-build'", out_terse_iter2[:300])
+
+            # Second Stop fire displays "Iteration 2/10"
+            if "Iteration 2/10" in out_terse_iter2 and "Fix auth bug" in out_terse_iter2:
+                log_pass("Second Stop fire (bl) displays 'Iteration 2/10' with task")
+            else:
+                log_fail("Second Stop fire (bl) displays 'Iteration 2/10' with task",
+                         "contains 'Iteration 2/10' and task", out_terse_iter2[:300])
+
+            # Verbose mode (state now iteration=3): full recipe present despite iteration>1
+            out_verbose_iter3 = run_script_verbose(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if "When complete:" in out_verbose_iter3:
+                log_pass("Verbose mode + iteration 3 (bl): full recipe present")
+            else:
+                log_fail("Verbose mode + iteration 3 (bl): full recipe present",
+                         "contains 'When complete:'", out_verbose_iter3[:300])
+
+            # Safety cap: exactly max_iterations nudges. State is at iteration=4 now.
+            # Run 7 more terse nudges → display 4/10..10/10, leaving iteration=11.
+            for _ in range(7):
+                run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            out_safety = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if "Safety Limit Reached" in out_safety:
+                log_pass("Safety cap fires after exactly max_iterations nudges (10/10 displayed)")
+            else:
+                log_fail("Safety cap fires after exactly max_iterations nudges",
+                         "contains 'Safety Limit Reached'", out_safety[:300])
+
+            # Prompt truncation: 500-char prompt → exactly 120 chars in reason
+            long_prompt = "A" * 500
+            (crew_dir / "build-state.json").write_text(
+                json.dumps({"active": True, "prompt": long_prompt, "iteration": 5, "max_iterations": 10})
+            )
+            out_trunc = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            reason = json.loads(out_trunc).get("reason", "")
+            task_line = [l for l in reason.split("\n") if l.startswith("Task:")]
+            if task_line:
+                task_value = task_line[0][len("Task: "):]
+                if len(task_value) == 120 and task_value.endswith("..."):
+                    log_pass("Terse mode + 500-char prompt: task truncated to 120 chars with ellipsis")
+                else:
+                    log_fail("Terse mode + 500-char prompt: task truncated to 120 chars with ellipsis",
+                             "120 chars ending with '...'", f"len={len(task_value)}, ends={task_value[-5:]!r}")
+            else:
+                log_fail("Terse mode + 500-char prompt: task line present in reason",
+                         "Task: ... line", reason[:200])
+
+            (crew_dir / "build-state.json").unlink()
+
+            # Measure-twice terse/verbose
+            (crew_dir / "measure-twice-state.json").write_text(
+                '{"active": true, "task_description": "Design profiles", "plan_file": ".crew/plans/profiles.md", "iteration": 1, "max_iterations": 10}'
+            )
+            out_mt_iter1 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if "When APPROVED" in out_mt_iter1 and "Iteration 1/10" in out_mt_iter1:
+                log_pass("Terse mode + iteration 1 (mt): full recipe + 'Iteration 1/10'")
+            else:
+                log_fail("Terse mode + iteration 1 (mt): full recipe + 'Iteration 1/10'",
+                         "contains 'When APPROVED' and 'Iteration 1/10'", out_mt_iter1[:300])
+
+            out_mt_iter2 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if ("When APPROVED" not in out_mt_iter2 and "cancel-measure-twice" not in out_mt_iter2
+                    and "Design profiles" in out_mt_iter2 and ".crew/plans/profiles.md" in out_mt_iter2):
+                log_pass("Terse mode + iteration 2 (mt): recipe absent, task+plan present")
+            else:
+                log_fail("Terse mode + iteration 2 (mt): recipe absent, task+plan present",
+                         "no recipe, task and plan present", out_mt_iter2[:300])
+
+            out_mt_v = run_script_verbose(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if "When APPROVED" in out_mt_v:
+                log_pass("Verbose mode (mt): full recipe present")
+            else:
+                log_fail("Verbose mode (mt): full recipe present",
+                         "contains 'When APPROVED'", out_mt_v[:300])
+
+            (crew_dir / "measure-twice-state.json").unlink()
+
+            # =========================================================================
             # CREW STATE CLI TESTS
             # =========================================================================
             log_section("crew-state.py")
@@ -304,24 +430,47 @@ def main():
             else:
                 log_fail("init bl - creates state file", "exit 0 and file exists", f"exit {code}, stderr: {stderr}")
 
-            # Test show bl
+            # Test show bl (compact default)
             stdout, stderr, code = run_crew_state(["show", "bl"], test_path)
-            if code == 0 and '"active": true' in stdout and '"prompt": "Test task"' in stdout:
-                log_pass("show bl - outputs JSON with expected fields")
+            if code == 0 and stdout.startswith("loop=bl") and "active=true" in stdout and "iter=" in stdout and 'task=' in stdout:
+                log_pass("show bl - compact one-line summary (default)")
             else:
-                log_fail("show bl - outputs JSON with expected fields", "JSON with active and prompt", stdout)
+                log_fail("show bl - compact one-line summary (default)",
+                         "single line starting with loop=bl, active=, iter=, task=", stdout)
 
-            # Test set bl
+            # Compact show: exactly one line
+            if code == 0 and len(stdout.strip().splitlines()) == 1:
+                log_pass("show bl - output is exactly one line")
+            else:
+                log_fail("show bl - output is exactly one line", "1 line", f"{len(stdout.strip().splitlines())} lines: {stdout[:200]}")
+
+            # show bl --verbose: JSON output
+            stdout_v, _, code_v = run_crew_state(["show", "bl", "--verbose"], test_path)
+            if code_v == 0 and '"active": true' in stdout_v and '"prompt": "Test task"' in stdout_v:
+                log_pass("show bl --verbose - pretty JSON with expected fields")
+            else:
+                log_fail("show bl --verbose - pretty JSON with expected fields",
+                         "JSON with active and prompt", stdout_v)
+
+            # show bl -v: same as --verbose
+            stdout_sv, _, code_sv = run_crew_state(["show", "bl", "-v"], test_path)
+            if code_sv == 0 and '"active": true' in stdout_sv:
+                log_pass("show bl -v - short flag works same as --verbose")
+            else:
+                log_fail("show bl -v - short flag works same as --verbose",
+                         "JSON with active: true", stdout_sv)
+
+            # Test set bl (use --verbose for JSON assertion)
             stdout, stderr, code = run_crew_state(["set", "bl", "iteration", "5"], test_path)
-            stdout2, _, _ = run_crew_state(["show", "bl"], test_path)
+            stdout2, _, _ = run_crew_state(["show", "bl", "--verbose"], test_path)
             if code == 0 and '"iteration": 5' in stdout2:
                 log_pass("set bl - changes field value")
             else:
                 log_fail("set bl - changes field value", "iteration: 5", stdout2)
 
-            # Test set bl active false (bool coercion)
+            # Test set bl active false (bool coercion, use --verbose for JSON assertion)
             stdout, stderr, code = run_crew_state(["set", "bl", "active", "false"], test_path)
-            stdout2, _, _ = run_crew_state(["show", "bl"], test_path)
+            stdout2, _, _ = run_crew_state(["show", "bl", "--verbose"], test_path)
             if code == 0 and '"active": false' in stdout2:
                 log_pass("set bl - bool coercion works")
             else:
@@ -331,9 +480,9 @@ def main():
             run_crew_state(["set", "bl", "active", "true"], test_path)
             run_crew_state(["set", "bl", "iteration", "5"], test_path)
 
-            # Test increment bl
+            # Test increment bl (use --verbose for JSON assertion)
             stdout, stderr, code = run_crew_state(["increment", "bl", "iteration"], test_path)
-            stdout2, _, _ = run_crew_state(["show", "bl"], test_path)
+            stdout2, _, _ = run_crew_state(["show", "bl", "--verbose"], test_path)
             if code == 0 and '"iteration": 6' in stdout2:
                 log_pass("increment bl - bumps counter")
             else:
@@ -348,9 +497,9 @@ def main():
             else:
                 log_fail("deactivate bl - sets active=false and adds metadata", "active=false, completed_at, reason", json.dumps(data))
 
-            # Test init mt
+            # Test init mt (use --verbose for JSON assertion)
             stdout, stderr, code = run_crew_state(["init", "mt", "--task", "Build auth", "--plan-file", ".crew/plans/auth.md"], test_path)
-            stdout2, _, _ = run_crew_state(["show", "mt"], test_path)
+            stdout2, _, _ = run_crew_state(["show", "mt", "--verbose"], test_path)
             if code == 0 and '"task_description": "Build auth"' in stdout2:
                 log_pass("init mt - creates measure-twice state")
             else:
@@ -372,13 +521,22 @@ def main():
             else:
                 log_fail("set invalid field - exits with error", "exit 1 with error message", f"exit {code}, stderr: {stderr}")
 
-            # Test show on missing file returns default state
+            # Test show on missing file returns default state (compact: active=false)
             (crew_dir / "build-state.json").unlink(missing_ok=True)
             stdout, stderr, code = run_crew_state(["show", "bl"], test_path)
-            if code == 0 and '"active": false' in stdout:
-                log_pass("show bl missing file - returns default state")
+            if code == 0 and "active=false" in stdout and stdout.startswith("loop=bl"):
+                log_pass("show bl missing file - returns compact default state with active=false")
             else:
-                log_fail("show bl missing file - returns default state", "default state JSON", stdout)
+                log_fail("show bl missing file - returns compact default state with active=false",
+                         "compact summary with active=false", stdout)
+
+            # show bl missing file + --verbose: JSON active=false
+            stdout_mv, _, code_mv = run_crew_state(["show", "bl", "--verbose"], test_path)
+            if code_mv == 0 and '"active": false' in stdout_mv:
+                log_pass("show bl missing file --verbose - returns default JSON state")
+            else:
+                log_fail("show bl missing file --verbose - returns default JSON state",
+                         '"active": false in JSON', stdout_mv)
 
             # Test is-active when inactive (no state file)
             (crew_dir / "build-state.json").unlink(missing_ok=True)
@@ -407,12 +565,34 @@ def main():
             else:
                 log_fail("init mt --auto-plan - derives plan filename", ".crew/plans/build-auth-system.md", stdout)
 
-            # Verify state has the auto-derived plan file
-            stdout2, _, _ = run_crew_state(["show", "mt"], test_path)
+            # Verify state has the auto-derived plan file (use --verbose for JSON field check)
+            stdout2, _, _ = run_crew_state(["show", "mt", "--verbose"], test_path)
             if '"plan_file": ".crew/plans/build-auth-system.md"' in stdout2:
                 log_pass("init mt --auto-plan - stores derived path in state")
             else:
                 log_fail("init mt --auto-plan - stores derived path in state", "plan_file with derived path", stdout2)
+
+            # show mt compact: contains plan= field
+            stdout_mt_c, _, code_mt_c = run_crew_state(["show", "mt"], test_path)
+            if code_mt_c == 0 and "plan=" in stdout_mt_c and stdout_mt_c.startswith("loop=mt"):
+                log_pass("show mt compact - contains plan= field")
+            else:
+                log_fail("show mt compact - contains plan= field",
+                         "compact line with plan=", stdout_mt_c)
+
+            # show bl with prompt > 80 chars: task field ends with ...
+            for f in crew_dir.glob("*-state*.json"):
+                f.unlink()
+            long_task = "B" * 100
+            run_crew_state(["init", "bl", "--prompt", long_task], test_path)
+            stdout_long, _, code_long = run_crew_state(["show", "bl"], test_path)
+            if code_long == 0 and '...' in stdout_long:
+                log_pass("show bl long prompt - task truncated with ellipsis in compact output")
+            else:
+                log_fail("show bl long prompt - task truncated with ellipsis in compact output",
+                         "... in compact output", stdout_long)
+            for f in crew_dir.glob("*-state*.json"):
+                f.unlink()
 
             # Test check-conflicts with no active loops
             for f in crew_dir.glob("*-state*.json"):
@@ -491,9 +671,9 @@ def main():
                 log_fail("check-conflicts s3 - no conflict for different session",
                          "exit 0", f"exit {code}, stderr: {stderr}")
 
-            # show bl --session-id s1 shows s1's state
+            # show bl --session-id s1 shows s1's state (--verbose for JSON assertion)
             stdout, stderr, code = run_crew_state(
-                ["show", "bl", "--session-id", "s1"], test_path)
+                ["show", "bl", "--session-id", "s1", "--verbose"], test_path)
             if code == 0 and '"prompt": "Task for s1"' in stdout:
                 log_pass("show bl s1 - shows session-specific state")
             else:
@@ -504,26 +684,26 @@ def main():
             stdout, stderr, code = run_crew_state(
                 ["deactivate", "bl", "--reason", "done", "--session-id", "s1"], test_path)
             stdout2, _, _ = run_crew_state(
-                ["show", "bl", "--session-id", "s2"], test_path)
+                ["show", "bl", "--session-id", "s2", "--verbose"], test_path)
             if code == 0 and '"active": true' in stdout2:
                 log_pass("deactivate s1 - s2 remains active")
             else:
                 log_fail("deactivate s1 - s2 remains active",
                          "s2 still active", stdout2)
 
-            # session_id stored in state
+            # session_id stored in state (--verbose for JSON assertion)
             stdout, stderr, code = run_crew_state(
-                ["show", "bl", "--session-id", "s2"], test_path)
+                ["show", "bl", "--session-id", "s2", "--verbose"], test_path)
             if '"session_id": "s2"' in stdout:
                 log_pass("init stores session_id in state JSON")
             else:
                 log_fail("init stores session_id in state JSON",
                          'session_id: s2', stdout)
 
-            # CLAUDE_SESSION_ID env var fallback
+            # CLAUDE_SESSION_ID env var fallback (--verbose for JSON assertion)
             env_with_session = {**os.environ, "CLAUDE_PROJECT_DIR": str(test_path), "CLAUDE_SESSION_ID": "s2"}
             result = subprocess.run(
-                [sys.executable, str(crew_state), "show", "bl"],
+                [sys.executable, str(crew_state), "show", "bl", "--verbose"],
                 capture_output=True, text=True, cwd=test_path, env=env_with_session)
             if result.returncode == 0 and '"prompt": "Task for s2"' in result.stdout:
                 log_pass("CLAUDE_SESSION_ID env var fallback works")
@@ -706,12 +886,140 @@ def main():
             recent_todo.unlink(missing_ok=True)
 
             # =========================================================================
+            # MODELS HELPER TESTS (is_verbose / truncate)
+            # =========================================================================
+            log_section("models.py helpers")
+
+            import importlib.util
+            models_spec = importlib.util.spec_from_file_location("crew_models", SCRIPT_DIR / "models.py")
+            models_module = importlib.util.module_from_spec(models_spec)
+            models_spec.loader.exec_module(models_module)
+            is_verbose = models_module.is_verbose
+            truncate = models_module.truncate
+
+            # is_verbose: truthy values
+            saved_verbose = os.environ.pop("CREW_VERBOSE", None)
+            try:
+                for val in ("1", "true", "TRUE", "yes", "Yes"):
+                    os.environ["CREW_VERBOSE"] = val
+                    if is_verbose():
+                        log_pass(f"is_verbose() True for CREW_VERBOSE={val!r}")
+                    else:
+                        log_fail(f"is_verbose() True for CREW_VERBOSE={val!r}", "True", "False")
+
+                # is_verbose: falsy values
+                for val in ("", "0", "false", "no", "off"):
+                    os.environ["CREW_VERBOSE"] = val
+                    if not is_verbose():
+                        log_pass(f"is_verbose() False for CREW_VERBOSE={val!r}")
+                    else:
+                        log_fail(f"is_verbose() False for CREW_VERBOSE={val!r}", "False", "True")
+
+                # is_verbose: unset
+                os.environ.pop("CREW_VERBOSE", None)
+                if not is_verbose():
+                    log_pass("is_verbose() False when CREW_VERBOSE unset")
+                else:
+                    log_fail("is_verbose() False when CREW_VERBOSE unset", "False", "True")
+            finally:
+                if saved_verbose is not None:
+                    os.environ["CREW_VERBOSE"] = saved_verbose
+                else:
+                    os.environ.pop("CREW_VERBOSE", None)
+
+            # truncate: short text unchanged
+            if truncate("hello", 120) == "hello":
+                log_pass("truncate() leaves short text unchanged")
+            else:
+                log_fail("truncate() leaves short text unchanged", "hello", truncate("hello", 120))
+
+            # truncate: exactly max_length unchanged
+            exact = "X" * 120
+            if truncate(exact, 120) == exact:
+                log_pass("truncate() leaves text at exactly max_length unchanged")
+            else:
+                log_fail("truncate() leaves text at exactly max_length unchanged", "unchanged 120 chars", f"len={len(truncate(exact, 120))}")
+
+            # truncate: long text → exactly max_length total with ellipsis
+            long = "Y" * 500
+            t = truncate(long, 120)
+            if len(t) == 120 and t.endswith("...") and t[:117] == "Y" * 117:
+                log_pass("truncate() truncates long text to exactly max_length with ellipsis")
+            else:
+                log_fail("truncate() truncates long text to exactly max_length with ellipsis",
+                         "120 chars ending '...'", f"len={len(t)}, ends={t[-5:]!r}")
+
+            # truncate: default max_length is 120
+            if len(truncate("Z" * 300)) == 120:
+                log_pass("truncate() default max_length is 120")
+            else:
+                log_fail("truncate() default max_length is 120", "120", str(len(truncate("Z" * 300))))
+
+            # =========================================================================
+            # DEBATE DIR CLEANUP TESTS (session-start cleanup_stale_debate_dirs)
+            # =========================================================================
+            log_section("cleanup_stale_debate_dirs")
+
+            ss_spec = importlib.util.spec_from_file_location("crew_session_start", SCRIPT_DIR / "session-start.py")
+            ss_module = importlib.util.module_from_spec(ss_spec)
+            ss_spec.loader.exec_module(ss_module)
+            cleanup_stale_debate_dirs = ss_module.cleanup_stale_debate_dirs
+
+            debate_crew_dir = test_path / "debate-test" / ".crew"
+            debates_dir = debate_crew_dir / "debates"
+            debates_dir.mkdir(parents=True, exist_ok=True)
+
+            old_mtime = _time.time() - (2 * 86400)
+
+            # Stale multi-round run-* dir → removed
+            stale_run = debates_dir / "run-20250101-abc"
+            stale_run.mkdir()
+            (stale_run / "question.md").write_text("q")
+            os.utime(stale_run, (old_mtime, old_mtime))
+
+            # Stale single-round timestamp-slug dir (contains '-') → removed
+            stale_single = debates_dir / "20250101120000-fix-auth"
+            stale_single.mkdir()
+            (stale_single / "round-01.md").write_text("r")
+            os.utime(stale_single, (old_mtime, old_mtime))
+
+            # Fresh run-* dir (mid-write) → preserved
+            fresh_run = debates_dir / "run-99999999-live"
+            fresh_run.mkdir()
+            (fresh_run / "question.md").write_text("q")
+
+            cleanup_stale_debate_dirs(debate_crew_dir)
+
+            if not stale_run.exists():
+                log_pass("cleanup_stale_debate_dirs removes stale run-* dir")
+            else:
+                log_fail("cleanup_stale_debate_dirs removes stale run-* dir", "dir removed", "dir exists")
+
+            if not stale_single.exists():
+                log_pass("cleanup_stale_debate_dirs removes stale timestamp-slug dir")
+            else:
+                log_fail("cleanup_stale_debate_dirs removes stale timestamp-slug dir", "dir removed", "dir exists")
+
+            if fresh_run.exists():
+                log_pass("cleanup_stale_debate_dirs preserves fresh (live) run dir")
+            else:
+                log_fail("cleanup_stale_debate_dirs preserves fresh (live) run dir", "dir exists", "dir removed")
+
+            # No debates dir → no error
+            no_debates = test_path / "no-debates" / ".crew"
+            no_debates.mkdir(parents=True, exist_ok=True)
+            try:
+                cleanup_stale_debate_dirs(no_debates)
+                log_pass("cleanup_stale_debate_dirs no-op when debates dir absent")
+            except Exception as e:
+                log_fail("cleanup_stale_debate_dirs no-op when debates dir absent", "no exception", repr(e))
+
+            # =========================================================================
             # SLUGIFY TESTS
             # =========================================================================
             log_section("slugify()")
 
             # Import slugify from crew-state.py (hyphenated filename requires importlib)
-            import importlib.util
             spec = importlib.util.spec_from_file_location("crew_state", SCRIPT_DIR / "crew-state.py")
             crew_state_module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(crew_state_module)

@@ -9,10 +9,10 @@ Check the state of active loops by running these commands:
 
 ```bash
 # Check build loop
-BL_STATE=$(${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py show bl 2>/dev/null)
+BL_STATE=$(${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py show bl --verbose 2>/dev/null)
 
 # Check measure-twice loop
-MT_STATE=$(${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py show mt 2>/dev/null)
+MT_STATE=$(${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py show mt --verbose 2>/dev/null)
 ```
 
 ### Report Format

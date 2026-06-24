@@ -13,6 +13,8 @@ from models import (
     BuildState,
     MeasureTwiceState,
     read_hook_input,
+    is_verbose,
+    truncate,
 )
 from state_discovery import find_session_state_file
 
@@ -31,13 +33,15 @@ def main():
         loop_state = BuildState.load(loop_file)
 
         if loop_state.active:
-            if loop_state.iteration < loop_state.max_iterations:
-                loop_state.iteration += 1
-                loop_state.save(loop_file)
+            if loop_state.iteration <= loop_state.max_iterations:
+                # iteration field = "next nudge to display"; init sets it to 1,
+                # we display it as-is then increment for the next Stop fire.
+                task_text = truncate(loop_state.prompt, 120)
+                if is_verbose() or loop_state.iteration == 1:
+                    # Full recipe on verbose mode or first Stop fire
+                    message = f"""[Build Loop - Iteration {loop_state.iteration}/{loop_state.max_iterations}]
 
-                message = f"""[Build Loop - Iteration {loop_state.iteration}/{loop_state.max_iterations}]
-
-Task: {loop_state.prompt}
+Task: {task_text}
 
 Continue working. When complete:
 1. Spawn advisor to verify and review your work
@@ -46,6 +50,13 @@ Continue working. When complete:
 
 To exit early: `/crew:cancel-build`
 """
+                else:
+                    # Terse mode for second Stop fire onwards
+                    message = f"""[Build Loop - Iteration {loop_state.iteration}/{loop_state.max_iterations}]
+Task: {task_text}
+"""
+                loop_state.iteration += 1
+                loop_state.save(loop_file)
                 print(HookResult.block(message).to_json())
                 return
 
@@ -67,13 +78,15 @@ Review what was accomplished and whether the task is complete.
         measure_state = MeasureTwiceState.load(measure_file)
 
         if measure_state.active:
-            if measure_state.iteration < measure_state.max_iterations:
-                measure_state.iteration += 1
-                measure_state.save(measure_file)
+            if measure_state.iteration <= measure_state.max_iterations:
+                # iteration field = "next nudge to display"; init sets it to 1,
+                # we display it as-is then increment for the next Stop fire.
+                task_text = truncate(measure_state.task_description, 120)
+                if is_verbose() or measure_state.iteration == 1:
+                    # Full recipe on verbose mode or first Stop fire
+                    message = f"""[Measure-Twice Loop - Iteration {measure_state.iteration}/{measure_state.max_iterations}]
 
-                message = f"""[Measure-Twice Loop - Iteration {measure_state.iteration}/{measure_state.max_iterations}]
-
-Task: {measure_state.task_description}
+Task: {task_text}
 Plan: {measure_state.plan_file}
 
 Continue refining the plan:
@@ -83,6 +96,14 @@ Continue refining the plan:
 
 To exit early: `/crew:cancel-measure-twice`
 """
+                else:
+                    # Terse mode for second Stop fire onwards
+                    message = f"""[Measure-Twice Loop - Iteration {measure_state.iteration}/{measure_state.max_iterations}]
+Task: {task_text}
+Plan: {measure_state.plan_file}
+"""
+                measure_state.iteration += 1
+                measure_state.save(measure_file)
                 print(HookResult.block(message).to_json())
                 return
 

@@ -5,6 +5,7 @@ Restores persistent mode states and injects plugin integration guidance.
 """
 
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -66,6 +67,37 @@ def cleanup_stale_files(directory: Path) -> None:
                     json_file.unlink()
             except (OSError, AttributeError, KeyError, ValueError):
                 pass
+
+
+def cleanup_stale_debate_dirs(crew_dir: Path) -> None:
+    """Remove stale debate run directories from .crew/debates/.
+
+    Debate runs are directories (not JSON files), so they need shutil.rmtree
+    rather than unlink.  Uses the INACTIVE (1-day) threshold — never the 7-day
+    active threshold — so a live debate mid-write is never nuked.
+
+    Covers both debate-dir conventions:
+    - ``run-*``       multi-round debate runs
+    - ``*-*``         single-round ``<timestamp>-<slug>`` dirs
+    """
+    debates_dir = crew_dir / "debates"
+    if not debates_dir.is_dir():
+        return
+
+    now = time.time()
+
+    for entry in debates_dir.iterdir():
+        try:
+            if not entry.is_dir():
+                continue
+            # Match both run-* (multi-round) and *-* timestamp-slug single-round dirs.
+            if not (entry.name.startswith("run-") or "-" in entry.name):
+                continue
+            age = now - entry.stat().st_mtime  # OSError raised here if stat fails
+        except OSError:
+            continue  # Skip entries whose stat() raises (e.g. dangling symlink)
+        if age > STALE_INACTIVE_SECONDS:
+            shutil.rmtree(str(entry), ignore_errors=True)
 
 
 def cleanup_stale_todos(todos_dir: Path) -> None:
@@ -300,6 +332,7 @@ def main():
     cleanup_stale_todos(home / ".claude" / "todos")
     cleanup_stale_files(home / ".claude")
     cleanup_stale_files(directory / ".crew")
+    cleanup_stale_debate_dirs(directory / ".crew")
 
     # Detect project stack
     stack_hints = detect_project_stack(directory)

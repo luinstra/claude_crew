@@ -87,13 +87,47 @@ def slugify(text: str, max_length: int = 50) -> str:
     return slug[:max_length] if slug else "plan"
 
 
+def _compact_show(state, canonical: str) -> str:
+    """Format state as a compact single-line summary."""
+    active_str = "true" if state.active else "false"
+    iteration = getattr(state, "iteration", 1)
+    max_iter = getattr(state, "max_iterations", 10)
+
+    if canonical == "bl":
+        raw_task = getattr(state, "prompt", "")
+    else:
+        raw_task = getattr(state, "task_description", "")
+
+    # Normalize newlines and truncate task to 80 chars
+    task = raw_task.replace("\n", " ")
+    if len(task) > 80:
+        task = task[:77] + "..."
+
+    # Escape double quotes in task for safe inline display
+    task_escaped = task.replace('"', '\\"')
+
+    line = f'loop={canonical} active={active_str} iter={iteration}/{max_iter} task="{task_escaped}"'
+
+    if canonical == "mt":
+        plan = getattr(state, "plan_file", "")
+        line += f' plan={plan}'
+
+    return line
+
+
 def cmd_show(args):
     """Show current state of a loop."""
     session_id = resolve_session_id(args)
     path = get_state_path(args.loop, session_id)
-    cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
+    canonical = LOOP_ALIASES[args.loop]
+    cls = LOOP_CLASSES[canonical]
     state = cls.load(path)
-    print(json.dumps(asdict(state), indent=2))
+
+    verbose = getattr(args, "verbose", False)
+    if verbose:
+        print(json.dumps(asdict(state), indent=2))
+    else:
+        print(_compact_show(state, canonical))
 
 
 def cmd_is_active(args):
@@ -265,6 +299,7 @@ def main():
     p_show = subparsers.add_parser("show", help="Display current state")
     p_show.add_argument("loop", choices=list(LOOP_ALIASES.keys()))
     p_show.add_argument("--session-id", dest="session_id", help="Session ID for scoped state")
+    p_show.add_argument("--verbose", "-v", action="store_true", default=False, help="Output full pretty JSON instead of compact summary")
     p_show.set_defaults(func=cmd_show)
 
     # is-active
