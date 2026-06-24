@@ -71,6 +71,10 @@ strictly:
 
 ## What you do (council mode)
 
+> **Note:** discuss-mode debates (`/crew:debate`) now spawn the dedicated
+> `crew:panelist` seat. This council mode is retained as a fallback / for
+> `/crew:review`'s free-form path; for a pure discussion panel prefer `panelist`.
+
 When the prompt is a **free-form question** (no plan/diff target, no rubric),
 give an independent, critical take — exactly three things:
 

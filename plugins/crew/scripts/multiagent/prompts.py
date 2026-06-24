@@ -295,4 +295,8 @@ def build_prompt(
         body = code_review_ref(
             getattr(target, "diff_cmd", None), target.descriptor, notes
         )
-    return f"{_seat_role_preamble(seat_role)}{body}{_prior_round_block(prior_round)}"
+    # Prior round goes BEFORE the review body so a seat reads it as context to
+    # weigh, not as a trailer after the "return your verdict" instruction. With
+    # prior_round=None (the default, and the only review-mode case used today)
+    # this collapses to exactly the single-round review prompt.
+    return f"{_seat_role_preamble(seat_role)}{_prior_round_block(prior_round)}{body}"

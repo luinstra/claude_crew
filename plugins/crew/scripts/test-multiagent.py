@@ -761,6 +761,13 @@ def test_targets():
         check("no-commits-yet -> clear note, no traceback",
               t.kind == "code" and any("no commits" in n for n in t.notes),
               "no-commits note", str(t.notes))
+        # BLOCKING regression guard: an unborn repo has no HEAD, so the
+        # reproduced command must NOT use `git diff HEAD` — it diffs against the
+        # empty tree instead (and still includes the untracked file).
+        check("unborn-repo diff_cmd avoids 'diff HEAD', uses the empty-tree base",
+              t.diff_cmd is not None and "diff HEAD" not in t.diff_cmd
+              and "hash-object -t tree" in t.diff_cmd,
+              "empty-tree base, no HEAD", str(t.diff_cmd))
 
     # detached HEAD
     with tempfile.TemporaryDirectory() as td:

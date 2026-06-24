@@ -111,16 +111,31 @@ def _untracked_diff(cwd: str | None = None) -> str:
     return "".join(parts)
 
 
-# Ref-mode command a seat runs to reproduce a *complete* working-tree diff:
-# tracked changes plus untracked (non-ignored) files as new-file diffs. The
-# `--no-index` calls exit 1 when content differs (always, for a new file) —
-# expected and harmless inside the loop. Fully read-only: no index/ref/tree
-# mutation (no `git add -N`).
-_WORKTREE_DIFF_CMD = (
-    "git --no-pager diff HEAD; "
-    "git ls-files --others --exclude-standard | "
-    'while IFS= read -r f; do git --no-pager diff --no-index -- /dev/null "$f"; done'
-)
+# An unborn repo has no HEAD; diff staged content against git's empty tree
+# instead. `$(git hash-object -t tree /dev/null)` yields the empty-tree object
+# for the repo's hash algorithm (sha1 OR sha256) — correct without hardcoding.
+_EMPTY_TREE_BASE = "$(git hash-object -t tree /dev/null)"
+
+
+def _worktree_diff_cmd(base: str) -> str:
+    """A seat-reproducible command for a COMPLETE working-tree diff vs ``base``.
+
+    Tracked changes vs ``base`` PLUS untracked (non-ignored) files rendered as
+    new-file diffs. ``-z`` + a NUL-delimited read loop keeps paths with spaces
+    or newlines intact (matching the Python-side ``_untracked_files``). The
+    ``--no-index`` calls exit 1 whenever content differs (always, for a new file)
+    — expected and harmless. Fully read-only (no index/ref/tree mutation).
+    NB: the read loop assumes a bash/zsh-compatible shell (`read -d`).
+    """
+    return (
+        f"git --no-pager diff {base}; "
+        "git ls-files --others --exclude-standard -z | "
+        'while IFS= read -r -d "" f; do git --no-pager diff --no-index -- /dev/null "$f"; done'
+    )
+
+
+# The common case: a committed HEAD is present.
+_WORKTREE_DIFF_CMD = _worktree_diff_cmd("HEAD")
 
 
 def _merge_base(base: str, cwd: str | None = None) -> str | None:
@@ -184,14 +199,22 @@ def _resolve_working_tree(cwd: str | None) -> Target:
         notes += _untracked_note(cwd)
         if not content.strip():
             notes.append("working tree is empty (nothing to review)")
+        # No HEAD here — the reproduced command MUST NOT use `git diff HEAD`
+        # (that fails in an unborn repo and would omit staged initial files).
+        # Diff staged content against the empty tree, plus untracked files.
+        if untracked:
+            diff_cmd = _worktree_diff_cmd(_EMPTY_TREE_BASE)
+        elif content.strip():
+            diff_cmd = f"git --no-pager diff {_EMPTY_TREE_BASE}"
+        else:
+            diff_cmd = None
         return Target(
             kind="code",
             scope="working-tree (no commits yet)",
             content=content,
             descriptor="code: working-tree (no commits yet)",
             notes=notes,
-            # No HEAD; the compound command surfaces untracked files for a seat.
-            diff_cmd=_WORKTREE_DIFF_CMD if untracked else None,
+            diff_cmd=diff_cmd,
         )
 
     # Full uncommitted diff (staged + unstaged) to tracked files, plus

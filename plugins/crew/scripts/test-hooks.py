@@ -977,8 +977,9 @@ def main():
             (stale_run / "question.md").write_text("q")
             os.utime(stale_run, (old_mtime, old_mtime))
 
-            # Stale single-round timestamp-slug dir (contains '-') → removed
-            stale_single = debates_dir / "20250101120000-fix-auth"
+            # Stale single-round timestamp-slug dir (real cmd_debate format
+            # %Y%m%d-%H%M%S, i.e. 8 digits + '-' + 6 digits + slug) → removed
+            stale_single = debates_dir / "20250101-120000-fix-auth"
             stale_single.mkdir()
             (stale_single / "round-01.md").write_text("r")
             os.utime(stale_single, (old_mtime, old_mtime))
@@ -987,6 +988,13 @@ def main():
             fresh_run = debates_dir / "run-99999999-live"
             fresh_run.mkdir()
             (fresh_run / "question.md").write_text("q")
+
+            # Stale but NON-generated hyphenated user dir → must be PRESERVED
+            # (the cleanup matches only run-* / YYYYMMDD-HHMMSS, not any hyphen).
+            user_dir = debates_dir / "my-saved-notes"
+            user_dir.mkdir()
+            (user_dir / "keep.md").write_text("keep")
+            os.utime(user_dir, (old_mtime, old_mtime))
 
             cleanup_stale_debate_dirs(debate_crew_dir)
 
@@ -999,6 +1007,11 @@ def main():
                 log_pass("cleanup_stale_debate_dirs removes stale timestamp-slug dir")
             else:
                 log_fail("cleanup_stale_debate_dirs removes stale timestamp-slug dir", "dir removed", "dir exists")
+
+            if user_dir.exists():
+                log_pass("cleanup_stale_debate_dirs preserves a non-generated hyphenated user dir")
+            else:
+                log_fail("cleanup_stale_debate_dirs preserves a non-generated hyphenated user dir", "dir kept", "dir removed")
 
             if fresh_run.exists():
                 log_pass("cleanup_stale_debate_dirs preserves fresh (live) run dir")

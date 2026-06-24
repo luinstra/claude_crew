@@ -27,6 +27,12 @@ $ARGUMENTS
   `crew:reviewer`). When in doubt it's discuss. Review mode is single-round
   (use `/crew:review` for the full review verdict); multi-round is discuss only.
 
+> **Question-file naming (two conventions, by design):** single-round (section
+> A) uses the engine `debate` subcommand, which writes **`question.txt`** into a
+> `<timestamp>-<slug>/` dir. Multi-round (section B) uses **`question.md`** in a
+> `run-<id>/` dir — that is the filename + dir layout the `rounds.py` reader
+> (`render --run-id`) expects. Use whichever matches the section you're in.
+
 Resolve the flags to a **seat list**, strip them from `$ARGUMENTS` (the remainder
 is the question/target), then split the seat list: `codex`/`agy` are **subprocess
 seats** (the Python engine); `opus`/`sonnet` are **task seats** (`crew:panelist`

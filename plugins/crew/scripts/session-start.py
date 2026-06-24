@@ -5,6 +5,7 @@ Restores persistent mode states and injects plugin integration guidance.
 """
 
 import json
+import re
 import shutil
 import time
 from pathlib import Path
@@ -69,6 +70,11 @@ def cleanup_stale_files(directory: Path) -> None:
                 pass
 
 
+# Generated debate-dir names only: run-<...> OR a YYYYMMDD-HHMMSS timestamp
+# prefix. Guards cleanup against deleting arbitrary user dirs under .crew/debates/.
+_DEBATE_DIR_RE = re.compile(r"^(run-|\d{8}-\d{6})")
+
+
 def cleanup_stale_debate_dirs(crew_dir: Path) -> None:
     """Remove stale debate run directories from .crew/debates/.
 
@@ -76,9 +82,10 @@ def cleanup_stale_debate_dirs(crew_dir: Path) -> None:
     rather than unlink.  Uses the INACTIVE (1-day) threshold — never the 7-day
     active threshold — so a live debate mid-write is never nuked.
 
-    Covers both debate-dir conventions:
-    - ``run-*``       multi-round debate runs
-    - ``*-*``         single-round ``<timestamp>-<slug>`` dirs
+    Only removes dirs matching a GENERATED debate-dir name — never an arbitrary
+    hyphenated dir a user may have parked under .crew/debates/:
+    - ``run-<...>``              multi-round debate runs
+    - ``<YYYYMMDD-HHMMSS>[-...]`` single-round ``<timestamp>-<slug>`` dirs
     """
     debates_dir = crew_dir / "debates"
     if not debates_dir.is_dir():
@@ -90,8 +97,9 @@ def cleanup_stale_debate_dirs(crew_dir: Path) -> None:
         try:
             if not entry.is_dir():
                 continue
-            # Match both run-* (multi-round) and *-* timestamp-slug single-round dirs.
-            if not (entry.name.startswith("run-") or "-" in entry.name):
+            # Match ONLY our generated dir names (run-* or a YYYYMMDD-HHMMSS
+            # timestamp prefix) — NOT any dir that merely contains a hyphen.
+            if not _DEBATE_DIR_RE.match(entry.name):
                 continue
             age = now - entry.stat().st_mtime  # OSError raised here if stat fails
         except OSError:
