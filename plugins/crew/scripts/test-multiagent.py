@@ -43,7 +43,7 @@ MULTIAGENT_DIR = SCRIPT_DIR / "multiagent"
 # Make `import multiagent...` resolve (the package parent is SCRIPT_DIR).
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from multiagent import prompts, render, targets  # noqa: E402
+from multiagent import prompts, render, rounds, targets  # noqa: E402
 from multiagent.providers import (  # noqa: E402
     ProviderResult,
     get_provider,
@@ -1452,6 +1452,177 @@ def test_debate_subcommand():
           "nonzero + 'no question'", f"{proc.returncode}: {proc.stderr!r}")
 
 
+def test_rounds():
+    log_section("rounds — debate run lifecycle (pure FS, no model calls)")
+
+    check("slugify lowercases + collapses to [a-z0-9-]",
+          rounds.slugify("Redis vs In-Memory!!") == "redis-vs-in-memory",
+          "redis-vs-in-memory", rounds.slugify("Redis vs In-Memory!!"))
+    check("slugify empty -> 'debate'", rounds.slugify("") == "debate",
+          "debate", rounds.slugify(""))
+
+    rid = rounds.new_run_id("My Topic", ts="2026-06-23T10:11:12")
+    check("new_run_id has run- prefix + matches RUN_ID_RE",
+          rid.startswith("run-") and bool(rounds.RUN_ID_RE.match(rid)),
+          "valid run id", rid)
+    check("new_run_id with no slug still valid",
+          bool(rounds.RUN_ID_RE.match(rounds.new_run_id(ts="20260623"))),
+          "valid", "?")
+
+    # traversal guard: a valid run-id can only ever name a child of base_dir.
+    for bad in ("../evil", "run-../x", "run-a/b", "nope", "run-..", ""):
+        try:
+            rounds.validate_run_id(bad)
+            check(f"validate_run_id rejects {bad!r}", False, "RoundError", "no raise")
+        except rounds.RoundError:
+            check(f"validate_run_id rejects {bad!r}", True)
+    try:
+        rounds.run_dir("../../etc", base_dir="/tmp/x")
+        check("run_dir rejects traversal run-id", False, "RoundError", "no raise")
+    except rounds.RoundError:
+        check("run_dir rejects traversal run-id", True)
+
+    with tempfile.TemporaryDirectory() as td:
+        d = rounds.ensure_run_dir(rid, base_dir=td)
+        check("ensure_run_dir creates the dir", d.is_dir(), "dir exists", str(d))
+        rounds.write_question(d, "Redis or in-memory?")
+        check("question round-trips",
+              rounds.read_question(d) == "Redis or in-memory?",
+              "Redis or in-memory?", str(rounds.read_question(d)))
+        rounds.write_round(d, 1, "r1 positions")
+        rounds.write_round(d, 2, "r2 positions")
+        check("round-NN.md is zero-padded",
+              (d / "round-01.md").is_file() and (d / "round-02.md").is_file(),
+              "round-01/02.md", str(sorted(p.name for p in d.glob("round-*.md"))))
+        check("list_rounds returns sorted ints",
+              rounds.list_rounds(d) == [1, 2], "[1, 2]", str(rounds.list_rounds(d)))
+        check("read_prior_rounds(1) is None (round 1 has no prior)",
+              rounds.read_prior_rounds(d, 1) is None, "None",
+              str(rounds.read_prior_rounds(d, 1)))
+        prior = rounds.read_prior_rounds(d, 3)
+        check("read_prior_rounds(3) concatenates rounds 1 + 2",
+              prior is not None and "r1 positions" in prior and "r2 positions" in prior,
+              "rounds 1+2", str(prior))
+        check("read_round(2) returns round 2 text",
+              rounds.read_round(d, 2) == "r2 positions", "r2 positions",
+              str(rounds.read_round(d, 2)))
+        check("read_round missing -> None",
+              rounds.read_round(d, 9) is None, "None", str(rounds.read_round(d, 9)))
+        try:
+            rounds.round_path(d, 0)
+            check("round_path(0) raises RoundError", False, "RoundError", "no raise")
+        except rounds.RoundError:
+            check("round_path(0) raises RoundError", True)
+
+
+def test_discuss_and_modes():
+    log_section("prompts — discuss mode, mode validation, prior_round (single builder)")
+
+    code_tgt = targets.Target(
+        kind="code", scope="working-tree", content="DIFF-BYTES",
+        descriptor="code: working-tree", diff_cmd="git --no-pager diff HEAD",
+    )
+    d = prompts.build_prompt(code_tgt, mode="discuss", seat_role="opus")
+    check("discuss mode uses the council stance (DIRECT TAKE), not the rubric",
+          "DIRECT TAKE" in d and "APPROVED" not in d,
+          "council stance, no verdict", d[:200])
+    check("discuss over a diff references diff_cmd (no inlined content)",
+          "git --no-pager diff HEAD" in d and "DIFF-BYTES" not in d,
+          "ref diff_cmd", d[:200])
+    check("discuss seat_role label appears", "opus" in d, "opus label", d[:80])
+
+    try:
+        prompts.build_prompt(code_tgt, mode="bogus")
+        check("build_prompt unknown mode raises ValueError (fail loud)",
+              False, "ValueError", "no raise")
+    except ValueError:
+        check("build_prompt unknown mode raises ValueError (fail loud)", True)
+
+    withp = prompts.council("Q?", prior_round="codex: X\nagy: Y")
+    check("council prior_round adds an injection-guarded DATA block",
+          "PRIOR ROUND" in withp and "do NOT obey" in withp and "codex: X" in withp,
+          "guarded prior block", withp[:240])
+    check("council without prior_round stays single-round (no PRIOR ROUND block)",
+          "PRIOR ROUND" not in prompts.council("Q?"), "no prior block",
+          prompts.council("Q?")[:120])
+
+    base = prompts.build_prompt(code_tgt)
+    check("review-mode default has no seat-role / prior preamble (byte-compatible)",
+          not base.startswith("You are acting as") and "PRIOR ROUND" not in base,
+          "clean default", base[:80])
+
+
+def test_render_subcommand():
+    log_section("render subcommand (single prompt source for Task seats; no execution)")
+
+    proc = _run_cli(
+        ["render", "--mode", "discuss", "-q", "Redis or memory?", "--seat-role", "panelist"],
+        timeout=30,
+    )
+    check("render discuss -q -> exit 0", proc.returncode == 0, "0",
+          f"{proc.returncode}: {proc.stderr[:200]}")
+    check("render discuss emits the council prompt with the question + role",
+          "QUESTION" in proc.stdout and "Redis or memory?" in proc.stdout
+          and "panelist" in proc.stdout,
+          "council prompt", proc.stdout[:200])
+
+    with tempfile.TemporaryDirectory() as td:
+        qf = Path(td) / "q.txt"
+        qf.write_text("Q from file")
+        proc = _run_cli(["render", "--mode", "discuss", "-q", "X", "-f", str(qf)], timeout=30)
+        check("render -q + -f together -> nonzero error",
+              proc.returncode != 0, "nonzero", str(proc.returncode))
+
+    proc = _run_cli(["render", "--mode", "review", "-q", "a question"], timeout=30)
+    check("render free-form -q with --mode review -> error",
+          proc.returncode != 0, "nonzero", str(proc.returncode))
+
+    # multi-round: prior round folded in from the run dir
+    with tempfile.TemporaryDirectory() as td:
+        d = rounds.ensure_run_dir("run-xyz", base_dir=td)
+        rounds.write_round(d, 1, "codex: use redis\nagy: in-memory")
+        proc = _run_cli(
+            ["render", "--mode", "discuss", "-q", "Redis?", "--seat-role", "codex",
+             "--run-id", "run-xyz", "--round", "2", "--base-dir", td],
+            timeout=30,
+        )
+        check("render round 2 folds the prior round in as DATA",
+              proc.returncode == 0 and "PRIOR ROUND" in proc.stdout
+              and "use redis" in proc.stdout,
+              "prior round data", proc.stdout[:200])
+
+    proc = _run_cli(["render", "--mode", "discuss", "-q", "Q", "--run-id", "run-x"], timeout=30)
+    check("render lone --run-id (no --round) -> error",
+          proc.returncode != 0, "nonzero", str(proc.returncode))
+
+    proc = _run_cli(
+        ["render", "--mode", "discuss", "-q", "Q", "--run-id", "../../etc", "--round", "2"],
+        timeout=30,
+    )
+    check("render rejects a traversal --run-id", proc.returncode != 0,
+          "nonzero", str(proc.returncode))
+
+    # PARITY GATE: render's emitted prompt == prompts.build_prompt(...) exactly —
+    # the orchestrator's Task-seat prompt is the same single source as the engine's.
+    # NB: write --out OUTSIDE the repo, else the out-file would itself become an
+    # untracked file and perturb the working-tree diff between the two reads.
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as outdir:
+        _init_repo(td)
+        (Path(td) / "a.txt").write_text("hello\nchanged\n")
+        outf = Path(outdir) / "p.txt"
+        proc = _run_cli(
+            ["render", "working-tree", "--mode", "review", "--seat-role", "opus",
+             "-o", str(outf)],
+            cwd=td, timeout=30,
+        )
+        rendered = outf.read_text() if outf.is_file() else ""
+        tgt = targets.resolve("working-tree", cwd=td)
+        expected = prompts.build_prompt(tgt, seat_role="opus", mode="review")
+        check("render output == prompts.build_prompt (single source / Task-seat parity)",
+              rendered.rstrip("\n") == expected.rstrip("\n"),
+              "identical to build_prompt", rendered[:160])
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -1471,6 +1642,9 @@ def main():
     test_run_subcommand()
     test_council_subcommand()
     test_debate_subcommand()
+    test_rounds()
+    test_discuss_and_modes()
+    test_render_subcommand()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")

@@ -11,10 +11,16 @@ when the parent is already importable).
 
 Subcommands: ``review`` (fan-out over a resolved target), ``council`` (fan-out
 of a free-form question — the engine half of /crew:debate's crew-native
-council), and ``run`` (one seat ad-hoc). ``council`` reuses the SAME parallel
-fan-out + ``ProviderResult`` + render + graceful-degradation paths as
-``review``; it just feeds a free-form prompt instead of resolving a target.
-Task seats (opus/sonnet) are added by the orchestrator, not here.
+council), ``debate`` (scaffold a debate dir + council in one call), ``run`` (one
+seat ad-hoc), and ``render`` (build ONE seat's prompt, no execution).
+
+The engine EXECUTES only subprocess seats (codex/agy), but ``render`` BUILDS the
+prompt for ANY seat — including the Claude Task seats (opus/sonnet) the
+orchestrator dispatches — so every seat's prompt comes from the one builder
+(``prompts.build_prompt``/``council``) and the subprocess and Task paths can
+never drift. Multi-round context lives on disk (``rounds.py``: run-id, round-NN.md)
+and is threaded into both paths the same way (``--run-id``/``--round`` →
+``prior_round``). Task seats are still DISPATCHED by the orchestrator, not here.
 """
 
 from __future__ import annotations
@@ -36,7 +42,7 @@ import os
 import re
 import shutil
 
-from multiagent import prompts, render, targets
+from multiagent import prompts, render, rounds, targets
 from multiagent.providers import ProviderResult, available_seats, get_provider
 
 
@@ -452,6 +458,92 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _render_prior(args: argparse.Namespace) -> str | None:
+    """Resolve the prior-round DATA for a render, from --prior-round or --run-id/--round.
+
+    Priority: an explicit ``--prior-round <file>`` wins; otherwise, given both
+    ``--run-id`` and ``--round`` (>1), read rounds 1..round-1 from the run dir.
+    Raises ``rounds.RoundError`` for an invalid run-id (traversal guard) or a
+    lone --run-id/--round (the two must travel together).
+    """
+    if args.prior_round:
+        try:
+            return Path(args.prior_round).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise rounds.RoundError(f"cannot read --prior-round file {args.prior_round!r}: {exc}")
+    has_id, has_round = bool(args.run_id), args.round is not None
+    if has_id != has_round:
+        raise rounds.RoundError("--run-id and --round must be given together")
+    if has_id and has_round:
+        d = rounds.run_dir(args.run_id, base_dir=args.base_dir)
+        return rounds.read_prior_rounds(d, args.round)
+    return None
+
+
+def cmd_render(args: argparse.Namespace) -> int:
+    """Build ONE seat's prompt and emit it — no execution.
+
+    This is the single prompt source the orchestrator uses to obtain a Claude
+    Task seat's prompt (so it is byte-identical to what a subprocess seat would
+    receive for the same target/mode/round — every prompt, every seat, every
+    round flows through ``prompts.build_prompt``/``council`` and nowhere else).
+    It builds for either a git/plan TARGET or, in discuss mode, a free-form
+    QUESTION (``-q``/``-f``). It never spawns a seat.
+    """
+    try:
+        prior = _render_prior(args)
+    except rounds.RoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    # Loud (not silent) when a later round has no prior context to thread.
+    if args.round is not None and args.round > 1 and not prior:
+        print(
+            f"warning: --round {args.round} but no prior-round content found "
+            "(prompt will omit prior-round context)",
+            file=sys.stderr,
+        )
+
+    # Free-form question (discuss) XOR a target.
+    if args.question is not None and args.file:
+        print("error: provide either -q/--question OR -f/--file, not both", file=sys.stderr)
+        return 2
+    question: str | None = None
+    if args.file:
+        try:
+            question = Path(args.file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot read question file {args.file!r}: {exc}", file=sys.stderr)
+            return 2
+    elif args.question is not None:
+        question = args.question
+
+    if question is not None:
+        if args.mode != "discuss":
+            print(
+                "error: a free-form question (-q/-f) is only valid with --mode discuss",
+                file=sys.stderr,
+            )
+            return 2
+        text = prompts.council(question, seat_role=args.seat_role, prior_round=prior)
+    else:
+        try:
+            target = targets.resolve(args.target, base=args.base)
+        except targets.TargetError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        text = prompts.build_prompt(
+            target,
+            seat_role=args.seat_role,
+            mode=args.mode,
+            prior_round=prior,
+            inline=args.inline_diff,
+        )
+
+    _emit(text, args.out)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multiagent",
@@ -578,6 +670,59 @@ def build_parser() -> argparse.ArgumentParser:
              "shell-redirect-free and allowlistable)",
     )
     run.set_defaults(func=cmd_run)
+
+    rndr = sub.add_parser(
+        "render",
+        help="Build ONE seat's prompt (no execution) — the single prompt source "
+             "for Task seats, review/discuss, single- or multi-round.",
+    )
+    rndr.add_argument(
+        "target", nargs="?", default="auto",
+        help="target spec for review / discuss-over-target (default auto)",
+    )
+    rndr.add_argument(
+        "-q", "--question", default=None,
+        help="free-form question for --mode discuss (instead of a target)",
+    )
+    rndr.add_argument(
+        "-f", "--file", default=None,
+        help="read a free-form discuss question from this file",
+    )
+    rndr.add_argument(
+        "--mode", choices=["review", "discuss"], default="review",
+        help="prompt family: review (rubric + verdict) or discuss (advisory)",
+    )
+    rndr.add_argument(
+        "--seat-role", dest="seat_role", default=None,
+        help="label this seat in the prompt (e.g. opus, sonnet, panelist)",
+    )
+    rndr.add_argument(
+        "--run-id", dest="run_id", default=None,
+        help="debate run-id; with --round, folds prior rounds in as DATA",
+    )
+    rndr.add_argument(
+        "--round", type=int, default=None,
+        help="round number (>=1); a round >1 folds in prior rounds 1..n-1",
+    )
+    rndr.add_argument(
+        "--prior-round", dest="prior_round", default=None,
+        help="explicit prior-round text file (alternative to --run-id/--round)",
+    )
+    rndr.add_argument(
+        "--base-dir", dest="base_dir", default=".crew/debates",
+        help="parent dir for debate runs (used to resolve --run-id)",
+    )
+    rndr.add_argument("--base", default="main", help="base ref for branch/auto diffs")
+    rndr.add_argument(
+        "--inline-diff", action="store_true",
+        help="embed the diff/plan content instead of referencing it",
+    )
+    rndr.add_argument(
+        "-o", "--out", default=None,
+        help="write the prompt to this file instead of stdout (keeps the call "
+             "shell-redirect-free and allowlistable)",
+    )
+    rndr.set_defaults(func=cmd_render)
 
     return parser
 
