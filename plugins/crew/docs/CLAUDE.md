@@ -45,7 +45,8 @@ Use the Task tool to delegate to specialized agents:
 | `reader` | Information finding | Codebase search, external docs, images, code graph |
 | `executor` | Focused execution | Direct task implementation |
 | `document-writer` | Documentation | README, API docs, comments |
-| `reviewer` | Review-panel seat (read-only by convention; not sandbox-enforced) | Driven by `/crew:review` (spawned at `model: opus` / `model: sonnet`) |
+| `reviewer` | Review-panel seat — rubric + APPROVED/REVISE (read-only by convention; not sandbox-enforced) | Driven by `/crew:review` (spawned at `model: opus` / `model: sonnet`) |
+| `panelist` | Discuss-panel seat — direct take / objection / tradeoffs, no verdict (read-only by convention) | Driven by `/crew:debate` discuss mode (spawned at `model: opus` / `model: sonnet`) |
 
 ## Skills
 
@@ -68,7 +69,7 @@ Skills provide specialized guidance that activates automatically based on contex
 | `/crew:plan "description"` | Start planning session |
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (saves context) |
 | `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (codex + agy + opus + sonnet) → `APPROVED`/`REVISE` verdict |
-| `/crew:debate "question"` | Crew-native council — single-round multi-model take (codex + agy + opus + sonnet), synthesized into agreement/disagreement/recommendation (self-contained, no external plugin) |
+| `/crew:debate "question"` | Crew-native multi-model debate (codex + agy + opus + sonnet) — single-round council by default, or `--rounds N` for a multi-round debate with rebuttals; synthesized into agreement/disagreement/recommendation (self-contained, no external plugin) |
 
 **Panel size (build / measure-twice / review / debate):** start the argument with
 `--panel full` (default), `--panel lite` (opus + sonnet), `--panel solo` (opus),

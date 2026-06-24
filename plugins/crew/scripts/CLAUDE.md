@@ -31,12 +31,13 @@ their results into the same six-field shape the engine returns.
 
 ```
 multiagent/
-├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` subcommands
-├── prompts.py           # plan/code/council prompt builders (reference + inline modes)
-├── targets.py           # resolve a plan .md or a git diff target (+ the diff_cmd/ref_path a seat reproduces)
+├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `render` subcommands
+├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
+├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
+├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
 ├── render.py            # side-by-side panel + --json rendering
 └── providers/
-    ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC, registry
+    ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC (executor: run()), registry
     ├── codex.py         # CodexProvider — `codex exec - --sandbox read-only -o <tmp>`, prompt via stdin
     └── agy.py           # AgyProvider — `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions)
 ```
@@ -44,15 +45,36 @@ multiagent/
 Key contracts (do NOT regress):
 - **Six-field `ProviderResult`** (`name, model, ok, output, error, elapsed`) — the
   one shape every seat (subprocess AND normalized Task seat) returns.
+- **Provider = executor.** The `Provider` ABC's job is `run()` (invoke a CLI →
+  `ProviderResult`). codex/agy are executors; opus/sonnet (Task seats) are NOT
+  providers — they're owned by the orchestrator. (This is the debate-validated
+  shape: we deliberately did NOT adopt the Enterprise fork's prompt-builder
+  `BaseProvider`/`TaskProvider`, which modelled non-executable Claude seats as
+  providers.)
+- **One prompt builder; engine builds for all, executes only subprocess.**
+  `prompts.build_prompt`/`council` is the SINGLE source of every seat's prompt.
+  The engine EXECUTES only subprocess seats, but `render` BUILDS the prompt for
+  ANY seat — including the Claude Task seats the orchestrator dispatches — so the
+  subprocess and Task prompts can never drift. (This *evolves* the older "the
+  engine only knows subprocess seats" contract.) The parity test in
+  `test-multiagent.py` asserts `render` output == `prompts.build_prompt(...)`.
+- **Modes** — `mode="review"` (rubric + APPROVED/REVISE) vs `mode="discuss"`
+  (advisory council take, no verdict). `build_prompt` raises on an unknown mode.
+  Defaults (`seat_role=None, mode="review", prior_round=None`) keep review output
+  byte-identical — multi-round/discuss are opt-in.
+- **Multi-round lives on disk** (`rounds.py`): a run dir holds `question.md` +
+  `round-NN.md`; `render --run-id R --round n` folds rounds `1…n-1` in as
+  injection-guarded DATA (`prior_round`). The orchestrator (debate.md) owns the
+  round loop + convergence; the engine just renders/executes/reads-records.
 - **Never choke** — a failed/skipped seat returns `ok=False`; the fan-out only
   exits nonzero when EVERY seat failed (and still emits the full array, no traceback).
 - **Reference mode is the default** — seats fetch the diff/plan themselves (the
   engine passes `targets.Target.diff_cmd` / `ref_path`); `--inline-diff` embeds it.
-  The Claude Task seats (`crew:reviewer`) have `Read, Grep, Glob, Bash` and fetch
-  the target the same way — run the diff command, or read the plan path. Its
-  `Bash` is read-only by CONVENTION (instructed to git diff/show/log + reads,
-  never mutate) — NOT sandbox-enforced; see `reviewer.md` for the honest posture
-  + the native enforcement paths if it's ever pointed at untrusted diffs.
+  The Claude Task seats (`crew:reviewer` for review, `crew:panelist` for discuss)
+  have `Read, Grep, Glob, Bash` and fetch the target the same way. Their `Bash` is
+  read-only by CONVENTION (instructed to git diff/show/log + reads, never mutate)
+  — NOT sandbox-enforced; see `reviewer.md` for the honest posture + the native
+  enforcement paths if it's ever pointed at untrusted diffs.
 - **`--out <file>`** writes results to a file so the call needs no shell redirect
   (stays permission-allowlistable).
 - **Panel selection** — the commands accept `--panel full|lite|solo` / `--seats
