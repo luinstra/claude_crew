@@ -110,7 +110,7 @@ class CursorProvider(Provider):
     """A review-panel seat backed by the Cursor Agent CLI subprocess.
 
     Pinned to one model. Multiple named instances (see ``CURSOR_SEATS``) run as
-    distinct seats — ``cursor-gemini``, ``cursor-glm``, ``cursor-composer``, …
+    distinct seats — ``cursor-gpt``, ``cursor-gemini``, ``cursor-glm``, ``cursor-composer``, …
     """
 
     def __init__(

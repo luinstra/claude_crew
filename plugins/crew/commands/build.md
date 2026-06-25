@@ -13,10 +13,10 @@ $ARGUMENTS
 Flags at the **start** of `$ARGUMENTS` choose which models verify; the rest is
 the task. Default (no flag) = the full panel.
 
-- `--panel full` = `codex,cursor-gemini,cursor-glm,cursor-composer,opus,sonnet`
+- `--panel full` = `codex,cursor-gpt,cursor-gemini,cursor-glm,cursor-composer,opus,sonnet`
   (default) · `--panel lite` = `opus,sonnet` · `--panel solo` = `opus`
 - `--seats <list>` = an explicit comma-list of any registered seat
-  (`codex, agy, cursor-gemini, cursor-glm, cursor-composer, opus, sonnet`;
+  (`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-composer, opus, sonnet`;
   e.g. `--seats codex,opus`). `agy` is opt-in — works via `--seats agy` but is
   not in the default panel. `--seats` wins if both are given.
 
@@ -85,7 +85,7 @@ into the existing verdict. Two seat kinds:
   no `claude -p`, no API key).
 
 The panel is whatever the Panel-options flags resolved to (default **codex +
-cursor-gemini + cursor-glm + cursor-composer + opus + sonnet**). Only fan out the
+cursor-gpt + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet**). Only fan out the
 seats in that list. A failed/skipped seat
 NEVER aborts the verification (see "Synthesize" below) — the verdict is
 synthesized from whichever seats succeed.

@@ -14,7 +14,7 @@ of a free-form question — the engine half of /crew:debate's crew-native
 council), ``debate`` (scaffold a debate dir + council in one call), ``run`` (one
 seat ad-hoc), and ``render`` (build ONE seat's prompt, no execution).
 
-The engine EXECUTES only subprocess seats (codex/agy), but ``render`` BUILDS the
+The engine EXECUTES only subprocess seats (codex/cursor-*, plus opt-in agy), but ``render`` BUILDS the
 prompt for ANY seat — including the Claude Task seats (opus/sonnet) the
 orchestrator dispatches — so every seat's prompt comes from the one builder
 (``prompts.build_prompt``/``council``) and the subprocess and Task paths can
@@ -290,7 +290,7 @@ def _slugify(text: str, max_words: int = 6) -> str:
 
 
 def cmd_debate(args: argparse.Namespace) -> int:
-    """Scaffold a debate dir + run the codex+agy council in ONE allowlistable call.
+    """Scaffold a debate dir + run the subprocess-seat council in ONE allowlistable call.
 
     Folds the steps /crew:debate used to do in the shell — `mkdir` the dir, a
     heredoc to write the question, a redirect to capture results — into a single
@@ -365,10 +365,11 @@ def cmd_debate(args: argparse.Namespace) -> int:
         except OSError:
             pass
 
-    # A Claude-only panel (e.g. --panel lite/solo) has NO codex/agy seat but
+    # A Claude-only panel (e.g. --panel lite/solo) has NO subprocess seat but
     # still wants the dir + question.md scaffolded so the orchestrator can run
     # the opus/sonnet Task seats and log there. `--seats none` (or "") means
-    # exactly that — distinct from OMITTING --seats (which defaults to codex,agy).
+    # exactly that — distinct from OMITTING --seats (which defaults to the
+    # subprocess panel: codex,cursor-gpt,cursor-gemini,cursor-glm,cursor-composer).
     if args.seats is not None and args.seats.strip().lower() in ("", "none"):
         seats: list[str] = []
     else:
@@ -630,7 +631,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     debate = sub.add_parser(
         "debate",
-        help="Scaffold a debate dir + run the codex+agy council in one call "
+        help="Scaffold a debate dir + run the subprocess-seat council in one call "
              "(no mkdir/heredoc/redirect to approve).",
     )
     debate.add_argument(

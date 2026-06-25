@@ -1,5 +1,5 @@
 ---
-description: Multi-model review of a plan OR code diff (default panel codex + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet; narrow with --panel/--seats)
+description: Multi-model review of a plan OR code diff (default panel codex + cursor-gpt + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet; narrow with --panel/--seats)
 argument-hint: "<the plan | the code | a .md path | a git scope>"
 allowed-tools: Bash, Task, Read, Glob
 ---
@@ -22,10 +22,10 @@ $ARGUMENTS
 Flags at the **start** of `$ARGUMENTS` choose which models review; the rest is
 the review request. Default (no flag) = the full panel.
 
-- `--panel full` = `codex,cursor-gemini,cursor-glm,cursor-composer,opus,sonnet`
+- `--panel full` = `codex,cursor-gpt,cursor-gemini,cursor-glm,cursor-composer,opus,sonnet`
   (default) · `--panel lite` = `opus,sonnet` · `--panel solo` = `opus`
 - `--seats <list>` = an explicit comma-list of any registered seat
-  (`codex, agy, cursor-gemini, cursor-glm, cursor-composer, opus, sonnet`;
+  (`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-composer, opus, sonnet`;
   e.g. `--seats codex,opus`). `agy` is opt-in — works via `--seats agy` but is
   not in the default panel. `--seats` wins if both are given.
 
@@ -47,7 +47,7 @@ verdict. Two seat kinds:
   `claude -p`, no API key).
 
 The panel is whatever the Panel-options flags resolved to (default **codex +
-cursor-gemini + cursor-glm + cursor-composer + opus + sonnet**); only fan out the
+cursor-gpt + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet**); only fan out the
 seats in that list. This is safe because a
 failed/skipped seat NEVER aborts the review (see Step 6) — the verdict is
 synthesized from whichever seats succeed.

@@ -24,8 +24,8 @@ scripts/
 
 The engine that powers `/crew:review`, `/crew:debate`, and the review steps of
 `/crew:build` and `/crew:measure-twice`. It drives **subprocess seats** only —
-the external CLIs `codex` + `cursor-gemini`/`cursor-glm`/`cursor-composer` (with
-`agy` opt-in via `--seats agy`). The **Claude seats** (opus/sonnet) are NOT
+the external CLIs `codex` + `cursor-gpt`/`cursor-gemini`/`cursor-glm`/`cursor-composer`
+(with `agy` opt-in via `--seats agy`). The **Claude seats** (opus/sonnet) are NOT
 in here: they're spawned by the orchestrating command as `crew:reviewer` Task
 subagents (in-session, on the subscription), and the orchestrator normalizes
 their results into the same six-field shape the engine returns.
@@ -40,7 +40,7 @@ multiagent/
 └── providers/
     ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC (executor: run()), registry + known_seat_names()
     ├── codex.py         # CodexProvider — `codex exec - --sandbox read-only -o <tmp>`, prompt via stdin
-    ├── cursor.py        # CursorProvider — the live `cursor-gemini`/`cursor-glm`/`cursor-composer` seats; CURSOR_SEATS is the one-line-to-extend source of truth
+    ├── cursor.py        # CursorProvider — the live `cursor-gpt`/`cursor-gemini`/`cursor-glm`/`cursor-composer` seats; CURSOR_SEATS is the one-line-to-extend source of truth
     └── agy.py           # AgyProvider (opt-in) — `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions)
 ```
 
@@ -83,7 +83,7 @@ Key contracts (do NOT regress):
   <subset>`; the ORCHESTRATOR resolves those to a seat list and passes only the
   subprocess subset (the `codex`/`cursor-*` entries, plus opt-in `agy`) to the
   engine's `--seats` (skipping the engine when there are none). The default panel
-  is `codex + cursor-gemini/glm/composer + opus + sonnet`; `agy` is opt-in. The
+  is `codex + cursor-gpt/gemini/glm/composer + opus + sonnet`; `agy` is opt-in. The
   engine itself only knows subprocess seats, and its subprocess-seat allowlist is
   now registry-derived via `known_seat_names()` (no hardcoded codex/agy list).
   One engine-side
@@ -92,7 +92,8 @@ Key contracts (do NOT regress):
   `lite`/`solo` council still gets its log dir. `review`/`council` intentionally
   do NOT support empty seats (they're pure fan-out; the orchestrator skips them).
 - Tuning env: `CREW_MA_SEATS`, `CREW_MA_TIMEOUT`, `CREW_MA_CODEX_MODEL`,
-  `CREW_MA_AGY_MODEL`, `CREW_MA_AGY_PRINT_TIMEOUT`.
+  `CREW_MA_GPT_MODEL`, `CREW_MA_GEMINI_MODEL`, `CREW_MA_GLM_MODEL`,
+  `CREW_MA_COMPOSER_MODEL`, `CREW_MA_AGY_MODEL`, `CREW_MA_AGY_PRINT_TIMEOUT`.
 
 Run its tests with `python plugins/crew/scripts/test-multiagent.py`.
 

@@ -1,5 +1,5 @@
 ---
-description: Crew-native multi-model debate on a question — single round (council) or multi-round with rebuttals; default panel codex + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet; narrow with --panel/--seats
+description: Crew-native multi-model debate on a question — single round (council) or multi-round with rebuttals; default panel codex + cursor-gpt + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet; narrow with --panel/--seats
 argument-hint: "[--rounds N] [--panel ...] <question>"
 allowed-tools: Bash, Task, Read, Glob, Write
 ---
@@ -19,10 +19,10 @@ $ARGUMENTS
   council; `N>1` runs a multi-round debate where each round sees the prior
   round's positions and may rebut/revise.
 - **Panel** — `--panel full` =
-  `codex,cursor-gemini,cursor-glm,cursor-composer,opus,sonnet` (default) ·
+  `codex,cursor-gpt,cursor-gemini,cursor-glm,cursor-composer,opus,sonnet` (default) ·
   `--panel lite` = `opus,sonnet` · `--panel solo` = `opus` · `--seats <list>` =
   an explicit comma-list of any registered seat
-  (`codex, agy, cursor-gemini, cursor-glm, cursor-composer, opus, sonnet`;
+  (`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-composer, opus, sonnet`;
   `agy` is opt-in — works via `--seats agy` but is not in the default panel).
   `--seats` wins over `--panel`.
 - **Mode** — inferred, not flagged: a free-form **question** → **discuss** mode
