@@ -1643,6 +1643,15 @@ def test_render_subcommand():
           and "panelist" in proc.stdout,
           "council prompt", proc.stdout[:200])
 
+    # -o into a NON-existent dir must create parents (else /crew:review crashes
+    # in a fresh repo writing .crew/.prompt-*.txt — _emit now mkdirs).
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "fresh" / ".crew" / "p.txt"
+        proc = _run_cli(["render", "--mode", "discuss", "-q", "X", "-o", str(out)], timeout=30)
+        check("render -o into a non-existent dir creates parents (no crash)",
+              proc.returncode == 0 and out.is_file(),
+              "file written", f"rc={proc.returncode} exists={out.is_file()} err={proc.stderr[:150]}")
+
     with tempfile.TemporaryDirectory() as td:
         qf = Path(td) / "q.txt"
         qf.write_text("Q from file")
@@ -1775,6 +1784,28 @@ def test_cursor():
         finally:
             os.environ["PATH"] = old_path
             os.environ.pop("CURSOR_CAPTURE", None)
+
+    # Empty output at exit 0 must be ok=False (mirrors codex/agy) — an all-empty
+    # panel must never render as a valid "(no output)" review.
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        make_fake_bin(d, "agent", '''
+        import sys
+        if "--version" in sys.argv:
+            print("2026.06.24-00-45-58-9f61de7")
+            sys.exit(0)
+        sys.stderr.write("nothing to do")
+        sys.exit(0)
+        ''')
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = path_with(d)["PATH"]
+        try:
+            r = CursorProvider("cursor-glm", "glm-5.2-max").run("REVIEW", timeout=10)
+            check("cursor empty output at exit 0 -> ok=False (not a valid review)",
+                  r.ok is False and "empty" in (r.error or "").lower(),
+                  "ok=False empty", f"ok={r.ok} err={r.error!r}")
+        finally:
+            os.environ["PATH"] = old_path
 
     # is_available rejects a non-Cursor `agent` binary (no date-stamp, no "cursor").
     with tempfile.TemporaryDirectory() as td:

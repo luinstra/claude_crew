@@ -188,7 +188,13 @@ def _emit(text: str, out_path: str | None) -> None:
     here — it only fires on total failure and belongs on the terminal.
     """
     if out_path:
-        Path(out_path).write_text(
+        # Create parent dirs so a standalone `render`/`review`/`run -o .crew/…`
+        # doesn't crash in a fresh repo where .crew/ hasn't been created yet
+        # (only build/measure-twice init .crew via crew-state; review/debate don't).
+        p = Path(out_path)
+        if p.parent and not p.parent.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
             text if text.endswith("\n") else text + "\n", encoding="utf-8"
         )
     else:

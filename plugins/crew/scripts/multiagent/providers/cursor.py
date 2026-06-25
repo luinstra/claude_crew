@@ -232,6 +232,16 @@ class CursorProvider(Provider):
                        f"stderr: {_strip_ansi(proc.stderr)[:500]}"),
                 elapsed=elapsed,
             )
+        # Empty output at exit 0 is NOT a valid review (mirrors codex/agy): an
+        # all-empty panel must not be rendered as an OK "(no output)" review.
+        if not raw_output.strip():
+            stderr_clean = _strip_ansi(proc.stderr).strip()
+            return ProviderResult(
+                name=self.name, model=chosen_model, ok=False, output="",
+                error=("agent returned empty output at exit 0"
+                       + (f"; stderr: {stderr_clean[:500]}" if stderr_clean else "")),
+                elapsed=elapsed,
+            )
         return ProviderResult(
             name=self.name, model=chosen_model, ok=True, output=raw_output,
             error=None, elapsed=elapsed,
