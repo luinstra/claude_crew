@@ -32,7 +32,7 @@ their results into the same six-field shape the engine returns.
 
 ```
 multiagent/
-├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `render` subcommands
+├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `render` | `seats` subcommands
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
@@ -79,14 +79,33 @@ Key contracts (do NOT regress):
   enforcement paths if it's ever pointed at untrusted diffs.
 - **`--out <file>`** writes results to a file so the call needs no shell redirect
   (stays permission-allowlistable).
-- **Panel selection** — the commands accept `--panel full|lite|solo` / `--seats
-  <subset>`; the ORCHESTRATOR resolves those to a seat list and passes only the
-  subprocess subset (the `codex`/`cursor-*` entries, plus opt-in `agy`) to the
-  engine's `--seats` (skipping the engine when there are none). The default panel
-  is `codex + cursor-gpt/gemini/glm/composer + opus + sonnet`; `agy` is opt-in. The
-  engine itself only knows subprocess seats, and its subprocess-seat allowlist is
-  now registry-derived via `known_seat_names()` (no hardcoded codex/agy list).
-  One engine-side
+- **Panel selection** — the commands accept `--panel full|lite|solo|cursor` /
+  `--seats <subset>`; the ORCHESTRATOR resolves those to a seat list and passes
+  only the subprocess subset (the `codex`/`cursor-*` entries, plus opt-in `agy`) to
+  the engine's `--seats` (skipping the engine when there are none). The default
+  panel is `codex + cursor-gemini/glm/composer + opus + sonnet`; `cursor-gpt` and
+  `agy` are registered but opt-in (codex already covers the GPT lineage, so
+  `cursor-gpt` isn't defaulted); `--panel cursor` = `--seats cursor` (ALL Cursor
+  seats incl. cursor-gpt, no codex/Claude).
+  The engine itself only knows subprocess seats, and its subprocess-seat allowlist
+  is registry-derived via `known_seat_names()` (no hardcoded codex/agy list). The
+  `cursor` GROUP TOKEN (in `--seats` AND `CREW_MA_SEATS`) expands to every
+  registered `cursor-*` seat via `_expand_seat_groups`, so it grows with
+  `CURSOR_SEATS`. `render --stage --session-id <id>` stages a seat prompt to
+  `.crew/reviews/<session-id>/prompt-<seat-role>.txt` (session resolved in Python —
+  arg → `CLAUDE_SESSION_ID` env — so the command carries no `${…}` expansion).
+- **Per-seat fan-out (visibility).** The review-bearing commands
+  (`review`/`build`/`measure-twice`) fan subprocess seats out ONE
+  `cli.py run <seat>` call PER seat — each a separate, visible, killable shell —
+  rather than one opaque `cli.py review --seats <all>` call that hides them in the
+  `_fan_out` thread pool. The orchestrator gets the concrete (group-expanded) seat
+  list from `cli.py seats --seats <spec>`, renders the shared subprocess prompt
+  once with `render --stage`, then runs each seat via `run <seat> -f <prompt>
+  --json`. `run --json` always exits 0 with the six-field result, so per-seat
+  never-choke is automatic (no all-failed abort to handle). The `review`
+  subcommand still exists for ad-hoc one-shot fan-out; the commands just don't use
+  it. (`/crew:debate` already fanned out per-seat in its multi-round path.)
+- One engine-side
   affordance: `cli.py debate --seats none` (or `""`) scaffolds the dir + writes an
   empty `subprocess.json` (exit 0) instead of erroring — so a Claude-only
   `lite`/`solo` council still gets its log dir. `review`/`council` intentionally

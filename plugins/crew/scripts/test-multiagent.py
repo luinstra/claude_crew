@@ -455,15 +455,23 @@ def test_default_seats():
     try:
         os.environ.pop("CREW_MA_SEATS", None)
         seats = _default_subprocess_seats()
-        check("default subprocess panel == codex + cursor-gpt/gemini/glm/composer",
-              seats == ["codex", "cursor-gpt", "cursor-gemini", "cursor-glm", "cursor-composer"],
-              "['codex', 'cursor-gpt', 'cursor-gemini', 'cursor-glm', 'cursor-composer']", str(seats))
+        check("default subprocess panel == codex + cursor-gemini/glm/composer (cursor-gpt opt-in)",
+              seats == ["codex", "cursor-gemini", "cursor-glm", "cursor-composer"],
+              "['codex', 'cursor-gemini', 'cursor-glm', 'cursor-composer']", str(seats))
         # opus/sonnet (Task seats) AND unknown names in CREW_MA_SEATS are dropped;
         # agy is registered, so it's honored as an opt-in seat.
         os.environ["CREW_MA_SEATS"] = "codex,agy,opus,sonnet,bogus"
         seats = _default_subprocess_seats()
         check("CREW_MA_SEATS filters to registered subprocess seats only",
               seats == ["codex", "agy"], "['codex', 'agy']", str(seats))
+        # The 'cursor' group token expands in the env-var path too (not just the
+        # CLI --seats path), so CREW_MA_SEATS=cursor behaves like --seats cursor.
+        from multiagent.providers.cursor import CURSOR_SEATS  # noqa: E402
+        os.environ["CREW_MA_SEATS"] = "cursor"
+        seats = _default_subprocess_seats()
+        check("CREW_MA_SEATS=cursor expands to all cursor-* seats",
+              set(seats) == set(CURSOR_SEATS) and len(seats) == len(CURSOR_SEATS),
+              "all cursor-* seats", str(seats))
     finally:
         if saved is None:
             os.environ.pop("CREW_MA_SEATS", None)
@@ -495,6 +503,92 @@ def test_resolve_timeout():
             os.environ.pop("CREW_MA_TIMEOUT", None)
         else:
             os.environ["CREW_MA_TIMEOUT"] = saved
+
+
+def test_stage():
+    log_section("--stage session-scoped prompt staging")
+    from multiagent import cli  # noqa: E402
+
+    # _resolve_session_id: --session-id arg wins; CLAUDE_SESSION_ID env fallback;
+    # empty when neither is present (NOT a shell ${…} expansion).
+    saved = os.environ.get("CLAUDE_SESSION_ID")
+    try:
+        os.environ["CLAUDE_SESSION_ID"] = "envsess"
+        check("session id: --session-id arg wins over env",
+              cli._resolve_session_id("argsess") == "argsess",
+              "argsess", cli._resolve_session_id("argsess"))
+        check("session id: falls back to CLAUDE_SESSION_ID env",
+              cli._resolve_session_id(None) == "envsess",
+              "envsess", cli._resolve_session_id(None))
+        os.environ.pop("CLAUDE_SESSION_ID", None)
+        check("session id: empty when neither arg nor env given",
+              cli._resolve_session_id(None) == "", "''", repr(cli._resolve_session_id(None)))
+    finally:
+        if saved is None:
+            os.environ.pop("CLAUDE_SESSION_ID", None)
+        else:
+            os.environ["CLAUDE_SESSION_ID"] = saved
+
+    # _stage_path: derives .crew/reviews/<session>/prompt-<role>.txt from
+    # seat-role + session; flat when no session; charset-guards the segment.
+    check("stage path derives from session id + seat-role",
+          cli._stage_path("abc123", "opus") == ".crew/reviews/abc123/prompt-opus.txt",
+          ".crew/reviews/abc123/prompt-opus.txt", cli._stage_path("abc123", "opus"))
+    check("stage path is flat when session id is empty",
+          cli._stage_path("", "sonnet") == ".crew/reviews/prompt-sonnet.txt",
+          ".crew/reviews/prompt-sonnet.txt", cli._stage_path("", "sonnet"))
+    check("stage path charset-guards the session segment (no traversal)",
+          cli._stage_path("../../etc", "opus") == ".crew/reviews/etc/prompt-opus.txt",
+          ".crew/reviews/etc/prompt-opus.txt", cli._stage_path("../../etc", "opus"))
+    check("stage path charset-guards the seat-role too (no traversal)",
+          cli._stage_path("s", "../../evil") == ".crew/reviews/s/prompt-evil.txt",
+          ".crew/reviews/s/prompt-evil.txt", cli._stage_path("s", "../../evil"))
+    check("stage path defaults role to 'seat' when seat-role missing",
+          cli._stage_path("s", None) == ".crew/reviews/s/prompt-seat.txt",
+          ".crew/reviews/s/prompt-seat.txt", cli._stage_path("s", None))
+
+    # End-to-end: render --stage writes the prompt to the derived path and prints
+    # that path — no -o, no shell expansion. Run in a temp cwd so nothing leaks
+    # into the repo. discuss -q needs no git repo.
+    with tempfile.TemporaryDirectory() as td:
+        proc = _run_cli(
+            ["render", "--mode", "discuss", "-q", "Redis?", "--seat-role", "opus",
+             "--stage", "--session-id", "sess-XYZ"],
+            cwd=td, timeout=30,
+        )
+        staged = Path(td) / ".crew" / "reviews" / "sess-XYZ" / "prompt-opus.txt"
+        check("render --stage writes the derived session-scoped path",
+              proc.returncode == 0 and staged.is_file(),
+              "file at .crew/reviews/sess-XYZ/prompt-opus.txt",
+              f"rc={proc.returncode} exists={staged.is_file()} err={proc.stderr[:150]}")
+        check("render --stage prints the staged path to stdout",
+              ".crew/reviews/sess-XYZ/prompt-opus.txt" in proc.stdout,
+              "path on stdout", proc.stdout.strip()[:200])
+        check("render --stage staged file contains the rendered prompt",
+              staged.is_file() and "Redis?" in staged.read_text(),
+              "prompt body present", staged.read_text()[:120] if staged.is_file() else "(missing)")
+
+    # --stage and -o are mutually exclusive (no ambiguous double destination).
+    with tempfile.TemporaryDirectory() as td:
+        proc = _run_cli(
+            ["render", "--mode", "discuss", "-q", "X", "--seat-role", "opus",
+             "--stage", "-o", str(Path(td) / "x.txt")],
+            cwd=td, timeout=30,
+        )
+        check("render --stage + -o together -> nonzero error",
+              proc.returncode != 0, "nonzero", str(proc.returncode))
+
+    # An unsubstituted <session-id> placeholder is rejected (loud fail) so a
+    # templating slip can't silently collapse to a constant shared staging dir.
+    with tempfile.TemporaryDirectory() as td:
+        proc = _run_cli(
+            ["render", "--mode", "discuss", "-q", "X", "--seat-role", "opus",
+             "--stage", "--session-id", "<session-id>"],
+            cwd=td, timeout=30,
+        )
+        check("render --stage rejects an unsubstituted <session-id> placeholder",
+              proc.returncode != 0 and "placeholder" in proc.stderr.lower(),
+              "nonzero + placeholder error", f"rc={proc.returncode} err={proc.stderr[:150]}")
 
 
 def test_registry():
@@ -1727,6 +1821,24 @@ def test_cursor():
     check("engine resolves a cursor seat (--seats cursor-glm,codex)",
           cli._resolve_seats("cursor-glm,codex") == ["cursor-glm", "codex"],
           "['cursor-glm', 'codex']", str(cli._resolve_seats("cursor-glm,codex")))
+    # The 'cursor' GROUP token expands to every registered cursor-* seat
+    # (registry-derived — grows with CURSOR_SEATS) and de-dupes.
+    expanded = cli._resolve_seats("cursor")
+    check("--seats cursor expands to all cursor-* seats",
+          set(expanded) == set(CURSOR_SEATS) and len(expanded) == len(CURSOR_SEATS),
+          "all cursor-* seats", str(expanded))
+    check("--seats cursor,codex adds codex; codex,cursor,cursor-gpt de-dupes",
+          "codex" in cli._resolve_seats("cursor,codex")
+          and cli._resolve_seats("codex,cursor,cursor-gpt").count("cursor-gpt") == 1,
+          "codex present + no dup", str(cli._resolve_seats("codex,cursor,cursor-gpt")))
+    # `cli.py seats` prints the resolved (group-expanded) subprocess list, one per
+    # line — the helper an orchestrator uses to fan out PER-SEAT.
+    proc = _run_cli(["seats", "--seats", "codex,cursor"], timeout=30)
+    lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    check("cli.py seats expands the cursor group to concrete seats (one per line)",
+          proc.returncode == 0 and "codex" in lines
+          and all(s in lines for s in CURSOR_SEATS),
+          "codex + all cursor-* one per line", str(lines))
 
     # A single fake `agent` that answers --version with a bare date-stamp (NO
     # "cursor" string) AND, on the run invocation, captures argv + emits ANSI.
@@ -1856,6 +1968,7 @@ def main():
     test_result_contract()
     test_default_seats()
     test_resolve_timeout()
+    test_stage()
     test_registry()
     test_codex()
     test_agy_helpers()

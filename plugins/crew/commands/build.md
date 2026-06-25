@@ -13,19 +13,29 @@ $ARGUMENTS
 Flags at the **start** of `$ARGUMENTS` choose which models verify; the rest is
 the task. Default (no flag) = the full panel.
 
-- `--panel full` = `codex,cursor-gpt,cursor-gemini,cursor-glm,cursor-composer,opus,sonnet`
+- `--panel full` = `codex,cursor-gemini,cursor-glm,cursor-composer,opus,sonnet`
   (default) · `--panel lite` = `opus,sonnet` · `--panel solo` = `opus`
+- `--panel cursor` = all Cursor model-seats (`--seats cursor`, which the engine
+  expands to every registered cursor-* seat — cursor-gpt, cursor-gemini,
+  cursor-glm, cursor-composer, and any future ones); a pure cross-model Cursor
+  panel — NO codex, NO opus/sonnet Task seats.
 - `--seats <list>` = an explicit comma-list of any registered seat
   (`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-composer, opus, sonnet`;
   e.g. `--seats codex,opus`). `agy` is opt-in — works via `--seats agy` but is
   not in the default panel. `--seats` wins if both are given.
+- **Opt-in `opus-4.6` Claude seat** — a third Claude voice pinned to
+  `claude-opus-4-6` (some prefer 4.6 over 4.7/4.8). NOT in any default; add it
+  explicitly (e.g. `--seats codex,opus,sonnet,opus-4.6`). A Task seat like
+  `opus`/`sonnet`, just version-pinned.
 
 Resolve the flags to a **seat list** once, then split it:
 - **subprocess seats** = the `codex`/`cursor-*` entries (and opt-in `agy`) → pass
   as the engine's `--seats` (Step 2a). **If the list has NO subprocess seat, SKIP
-  Step 2a entirely.**
-- **task seats** = the `opus`/`sonnet` entries → in Step 2b spawn `crew:reviewer`
-  ONLY for those (zero, one, or both).
+  Step 2a entirely.** For `--panel cursor` the subprocess seats are all cursor-*
+  (pass `--seats cursor` to the engine, which expands it to every cursor-* seat).
+- **task seats** = the `opus`/`sonnet`/`opus-4.6` entries → in Step 2b spawn
+  `crew:reviewer` ONLY for those. For `--panel cursor` there are NO Claude Task
+  seats, so SKIP Step 2b entirely.
 
 Below, **"the task"** means `$ARGUMENTS` with these panel flags removed — use it
 wherever a step references the task. Keep the raw `$ARGUMENTS` (flags included)
@@ -85,7 +95,7 @@ into the existing verdict. Two seat kinds:
   no `claude -p`, no API key).
 
 The panel is whatever the Panel-options flags resolved to (default **codex +
-cursor-gpt + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet**). Only fan out the
+cursor-gemini + cursor-glm + cursor-composer + opus + sonnet**). Only fan out the
 seats in that list. A failed/skipped seat
 NEVER aborts the verification (see "Synthesize" below) — the verdict is
 synthesized from whichever seats succeed.
@@ -94,26 +104,53 @@ synthesized from whichever seats succeed.
 > seats spawned below — seat tool access is governed per-seat by the reviewer
 > agent frontmatter (`Read, Grep, Glob, Bash`) and the engine's sandbox flags.
 
-### Step 2a — Fan out subprocess seats (one Bash call)
+### Step 2a — Fan out subprocess seats (one visible shell PER SEAT)
 
 **Skip this step if the resolved panel has no subprocess seat** (e.g.
-`--panel lite`) — go straight to Step 2b. Otherwise run the engine once over the
-working-tree diff, passing ONLY the resolved subprocess seats. Use the bare-script
-path (its top-of-file `sys.path` guard makes package imports resolve):
+`--panel lite`) — go straight to Step 2b. Otherwise fan the subprocess seats out
+over the working-tree diff **one `cli.py run` call per seat, in parallel** — each a
+separate, visible, individually-killable shell (the per-seat shape
+`/crew:debate`'s multi-round path uses), not one opaque `review` call hiding them
+in an internal thread pool. Use the
+bare-script path (its top-of-file `sys.path` guard makes package imports resolve).
+
+**2a.0 — get the concrete seat list** (expands group tokens like `cursor`; keeps
+the registry authoritative — no hardcoded cursor list here):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review working-tree --seats <resolved codex/cursor-* seats> --json
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" seats --seats <resolved codex/cursor-* seats>
 ```
 
-- The engine returns a JSON array of result objects, each with the six fields:
-  `name, model, ok, output, error, elapsed`.
-- **Never choke on a seat failure:** the engine NEVER raises out of the fan-out.
-  Any failed/skipped subprocess seat comes back as an `ok=False` entry with a
-  diagnostic in `error`; the other seats still return. The engine exits nonzero
-  with an `all N seats failed: <diagnostics>` message on stderr ONLY when every
-  subprocess seat failed — and even then emits the full JSON array (no
-  traceback). A nonzero engine exit does NOT abort the verification: fold in the
-  Task seats and synthesize from whatever succeeded.
+It prints one seat per line. (For `--panel cursor`, pass `--seats cursor`.)
+
+**2a.1 — render the shared subprocess prompt ONCE** over the working-tree diff via
+`--stage` (session-scoped — substitute your real id for `<session-id>`, the
+`[Session ID: …]` value; never the literal placeholder or a `${…}` expansion):
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render working-tree --mode review --stage --session-id <session-id>
+```
+
+It prints the staged path — `.crew/reviews/<session-id>/prompt-seat.txt`. Reference
+mode (the default) makes each seat reproduce the compound working-tree diff itself,
+untracked files included — so a seat can't miss files the executor just created.
+
+**2a.2 — run EACH seat in its own parallel shell.** For every seat from 2a.0, launch
+a SEPARATE `cli.py run <seat>` Bash call, all concurrently (e.g. background calls):
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" run <seat> -f .crew/reviews/<session-id>/prompt-seat.txt --json -o .crew/reviews/<session-id>/<seat>.json
+```
+
+- `run --json` ALWAYS exits 0 and writes the six-field result
+  (`name, model, ok, output, error, elapsed`) — a failed/skipped seat lands as
+  `ok=False` with a diagnostic. **Per-seat never-choke is automatic**: one seat
+  failing can't sink the others, and there's no all-failed abort to handle.
+- Same model / sandbox / auth-banner / ARG_MAX handling as the old single-call
+  path — `run` uses the identical provider machinery.
+
+**2a.3 — collect.** Read each `.crew/reviews/<session-id>/<seat>.json` (one
+six-field result apiece) and carry them into Step 2d alongside the Task seats.
 
 ### Step 2b — Fan out Task seats (parallel)
 
@@ -130,9 +167,24 @@ seats see them. Render each `opus`/`sonnet` seat's prompt over the SAME `working
 target:
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render working-tree --mode review --seat-role opus   -o .crew/.prompt-opus.txt
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render working-tree --mode review --seat-role sonnet -o .crew/.prompt-sonnet.txt
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render working-tree --mode review --seat-role opus   --stage --session-id <session-id>
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render working-tree --mode review --seat-role sonnet --stage --session-id <session-id>
+# opt-in — only if opus-4.6 is in the panel (staged as prompt-opus-46.txt):
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render working-tree --mode review --seat-role opus-4.6 --stage --session-id <session-id>
 ```
+
+`--stage` derives `.crew/reviews/<session-id>/prompt-<seat-role>.txt` from the
+`--seat-role` + session id, writes it (creating the dir), and prints the path —
+session-scoped so concurrent sessions never clobber each other. **Substitute your
+actual session id for `<session-id>`** — the `[Session ID: …]` value from the
+SessionStart context (the same id `crew-state.py` uses). Pass it as a literal
+`--session-id` value — NOT the placeholder text, and NOT a `${CLAUDE_SESSION_ID}`
+shell expansion (a `$…` expansion isn't allowlistable and isn't reliably exported
+to the command shell; the engine resolves the id itself, arg → env). The engine
+**rejects an unsubstituted `<…>` placeholder** with a loud error, so a missed
+substitution fails fast instead of silently sharing one dir. `.crew/` is
+gitignored. **Read** each staged file with the Read tool and pass its contents to
+the matching seat.
 
 Then dispatch each seat with the rendered text as its prompt, appending the
 executor's summary inline (it's small) so every seat shares the same intent. Each
@@ -140,10 +192,12 @@ seat is the SAME agent (`crew:reviewer`) with a per-spawn `model` override
 selecting the voice (spawn only the ones in the panel):
 
 ```
-# Spawn ONLY the opus/sonnet seats in the resolved panel — e.g. --panel solo
-# spawns just the opus line; --panel lite spawns both; full spawns both too.
-Task(subagent_type="crew:reviewer", model="opus",   prompt="<contents of .crew/.prompt-opus.txt> + executor summary")
-Task(subagent_type="crew:reviewer", model="sonnet", prompt="<contents of .crew/.prompt-sonnet.txt> + executor summary")
+# Spawn ONLY the Claude seats in the resolved panel — e.g. --panel solo spawns
+# just the opus line; --panel lite spawns opus+sonnet; opt-in adds opus-4.6.
+# opt-in opus-4.6: Task(subagent_type="crew:reviewer", model="claude-opus-4-6", prompt="<contents of .crew/reviews/<session-id>/prompt-opus-46.txt> + executor summary")
+# (model="claude-opus-4-6" silently falls back to the inherited model if 4.6 isn't on your org allowlist.)
+Task(subagent_type="crew:reviewer", model="opus",   prompt="<contents of .crew/reviews/<session-id>/prompt-opus.txt> + executor summary")
+Task(subagent_type="crew:reviewer", model="sonnet", prompt="<contents of .crew/reviews/<session-id>/prompt-sonnet.txt> + executor summary")
 ```
 
 The rendered prompt already states this is a **code review**, tells the seat to

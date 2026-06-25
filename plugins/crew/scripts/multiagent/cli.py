@@ -51,12 +51,14 @@ from multiagent.providers import (
 )
 
 # The default subprocess panel. codex (OpenAI) + three Cursor model-seats for
-# cross-model diversity at one Cursor price. agy stays registered as an opt-in
-# seat (`--seats agy`) but is no longer a default. Override the whole list with
-# CREW_MA_SEATS. Any name here must be a registered subprocess seat (see
-# providers/__init__._build_registry); unknown names are dropped.
+# cross-model diversity at one Cursor price. `cursor-gpt` is NOT a default —
+# codex already covers the GPT lineage, so defaulting it too is redundant model
+# coverage at extra token cost; it stays registered and opt-in (`--seats cursor-gpt`
+# / `--panel cursor`). agy is likewise registered-but-opt-in (`--seats agy`).
+# Override the whole list with CREW_MA_SEATS. Any name here must be a registered
+# subprocess seat (see providers/__init__._build_registry); unknown names dropped.
 _DEFAULT_SUBPROCESS_PANEL = (
-    "codex", "cursor-gpt", "cursor-gemini", "cursor-glm", "cursor-composer",
+    "codex", "cursor-gemini", "cursor-glm", "cursor-composer",
 )
 
 
@@ -74,7 +76,10 @@ def _default_subprocess_seats() -> list[str]:
     an ``ok=False`` result while the other seats still return (see ``cmd_review``).
     """
     raw = os.environ.get("CREW_MA_SEATS", ",".join(_DEFAULT_SUBPROCESS_PANEL))
-    names = [n.strip() for n in raw.split(",") if n.strip()]
+    # Expand group tokens (e.g. `cursor`) BEFORE the known-seat filter, so
+    # CREW_MA_SEATS=cursor behaves like the CLI `--seats cursor` rather than
+    # silently dropping the unknown bare token and falling back to the default.
+    names = _expand_seat_groups([n.strip() for n in raw.split(",") if n.strip()])
     known = set(known_seat_names())
     subprocess_only = [n for n in names if n in known]
     return subprocess_only or [s for s in _DEFAULT_SUBPROCESS_PANEL if s in known]
@@ -120,16 +125,75 @@ def _run_seat(name: str, prompt: str, timeout: int) -> ProviderResult:
     return provider.run(prompt, model=model, timeout=timeout)
 
 
+def _expand_seat_groups(names: list[str]) -> list[str]:
+    """Expand group tokens to seat names. ``cursor`` -> every registered
+    ``cursor-*`` seat (registry-derived, so it grows automatically as cursor
+    models are added to CURSOR_SEATS). Non-group names pass through unchanged.
+    """
+    cursor_seats = [n for n in known_seat_names() if n.startswith("cursor-")]
+    out: list[str] = []
+    for n in names:
+        if n == "cursor":
+            out.extend(cursor_seats)
+        else:
+            out.append(n)
+    return out
+
+
 def _resolve_seats(seats_arg: str | None) -> list[str]:
-    """Resolve the comma-separated --seats arg to subprocess seats only."""
+    """Resolve the comma-separated --seats arg to subprocess seats only.
+
+    Accepts the ``cursor`` group token (expands to all cursor-* seats), so
+    ``--seats cursor`` runs the whole Cursor panel and ``--seats cursor,codex``
+    adds codex.
+    """
     seats = (
         [s.strip() for s in seats_arg.split(",") if s.strip()]
         if seats_arg
         else _default_subprocess_seats()
     )
+    seats = _expand_seat_groups(seats)
     # Engine drives subprocess seats only — the allowlist is the registry.
+    # Filter to known seats, de-duplicating while preserving order.
     known = set(known_seat_names())
-    return [s for s in seats if s in known]
+    seen: set[str] = set()
+    return [s for s in seats if s in known and not (s in seen or seen.add(s))]
+
+
+_REVIEWS_BASE = ".crew/reviews"
+
+
+def _resolve_session_id(arg: str | None) -> str:
+    """Session id for staging paths: ``--session-id`` arg -> ``CLAUDE_SESSION_ID``
+    env -> ``""`` (no session).
+
+    Mirrors crew-state.py's resolution order. Resolved HERE in Python — NOT via
+    a shell ``${CLAUDE_SESSION_ID}`` expansion in the calling command, because
+    that expansion (a) makes the command un-allowlistable (the permission layer
+    flags every ``$…``) and (b) is not reliably exported into the command shell
+    anyway, so it silently collapses to an empty segment. The orchestrator passes
+    the id it already knows as a literal ``--session-id`` value instead.
+    """
+    return (arg or os.environ.get("CLAUDE_SESSION_ID") or "").strip()
+
+
+def _stage_path(session_id: str, seat_role: str | None) -> str:
+    """Derive the session-scoped staging path for a rendered prompt:
+    ``.crew/reviews/<session-id>/prompt-<seat-role>.txt``.
+
+    The seat-role supplies the filename (so the caller passes no path at all);
+    the session id supplies a per-session dir so concurrent sessions in one
+    project never clobber each other's prompts. BOTH the session segment AND the
+    seat-role are charset-guarded to ``[A-Za-z0-9_-]`` so neither can ever escape
+    ``.crew/reviews/`` — a hostile ``--seat-role ../../x`` or ``--session-id``
+    can only ever name a single child dir/file (path-traversal guard). With no
+    session id the path is flat (``.crew/reviews/prompt-<role>.txt``) — sequential
+    same-project use still works; only cross-session isolation is lost.
+    """
+    role = re.sub(r"[^A-Za-z0-9_-]", "", (seat_role or "").strip()) or "seat"
+    seg = re.sub(r"[^A-Za-z0-9_-]", "", session_id)
+    base = Path(_REVIEWS_BASE) / seg if seg else Path(_REVIEWS_BASE)
+    return str(base / f"prompt-{role}.txt")
 
 
 def _fan_out(seats: list[str], prompt: str, timeout: int) -> list[ProviderResult]:
@@ -369,7 +433,7 @@ def cmd_debate(args: argparse.Namespace) -> int:
     # still wants the dir + question.md scaffolded so the orchestrator can run
     # the opus/sonnet Task seats and log there. `--seats none` (or "") means
     # exactly that — distinct from OMITTING --seats (which defaults to the
-    # subprocess panel: codex,cursor-gpt,cursor-gemini,cursor-glm,cursor-composer).
+    # subprocess panel: codex,cursor-gemini,cursor-glm,cursor-composer).
     if args.seats is not None and args.seats.strip().lower() in ("", "none"):
         seats: list[str] = []
     else:
@@ -570,7 +634,51 @@ def cmd_render(args: argparse.Namespace) -> int:
             inline=args.inline_diff,
         )
 
-    _emit(text, args.out)
+    out_path = args.out
+    if args.stage:
+        if args.out:
+            print("error: --stage and -o/--out are mutually exclusive", file=sys.stderr)
+            return 2
+        # Fail LOUD on an unsubstituted template. The orchestrator must replace
+        # the `<session-id>` placeholder with its real id; if it forgets, the
+        # charset guard would silently strip `<`/`>` to a CONSTANT `session-id`
+        # segment — reintroducing the cross-session clobber --stage exists to
+        # prevent. Reject the placeholder outright so the mistake is obvious.
+        # Resolve first (arg → CLAUDE_SESSION_ID env), THEN check — so an env
+        # value that is itself an unsubstituted placeholder is caught too, not
+        # only the --session-id arg.
+        session_id = _resolve_session_id(args.session_id)
+        if "<" in session_id or ">" in session_id:
+            print(
+                f"error: session id looks like an unsubstituted placeholder "
+                f"({session_id!r}); pass your actual session id (the "
+                "[Session ID: …] value), not the literal template",
+                file=sys.stderr,
+            )
+            return 2
+        out_path = _stage_path(session_id, args.seat_role)
+
+    _emit(text, out_path)
+    # In --stage mode the prompt went to a file, so stdout is free to carry the
+    # resolved path: the orchestrator reads THAT file (with the Read tool — no
+    # shell expansion) and hands its contents to the Task seat.
+    if args.stage:
+        print(out_path)
+    return 0
+
+
+def cmd_seats(args: argparse.Namespace) -> int:
+    """Print the resolved subprocess seat list — one per line.
+
+    Resolves ``--seats`` (group tokens like ``cursor`` expanded, filtered to the
+    registry, de-duped) the SAME way ``review``/``council`` do, but prints the
+    concrete names instead of running them. This lets an orchestrator that fans
+    out PER-SEAT — one ``run <seat>`` call each, so every subprocess seat is its
+    own visible shell — obtain the expanded list without hardcoding the cursor
+    group, keeping the registry the single source of truth.
+    """
+    for s in _resolve_seats(args.seats):
+        print(s)
     return 0
 
 
@@ -668,6 +776,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     debate.set_defaults(func=cmd_debate)
 
+    seats_p = sub.add_parser(
+        "seats",
+        help="print the resolved subprocess seat list (group tokens expanded), "
+             "one per line — for per-seat fan-out",
+    )
+    seats_p.add_argument(
+        "--seats", default=None,
+        help="comma-separated seats / group tokens (e.g. 'cursor'); "
+             "default = the default subprocess panel",
+    )
+    seats_p.set_defaults(func=cmd_seats)
+
     run = sub.add_parser(
         "run",
         help="Run ONE subprocess seat (codex|agy|cursor-*) ad-hoc through the engine.",
@@ -751,6 +871,18 @@ def build_parser() -> argparse.ArgumentParser:
         "-o", "--out", default=None,
         help="write the prompt to this file instead of stdout (keeps the call "
              "shell-redirect-free and allowlistable)",
+    )
+    rndr.add_argument(
+        "--session-id", dest="session_id", default=None,
+        help="session id for the --stage path (default: CLAUDE_SESSION_ID env). "
+             "Pass the literal id; the engine resolves it, so the command needs "
+             "no shell ${…} expansion.",
+    )
+    rndr.add_argument(
+        "--stage", action="store_true",
+        help="stage the prompt to .crew/reviews/<session-id>/prompt-<seat-role>.txt "
+             "— path derived from --seat-role + session id, so no -o and no shell "
+             "expansion. Prints the staged path to stdout.",
     )
     rndr.set_defaults(func=cmd_render)
 

@@ -1,5 +1,5 @@
 ---
-description: Crew-native multi-model debate on a question — single round (council) or multi-round with rebuttals; default panel codex + cursor-gpt + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet; narrow with --panel/--seats
+description: Crew-native multi-model debate on a question — single round (council) or multi-round with rebuttals; default panel codex + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet; narrow with --panel/--seats
 argument-hint: "[--rounds N] [--panel ...] <question>"
 allowed-tools: Bash, Task, Read, Glob, Write
 ---
@@ -19,12 +19,20 @@ $ARGUMENTS
   council; `N>1` runs a multi-round debate where each round sees the prior
   round's positions and may rebut/revise.
 - **Panel** — `--panel full` =
-  `codex,cursor-gpt,cursor-gemini,cursor-glm,cursor-composer,opus,sonnet` (default) ·
-  `--panel lite` = `opus,sonnet` · `--panel solo` = `opus` · `--seats <list>` =
+  `codex,cursor-gemini,cursor-glm,cursor-composer,opus,sonnet` (default) ·
+  `--panel lite` = `opus,sonnet` · `--panel solo` = `opus` · `--panel cursor` =
+  all Cursor model-seats (`--seats cursor`, which the engine expands to every
+  registered cursor-* seat — cursor-gpt, cursor-gemini, cursor-glm,
+  cursor-composer, and any future ones); a pure cross-model Cursor panel — NO
+  codex, NO opus/sonnet Task seats · `--seats <list>` =
   an explicit comma-list of any registered seat
   (`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-composer, opus, sonnet`;
   `agy` is opt-in — works via `--seats agy` but is not in the default panel).
   `--seats` wins over `--panel`.
+- **Opt-in `opus-4.6` Claude seat** — a third Claude voice pinned to
+  `claude-opus-4-6` (some prefer 4.6 over 4.7/4.8). NOT in any default; add it
+  explicitly (e.g. `--seats opus,sonnet,opus-4.6`). A Task seat (`crew:panelist`
+  discuss / `crew:reviewer` review), just version-pinned.
 - **Mode** — inferred, not flagged: a free-form **question** → **discuss** mode
   (seats give a take; dispatch `crew:panelist`). An argument naming a **diff /
   branch / plan `.md`** → **review** mode (seats score it; dispatch
@@ -40,11 +48,13 @@ $ARGUMENTS
 
 Resolve the flags to a **seat list**, strip them from `$ARGUMENTS` (the remainder
 is the question/target), then split the seat list: the `codex`/`cursor-*` entries
-(and opt-in `agy`) are **subprocess seats** (the Python engine); `opus`/`sonnet`
+(and opt-in `agy`) are **subprocess seats** (the Python engine); `opus`/`sonnet`/`opus-4.6`
 are **task seats** (`crew:panelist`
 for discuss / `crew:reviewer` for review, via the Task tool — in-session, on the
-subscription, no `claude -p`, no API key). Seat the models in the resolved list
-only. A failed/skipped seat NEVER sinks the debate (see "Never choke" below) — the
+subscription, no `claude -p`, no API key; `opus-4.6` pins `model="claude-opus-4-6"`).
+Seat the models in the resolved list only. For `--panel cursor` the subprocess
+seats are all cursor-* (pass `--seats cursor` to the engine, which expands it to
+every cursor-* seat) and the Task-seats step is SKIPPED (no Claude Task seats). A failed/skipped seat NEVER sinks the debate (see "Never choke" below) — the
 synthesis is built from whichever seats succeed; only an all-empty panel aborts.
 
 > **Reference code, don't paste it.** Every seat runs in the repo. If the
@@ -82,21 +92,35 @@ with **`dir`** — read it; that's where the Claude-seat outputs + synthesis go.
 
 ## A2 — Fan out task seats (parallel)
 
-For each `opus`/`sonnet` entry in the panel, render its prompt from the ONE
-builder, then dispatch the discuss seat (`crew:panelist`) in parallel:
+For each Claude-seat entry (`opus`, `sonnet`, or opt-in `opus-4.6`) in the panel,
+render its prompt from the ONE builder, then dispatch the discuss seat
+(`crew:panelist`) in parallel:
 
 ```bash
 python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render --mode discuss --seat-role opus -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-opus.txt
+# opt-in — only if opus-4.6 is in the panel:
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render --mode discuss --seat-role opus-4.6 -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-opus-4.6.txt
 ```
 
 ```
-Task(subagent_type="crew:panelist", model="opus",   prompt="<contents of .prompt-opus.txt>")
-Task(subagent_type="crew:panelist", model="sonnet", prompt="<contents of .prompt-sonnet.txt>")
+Task(subagent_type="crew:panelist", model="opus",   prompt="<contents of .crew/debates/<dir>/.prompt-opus.txt>")
+Task(subagent_type="crew:panelist", model="sonnet", prompt="<contents of .crew/debates/<dir>/.prompt-sonnet.txt>")
+# opt-in opus-4.6 — version-pinned; silently falls back to the inherited model if 4.6 isn't on your org allowlist:
+Task(subagent_type="crew:panelist", model="claude-opus-4-6", prompt="<contents of .crew/debates/<dir>/.prompt-opus-4.6.txt>")
 ```
 
-(Review mode: `--mode review <target>` instead of `-f question`, and dispatch
-`crew:reviewer`. The subprocess seats then use `cli.py review` rather than
-`debate` — but most debates are discuss.)
+(Review mode: render with `--mode review <target>` instead of `-f question`,
+dispatch `crew:reviewer`, and fan the subprocess seats out per-seat via
+`cli.py run` — the same shape as `/crew:review` Step 3 — rather than the discuss
+`debate` scaffold. But most debates are discuss.)
+
+> **Why `-o` here, not `--stage`:** `/crew:review`, `/crew:build`, and
+> `/crew:measure-twice` stage prompts via `render --stage` (session-scoped
+> `.crew/reviews/<session-id>/`). Debate deliberately keeps `-o` into its own
+> `.crew/debates/<dir>/` (single-round) or `<run-id>/` (multi-round) dir instead —
+> that dir is also where `question.md`/`round-NN.md` live, and the run-id is what
+> threads prior rounds through `render --run-id` (which `--stage` doesn't model).
+> The two staging schemes are intentional, not an inconsistency to "fix".
 
 ## A3 — Normalize + synthesize + log
 
@@ -157,7 +181,7 @@ Then run the round's seats (in parallel where possible):
   ```bash
   python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" run <seat> -f .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt --json -o .crew/debates/<run-id>/<seat>-r<n>.json
   ```
-- **Task seats** (`opus`/`sonnet`): `Task(subagent_type="crew:panelist", model="<seat>", prompt="<contents of .prompt-<seat>-r<n>.txt>")`. Use each Task's RETURNED result as its take and completion signal — never an output-file size or other proxy (see A3).
+- **Task seats** (`opus`/`sonnet`): `Task(subagent_type="crew:panelist", model="<seat>", prompt="<contents of .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt>")`. Use each Task's RETURNED result as its take and completion signal — never an output-file size or other proxy (see A3).
 
 **Record the round.** Normalize every seat to the six-field shape, then with the
 **Write tool** write all seats' positions for this round into — wait for every

@@ -68,12 +68,13 @@ Skills provide specialized guidance that activates automatically based on contex
 | `/crew:cancel-measure-twice` | Exit an active measure-twice loop |
 | `/crew:plan "description"` | Start planning session |
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (saves context) |
-| `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (codex + cursor-gpt + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet) → `APPROVED`/`REVISE` verdict |
-| `/crew:debate "question"` | Crew-native multi-model debate (codex + cursor-gpt + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet) — single-round council by default, or `--rounds N` for a multi-round debate with rebuttals; synthesized into agreement/disagreement/recommendation (self-contained, no external plugin) |
+| `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (codex + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet) → `APPROVED`/`REVISE` verdict |
+| `/crew:debate "question"` | Crew-native multi-model debate (codex + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet) — single-round council by default, or `--rounds N` for a multi-round debate with rebuttals; synthesized into agreement/disagreement/recommendation (self-contained, no external plugin) |
 
 **Panel size (build / measure-twice / review / debate):** start the argument with
-`--panel full` (default — codex + cursor-gpt + cursor-gemini + cursor-glm + cursor-composer +
-opus + sonnet), `--panel lite` (opus + sonnet), `--panel solo` (opus), or
+`--panel full` (default — codex + cursor-gemini + cursor-glm + cursor-composer +
+opus + sonnet), `--panel lite` (opus + sonnet), `--panel solo` (opus),
+`--panel cursor` (all Cursor models — gpt/gemini/glm/composer, no codex/Claude), or
 `--seats codex,opus` (any subset of
 `codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-composer, opus, sonnet`; `agy` is
 opt-in). Not every change needs the full panel — e.g.
