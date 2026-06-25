@@ -42,6 +42,61 @@ class ProviderResult:
         """
         return dataclasses.asdict(self)
 
+    @classmethod
+    def from_dict(cls, d) -> "ProviderResult":
+        """Inverse of to_dict — rebuild a result from a decoded seat JSON.
+
+        CONTRACT: the returned ProviderResult is ALWAYS safe to pass to
+        render_block/render_panel without raising, for ANY decoded JSON input.
+        Every field is coerced to a render-safe type below; nothing is passed
+        through raw. A non-object top-level value (list/null/str/number — valid
+        JSON but not a dict) degrades to a skipped/failed result instead of
+        crashing or faking an OK seat.
+
+        The name="unknown" default is a LAST-RESORT fallback used only when NO
+        name is available (non-object input, or a missing/empty name field). The
+        collect path NEVER relies on it: cmd_collect always overrides name to the
+        requested seat label S before rendering (see cmd_collect).
+        """
+        if not isinstance(d, dict):
+            # File decoded to a non-object (list/null/str/number). Do NOT crash
+            # and do NOT fake an OK seat — render this as a skipped/failed block.
+            # The "unknown" name is a fallback; cmd_collect overrides it with the
+            # requested seat label, so the digest never shows "unknown".
+            return cls(name="unknown", model=None, ok=False, output="",
+                       error="skipped: malformed result (not a JSON object)",
+                       elapsed=0.0)
+
+        # --- comprehensive, render-safe coercion of EVERY field ---
+        name = d.get("name")
+        name = "unknown" if name is None else str(name)  # None/missing -> "unknown"
+                                                         # (fallback only; collect
+                                                         # overrides). Any present
+                                                         # value (incl. 0, "", lists)
+                                                         # stringifies — never crashes
+                                                         # _model_label.
+        model = d.get("model")
+        model = None if model is None else str(model)  # None stays None
+                                                       # (_model_label handles None)
+
+        ok = d.get("ok") is True                     # STRICT identity — only literal
+                                                     # JSON `true` is OK.
+
+        out = d.get("output")
+        output = "" if out is None else str(out)     # None/missing -> "";
+                                                     # int/list/etc -> str so
+                                                     # .strip() never crashes
+
+        err = d.get("error")
+        error = None if err is None else str(err)    # None stays None; else stringify
+
+        try:
+            elapsed = float(d.get("elapsed", 0.0))   # "bad"/list/None -> 0.0
+        except (TypeError, ValueError):
+            elapsed = 0.0
+        return cls(name=name, model=model, ok=ok, output=output,
+                   error=error, elapsed=elapsed)
+
 
 # =============================================================================
 # Provider ABC

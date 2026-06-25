@@ -2230,6 +2230,309 @@ def test_stage_all():
               "prompt-opus-46.txt", f"rc={n.returncode} exists={norm_f.is_file()}")
 
 
+def test_from_dict_and_escaping():
+    log_section("ProviderResult.from_dict (render-safety contract) + JSON escaping fix")
+
+    # 1. round-trip: from_dict(to_dict(r)) == r for an ok and a failed result.
+    rok = ProviderResult(name="codex", model="gpt-5", ok=True,
+                         output="hello", error=None, elapsed=1.5)
+    rfail = ProviderResult(name="cursor-glm", model=None, ok=False,
+                          output="", error="boom", elapsed=0.0)
+    check("from_dict(to_dict(r)) round-trips an ok result",
+          ProviderResult.from_dict(rok.to_dict()) == rok,
+          repr(rok), repr(ProviderResult.from_dict(rok.to_dict())))
+    check("from_dict(to_dict(r)) round-trips a failed result",
+          ProviderResult.from_dict(rfail.to_dict()) == rfail,
+          repr(rfail), repr(ProviderResult.from_dict(rfail.to_dict())))
+    check("from_dict preserves exactly the six field names",
+          set(rok.to_dict().keys())
+          == {"name", "model", "ok", "output", "error", "elapsed"},
+          "six fields", str(set(rok.to_dict().keys())))
+
+    # 2. partial/corrupt degradation.
+    try:
+        e = ProviderResult.from_dict({})
+        check("from_dict({}) -> ok False, no raise", e.ok is False,
+              "ok False", repr(e))
+    except Exception as exc:
+        check("from_dict({}) -> no raise", False, "no raise", repr(exc))
+
+    try:
+        e = ProviderResult.from_dict({"elapsed": "bad"})
+        check("from_dict({'elapsed':'bad'}) -> elapsed 0.0, no raise",
+              e.elapsed == 0.0, "0.0", repr(e.elapsed))
+    except Exception as exc:
+        check("from_dict({'elapsed':'bad'}) -> no raise", False, "no raise", repr(exc))
+
+    check("from_dict({'ok':'false'}) -> ok is False (strict identity)",
+          ProviderResult.from_dict({"ok": "false"}).ok is False,
+          "False", repr(ProviderResult.from_dict({"ok": "false"}).ok))
+    check("from_dict({'ok':'true'}) -> ok is False (only literal true)",
+          ProviderResult.from_dict({"ok": "true"}).ok is False,
+          "False", repr(ProviderResult.from_dict({"ok": "true"}).ok))
+    check("from_dict({'ok':1}) -> ok is False (only literal true)",
+          ProviderResult.from_dict({"ok": 1}).ok is False,
+          "False", repr(ProviderResult.from_dict({"ok": 1}).ok))
+
+    # non-object top-level JSON -> skipped/failed result, no raise, renders skipped.
+    for val in ([], "x", None, 3):
+        try:
+            r = ProviderResult.from_dict(val)
+        except Exception as exc:
+            check(f"from_dict({val!r}) -> no raise", False, "no raise", repr(exc))
+            continue
+        ok_skipped = (r.ok is False
+                      and bool(r.error)
+                      and r.error.startswith("skipped:")
+                      and render.is_skipped(r))
+        # render through the panel to prove it renders without raising.
+        try:
+            block = render.render_panel([r])
+            rendered = isinstance(block, str)
+        except Exception as exc:
+            rendered = False
+            check(f"render_panel([from_dict({val!r})]) does not raise", False,
+                  "string", repr(exc))
+        check(f"from_dict({val!r}) -> ok False skipped block, renders",
+              ok_skipped and rendered,
+              "skipped + renders", repr(r))
+
+    e = ProviderResult.from_dict({"name": "x", "elapsed": "bad"})
+    check("from_dict({'name':'x','elapsed':'bad'}) keeps name 'x', elapsed 0.0",
+          e.name == "x" and e.elapsed == 0.0, "x/0.0", f"{e.name}/{e.elapsed}")
+
+    # 3. RENDER-SAFETY CONTRACT — every field wrong-typed.
+    wrong = ProviderResult.from_dict(
+        {"name": 5, "model": [], "ok": "false", "output": 1,
+         "error": [], "elapsed": "bad"})
+    try:
+        block = render.render_block(wrong)
+        panel = render.render_panel([wrong])
+        rendered = isinstance(block, str) and isinstance(panel, str)
+    except Exception as exc:
+        rendered = False
+        check("render_block(all-wrong-typed from_dict) returns a string, no raise",
+              False, "string", repr(exc))
+    check("render_block(all-wrong-typed from_dict) returns a string, no raise",
+          rendered, "string", "raised/non-string")
+    check("from_dict coerces all-wrong-typed fields render-safe",
+          wrong.name == "5" and wrong.model == "[]" and wrong.ok is False
+          and wrong.output == "1" and wrong.error == "[]" and wrong.elapsed == 0.0,
+          "name=5 model=[] ok=False output=1 error=[] elapsed=0.0",
+          repr(wrong))
+
+    # 4. escaping gone — cmd_run --json writes the literal non-ASCII char, no \u.
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        bins = d / "bin"
+        bins.mkdir()
+        # fake codex that emits a non-ASCII em-dash / curly-quote review.
+        make_fake_bin(bins, "codex", """
+        import sys
+        a = sys.argv[1:]
+        out = None
+        for i, x in enumerate(a):
+            if x == "-o":
+                out = a[i + 1]
+        with open(out, "w", encoding="utf-8") as f:
+            f.write("verdict — APPROVED “good”")
+        sys.exit(0)
+        """)
+        env = path_with(bins)
+        outf = d / "codex.json"
+        proc = _run_cli(
+            ["run", "codex", "X", "--json", "-o", str(outf)], env=env, timeout=30)
+        text = outf.read_text(encoding="utf-8") if outf.exists() else ""
+        check("cmd_run --json -o writes literal non-ASCII char (no \\u escape)",
+              proc.returncode == 0
+              and "—" in text and "“" in text
+              and "\\u" not in text,
+              "em-dash present, no \\u", repr(text[:200]))
+
+    # mirror via render.render_json over a non-ASCII result.
+    rj = render.render_json([ProviderResult(
+        name="codex", model=None, ok=True,
+        output="x — y …", error=None, elapsed=0.0)])
+    check("render_json emits literal non-ASCII char (no \\u escape)",
+          "—" in rj and "…" in rj and "\\u" not in rj,
+          "em-dash present, no \\u", repr(rj[:200]))
+
+
+def _write_seat_json(dir_path: Path, seat: str, result: ProviderResult) -> None:
+    (dir_path / f"{seat}.json").write_text(
+        json.dumps(result.to_dict(), ensure_ascii=False), encoding="utf-8")
+
+
+def test_collect():
+    log_section("crew collect subcommand (named-seats-only digest, no glob)")
+
+    rA = ProviderResult(name="seatA", model="m-a", ok=True,
+                        output="A says — APPROVED", error=None, elapsed=1.0)
+    rB = ProviderResult(name="seatB", model=None, ok=False,
+                        output="", error="boom", elapsed=0.0)
+
+    # 5. byte-faithfulness (via --seats), in --seats order.
+    with tempfile.TemporaryDirectory() as td:
+        rd = Path(td) / ".crew" / "reviews" / "sess1"
+        rd.mkdir(parents=True)
+        _write_seat_json(rd, "seatA", rA)
+        _write_seat_json(rd, "seatB", rB)
+        outf = ".crew/reviews/sess1/panel.md"
+        proc = _run_dispatcher(
+            ["collect", "--session-id", "sess1", "--seats", "seatA,seatB",
+             "-o", outf], cwd=td, timeout=30)
+        content = (Path(td) / outf).read_text(encoding="utf-8") \
+            if (Path(td) / outf).exists() else ""
+        expected = render.render_panel([rA, rB]) + "\n"
+        check("collect -o file == render_panel([rA,rB]) + '\\n' (byte-faithful, seat order)",
+              proc.returncode == 0 and content == expected,
+              "byte-equal digest", f"rc={proc.returncode} got={content[:120]!r}")
+        # non-ASCII round-trips through collect with no \u escape.
+        check("collect digest carries literal non-ASCII char (no \\u)",
+              "—" in content and "\\u" not in content,
+              "em-dash present, no \\u", repr(content[:120]))
+
+    # 6. STALE-SEAT EXCLUSION — a non-named <otherseat>.json is never read.
+    with tempfile.TemporaryDirectory() as td:
+        rd = Path(td) / ".crew" / "reviews" / "sess2"
+        rd.mkdir(parents=True)
+        _write_seat_json(rd, "seatA", rA)
+        stale = ProviderResult(name="stale", model=None, ok=True,
+                              output="STALE-LEFTOVER", error=None, elapsed=0.0)
+        _write_seat_json(rd, "stale", stale)
+        outf = ".crew/reviews/sess2/panel.md"
+        proc = _run_dispatcher(
+            ["collect", "--session-id", "sess2", "--seats", "seatA", "-o", outf],
+            cwd=td, timeout=30)
+        content = (Path(td) / outf).read_text() if (Path(td) / outf).exists() else ""
+        check("collect excludes a stale non-named <otherseat>.json (no glob)",
+              proc.returncode == 0
+              and "seatA" in content
+              and "STALE-LEFTOVER" not in content
+              and "stale" not in content,
+              "seatA only, no stale", repr(content[:160]))
+
+    # 7. NAMED-BUT-MISSING seat -> SKIPPED block labeled with the seat name.
+    with tempfile.TemporaryDirectory() as td:
+        rd = Path(td) / ".crew" / "reviews" / "sess3"
+        rd.mkdir(parents=True)
+        _write_seat_json(rd, "seatA", rA)
+        outf = ".crew/reviews/sess3/panel.md"
+        proc = _run_dispatcher(
+            ["collect", "--session-id", "sess3", "--seats", "seatA,seatMISSING",
+             "-o", outf], cwd=td, timeout=30)
+        content = (Path(td) / outf).read_text() if (Path(td) / outf).exists() else ""
+        check("collect named-but-missing seat -> SKIPPED block labeled by name, exit 0",
+              proc.returncode == 0
+              and "seatA" in content
+              and "seatMISSING" in content
+              and "SKIPPED" in content,
+              "seatMISSING SKIPPED block", repr(content[:200]))
+
+    # 8. partial-file degradation — ALWAYS labeled by requested seat.
+    with tempfile.TemporaryDirectory() as td:
+        rd = Path(td) / ".crew" / "reviews" / "sess4"
+        rd.mkdir(parents=True)
+        _write_seat_json(rd, "seatA", rA)
+        (rd / "seatB.json").write_text("{ not json", encoding="utf-8")  # not JSON
+        (rd / "seatC.json").write_text("[]", encoding="utf-8")          # non-object
+        outf = ".crew/reviews/sess4/panel.md"
+        proc = _run_dispatcher(
+            ["collect", "--session-id", "sess4", "--seats", "seatA,seatB,seatC",
+             "-o", outf], cwd=td, timeout=30)
+        content = (Path(td) / outf).read_text() if (Path(td) / outf).exists() else ""
+        check("collect malformed/non-object files -> SKIPPED labeled by seat, no 'unknown'",
+              proc.returncode == 0
+              and "seatA" in content
+              and "seatB" in content
+              and "seatC" in content
+              and "unknown" not in content
+              and content.count("SKIPPED") >= 2,
+              "seatB+seatC SKIPPED labeled, no unknown", repr(content[:300]))
+
+    # 9. empty seat list -> '(no seats ran)', exit 0.
+    with tempfile.TemporaryDirectory() as td:
+        outf = "panel.md"
+        proc = _run_dispatcher(
+            ["collect", "--session-id", "sessEmpty", "--seats", "", "-o", outf],
+            cwd=td, timeout=30)
+        content = (Path(td) / outf).read_text() if (Path(td) / outf).exists() else ""
+        check("collect empty --seats -> '(no seats ran)', exit 0",
+              proc.returncode == 0 and content.strip() == "(no seats ran)",
+              "(no seats ran)", f"rc={proc.returncode} got={content!r}")
+
+    # 10. path-only stdout with -o: stdout.strip() == args.out, digest to file.
+    with tempfile.TemporaryDirectory() as td:
+        rd = Path(td) / ".crew" / "reviews" / "sess5"
+        rd.mkdir(parents=True)
+        _write_seat_json(rd, "seatA", rA)
+        outf = ".crew/reviews/sess5/panel.md"
+        proc = _run_dispatcher(
+            ["collect", "--session-id", "sess5", "--seats", "seatA", "-o", outf],
+            cwd=td, timeout=30)
+        content = (Path(td) / outf).read_text() if (Path(td) / outf).exists() else ""
+        check("collect -o prints ONLY the out path to stdout (stdout.strip()==out)",
+              proc.returncode == 0 and proc.stdout.strip() == outf,
+              f"stdout=={outf}", repr(proc.stdout))
+        check("collect -o sends the digest to the file, not stdout",
+              "seatA" in content and "seatA" not in proc.stdout,
+              "digest in file only", repr(proc.stdout[:120]))
+
+    # 11. traversal containment via SANITIZATION (../../x -> .crew/reviews/x).
+    with tempfile.TemporaryDirectory() as td:
+        rd = Path(td) / ".crew" / "reviews" / "x"
+        rd.mkdir(parents=True)
+        _write_seat_json(rd, "seatA", rA)
+        outf = "out.md"
+        proc = _run_dispatcher(
+            ["collect", "--session-id", "../../x", "--seats", "seatA", "-o", outf],
+            cwd=td, timeout=30)
+        content = (Path(td) / outf).read_text() if (Path(td) / outf).exists() else ""
+        # contained: it read .crew/reviews/x/seatA.json (sanitized), not a raise.
+        check("collect --session-id ../../x is CONTAINED (sanitized to .crew/reviews/x)",
+              proc.returncode == 0 and "seatA" in content
+              and "A says" in content,
+              "reads sanitized .crew/reviews/x", f"rc={proc.returncode} got={content[:120]!r}")
+
+    # 12. SEAT-NAME traversal REJECTED (not silently sanitized) — a seat name
+    # supplies a filename, so a name with path chars could escape the session dir.
+    with tempfile.TemporaryDirectory() as td:
+        # Plant a file OUTSIDE the session dir that a traversal name would target.
+        outside = Path(td) / "foo.json"
+        outside.write_text(
+            json.dumps(ProviderResult(
+                name="foo", model=None, ok=True, output="OUTSIDE-SECRET",
+                error=None, elapsed=0.0).to_dict(), ensure_ascii=False),
+            encoding="utf-8")
+        rd = Path(td) / ".crew" / "reviews" / "sess6"
+        rd.mkdir(parents=True)
+        for bad in ("../../foo", "a/b", "a.b"):
+            outf = "out.md"
+            proc = _run_dispatcher(
+                ["collect", "--session-id", "sess6", "--seats", bad, "-o", outf],
+                cwd=td, timeout=30)
+            wrote = (Path(td) / outf).exists()
+            check(f"collect rejects path-traversal seat name {bad!r} (nonzero, no read outside)",
+                  proc.returncode != 0
+                  and "invalid seat name" in proc.stderr
+                  and "OUTSIDE-SECRET" not in (proc.stdout
+                      + ((Path(td) / outf).read_text() if wrote else "")),
+                  "nonzero + invalid seat name, no outside read",
+                  f"rc={proc.returncode} err={proc.stderr[:150]!r}")
+        # legit registry-style names still pass cleanly.
+        _write_seat_json(rd, "cursor-glm", ProviderResult(
+            name="cursor-glm", model="glm", ok=True, output="ok",
+            error=None, elapsed=0.0))
+        proc = _run_dispatcher(
+            ["collect", "--session-id", "sess6", "--seats", "cursor-glm",
+             "-o", "ok.md"], cwd=td, timeout=30)
+        ok_content = (Path(td) / "ok.md").read_text() \
+            if (Path(td) / "ok.md").exists() else ""
+        check("collect accepts a legit cursor-* seat name (hyphen passes the guard)",
+              proc.returncode == 0 and "cursor-glm" in ok_content,
+              "exit0 + cursor-glm rendered", f"rc={proc.returncode} got={ok_content[:120]!r}")
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -2256,6 +2559,8 @@ def main():
     test_discuss_and_modes()
     test_render_subcommand()
     test_cursor()
+    test_from_dict_and_escaping()
+    test_collect()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")

@@ -176,8 +176,20 @@ value; never the literal placeholder or a `${…}` expansion):
 It prints the staged path — `.crew/reviews/<session-id>/prompt-seat.txt`. Reference
 mode (the default) makes each seat read the plan file itself.
 
-**3a.2 — run EACH seat in its own parallel shell.** For every seat from 3a.0, launch
-a SEPARATE `crew run <seat>` Bash call, all concurrently (e.g. background calls):
+**3a.2 — run EACH seat in its own parallel shell.** First, **clear any pre-existing
+`<seat>.json`** for the seats you are about to run — the session dir
+`.crew/reviews/<session-id>/` is REUSED across reviews, so a leftover file from an
+EARLIER panel (or from a seat whose shell you later kill) would otherwise be read
+by `collect` as a FRESH result, folding stale data into this verdict. After
+clearing, a seat that doesn't write a fresh file this run correctly renders as
+SKIPPED, not stale-OK. Remove the expected target file for each seat first:
+
+```bash
+rm -f .crew/reviews/<session-id>/<seat>.json
+```
+
+Then, for every seat from 3a.0, launch a SEPARATE `crew run <seat>` Bash call, all
+concurrently (e.g. background calls):
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f .crew/reviews/<session-id>/prompt-seat.txt --json -o .crew/reviews/<session-id>/<seat>.json
@@ -190,8 +202,34 @@ a SEPARATE `crew run <seat>` Bash call, all concurrently (e.g. background calls)
 - Same model / sandbox / auth-banner / ARG_MAX handling as the old single-call
   path — `run` uses the identical provider machinery.
 
-**3a.3 — collect.** Read each `.crew/reviews/<session-id>/<seat>.json` (one
-six-field result apiece) and carry them into 3d alongside the Task seats.
+**3a.3 — collect.** WAIT for every 3a.2 `crew run <seat>` background shell to EXIT
+before calling collect — a seat whose `<seat>.json` has not been written yet is
+STILL RUNNING, not skipped (the same wait discipline as the Task seats in Step
+3b). Because `collect` renders a missing file as a SKIPPED block, collecting early
+would silently drop a slow-but-still-running seat from the verdict. Only after ALL
+per-seat run shells have completed do you run collect.
+
+Then collapse the per-seat result files into ONE markdown digest instead of
+reading N `<seat>.json` files. You ALREADY have the resolved
+subprocess-seat list from the `crew seats --seats <spec>` step you ran in 3a.0 for
+the per-seat loop (it prints one seat per line). **JOIN those seat names
+comma-separated** and pass that SAME list as `collect --seats <comma-list>` so
+collect digests EXACTLY the seats that ran:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/crew" collect --session-id <session-id> --seats <resolved-subprocess-seats> -o .crew/reviews/<session-id>/panel.md
+```
+
+where `<resolved-subprocess-seats>` is the comma-separated join of the per-line
+seat names from your 3a.0 `crew seats` output. `collect` reads EXACTLY those named
+`<seat>.json` files (never globs — a stale/foreign file is never folded in), and a
+named-but-missing seat renders as a SKIPPED block labeled with its name. It writes
+a faithful `render_panel` digest (it does NOT summarize, vote, or reorder) and
+prints only the output path. Then **Read `panel.md` once** — it is the full
+subprocess panel as labeled blocks — and carry it into 3d alongside the Task
+seats. `panel.md` blocks follow the `--seats` ORDER; each is seat-labeled, so
+reference seats by their LABEL ("the codex block", "the cursor-glm verdict"),
+never positionally.
 
 #### 3b — Fan out Task seats (parallel)
 
@@ -280,7 +318,8 @@ from the verdict math.
 
 #### 3d — Synthesize the verdict
 
-Read the full panel (subprocess + normalized Task seats, in stable order) and
+Read the full panel — the subprocess seats come from the single `panel.md` collect
+digest (Step 3a.3), joined with the normalized Task seats — and
 emit the existing verdict format. You MUST use one of these verdicts:
 
 **APPROVED** - Plan is ready for execution. No blocking issues.

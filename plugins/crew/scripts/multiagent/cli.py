@@ -14,7 +14,11 @@ the parent is already importable, e.g. under the dispatcher).
 Subcommands: ``review`` (fan-out over a resolved target), ``council`` (fan-out
 of a free-form question — the engine half of /crew:debate's crew-native
 council), ``debate`` (scaffold a debate dir + council in one call), ``run`` (one
-seat ad-hoc), and ``render`` (build ONE seat's prompt, no execution).
+seat ad-hoc), ``render`` (build ONE seat's prompt, no execution), ``seats``
+(print the resolved subprocess seat list, one per line, for per-seat fan-out),
+and ``collect`` (collapse the named per-seat ``<seat>.json`` result files into
+ONE faithful ``render_panel`` markdown digest — reads EXACTLY the seats named in
+``--seats``, never globs).
 
 The engine EXECUTES only subprocess seats (codex/cursor-*, plus opt-in agy), but ``render`` BUILDS the
 prompt for ANY seat — including the Claude Task seats (opus/sonnet) the
@@ -179,6 +183,21 @@ def _resolve_session_id(arg: str | None) -> str:
     return (arg or os.environ.get("CLAUDE_SESSION_ID") or "").strip()
 
 
+def _reviews_subdir(session_id: str) -> Path:
+    """Resolve ``.crew/reviews/<sanitized-session-id>`` — the SHARED traversal
+    containment guard used by BOTH ``_stage_path`` and ``cmd_collect``.
+
+    The session segment is charset-guarded to ``[A-Za-z0-9_-]`` so it can never
+    escape ``.crew/reviews/``: a hostile ``--session-id ../../x`` does NOT raise —
+    it COLLAPSES (every ``/`` and ``.`` stripped) to a single child dir
+    ``.crew/reviews/x``. Containment is by SANITIZATION, not by raising. With no
+    session id the dir is flat (``.crew/reviews/``) — sequential same-project use
+    still works; only cross-session isolation is lost.
+    """
+    seg = re.sub(r"[^A-Za-z0-9_-]", "", session_id)
+    return Path(_REVIEWS_BASE) / seg if seg else Path(_REVIEWS_BASE)
+
+
 def _stage_path(session_id: str, seat_role: str | None) -> str:
     """Derive the session-scoped staging path for a rendered prompt:
     ``.crew/reviews/<session-id>/prompt-<seat-role>.txt``.
@@ -191,11 +210,12 @@ def _stage_path(session_id: str, seat_role: str | None) -> str:
     can only ever name a single child dir/file (path-traversal guard). With no
     session id the path is flat (``.crew/reviews/prompt-<role>.txt``) — sequential
     same-project use still works; only cross-session isolation is lost.
+
+    The session-segment containment is shared with ``cmd_collect`` via
+    ``_reviews_subdir`` so both resolve the dir identically.
     """
     role = re.sub(r"[^A-Za-z0-9_-]", "", (seat_role or "").strip()) or "seat"
-    seg = re.sub(r"[^A-Za-z0-9_-]", "", session_id)
-    base = Path(_REVIEWS_BASE) / seg if seg else Path(_REVIEWS_BASE)
-    return str(base / f"prompt-{role}.txt")
+    return str(_reviews_subdir(session_id) / f"prompt-{role}.txt")
 
 
 def _fan_out(seats: list[str], prompt: str, timeout: int) -> list[ProviderResult]:
@@ -535,7 +555,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
 
     if args.json:
-        _emit(json.dumps(result.to_dict()), args.out)
+        _emit(json.dumps(result.to_dict(), ensure_ascii=False), args.out)
         return 0
 
     if not result.ok:
@@ -833,6 +853,99 @@ def cmd_seats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_collect(args: argparse.Namespace) -> int:
+    """Collapse the named per-seat ``<seat>.json`` result files into ONE markdown
+    digest (a FAITHFUL ``render_panel`` projection — never a summarizer/voter).
+
+    Reads EXACTLY the seats named in ``--seats`` (in that order) — NO glob. This
+    is the deterministic fix for the stale-seat bug: the reviews dir is reused
+    across reviews within a session and seat filenames are STABLE, so a blind
+    ``*.json`` glob would fold a STALE ``<seat>.json`` from an earlier panel into
+    a later verdict. By reading only the named seats, a stale/foreign file is
+    never read, and a named-but-missing seat renders as a SKIPPED block labeled
+    with its name (never silently dropped).
+
+    Per-file outcome (precise): a MISSING, UNREADABLE, or non-JSON file → a
+    labeled SKIPPED block; a valid-JSON-but-NON-OBJECT file (``[]``/``null``/etc.)
+    → a labeled SKIPPED block (via ``from_dict``'s non-object guard); a
+    WELL-FORMED JSON OBJECT renders per its fields (missing fields coerced via
+    ``from_dict``'s render-safe defaults — e.g. ``{}`` renders as a FAILED block,
+    ``{"ok": true}`` as an OK block). This faithfully reflects whatever ``run
+    --json`` wrote; collect does not validate the schema.
+
+    EVERY block is labeled with the REQUESTED seat name ``s`` (valid, malformed,
+    non-object, or missing alike) — never "unknown". The dir is resolved through
+    the SAME sanitizing containment guard ``_stage_path`` uses
+    (``_reviews_subdir``), so ``--session-id ../../x`` collapses to
+    ``.crew/reviews/x`` (contained), reading nothing outside ``.crew/reviews/``.
+    """
+    # Fail LOUD on an unsubstituted template (same posture as cmd_render --stage):
+    # resolve first (arg -> CLAUDE_SESSION_ID env), THEN check.
+    session_id = _resolve_session_id(args.session_id)
+    if "<" in session_id or ">" in session_id:
+        print(
+            f"error: session id looks like an unsubstituted placeholder "
+            f"({session_id!r}); pass your actual session id (the "
+            "[Session ID: …] value), not the literal template",
+            file=sys.stderr,
+        )
+        return 2
+
+    results_dir = _reviews_subdir(session_id)
+
+    seats = [s.strip() for s in (args.seats or "").split(",") if s.strip()]
+
+    # Validate each seat name BEFORE building a path: a seat name supplies a
+    # FILENAME (`<seat>.json`), so a name with `/`, `.`, or `..` could escape the
+    # session dir. Mirror _stage_path's charset guard, but REJECT (loud, nonzero)
+    # rather than silently sanitize — a sanitized name would name the WRONG file
+    # (e.g. `../../foo` -> `foo`). Registry seat names (codex, cursor-*) pass.
+    for s in seats:
+        if re.sub(r"[^A-Za-z0-9_-]", "", s) != s:
+            print(
+                f"error: invalid seat name {s!r} in --seats; seat names must "
+                "match [A-Za-z0-9_-] (no path separators or dots). collect reads "
+                "EXACTLY <seat>.json inside the session dir and never outside it.",
+                file=sys.stderr,
+            )
+            return 2
+
+    results: list[ProviderResult] = []
+    for s in seats:
+        p = results_dir / f"{s}.json"
+        if not p.exists():
+            # Named-but-missing seat -> SKIPPED block labeled with its name.
+            results.append(ProviderResult(
+                name=s, model=None, ok=False, output="",
+                error="skipped: no result file for seat", elapsed=0.0,
+            ))
+            continue
+        try:
+            result = ProviderResult.from_dict(json.loads(p.read_text(encoding="utf-8")))
+            # ALWAYS label by the requested seat — never "unknown". from_dict's
+            # "unknown" fallback (non-object/missing-name files) can never reach
+            # the digest: cmd_collect knows s, from_dict does not.
+            result.name = s
+        except (OSError, ValueError) as exc:
+            # "not valid JSON at all" (JSONDecodeError is a ValueError subclass)
+            # or unreadable file -> SKIPPED block labeled with the requested seat.
+            result = ProviderResult(
+                name=s, model=None, ok=False, output="",
+                error=f"skipped: unreadable result file ({exc})", elapsed=0.0,
+            )
+        results.append(result)
+
+    text = render.render_panel(results)
+    _emit(text, args.out)
+    # With -o the digest went to a file, so stdout carries ONLY the path
+    # (mirrors --stage's path-only stdout contract; keeps the call allowlist-safe
+    # and the digest off stdout). Print args.out VERBATIM — the path the caller
+    # passed is the path to echo.
+    if args.out:
+        print(args.out)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multiagent",
@@ -938,6 +1051,29 @@ def build_parser() -> argparse.ArgumentParser:
              "default = the default subprocess panel",
     )
     seats_p.set_defaults(func=cmd_seats)
+
+    coll = sub.add_parser(
+        "collect",
+        help="Collapse the named per-seat <seat>.json result files into ONE markdown "
+             "digest (faithful render_panel projection — never a summarizer). Reads "
+             "EXACTLY the seats named in --seats; never globs (avoids stale-seat "
+             "contamination across reused session dirs).",
+    )
+    coll.add_argument(
+        "--session-id", dest="session_id", default=None,
+        help="session id for .crew/reviews/<session-id>/ (default: CLAUDE_SESSION_ID env)",
+    )
+    coll.add_argument(
+        "--seats", dest="seats", default="",
+        help="comma-separated resolved subprocess-seat names. collect reads EXACTLY "
+             "<seat>.json for each; a missing seat renders as a SKIPPED block; "
+             "stale/foreign files are never read. (collect never globs.)",
+    )
+    coll.add_argument(
+        "-o", "--out", default=None,
+        help="write the digest to this file (keeps the call shell-redirect-free)",
+    )
+    coll.set_defaults(func=cmd_collect)
 
     run = sub.add_parser(
         "run",

@@ -88,4 +88,4 @@ def render_panel(results: list[ProviderResult]) -> str:
 
 def render_json(results: list[ProviderResult]) -> str:
     """Emit a JSON array of result dicts — ONE json.dumps over the list."""
-    return json.dumps([r.to_dict() for r in results], indent=2)
+    return json.dumps([r.to_dict() for r in results], indent=2, ensure_ascii=False)

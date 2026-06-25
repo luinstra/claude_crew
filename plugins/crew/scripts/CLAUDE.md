@@ -37,7 +37,7 @@ their results into the same six-field shape the engine returns.
 
 ```
 multiagent/
-├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `render` (incl. `--stage-all`) | `seats` subcommands (reached via the bare `../crew` dispatcher)
+├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `render` (incl. `--stage-all`) | `seats` | `collect` subcommands (reached via the bare `../crew` dispatcher)
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
@@ -132,7 +132,20 @@ Key contracts (do NOT regress):
   list from `crew seats --seats <spec>`, renders the shared subprocess prompt
   once with `render --stage`, then runs each seat via `run <seat> -f <prompt>
   --json`. `run --json` always exits 0 with the six-field result, so per-seat
-  never-choke is automatic (no all-failed abort to handle). The `review`
+  never-choke is automatic (no all-failed abort to handle). After the fan-out,
+  the orchestrator collapses the N per-seat `<seat>.json` files into ONE markdown
+  digest with `crew collect --session-id <id> --seats <comma-joined seat list>
+  -o panel.md` and reads `panel.md` once (instead of N raw-JSON reads). `collect`
+  reads EXACTLY the named seats (never globs — a stale `<seat>.json` from an
+  earlier panel in the reused session dir is never folded in), labels every block
+  by its requested seat name (a missing, unreadable, non-JSON, or non-object file
+  → a labeled SKIPPED block; a well-formed JSON object renders per its fields via
+  `from_dict`'s render-safe coercion), rejects a seat name with path chars
+  (nonzero), and emits a FAITHFUL `render_panel` projection (never
+  summarizes/votes/reorders). The orchestrator clears each expected `<seat>.json`
+  BEFORE launching the per-seat run shells (the session dir is reused, so a
+  leftover/killed-seat file would otherwise be read as fresh) and WAITS for every
+  run shell to exit before collecting. The `review`
   subcommand still exists for ad-hoc one-shot fan-out; the commands just don't use
   it. (`/crew:debate` fans out per-seat in BOTH paths now — its multi-round path
   always did, and the single-round path scaffolds via `debate --seats none` then
