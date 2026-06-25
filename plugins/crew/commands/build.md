@@ -13,14 +13,17 @@ $ARGUMENTS
 Flags at the **start** of `$ARGUMENTS` choose which models verify; the rest is
 the task. Default (no flag) = the full panel.
 
-- `--panel full` = `codex,agy,opus,sonnet` (default) · `--panel lite` =
-  `opus,sonnet` · `--panel solo` = `opus`
-- `--seats <list>` = an explicit comma-list from `codex,agy,opus,sonnet`
-  (e.g. `--seats codex,opus`). `--seats` wins if both are given.
+- `--panel full` = `codex,cursor-gemini,cursor-glm,cursor-composer,opus,sonnet`
+  (default) · `--panel lite` = `opus,sonnet` · `--panel solo` = `opus`
+- `--seats <list>` = an explicit comma-list of any registered seat
+  (`codex, agy, cursor-gemini, cursor-glm, cursor-composer, opus, sonnet`;
+  e.g. `--seats codex,opus`). `agy` is opt-in — works via `--seats agy` but is
+  not in the default panel. `--seats` wins if both are given.
 
 Resolve the flags to a **seat list** once, then split it:
-- **subprocess seats** = the `codex`/`agy` entries → pass as the engine's
-  `--seats` (Step 2a). **If the list has NO codex/agy, SKIP Step 2a entirely.**
+- **subprocess seats** = the `codex`/`cursor-*` entries (and opt-in `agy`) → pass
+  as the engine's `--seats` (Step 2a). **If the list has NO subprocess seat, SKIP
+  Step 2a entirely.**
 - **task seats** = the `opus`/`sonnet` entries → in Step 2b spawn `crew:reviewer`
   ONLY for those (zero, one, or both).
 
@@ -75,14 +78,15 @@ of a single advisor. The same code-review criteria fan out across several AI
 seats in parallel over the **working-tree diff**, and you synthesize the results
 into the existing verdict. Two seat kinds:
 
-- **subprocess seats** — the `codex`/`agy` entries of the resolved panel, via
-  the Python engine.
+- **subprocess seats** — the `codex`/`cursor-*` entries (and opt-in `agy`) of
+  the resolved panel, via the Python engine.
 - **task seats** — the `opus`/`sonnet` entries of the resolved panel, each a
   `crew:reviewer` spawned via the Task tool (in-session, on the subscription —
   no `claude -p`, no API key).
 
-The panel is whatever the Panel-options flags resolved to (default **codex + agy
-+ opus + sonnet**). Only fan out the seats in that list. A failed/skipped seat
+The panel is whatever the Panel-options flags resolved to (default **codex +
+cursor-gemini + cursor-glm + cursor-composer + opus + sonnet**). Only fan out the
+seats in that list. A failed/skipped seat
 NEVER aborts the verification (see "Synthesize" below) — the verdict is
 synthesized from whichever seats succeed.
 
@@ -92,13 +96,13 @@ synthesized from whichever seats succeed.
 
 ### Step 2a — Fan out subprocess seats (one Bash call)
 
-**Skip this step if the resolved panel has no `codex`/`agy` seat** (e.g.
+**Skip this step if the resolved panel has no subprocess seat** (e.g.
 `--panel lite`) — go straight to Step 2b. Otherwise run the engine once over the
 working-tree diff, passing ONLY the resolved subprocess seats. Use the bare-script
 path (its top-of-file `sys.path` guard makes package imports resolve):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review working-tree --seats <resolved codex/agy seats> --json
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review working-tree --seats <resolved codex/cursor-* seats> --json
 ```
 
 - The engine returns a JSON array of result objects, each with the six fields:
@@ -114,31 +118,42 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review working-tree --s
 ### Step 2b — Fan out Task seats (parallel)
 
 Spawn a reviewer seat **in parallel for each `opus`/`sonnet` entry in the
-resolved panel** (zero, one, or both — skip this step if neither is present),
-passing each a **criteria-equivalent** code-review prompt to the engine's (same
-completeness / code-quality / security / error-handling criteria — NOT
-byte-identical). Like the subprocess seats, the Task seats **fetch the diff
-themselves** — do NOT paste the diff into the prompt. Tell each seat to run
-`git diff HEAD` (and read any untracked files the executor created);
-`crew:reviewer` has `Read, Grep, Glob, Bash` for exactly this (read-only
-git/inspection). Pass the executor's summary inline (it's small) so every seat
-shares the same intent. This keeps all seats reviewing the SAME source by the
-SAME means — no embedded-vs-referenced divergence. Each seat is the SAME agent
-(`crew:reviewer`) with a per-spawn `model` override selecting the voice (spawn
-only the ones in the panel):
+resolved panel** (zero, one, or both — skip this step if neither is present). Do
+NOT hand-write each seat's prompt: **render it from the engine** so every seat —
+subprocess AND Task — reviews ONE identical target. `render` is the single prompt
+source, and it resolves `working-tree` the SAME way Step 2a's engine `review`
+did — via the compound `Target.diff_cmd` that INCLUDES untracked files. That
+matters most here: `/crew:build` verification routinely follows a step where the
+executor just CREATED new files, and a hand-built `git diff HEAD` prompt would
+make the Claude seats miss exactly those untracked files while the subprocess
+seats see them. Render each `opus`/`sonnet` seat's prompt over the SAME `working-tree`
+target:
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render working-tree --mode review --seat-role opus   -o .crew/.prompt-opus.txt
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render working-tree --mode review --seat-role sonnet -o .crew/.prompt-sonnet.txt
+```
+
+Then dispatch each seat with the rendered text as its prompt, appending the
+executor's summary inline (it's small) so every seat shares the same intent. Each
+seat is the SAME agent (`crew:reviewer`) with a per-spawn `model` override
+selecting the voice (spawn only the ones in the panel):
 
 ```
 # Spawn ONLY the opus/sonnet seats in the resolved panel — e.g. --panel solo
 # spawns just the opus line; --panel lite spawns both; full spawns both too.
-Task(subagent_type="crew:reviewer", model="opus",   prompt="<the assembled code-review prompt>")
-Task(subagent_type="crew:reviewer", model="sonnet", prompt="<the assembled code-review prompt>")
+Task(subagent_type="crew:reviewer", model="opus",   prompt="<contents of .crew/.prompt-opus.txt> + executor summary")
+Task(subagent_type="crew:reviewer", model="sonnet", prompt="<contents of .crew/.prompt-sonnet.txt> + executor summary")
 ```
 
-The assembled review prompt must state this is a **code review** of the task,
-include the executor's summary, tell the seat to inspect the changes itself via
-`git diff HEAD` (plus any untracked files), list the criteria (completeness, code
-quality, security, performance, error handling), and ask for findings tagged
-`[BLOCKING]`/`[MINOR]` + a one-line verdict.
+The rendered prompt already states this is a **code review**, tells the seat to
+inspect the changes itself in reference mode (the compound working-tree diff,
+untracked files included), lists the criteria (completeness, code quality,
+security, performance, error handling), and asks for findings tagged
+`[BLOCKING]`/`[MINOR]` + a one-line verdict. `crew:reviewer` has `Read, Grep,
+Glob, Bash` for exactly this (read-only git/inspection). Because every seat's
+prompt comes from the one `render` source over the same `working-tree` target,
+the panel reviews a single identical diff — no tracked-vs-untracked divergence.
 
 **Never choke on a Task-seat failure:** a `crew:reviewer` spawn that errors,
 times out, returns no usable block, or is reported missing/failed by the harness

@@ -24,7 +24,8 @@ scripts/
 
 The engine that powers `/crew:review`, `/crew:debate`, and the review steps of
 `/crew:build` and `/crew:measure-twice`. It drives **subprocess seats** only —
-the external CLIs `codex` and `agy`. The **Claude seats** (opus/sonnet) are NOT
+the external CLIs `codex` + `cursor-gemini`/`cursor-glm`/`cursor-composer` (with
+`agy` opt-in via `--seats agy`). The **Claude seats** (opus/sonnet) are NOT
 in here: they're spawned by the orchestrating command as `crew:reviewer` Task
 subagents (in-session, on the subscription), and the orchestrator normalizes
 their results into the same six-field shape the engine returns.
@@ -37,16 +38,17 @@ multiagent/
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
 ├── render.py            # side-by-side panel + --json rendering
 └── providers/
-    ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC (executor: run()), registry
+    ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC (executor: run()), registry + known_seat_names()
     ├── codex.py         # CodexProvider — `codex exec - --sandbox read-only -o <tmp>`, prompt via stdin
-    └── agy.py           # AgyProvider — `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions)
+    ├── cursor.py        # CursorProvider — the live `cursor-gemini`/`cursor-glm`/`cursor-composer` seats; CURSOR_SEATS is the one-line-to-extend source of truth
+    └── agy.py           # AgyProvider (opt-in) — `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions)
 ```
 
 Key contracts (do NOT regress):
 - **Six-field `ProviderResult`** (`name, model, ok, output, error, elapsed`) — the
   one shape every seat (subprocess AND normalized Task seat) returns.
 - **Provider = executor.** The `Provider` ABC's job is `run()` (invoke a CLI →
-  `ProviderResult`). codex/agy are executors; opus/sonnet (Task seats) are NOT
+  `ProviderResult`). codex/cursor-* (and opt-in agy) are executors; opus/sonnet (Task seats) are NOT
   providers — they're owned by the orchestrator. (This is the debate-validated
   shape: we deliberately did NOT adopt the Enterprise fork's prompt-builder
   `BaseProvider`/`TaskProvider`, which modelled non-executable Claude seats as
@@ -79,8 +81,12 @@ Key contracts (do NOT regress):
   (stays permission-allowlistable).
 - **Panel selection** — the commands accept `--panel full|lite|solo` / `--seats
   <subset>`; the ORCHESTRATOR resolves those to a seat list and passes only the
-  `codex`/`agy` subset to the engine's `--seats` (skipping the engine when there
-  are none). The engine itself only knows subprocess seats. One engine-side
+  subprocess subset (the `codex`/`cursor-*` entries, plus opt-in `agy`) to the
+  engine's `--seats` (skipping the engine when there are none). The default panel
+  is `codex + cursor-gemini/glm/composer + opus + sonnet`; `agy` is opt-in. The
+  engine itself only knows subprocess seats, and its subprocess-seat allowlist is
+  now registry-derived via `known_seat_names()` (no hardcoded codex/agy list).
+  One engine-side
   affordance: `cli.py debate --seats none` (or `""`) scaffolds the dir + writes an
   empty `subprocess.json` (exit 0) instead of erroring — so a Claude-only
   `lite`/`solo` council still gets its log dir. `review`/`council` intentionally

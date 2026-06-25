@@ -253,6 +253,15 @@ def test_agy_helpers():
               "https://accounts.google.com/o/oauth2/auth to continue"
           ) is not None,
           "non-None", "None")
+    # False-NEGATIVE guard: an auth banner that says "confidence level: low"
+    # (no colon RIGHT AFTER the word "confidence") must STILL be flagged — the
+    # structure marker is "confidence:" (rubric form), not bare "confidence".
+    check("detect_auth_or_error flags 'confidence level:' auth banner (marker is 'confidence:')",
+          detect_auth_or_error(
+              "confidence level: low — please authenticate at "
+              "https://accounts.google.com"
+          ) is not None,
+          "non-None", "None")
     check("parse_timeout 8m -> 480s", parse_timeout_to_seconds("8m") == 480.0,
           "480.0", str(parse_timeout_to_seconds("8m")))
     check("parse_timeout 300s -> 300", parse_timeout_to_seconds("300s") == 300.0,
@@ -446,12 +455,14 @@ def test_default_seats():
     try:
         os.environ.pop("CREW_MA_SEATS", None)
         seats = _default_subprocess_seats()
-        check("default subprocess seats == codex,agy (agy is a default seat)",
-              seats == ["codex", "agy"], "['codex', 'agy']", str(seats))
-        # opus/sonnet in CREW_MA_SEATS are ignored (orchestrator owns Task seats)
-        os.environ["CREW_MA_SEATS"] = "codex,agy,opus,sonnet"
+        check("default subprocess panel == codex + cursor-gemini/glm/composer",
+              seats == ["codex", "cursor-gemini", "cursor-glm", "cursor-composer"],
+              "['codex', 'cursor-gemini', 'cursor-glm', 'cursor-composer']", str(seats))
+        # opus/sonnet (Task seats) AND unknown names in CREW_MA_SEATS are dropped;
+        # agy is registered, so it's honored as an opt-in seat.
+        os.environ["CREW_MA_SEATS"] = "codex,agy,opus,sonnet,bogus"
         seats = _default_subprocess_seats()
-        check("CREW_MA_SEATS filters to subprocess seats only",
+        check("CREW_MA_SEATS filters to registered subprocess seats only",
               seats == ["codex", "agy"], "['codex', 'agy']", str(seats))
     finally:
         if saved is None:
@@ -500,6 +511,18 @@ def test_registry():
               "nope" in str(exc), "mentions 'nope'", str(exc))
     seats = available_seats(["codex", "agy"])
     check("available_seats returns instances", len(seats) == 2, "2", str(len(seats)))
+    # Cursor model-seats are registered (one per CURSOR_SEATS entry).
+    from multiagent.providers import known_seat_names
+    from multiagent.providers.cursor import CursorProvider, CURSOR_SEATS
+    for seat_name, (model, env) in CURSOR_SEATS.items():
+        check(f"get_provider('{seat_name}') -> CursorProvider pinned to {model}",
+              isinstance(get_provider(seat_name), CursorProvider)
+              and get_provider(seat_name)._default_model == model
+              and get_provider(seat_name)._model_env_var == env,
+              f"CursorProvider({model})", repr(get_provider(seat_name).__dict__))
+    check("each cursor seat is a DISTINCT model (no closure late-binding bug)",
+          len({get_provider(s)._default_model for s in CURSOR_SEATS}) == len(CURSOR_SEATS),
+          "all distinct models", str([get_provider(s)._default_model for s in CURSOR_SEATS]))
 
 
 # =============================================================================
@@ -1203,6 +1226,10 @@ def test_council_subcommand():
         """)
         env = path_with(bins)
         env["CREW_MA_AGY_PRINT_TIMEOUT"] = "1s"
+        # Pin the two fake subprocess seats so this exercises the council fan-out
+        # deterministically, independent of the default panel (covered separately
+        # in test_default_seats, which is now codex + cursor-*).
+        env["CREW_MA_SEATS"] = "codex,agy"
         proc = _run_cli(
             ["council", "Pick one.", "--json", "--timeout", "5"],
             env=env, timeout=60,
@@ -1213,7 +1240,7 @@ def test_council_subcommand():
             names = sorted(r["name"] for r in arr)
         except Exception:
             names = []
-        check("council default seats == codex,agy",
+        check("council pinned seats fan out (codex,agy)",
               names == ["agy", "codex"], "['agy', 'codex']", str(names))
 
     # one seat fails, the other still returns (graceful degradation).
@@ -1343,7 +1370,7 @@ def test_debate_subcommand():
     sys.exit(0)
     """
 
-    # positional question + --slug: scaffolds <base>/<ts>-<slug>/ with question.txt
+    # positional question + --slug: scaffolds <base>/<ts>-<slug>/ with question.md
     # and subprocess.json, prints a JSON summary with the dir.
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
@@ -1370,10 +1397,10 @@ def test_debate_subcommand():
         check("debate: dir name is <timestamp>-<slug>",
               bool(ddir) and "x-vs-y" in ddir.name and ddir.name[:8].isdigit(),
               "<ts>-x-vs-y", str(ddir.name if ddir else None))
-        check("debate: question.txt written into the dir",
-              bool(ddir) and (ddir / "question.txt").exists()
-              and "Is X better than Y?" in (ddir / "question.txt").read_text(),
-              "question.txt holds the question", "?")
+        check("debate: question.md written into the dir",
+              bool(ddir) and (ddir / "question.md").exists()
+              and "Is X better than Y?" in (ddir / "question.md").read_text(),
+              "question.md holds the question", "?")
         ok_json = False
         if ddir and (ddir / "subprocess.json").exists():
             try:
@@ -1405,8 +1432,8 @@ def test_debate_subcommand():
             ddir = None
         check("debate -f: reads question file and scaffolds the dir",
               proc.returncode == 0 and bool(ddir) and ddir.exists()
-              and (ddir / "question.txt").exists(),
-              "exit0 + dir + question.txt", f"{proc.returncode}: {proc.stdout[:160]}")
+              and (ddir / "question.md").exists(),
+              "exit0 + dir + question.md", f"{proc.returncode}: {proc.stdout[:160]}")
         check("debate: auto-slug derived from the question when --slug omitted",
               bool(ddir) and "should-we-adopt" in ddir.name,
               "slug from first words", str(ddir.name if ddir else None))
@@ -1439,8 +1466,8 @@ def test_debate_subcommand():
               bool(ddir) and ddir.name.endswith("-pwned"),
               "<ts>-pwned", str(ddir.name if ddir else None))
         check("debate --consume: staging file deleted after copy into dir",
-              not staging.exists() and bool(ddir) and (ddir / "question.txt").exists(),
-              "staging gone, question.txt present", f"staging_exists={staging.exists()}")
+              not staging.exists() and bool(ddir) and (ddir / "question.md").exists(),
+              "staging gone, question.md present", f"staging_exists={staging.exists()}")
 
     # dir uniqueness: two same-slug debates never share a dir (no silent overwrite).
     with tempfile.TemporaryDirectory() as td:
@@ -1489,9 +1516,9 @@ def test_debate_subcommand():
                 is_empty = json.loads((ddir / "subprocess.json").read_text()) == []
             except Exception:
                 is_empty = False
-        check("debate --seats none: scaffolds dir + question.txt, exit 0",
-              proc.returncode == 0 and bool(ddir) and (ddir / "question.txt").exists(),
-              "exit0 + dir + question.txt", f"{proc.returncode}: {proc.stdout[:160]}")
+        check("debate --seats none: scaffolds dir + question.md, exit 0",
+              proc.returncode == 0 and bool(ddir) and (ddir / "question.md").exists(),
+              "exit0 + dir + question.md", f"{proc.returncode}: {proc.stdout[:160]}")
         check("debate --seats none: subprocess.json is [] (no codex/agy run)",
               is_empty, "[]", str(ddir))
 
@@ -1627,6 +1654,12 @@ def test_render_subcommand():
     check("render free-form -q with --mode review -> error",
           proc.returncode != 0, "nonzero", str(proc.returncode))
 
+    # A non-default positional target AND a free-form question are mutually
+    # exclusive — the target would otherwise be silently ignored.
+    proc = _run_cli(["render", "working-tree", "--mode", "discuss", "-q", "Q"], timeout=30)
+    check("render non-default target + -q together -> nonzero error",
+          proc.returncode != 0, "nonzero", str(proc.returncode))
+
     # multi-round: prior round folded in from the run dir
     with tempfile.TemporaryDirectory() as td:
         d = rounds.ensure_run_dir("run-xyz", base_dir=td)
@@ -1673,33 +1706,99 @@ def test_render_subcommand():
               "identical to build_prompt", rendered[:160])
 
 
-def test_cursor_dormant():
-    log_section("cursor provider — DORMANT (ported for parity, not wired in)")
-    from multiagent.providers import cursor
-    from multiagent.providers import known_seat_names
+def test_cursor():
+    log_section("CursorProvider (live multi-model seat)")
+    from multiagent.providers import cursor, known_seat_names
+    from multiagent.providers.cursor import CursorProvider, CURSOR_SEATS
     from multiagent import cli
 
-    check("cursor is NOT in the seat registry (codex/agy only)",
-          "cursor" not in known_seat_names(), "absent", str(known_seat_names()))
+    check("cursor model-seats are registered (cursor-gemini/glm/composer)",
+          all(s in known_seat_names() for s in CURSOR_SEATS),
+          "all present", str(known_seat_names()))
+    check("engine resolves a cursor seat (--seats cursor-glm,codex)",
+          cli._resolve_seats("cursor-glm,codex") == ["cursor-glm", "codex"],
+          "['cursor-glm', 'codex']", str(cli._resolve_seats("cursor-glm,codex")))
 
-    p = cursor.CursorProvider()
-    r = p.run("hello")  # no model configured -> must fail loudly, invoke nothing
-    check("dormant cursor.run() with no model fails loudly (ok=False, model error)",
-          r.ok is False and "model" in (r.error or "").lower(),
-          "ok=False + model error", f"ok={r.ok} err={r.error}")
-    check("dormant cursor result is the six-field shape",
-          set(r.to_dict().keys()) == {"name", "model", "ok", "output", "error", "elapsed"},
-          "six fields", str(set(r.to_dict().keys())))
+    # A single fake `agent` that answers --version with a bare date-stamp (NO
+    # "cursor" string) AND, on the run invocation, captures argv + emits ANSI.
+    fake_agent = '''
+    import sys, json, os
+    if "--version" in sys.argv:
+        print("2026.06.24-00-45-58-9f61de7")
+        sys.exit(0)
+    cap = os.environ.get("CURSOR_CAPTURE")
+    if cap:
+        json.dump(sys.argv[1:], open(cap, "w"))
+    sys.stdout.write("\\x1b[32mPASS\\x1b[0m review body")
+    sys.exit(0)
+    '''
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        make_fake_bin(d, "agent", fake_agent)
+        cap = d / "argv.json"
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = path_with(d)["PATH"]
+        os.environ["CURSOR_CAPTURE"] = str(cap)
+        try:
+            prov = CursorProvider("cursor-glm", "glm-5.2-max", "CREW_MA_GLM_MODEL")
+            # THE critical probe: agent --version is a bare date-stamp, no "cursor".
+            avail, diag = prov.is_available()
+            check("cursor is_available accepts a bare date-stamp --version (no 'cursor')",
+                  avail is True, "(True, '')", f"({avail}, {diag!r})")
 
-    check("engine _resolve_seats drops 'cursor' (only codex/agy are subprocess seats)",
-          cli._resolve_seats("cursor,codex") == ["codex"],
-          "['codex']", str(cli._resolve_seats("cursor,codex")))
+            r = prov.run("REVIEW-PROMPT", timeout=10)
+            argv = json.loads(cap.read_text())
+            check("cursor run() argv == agent --print --sandbox enabled --trust --workspace .. --model .. <prompt>",
+                  argv[:5] == ["--print", "--sandbox", "enabled", "--trust", "--workspace"]
+                  and "--model" in argv and "glm-5.2-max" in argv and argv[-1] == "REVIEW-PROMPT",
+                  "correct argv", str(argv))
+            check("cursor run() strips ANSI, returns ok=True with the resolved model",
+                  r.ok is True and "PASS" in r.output and "\x1b" not in r.output
+                  and r.model == "glm-5.2-max",
+                  "ok + clean output + model", f"ok={r.ok} out={r.output!r} model={r.model}")
 
-    # Cursor mirrors agy's banner-shape auth gate: a structured review of auth
-    # code is NOT flagged; a real structureless banner IS. NB the review input
-    # MUST contain a real cursor auth marker ("please login" / "sign in"), else
-    # the test is tautological — it would pass via "no marker found" without ever
-    # exercising the structure gate.
+            # env var overrides the pinned model.
+            os.environ["CREW_MA_GLM_MODEL"] = "glm-override"
+            r2 = prov.run("X", timeout=10)
+            check("CREW_MA_<seat>_MODEL overrides the pinned model",
+                  r2.model == "glm-override", "glm-override", str(r2.model))
+            os.environ.pop("CREW_MA_GLM_MODEL", None)
+        finally:
+            os.environ["PATH"] = old_path
+            os.environ.pop("CURSOR_CAPTURE", None)
+
+    # is_available rejects a non-Cursor `agent` binary (no date-stamp, no "cursor").
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        make_fake_bin(d, "agent", '''
+        import sys
+        if "--version" in sys.argv:
+            print("some-other-agent 1.0")
+        sys.exit(0)
+        ''')
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = path_with(d)["PATH"]
+        try:
+            avail, diag = CursorProvider("cursor-glm", "glm-5.2-max").is_available()
+            check("cursor is_available rejects a non-Cursor 'agent' binary",
+                  avail is False and bool(diag), "(False, diag)", f"({avail}, {diag!r})")
+        finally:
+            os.environ["PATH"] = old_path
+
+    # ARG_MAX guard fires before exec.
+    big = CursorProvider("cursor-glm", "glm-5.2-max").run("x" * (256 * 1024 + 1))
+    check("cursor run() ARG_MAX guard -> ok=False, no exec",
+          big.ok is False and "too large" in (big.error or "").lower(),
+          "ok=False too large", f"ok={big.ok} err={big.error}")
+
+    # A bare cursor seat with no model configured fails loudly (invokes nothing).
+    bare = CursorProvider("cursor", None).run("hi")
+    check("cursor seat with no model fails loudly (ok=False, model error)",
+          bare.ok is False and "model" in (bare.error or "").lower(),
+          "ok=False model error", f"ok={bare.ok} err={bare.error}")
+
+    # Auth banner-shape gate: a structured review quoting auth markers is NOT
+    # flagged; a real structureless banner IS.
     review_of_auth_code = (
         "[BLOCKING] the 'please login' redirect and sign in flow skip token "
         "validation; the not-logged-in branch is reachable. CONFIDENCE: high."
@@ -1734,7 +1833,7 @@ def main():
     test_rounds()
     test_discuss_and_modes()
     test_render_subcommand()
-    test_cursor_dormant()
+    test_cursor()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")

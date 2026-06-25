@@ -1,5 +1,5 @@
 ---
-description: Multi-model review of a plan OR code diff (default panel codex + agy + opus + sonnet; narrow with --panel/--seats)
+description: Multi-model review of a plan OR code diff (default panel codex + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet; narrow with --panel/--seats)
 argument-hint: "<the plan | the code | a .md path | a git scope>"
 allowed-tools: Bash, Task, Read, Glob
 ---
@@ -22,15 +22,17 @@ $ARGUMENTS
 Flags at the **start** of `$ARGUMENTS` choose which models review; the rest is
 the review request. Default (no flag) = the full panel.
 
-- `--panel full` = `codex,agy,opus,sonnet` (default) · `--panel lite` =
-  `opus,sonnet` · `--panel solo` = `opus`
-- `--seats <list>` = an explicit comma-list from `codex,agy,opus,sonnet`
-  (e.g. `--seats codex,opus`). `--seats` wins if both are given.
+- `--panel full` = `codex,cursor-gemini,cursor-glm,cursor-composer,opus,sonnet`
+  (default) · `--panel lite` = `opus,sonnet` · `--panel solo` = `opus`
+- `--seats <list>` = an explicit comma-list of any registered seat
+  (`codex, agy, cursor-gemini, cursor-glm, cursor-composer, opus, sonnet`;
+  e.g. `--seats codex,opus`). `agy` is opt-in — works via `--seats agy` but is
+  not in the default panel. `--seats` wins if both are given.
 
-Resolve to a **seat list**, then split it: the `codex`/`agy` entries are the
-engine's `--seats` (Step 3 — **skip Step 3 if there are none**); the
-`opus`/`sonnet` entries are the Task seats (Step 4 — spawn only those). A
-one-seat panel is fine.
+Resolve to a **seat list**, then split it: the `codex`/`cursor-*` entries (and
+opt-in `agy`) are the engine's `--seats` (Step 3 — **skip Step 3 if there are
+none**); the `opus`/`sonnet` entries are the Task seats (Step 4 — spawn only
+those). A one-seat panel is fine.
 
 ## What this does
 
@@ -38,14 +40,15 @@ The same review prompt fans out across a multi-model panel and you synthesize
 the results into the existing `APPROVED / REVISE / [BLOCKING] / [MINOR]`
 verdict. Two seat kinds:
 
-- **subprocess seats** — the `codex`/`agy` entries of the resolved panel, via
-  the Python engine.
+- **subprocess seats** — the `codex`/`cursor-*` entries (and opt-in `agy`) of
+  the resolved panel, via the Python engine.
 - **task seats** — the `opus`/`sonnet` entries of the resolved panel, each a
   `crew:reviewer` via the Task tool (in-session, on the subscription — no
   `claude -p`, no API key).
 
-The panel is whatever the Panel-options flags resolved to (default **codex + agy
-+ opus + sonnet**); only fan out the seats in that list. This is safe because a
+The panel is whatever the Panel-options flags resolved to (default **codex +
+cursor-gemini + cursor-glm + cursor-composer + opus + sonnet**); only fan out the
+seats in that list. This is safe because a
 failed/skipped seat NEVER aborts the review (see Step 6) — the verdict is
 synthesized from whichever seats succeed.
 
@@ -81,13 +84,13 @@ silently guess.
 
 ## Step 3 — Fan out subprocess seats (one Bash call)
 
-**Skip this step if the resolved panel has no `codex`/`agy` seat** (e.g.
+**Skip this step if the resolved panel has no subprocess seat** (e.g.
 `--panel lite`) — go straight to Step 4. Otherwise run the engine once for the
 resolved subprocess seats. Use the bare-script path (its top-of-file `sys.path`
 guard makes package imports resolve):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review "<TARGET>" --seats <resolved codex/agy seats> --json --base "<BASE>"
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review "<TARGET>" --seats <resolved codex/cursor-* seats> --json --base "<BASE>"
 ```
 
 - **Quote `"<TARGET>"` and `"<BASE>"`** — a plan path can contain spaces, and
@@ -95,8 +98,8 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review "<TARGET>" --sea
 - `<TARGET>` is the resolved plan `.md` path or git scope from Step 1.
 - For a code review of the working tree, `<TARGET>` is typically `working-tree`
   or `auto`.
-- `--seats` carries ONLY the resolved `codex`/`agy` seats (the Panel-options
-  flags already chose them).
+- `--seats` carries ONLY the resolved subprocess seats — the `codex`/`cursor-*`
+  entries, plus opt-in `agy` (the Panel-options flags already chose them).
 - The engine returns a JSON array of result objects, each with the six fields:
   `name, model, ok, output, error, elapsed`.
 - By default the subprocess seats **fetch the target themselves** (reference
@@ -114,29 +117,38 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" review "<TARGET>" --sea
 ## Step 4 — Fan out Task seats (parallel)
 
 Spawn a reviewer seat **in parallel for each `opus`/`sonnet` entry in the
-resolved panel** (zero, one, or both — skip this step if neither is present),
-passing each a **criteria-equivalent** prompt to the engine's (same plan-review
-or code-review criteria — NOT byte-identical). Like the subprocess seats, the
-Task seats **fetch the target themselves** — do NOT paste the plan body or diff
-into the prompt. Tell each seat where to look: `Read` the plan file at its path,
-or run the diff command (`git diff HEAD` for a working tree, `git diff
-<base>...HEAD` for a branch — the three-dot form diffs from the merge-base,
-identical to the diff the engine pins for its subprocess seats) and read the
-changed files. `crew:reviewer` has `Read, Grep, Glob, Bash` for exactly this
-(read-only git/inspection). This keeps all seats reviewing the SAME source by the
-SAME means — no embedded-vs-referenced divergence. Each seat is the SAME agent
+resolved panel** (zero, one, or both — skip this step if neither is present). Do
+NOT hand-write each seat's prompt: **render it from the engine** so every seat —
+subprocess AND Task — reviews ONE identical target. `render` is the single prompt
+source, and it resolves the working-tree target the SAME way the engine's
+`review` step did (compound `Target.diff_cmd` including untracked files), so a
+Claude seat can't miss new files a subprocess seat sees. For each `opus`/`sonnet`
+seat, render its prompt over the SAME resolved `<TARGET>` (and `--base "<BASE>"`)
+you passed the engine in Step 3:
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render "<TARGET>" --mode review --seat-role opus --base "<BASE>" -o .crew/.prompt-opus.txt
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render "<TARGET>" --mode review --seat-role sonnet --base "<BASE>" -o .crew/.prompt-sonnet.txt
+```
+
+(`<TARGET>` is the plan `.md` path or git scope from Step 1; `<BASE>` is the same
+base passed in Step 3 — drop `--base` for a plan-file or working-tree target.)
+Then dispatch each seat with the rendered text as its prompt — the SAME agent
 (`crew:reviewer`) with a per-spawn `model` override selecting the voice (spawn
 only the ones in the panel):
 
 ```
-Task(subagent_type="crew:reviewer", model="opus",   prompt="<the assembled review prompt>")
-Task(subagent_type="crew:reviewer", model="sonnet", prompt="<the assembled review prompt>")
+Task(subagent_type="crew:reviewer", model="opus",   prompt="<contents of .crew/.prompt-opus.txt>")
+Task(subagent_type="crew:reviewer", model="sonnet", prompt="<contents of .crew/.prompt-sonnet.txt>")
 ```
 
-The assembled review prompt must state plan-vs-code, tell the seat how to reach
-the target itself (the plan file path, or the diff command), list the criteria,
-and ask for per-criterion PASS/FAIL + `[BLOCKING]`/`[MINOR]` findings + a
-one-line verdict.
+The rendered prompt already states plan-vs-code, tells the seat how to reach the
+target itself (the plan file path, or the diff command — reference mode), lists
+the criteria, and asks for per-criterion PASS/FAIL + `[BLOCKING]`/`[MINOR]`
+findings + a one-line verdict. `crew:reviewer` has `Read, Grep, Glob, Bash` for
+exactly this (read-only git/inspection). Because every seat's prompt comes from
+the one `render` source, the panel reviews a single identical target — no
+embedded-vs-referenced or tracked-vs-untracked divergence.
 
 **Never choke on a Task-seat failure:** a `crew:reviewer` spawn that errors,
 times out, returns no usable block, or is reported missing/failed by the
@@ -182,6 +194,7 @@ emit the existing verdict format:
 
 ---
 
-Subscription safety: the engine drives only `codex`/`agy` (external-CLI auth);
-Claude voices are in-session Task seats. No `claude -p`, no Anthropic API — a
-stray `ANTHROPIC_API_KEY` is irrelevant here.
+Subscription safety: the engine drives only the subprocess seats — `codex` + the
+`cursor-*` seats (plus opt-in `agy`), all external-CLI auth; Claude voices are
+in-session Task seats. No `claude -p`, no Anthropic API — a stray
+`ANTHROPIC_API_KEY` is irrelevant here.

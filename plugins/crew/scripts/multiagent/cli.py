@@ -43,27 +43,39 @@ import re
 import shutil
 
 from multiagent import prompts, render, rounds, targets
-from multiagent.providers import ProviderResult, available_seats, get_provider
+from multiagent.providers import (
+    ProviderResult,
+    available_seats,
+    get_provider,
+    known_seat_names,
+)
+
+# The default subprocess panel. codex (OpenAI) + three Cursor model-seats for
+# cross-model diversity at one Cursor price. agy stays registered as an opt-in
+# seat (`--seats agy`) but is no longer a default. Override the whole list with
+# CREW_MA_SEATS. Any name here must be a registered subprocess seat (see
+# providers/__init__._build_registry); unknown names are dropped.
+_DEFAULT_SUBPROCESS_PANEL = ("codex", "cursor-gemini", "cursor-glm", "cursor-composer")
 
 
 def _default_subprocess_seats() -> list[str]:
     """Subprocess-seat default for the engine.
 
-    The engine only knows subprocess seats. Default to ``codex,agy`` (agy is a
-    DEFAULT seat — the full default panel is codex + agy + opus + sonnet, with
-    opus/sonnet added by the orchestrator). ``CREW_MA_SEATS`` may name
-    subprocess seats; non-subprocess names (opus/sonnet) are ignored here (the
-    orchestrator owns Task seats).
+    The engine only knows subprocess seats (codex/agy/cursor-*; opus/sonnet Task
+    seats are owned by the orchestrator). The allowlist is REGISTRY-DERIVED:
+    ``known_seat_names()`` returns every registered subprocess seat, so adding a
+    seat to the registry makes it usable here automatically — no hardcoded list
+    to keep in sync. ``CREW_MA_SEATS`` overrides the default panel.
 
-    Making agy a default seat is safe BECAUSE a failed seat NEVER sinks the
-    panel: any seat failure (nonzero exit, hang/timeout, empty output, agy
-    auth/error banner, unavailable) degrades to an ``ok=False`` result while the
-    other seats still return (see ``cmd_review``).
+    Safe BECAUSE a failed seat NEVER sinks the panel: any seat failure (nonzero
+    exit, hang/timeout, empty output, auth/error banner, unavailable) degrades to
+    an ``ok=False`` result while the other seats still return (see ``cmd_review``).
     """
-    raw = os.environ.get("CREW_MA_SEATS", "codex,agy")
+    raw = os.environ.get("CREW_MA_SEATS", ",".join(_DEFAULT_SUBPROCESS_PANEL))
     names = [n.strip() for n in raw.split(",") if n.strip()]
-    subprocess_only = [n for n in names if n in ("codex", "agy")]
-    return subprocess_only or ["codex", "agy"]
+    known = set(known_seat_names())
+    subprocess_only = [n for n in names if n in known]
+    return subprocess_only or [s for s in _DEFAULT_SUBPROCESS_PANEL if s in known]
 
 
 def _resolve_timeout(arg: int | None) -> int:
@@ -113,8 +125,9 @@ def _resolve_seats(seats_arg: str | None) -> list[str]:
         if seats_arg
         else _default_subprocess_seats()
     )
-    # Engine drives subprocess seats only.
-    return [s for s in seats if s in ("codex", "agy")]
+    # Engine drives subprocess seats only — the allowlist is the registry.
+    known = set(known_seat_names())
+    return [s for s in seats if s in known]
 
 
 def _fan_out(seats: list[str], prompt: str, timeout: int) -> list[ProviderResult]:
@@ -275,7 +288,7 @@ def cmd_debate(args: argparse.Namespace) -> int:
     heredoc to write the question, a redirect to capture results — into a single
     ``python cli.py debate …`` invocation that matches the allowlist rule (so it
     never prompts). Creates ``<base-dir>/<timestamp>-<slug>/``, writes
-    ``question.txt`` + ``subprocess.json`` into it, and prints a JSON summary
+    ``question.md`` + ``subprocess.json`` into it, and prints a JSON summary
     (including ``dir``) so the orchestrator knows where to drop the Claude-seat
     outputs + synthesis. The opus/sonnet Task seats are still spawned by the
     orchestrator — the engine cannot spawn in-session Claude agents.
@@ -329,10 +342,10 @@ def cmd_debate(args: argparse.Namespace) -> int:
     # Guard the writes: an IO failure (full disk, bad perms) must not dump a
     # traceback or leave an orphan dir — clean up and exit nonzero cleanly.
     try:
-        (debate_dir / "question.txt").write_text(question, encoding="utf-8")
+        (debate_dir / "question.md").write_text(question, encoding="utf-8")
     except OSError as exc:
         shutil.rmtree(debate_dir, ignore_errors=True)
-        print(f"error: cannot write question.txt: {exc}", file=sys.stderr)
+        print(f"error: cannot write question.md: {exc}", file=sys.stderr)
         return 2
 
     # --consume: the question is now safely in the dir, so the CLI removes the
@@ -345,7 +358,7 @@ def cmd_debate(args: argparse.Namespace) -> int:
             pass
 
     # A Claude-only panel (e.g. --panel lite/solo) has NO codex/agy seat but
-    # still wants the dir + question.txt scaffolded so the orchestrator can run
+    # still wants the dir + question.md scaffolded so the orchestrator can run
     # the opus/sonnet Task seats and log there. `--seats none` (or "") means
     # exactly that — distinct from OMITTING --seats (which defaults to codex,agy).
     if args.seats is not None and args.seats.strip().lower() in ("", "none"):
@@ -367,7 +380,7 @@ def cmd_debate(args: argparse.Namespace) -> int:
     # fared, then spawns the opus/sonnet Task seats and writes the synthesis here.
     print(json.dumps({
         "dir": str(debate_dir),
-        "question_file": str(debate_dir / "question.txt"),
+        "question_file": str(debate_dir / "question.md"),
         "subprocess_results": str(debate_dir / "subprocess.json"),
         "seats": [
             {"name": r.name, "ok": r.ok, "elapsed": round(r.elapsed, 1)}
@@ -377,23 +390,21 @@ def cmd_debate(args: argparse.Namespace) -> int:
     return _all_failed_exit(results)
 
 
-_SUBPROCESS_SEATS = ("codex", "agy")
-
-
 def cmd_run(args: argparse.Namespace) -> int:
-    """Run ONE subprocess seat ad-hoc via the existing provider classes.
+    """Run ONE subprocess seat ad-hoc via the registered provider.
 
-    This is the single, allowlistable entry point for ad-hoc codex/agy calls:
-    instead of hand-constructing ``agy -p "$(cat …)"`` (whose path varies every
-    time and so can't be permission-allowlisted), callers invoke
+    This is the single, allowlistable entry point for ad-hoc seat calls: instead
+    of hand-constructing a per-seat CLI invocation (whose path varies every time
+    and so can't be permission-allowlisted), callers invoke
     ``cli.py run <seat> -f <prompt-file>`` (or a direct prompt string). The seat
     is dispatched through the SAME ``get_provider``/``Provider`` machinery as
-    ``review`` so invocation shape, ANSI-strip, agy auth/error-banner detection,
+    ``review`` so invocation shape, ANSI-strip, auth/error-banner detection,
     timeout floor, ARG_MAX guard, and ``CREW_MA_*`` env all apply unchanged.
+    Valid seats are whatever the registry holds (codex, agy, cursor-*).
     """
     seat = args.seat
-    if seat not in _SUBPROCESS_SEATS:
-        known = ", ".join(_SUBPROCESS_SEATS)
+    if seat not in known_seat_names():
+        known = ", ".join(known_seat_names())
         print(
             f"error: unknown or non-subprocess seat {seat!r}; "
             f"valid subprocess seats: {known}",
@@ -508,6 +519,16 @@ def cmd_render(args: argparse.Namespace) -> int:
     if args.question is not None and args.file:
         print("error: provide either -q/--question OR -f/--file, not both", file=sys.stderr)
         return 2
+    # A free-form question and an explicit positional target are mutually
+    # exclusive — passing both is ambiguous (the target would be silently
+    # ignored). The default target is "auto"; only a NON-default target conflicts.
+    if (args.question is not None or args.file) and args.target != "auto":
+        print(
+            "error: provide either a positional <target> OR a free-form question "
+            "(-q/--question, -f/--file), not both",
+            file=sys.stderr,
+        )
+        return 2
     question: str | None = None
     if args.file:
         try:
@@ -558,7 +579,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="plan .md path, working-tree, branch, commit:<sha>, a SHA, or auto",
     )
-    review.add_argument("--seats", default=None, help="comma-separated subprocess seats (codex,agy)")
+    review.add_argument("--seats", default=None, help="comma-separated subprocess seats (e.g. codex,cursor-gemini,cursor-glm,cursor-composer)")
     review.add_argument("--json", action="store_true", help="emit a JSON array of results")
     review.add_argument("--base", default="main", help="base ref for branch/auto diffs")
     review.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
@@ -589,7 +610,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="read the question from this file instead of the positional string",
     )
-    council.add_argument("--seats", default=None, help="comma-separated subprocess seats (codex,agy)")
+    council.add_argument("--seats", default=None, help="comma-separated subprocess seats (e.g. codex,cursor-gemini,cursor-glm,cursor-composer)")
     council.add_argument("--json", action="store_true", help="emit a JSON array of results")
     council.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
     council.add_argument(
@@ -627,7 +648,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     debate.add_argument(
         "--seats", default=None,
-        help="comma-separated subprocess seats (codex,agy); 'none' scaffolds the "
+        help="comma-separated subprocess seats (e.g. codex,cursor-gemini,cursor-glm,cursor-composer); 'none' scaffolds the "
              "dir but runs no subprocess seats (a Claude-only panel)",
     )
     debate.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
@@ -640,9 +661,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser(
         "run",
-        help="Run ONE subprocess seat (codex|agy) ad-hoc through the engine.",
+        help="Run ONE subprocess seat (codex|agy|cursor-*) ad-hoc through the engine.",
     )
-    run.add_argument("seat", help="subprocess seat name (codex or agy)")
+    run.add_argument("seat", help="subprocess seat name (codex, agy, or a cursor-* seat)")
     run.add_argument(
         "prompt",
         nargs="?",

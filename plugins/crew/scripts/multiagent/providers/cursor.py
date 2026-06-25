@@ -1,21 +1,21 @@
-"""CursorProvider — a DORMANT subprocess seat using the Cursor Agent CLI.
+"""CursorProvider — a LIVE subprocess seat using the Cursor Agent CLI.
 
-⚠️  DORMANT / NOT WIRED IN. This file is carried for parity with the Enterprise
-    fork (where Cursor is the multi-model provider) but is **inactive here**:
-      * it is NOT in the registry (`providers/__init__._build_registry`),
-      * it is in NO panel (`--panel`/`--seats` only resolve codex/agy/opus/sonnet),
-      * its model strings are commented out (see `_DEFAULT_MODEL` below).
-    codex + agy are the live subprocess seats here. Cursor is not installed/used
-    on this machine (yet). See the "To activate" note at the bottom.
+One Cursor subscription exposes many models (`agent models`); we run several as
+distinct panel seats for cross-model diversity at one price. Each seat is a
+``CursorProvider`` instance pinned to a model string. Adding a model is a
+ONE-LINE change to ``CURSOR_SEATS`` below — the registry, the engine's
+subprocess-seat allowlist (which is registry-derived), and `--seats` all pick it
+up automatically.
 
-It is adapted to OUR executor `Provider` ABC (`is_available()` + `run()`), NOT the
-fork's prompt-builder `BaseProvider` — so prompt-building stays in `prompts.py`
-(the single builder) and this seat only EXECUTES, like codex/agy. If reactivated
-it slots straight into the registry with no further surgery.
+Adapted to OUR executor `Provider` ABC (`is_available()` + `run()`), NOT the
+Enterprise fork's prompt-builder `BaseProvider` — prompt-building stays in
+`prompts.py` (the single builder); this seat only EXECUTES, like codex.
 
 Invokes the ``agent`` binary (Cursor's headless agent). ``agent`` is a generic
-name, so availability is confirmed by checking ``agent --version`` contains
-"cursor".
+binary name, so availability is confirmed by an identity probe on
+``agent --version`` (see ``is_available`` — note the version is a bare date-stamp
+like ``2026.06.24-...`` with NO literal "cursor", so the date-stamp regex is the
+load-bearing check).
 
 CLI signature:
     agent --print --sandbox enabled --trust --workspace <cwd> --model <model> <prompt>
@@ -37,15 +37,22 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mGKHF]")
 # Conservative ARG_MAX cap (same as agy): prompt must fit in 256 KB.
 _ARG_MAX_BYTES = 256 * 1024
 
-# --- Models intentionally COMMENTED OUT (dormant) ----------------------------
-# When this provider is reactivated, pick a concrete model here (and register
-# named instances in cli.py / the registry, e.g.):
-#   _DEFAULT_MODEL = "claude-sonnet-4-6"
-#   PROVIDERS["cursor-gpt"]    = CursorProvider("cursor-gpt",    "gpt-5.5-high")
-#   PROVIDERS["cursor-gemini"] = CursorProvider("cursor-gemini", "gemini-3.1-pro")
-# Left as None so an accidental instantiation fails loudly instead of silently
-# invoking some default model.
-_DEFAULT_MODEL = None  # type: ignore[assignment]
+# Cursor's headless `agent --version` prints a bare build date-stamp
+# (e.g. "2026.06.24-00-45-58-9f61de7") — NO literal "cursor" — so this regex,
+# not a "cursor" substring, is what positively identifies the binary.
+_VERSION_DATESTAMP_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}-")
+
+# === The cursor panel seats — SINGLE SOURCE OF TRUTH ==========================
+# name -> (model string `agent --model` accepts, env var to override it).
+# Add a model = add ONE line here. Model strings verified via `agent models`.
+# Env override lets you retune a seat without code (e.g. CREW_MA_GLM_MODEL=...).
+CURSOR_SEATS: dict[str, tuple[str, str]] = {
+    "cursor-gemini":   ("gemini-3.1-pro", "CREW_MA_GEMINI_MODEL"),
+    "cursor-glm":      ("glm-5.2-max",    "CREW_MA_GLM_MODEL"),
+    "cursor-composer": ("composer-2.5",   "CREW_MA_COMPOSER_MODEL"),
+}
+
+# Fallback env var for a bare/unconfigured CursorProvider instance.
 _MODEL_ENV_VAR = "CREW_MA_CURSOR_MODEL"
 
 # Auth-failure substrings for Cursor-specific error detection.
@@ -63,7 +70,9 @@ _AUTH_BANNER_MAX_CHARS = 1000
 # Bracketed tags / distinctive headers only — NOT bare "approved"/"revise"
 # (an auth banner saying "not approved" would mask itself = false-negative).
 _REVIEW_STRUCTURE_MARKERS = (
-    "[blocking]", "[minor]", "confidence",
+    # "confidence:" (with the colon) matches the rubric's "CONFIDENCE: <level>"
+    # but NOT an auth banner's "confidence level: LOW — please authenticate".
+    "[blocking]", "[minor]", "confidence:",
     "direct take", "strongest objection", "risks / tradeoff",
 )
 
@@ -95,18 +104,32 @@ def _auth_failure_marker(text: str) -> str | None:
 
 
 class CursorProvider(Provider):
-    """A review-panel seat backed by the Cursor Agent CLI subprocess (DORMANT)."""
+    """A review-panel seat backed by the Cursor Agent CLI subprocess.
 
-    def __init__(self, name: str = "cursor", default_model: str | None = _DEFAULT_MODEL) -> None:
+    Pinned to one model. Multiple named instances (see ``CURSOR_SEATS``) run as
+    distinct seats — ``cursor-gemini``, ``cursor-glm``, ``cursor-composer``, …
+    """
+
+    def __init__(
+        self,
+        name: str = "cursor",
+        default_model: str | None = None,
+        model_env_var: str = _MODEL_ENV_VAR,
+    ) -> None:
         self.name = name
         self._default_model = default_model
+        self._model_env_var = model_env_var
 
     def is_available(self) -> tuple[bool, str]:
         """PATH check + a Cursor-identity probe on ``agent --version``.
 
-        (NB: unlike codex/agy's pure PATH check, this spawns ``agent --version``
-        to disambiguate the generic ``agent`` binary name. Harmless while
-        dormant — this provider is never resolved by the registry.)
+        ``agent`` is a generic binary name, so a PATH hit alone isn't enough.
+        Cursor's headless ``--version`` prints a bare build date-stamp (e.g.
+        ``2026.06.24-...``) with NO literal "cursor", so we accept the binary
+        when the version EITHER matches that date-stamp shape OR contains
+        "cursor" (older builds). Unlike codex/agy's pure-PATH check this spawns a
+        short probe — acceptable: a wrong skip is never-choke-safe (the seat just
+        sits out), whereas a wrong run would feed a non-Cursor tool a prompt.
         """
         if shutil.which("agent") is None:
             return False, "agent not found on PATH"
@@ -114,7 +137,9 @@ class CursorProvider(Provider):
             result = subprocess.run(
                 ["agent", "--version"], capture_output=True, text=True, timeout=10,
             )
-            if "cursor" not in (result.stdout + result.stderr).lower():
+            combined = (result.stdout + result.stderr).strip()
+            first_line = combined.splitlines()[0] if combined else ""
+            if not (_VERSION_DATESTAMP_RE.match(first_line) or "cursor" in combined.lower()):
                 return False, "agent binary found but does not appear to be Cursor Agent"
         except (subprocess.TimeoutExpired, OSError):
             return False, "agent binary found but does not appear to be Cursor Agent"
@@ -133,12 +158,12 @@ class CursorProvider(Provider):
         ``sandbox`` is accepted for ABC compatibility; Cursor always runs under
         its own ``--sandbox enabled`` confinement (any value maps to that).
         """
-        chosen_model = model or os.environ.get(_MODEL_ENV_VAR, self._default_model)
+        chosen_model = model or os.environ.get(self._model_env_var, self._default_model)
         if not chosen_model:
             return ProviderResult(
                 name=self.name, model=None, ok=False, output="",
-                error=("cursor seat has no model configured (dormant); set "
-                       f"{_MODEL_ENV_VAR} or pass --model to activate it"),
+                error=(f"cursor seat {self.name!r} has no model configured; set "
+                       f"{self._model_env_var} or pass --model"),
                 elapsed=0.0,
             )
         cwd = os.environ.get("CLAUDE_WORKING_DIRECTORY", os.getcwd())
@@ -199,14 +224,11 @@ class CursorProvider(Provider):
 
 
 # =============================================================================
-# To activate Cursor as a live seat (currently DORMANT):
-#   1. Pick model(s): set _DEFAULT_MODEL above, or register named instances.
-#   2. Register it in providers/__init__._build_registry(), e.g.:
-#         from .cursor import CursorProvider
-#         return {"codex": CodexProvider, "agy": AgyProvider,
-#                 "cursor": CursorProvider}
-#   3. Add it to the panel vocabulary in cli.py (_resolve_seats / defaults) and
-#      the commands' --panel/--seats lists.
-#   4. Add tests mirroring test_codex / test_agy_run.
-# Until then it is inert: importing this file registers nothing and runs nothing.
+# To add another Cursor model as a panel seat:
+#   1. Add ONE line to CURSOR_SEATS above: "cursor-<x>": ("<model>", "CREW_MA_<X>_MODEL").
+#      (Find the model string with `agent models`.)
+#   2. That's it. providers/__init__._build_registry() registers every
+#      CURSOR_SEATS entry, the engine's subprocess-seat allowlist is derived from
+#      the registry, and `--seats cursor-<x>` works. Optionally add it to a
+#      command's DEFAULT panel vocabulary (commands/*.md) if it should run by default.
 # =============================================================================
