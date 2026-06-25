@@ -163,17 +163,26 @@ identically to a failed subprocess seat.
 
 ### Step 2c — Normalize Task-seat results to the six-field shape
 
+> **The Task RESULT is the only completion signal.** Each `Task(...)` RETURNS the
+> seat's final message as its tool result — that returned text IS the seat's
+> review *and* the proof it finished. Take `ok`/`output` from that returned
+> result. **NEVER judge a seat by a proxy** (output-file byte size, transcript
+> length, a missed notification, elapsed time): those race the transcript flush
+> and have falsely declared a finished seat "dead", discarding a good review. A
+> seat that has not returned is **still running, not failed** — wait for it.
+
 For each Task seat, normalize its return into the SAME six fields as the
 subprocess results:
 
 - `name` = `opus` / `sonnet` (the seat name).
 - `model` = the pinned model (`opus` / `sonnet`).
-- `ok` = True if the seat returned a usable review block; **False** if it
-  returned no usable block, errored, or the harness reports it missing/failed.
+- `ok` = True if the seat's **returned result** is a usable review block;
+  **False** only if that result is an error, has no usable block, or the harness
+  reports the Task failed/missing. (Judge from the returned result — never a proxy.)
 - `error` = a populated diagnostic when `ok=False` (never a fabricated empty
   `ok=True` block).
 - `elapsed` = best-effort wall time (0.0 if unavailable — diagnostic only).
-- `output` = the seat's review text.
+- `output` = the seat's review text, taken from its returned Task result.
 
 A failed Task seat renders exactly like a failed subprocess seat. A
 skipped/unspawnable seat renders a clearly-marked skipped block and is excluded

@@ -100,6 +100,15 @@ Task(subagent_type="crew:panelist", model="sonnet", prompt="<contents of .prompt
 
 ## A3 — Normalize + synthesize + log
 
+> **The Task RESULT is the only completion signal.** Each `Task(...)` RETURNS the
+> seat's final message — that returned text IS the seat's take *and* the proof it
+> finished. Take `ok`/`output` from the returned result. **NEVER judge a seat by
+> a proxy** (output-file byte size, transcript length, a missed notification,
+> elapsed time): those race the transcript flush and have falsely declared a
+> finished seat "dead", discarding good work. A seat that has not returned is
+> still running, not failed — wait for it. `ok=False` ONLY when the Task itself
+> returns an error / no usable block, or the harness reports it failed.
+
 Normalize each task seat to the six-field shape (`name, model, ok, output, error,
 elapsed`); a failed/skipped seat renders like a failed subprocess seat and never
 suppresses the others. Render the full panel side-by-side, then synthesize:
@@ -148,10 +157,11 @@ Then run the round's seats (in parallel where possible):
   ```bash
   python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" run <seat> -f .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt --json -o .crew/debates/<run-id>/<seat>-r<n>.json
   ```
-- **Task seats** (`opus`/`sonnet`): `Task(subagent_type="crew:panelist", model="<seat>", prompt="<contents of .prompt-<seat>-r<n>.txt>")`.
+- **Task seats** (`opus`/`sonnet`): `Task(subagent_type="crew:panelist", model="<seat>", prompt="<contents of .prompt-<seat>-r<n>.txt>")`. Use each Task's RETURNED result as its take and completion signal — never an output-file size or other proxy (see A3).
 
 **Record the round.** Normalize every seat to the six-field shape, then with the
-**Write tool** write all seats' positions for this round into:
+**Write tool** write all seats' positions for this round into — wait for every
+seat's Task result first; a seat still running is not a failed seat:
 
 ```
 .crew/debates/<run-id>/round-<NN>.md      (zero-padded: round-01.md, round-02.md, …)

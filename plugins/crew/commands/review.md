@@ -150,6 +150,17 @@ exactly this (read-only git/inspection). Because every seat's prompt comes from
 the one `render` source, the panel reviews a single identical target — no
 embedded-vs-referenced or tracked-vs-untracked divergence.
 
+> **The Task RESULT is the only completion signal.** Each `Task(...)` call
+> RETURNS the seat's final message as its tool result — that returned text IS the
+> seat's review *and* the proof it finished. Take `ok`/`output` (Step 5) straight
+> from that returned result. **NEVER judge a seat by a proxy** — its output-file
+> byte size, transcript length, a notification you think you missed, or elapsed
+> time. Those race the transcript flush and have falsely declared a finished seat
+> "dead" while it was still writing a complete review, throwing away good work. A
+> seat that has not returned yet is **still running, not failed** — wait for its
+> result. Mark a seat `ok=False` ONLY when its Task actually returns an error,
+> returns no usable review block, or the harness itself reports it failed/missing.
+
 **Never choke on a Task-seat failure:** a `crew:reviewer` spawn that errors,
 times out, returns no usable block, or is reported missing/failed by the
 harness MUST NOT abort the review. Catch it, normalize it to the six-field
@@ -163,12 +174,14 @@ subprocess results (the Step 1.0 contract):
 
 - `name` = `opus` / `sonnet` (the seat name).
 - `model` = the pinned model (`opus` / `sonnet`).
-- `ok` = True if the seat returned a usable review block; **False** if it
-  returned no usable block, errored, or the harness reports it missing/failed.
+- `ok` = True if the seat's **returned result** is a usable review block;
+  **False** only if that returned result is an error, has no usable block, or the
+  harness reports the Task failed/missing. (Judge from the returned result — never
+  from a file size or any other proxy.)
 - `error` = a populated diagnostic when `ok=False` (never a fabricated empty
   `ok=True` block).
 - `elapsed` = best-effort wall time (0.0 if unavailable — diagnostic only).
-- `output` = the seat's review text.
+- `output` = the seat's review text, taken from its returned Task result.
 
 A failed Task seat renders exactly like a failed subprocess seat — its error
 block shows and never suppresses the others. A skipped/unspawnable seat renders
