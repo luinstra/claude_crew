@@ -41,8 +41,9 @@ $ARGUMENTS
 
 > **Question-file naming (one convention):** both paths write the question to
 > **`question.md`** inside the debate dir. Single-round (section A) uses the
-> engine `debate` subcommand, which writes `question.md` into a
-> `<timestamp>-<slug>/` dir. Multi-round (section B) writes `question.md` into a
+> engine `debate` subcommand **as a scaffolder only** (`--seats none` — writes
+> `question.md` into a `<timestamp>-<slug>/` dir and runs NO seats; A2 fans the
+> subprocess seats out per-seat). Multi-round (section B) writes `question.md` into a
 > `run-<id>/` dir — the filename + dir layout the `rounds.py` reader
 > (`render --run-id`) expects.
 
@@ -71,33 +72,95 @@ synthesis is built from whichever seats succeed; only an all-empty panel aborts.
 
 # A) Single round (`--rounds 1`, the default)
 
-## A1 — Scaffold + fan out subprocess seats (one call)
+## A1 — Scaffold the debate dir (one allowlistable call)
 
 Write the question to a staging file with the **Write tool** (robust for quotes /
-newlines), then run the engine `debate` subcommand over it (scaffolds the dir AND
-fans out the subprocess seats in one allowlistable call — no
-`mkdir`/heredoc/redirect):
+newlines), then run the engine `debate` subcommand with **`--seats none`** to
+scaffold the dir and copy the question into `question.md` — WITHOUT running any
+subprocess seats (the per-seat fan-out happens visibly in A2). One allowlistable
+call, no `mkdir`/heredoc/redirect:
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" debate -f .crew/debates/staged-question-<slug>.txt --slug <short-kebab-slug> --seats <resolved codex/cursor-* seats, or none> --consume
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" debate -f .crew/debates/staged-question-<slug>.txt --slug <short-kebab-slug> --seats none --consume
 ```
 
-`--seats` carries the resolved subprocess seats (the `codex`/`cursor-*` entries,
-plus opt-in `agy`); pass **`none`** for a
-Claude-only panel (`--panel lite`/`solo`) so the dir is still scaffolded with no
-subprocess seats run. `--consume` deletes the staging file after the question is
-copied in. The subcommand creates `.crew/debates/<timestamp>-<slug>/`, writes
-`question.md` + `subprocess.json` (six-field results), and prints a JSON summary
-with **`dir`** — read it; that's where the Claude-seat outputs + synthesis go.
+**Always `--seats none` here** — it scaffolds the dir with NO subprocess seats
+run; every subprocess seat is instead launched in its own visible shell in A2 (so
+a `--panel lite`/`solo` Claude-only panel uses the identical A1 call and simply
+skips A2). `--consume` deletes the staging file after the question is copied in.
+The subcommand creates `.crew/debates/<timestamp>-<slug>/`, writes `question.md`
+(and an empty `subprocess.json`), and prints a JSON summary with **`dir`** — read
+it; that's the debate dir where every per-seat result + the synthesis go.
 
-## A2 — Fan out task seats (parallel)
+## A2 — Fan out subprocess seats (one visible shell PER SEAT)
 
-For each Claude-seat entry (`opus`, `sonnet`, or opt-in `opus-4.6`) in the panel,
-render its prompt from the ONE builder, then dispatch the discuss seat
+**Skip this step if the resolved panel has no subprocess seat** (e.g.
+`--panel lite`/`solo`) — go straight to A3. Otherwise fan the subprocess seats out
+**one `cli.py run` call per seat, in parallel** — each a separate, visible,
+individually-killable shell (the same per-seat shape Section B's multi-round path
+and `/crew:review` Step 3 use, instead of one opaque `debate` call hiding them in
+an internal thread pool). Use the bare-script path (its top-of-file `sys.path`
+guard makes package imports resolve).
+
+**A2.0 — get the concrete seat list.** Group tokens (e.g. `cursor`) must be
+expanded to real seat names before you can loop. Ask the engine (keeps the
+registry authoritative — no hardcoded cursor list in this command):
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" seats --seats <resolved codex/cursor-* seats>
+```
+
+It prints one seat per line. (For `--panel cursor`, pass `--seats cursor` — it
+expands to every registered `cursor-*` seat.)
+
+**A2.1 — render each seat's prompt.** Discuss-mode council prompts carry a
+per-seat label, so render ONE prompt per seat from the single builder (the same
+shape Section B uses, minus the `--run-id`/`--round` round-threading — a single
+round has no prior):
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render --mode discuss --seat-role <seat> -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-<seat>.txt
+```
+
+This labels each subprocess seat ("acting as the **<seat>** seat") — a deliberate
+parity improvement over the old bundled `debate` call, which ran one shared
+*unlabeled* council prompt for all seats. (For a review-mode debate, render
+`--mode review <target>` here instead of `--mode discuss` — same as A3's note for
+the Task seats.)
+
+**A2.2 — run EACH seat in its own parallel shell.** For every seat from A2.0,
+launch a SEPARATE `cli.py run <seat>` Bash call, all concurrently (e.g. background
+calls) so they are distinct shells you can watch and kill individually:
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" run <seat> -f .crew/debates/<dir>/.prompt-<seat>.txt --json -o .crew/debates/<dir>/<seat>.json
+```
+
+- `run --json` ALWAYS exits 0 and writes the six-field result
+  (`name, model, ok, output, error, elapsed`) — even a failed/skipped seat lands
+  as `ok=False` with a diagnostic. So **per-seat never-choke is automatic**: one
+  seat failing can't sink the others, and there is no all-failed abort to handle —
+  you read whichever `<seat>.json` files appear.
+- Same model / sandbox / auth-banner / ARG_MAX handling as the old single-call
+  `debate` fan-out — `run` dispatches through the identical provider machinery.
+
+**A2.3 — collect.** WAIT for every A2.2 `run` shell to exit first — a seat whose
+`-o` file hasn't been written yet is still running, not failed (the same wait
+discipline as the Task seats in A3/A4). Then read each
+`.crew/debates/<dir>/<seat>.json` (one six-field result apiece) and carry them
+into A4 alongside the Task seats.
+
+## A3 — Fan out task seats (parallel)
+
+**Skip this step if the resolved panel has no Task seat** (e.g. `--panel cursor`)
+— go straight to A4. Otherwise, for each Claude-seat entry (`opus`, `sonnet`, or
+opt-in `opus-4.6`) in the panel, render its prompt from the ONE builder — **one
+render line per Claude seat in the panel** — then dispatch the discuss seat
 (`crew:panelist`) in parallel:
 
 ```bash
 python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render --mode discuss --seat-role opus -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-opus.txt
+python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render --mode discuss --seat-role sonnet -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-sonnet.txt
 # opt-in — only if opus-4.6 is in the panel:
 python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render --mode discuss --seat-role opus-4.6 -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-opus-4.6.txt
 ```
@@ -109,20 +172,21 @@ Task(subagent_type="crew:panelist", model="sonnet", prompt="<contents of .crew/d
 Task(subagent_type="crew:panelist", model="claude-opus-4-6", prompt="<contents of .crew/debates/<dir>/.prompt-opus-4.6.txt>")
 ```
 
-(Review mode: render with `--mode review <target>` instead of `-f question`,
-dispatch `crew:reviewer`, and fan the subprocess seats out per-seat via
-`cli.py run` — the same shape as `/crew:review` Step 3 — rather than the discuss
-`debate` scaffold. But most debates are discuss.)
+(Review mode: render with `--mode review <target>` instead of `-f question`, and
+dispatch `crew:reviewer` for the Task seats — the subprocess fan-out in A2 is
+already the same per-seat `cli.py run` shape as `/crew:review` Step 3. But most
+debates are discuss.)
 
-> **Why `-o` here, not `--stage`:** `/crew:review`, `/crew:build`, and
-> `/crew:measure-twice` stage prompts via `render --stage` (session-scoped
-> `.crew/reviews/<session-id>/`). Debate deliberately keeps `-o` into its own
-> `.crew/debates/<dir>/` (single-round) or `<run-id>/` (multi-round) dir instead —
-> that dir is also where `question.md`/`round-NN.md` live, and the run-id is what
-> threads prior rounds through `render --run-id` (which `--stage` doesn't model).
-> The two staging schemes are intentional, not an inconsistency to "fix".
+> **Why `-o` here (both A2 and A3), not `--stage`:** `/crew:review`,
+> `/crew:build`, and `/crew:measure-twice` stage prompts via `render --stage`
+> (session-scoped `.crew/reviews/<session-id>/`). Debate deliberately keeps `-o`
+> into its own `.crew/debates/<dir>/` (single-round) or `<run-id>/` (multi-round)
+> dir instead — that dir is also where `question.md`/`round-NN.md` and the
+> per-seat `<seat>.json` results live, and the run-id is what threads prior rounds
+> through `render --run-id` (which `--stage` doesn't model). The two staging
+> schemes are intentional, not an inconsistency to "fix".
 
-## A3 — Normalize + synthesize + log
+## A4 — Normalize + synthesize + log
 
 > **The Task RESULT is the only completion signal.** Each `Task(...)` RETURNS the
 > seat's final message — that returned text IS the seat's take *and* the proof it
@@ -133,12 +197,17 @@ dispatch `crew:reviewer`, and fan the subprocess seats out per-seat via
 > still running, not failed — wait for it. `ok=False` ONLY when the Task itself
 > returns an error / no usable block, or the harness reports it failed.
 
-Normalize each task seat to the six-field shape (`name, model, ok, output, error,
-elapsed`); a failed/skipped seat renders like a failed subprocess seat and never
-suppresses the others. Render the full panel side-by-side, then synthesize:
-**Areas of agreement / Key disagreements / Recommendation** (discuss), or the
-`APPROVED`/`REVISE` + `[BLOCKING]`/`[MINOR]` verdict (review). With the **Write
-tool**, log the seat outputs (`opus.md`, `sonnet.md`) and `synthesis.md` into the
+Gather every seat into the six-field shape (`name, model, ok, output, error,
+elapsed`): the subprocess seats are already six-field — read each
+`.crew/debates/<dir>/<seat>.json` from A2.3 (IGNORE the empty `subprocess.json`
+the A1 scaffold wrote — the real per-seat results live in the individual
+`<seat>.json` files, not that bundled file); normalize each task seat (A3) into the
+same shape from its returned Task result. A failed/skipped seat (subprocess OR
+task) renders with its diagnostic and never suppresses the others. Render the full
+panel side-by-side, then synthesize: **Areas of agreement / Key disagreements /
+Recommendation** (discuss), or the `APPROVED`/`REVISE` + `[BLOCKING]`/`[MINOR]`
+verdict (review). With the **Write tool**, log the seat outputs (`opus.md`,
+`sonnet.md`, and optionally the subprocess seats) and `synthesis.md` into the
 debate `dir`. Tell the user the path.
 
 ---
@@ -213,10 +282,11 @@ disagreements / Recommendation**. Tell the user the run-dir path.
 A failed/skipped seat — subprocess OR task, any round — NEVER aborts the debate
 and is NEVER silently dropped:
 
-- The engine never raises out of a fan-out: a failed/skipped subprocess seat is an
-  `ok=False` entry with a diagnostic; the others still return. A nonzero engine
-  exit (every subprocess seat failed) still emits the full JSON — fold the task
-  seats in and continue.
+- Subprocess seats run one-per-seat via `run --json`, which ALWAYS exits 0 and
+  writes a six-field result — a failed/skipped seat lands as `ok=False` with a
+  diagnostic, the others are unaffected, and there is no all-failed engine abort to
+  handle. (The A1 scaffold's `debate --seats none` runs no seats, so it can't fail
+  the panel either.) Read whichever `<seat>.json` files appear.
 - A `crew:panelist`/`crew:reviewer` Task that errors, times out, or returns no
   usable block is normalized to an `ok=False` six-field entry and rendered with
   its diagnostic; the other seats proceed.

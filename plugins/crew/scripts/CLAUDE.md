@@ -104,12 +104,17 @@ Key contracts (do NOT regress):
   --json`. `run --json` always exits 0 with the six-field result, so per-seat
   never-choke is automatic (no all-failed abort to handle). The `review`
   subcommand still exists for ad-hoc one-shot fan-out; the commands just don't use
-  it. (`/crew:debate` already fanned out per-seat in its multi-round path.)
+  it. (`/crew:debate` fans out per-seat in BOTH paths now — its multi-round path
+  always did, and the single-round path scaffolds via `debate --seats none` then
+  runs each subprocess seat with `run <seat>`, same as the commands above.)
 - One engine-side
   affordance: `cli.py debate --seats none` (or `""`) scaffolds the dir + writes an
-  empty `subprocess.json` (exit 0) instead of erroring — so a Claude-only
-  `lite`/`solo` council still gets its log dir. `review`/`council` intentionally
-  do NOT support empty seats (they're pure fan-out; the orchestrator skips them).
+  empty `subprocess.json` (exit 0) instead of erroring. The single-round
+  `/crew:debate` path now ALWAYS uses this scaffold-only mode, then fans seats out
+  per-seat into individual `<seat>.json` files — the scaffold's `subprocess.json`
+  stays empty and unused. (It also still lets a Claude-only `lite`/`solo` council
+  get its log dir.) `review`/`council` intentionally do NOT support empty seats
+  (they're pure fan-out; the orchestrator skips them).
 - Tuning env: `CREW_MA_SEATS`, `CREW_MA_TIMEOUT`, `CREW_MA_CODEX_MODEL`,
   `CREW_MA_GPT_MODEL`, `CREW_MA_GEMINI_MODEL`, `CREW_MA_GLM_MODEL`,
   `CREW_MA_COMPOSER_MODEL`, `CREW_MA_AGY_MODEL`, `CREW_MA_AGY_PRINT_TIMEOUT`.
