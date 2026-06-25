@@ -996,6 +996,15 @@ def main():
             (user_dir / "keep.md").write_text("keep")
             os.utime(user_dir, (old_mtime, old_mtime))
 
+            # Stale generated run-* dir that DOES contain synthesis.md → a
+            # completed decision record; must be PRESERVED regardless of age.
+            completed_run = debates_dir / "run-20250101-done"
+            completed_run.mkdir()
+            (completed_run / "question.md").write_text("q")
+            (completed_run / "round-01.md").write_text("r")
+            (completed_run / "synthesis.md").write_text("decision")
+            os.utime(completed_run, (old_mtime, old_mtime))
+
             cleanup_stale_debate_dirs(debate_crew_dir)
 
             if not stale_run.exists():
@@ -1017,6 +1026,11 @@ def main():
                 log_pass("cleanup_stale_debate_dirs preserves fresh (live) run dir")
             else:
                 log_fail("cleanup_stale_debate_dirs preserves fresh (live) run dir", "dir exists", "dir removed")
+
+            if completed_run.exists():
+                log_pass("cleanup_stale_debate_dirs preserves stale dir with synthesis.md (completed decision record)")
+            else:
+                log_fail("cleanup_stale_debate_dirs preserves stale dir with synthesis.md (completed decision record)", "dir kept", "dir removed")
 
             # No debates dir → no error
             no_debates = test_path / "no-debates" / ".crew"

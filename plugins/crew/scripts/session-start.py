@@ -76,7 +76,7 @@ _DEBATE_DIR_RE = re.compile(r"^(run-|\d{8}-\d{6})")
 
 
 def cleanup_stale_debate_dirs(crew_dir: Path) -> None:
-    """Remove stale debate run directories from .crew/debates/.
+    """Remove stale, INCOMPLETE debate run directories from .crew/debates/.
 
     Debate runs are directories (not JSON files), so they need shutil.rmtree
     rather than unlink.  Uses the INACTIVE (1-day) threshold — never the 7-day
@@ -86,6 +86,11 @@ def cleanup_stale_debate_dirs(crew_dir: Path) -> None:
     hyphenated dir a user may have parked under .crew/debates/:
     - ``run-<...>``              multi-round debate runs
     - ``<YYYYMMDD-HHMMSS>[-...]`` single-round ``<timestamp>-<slug>`` dirs
+
+    A stale generated dir is deleted ONLY when it has NO ``synthesis.md`` inside
+    it — i.e. an abandoned/incomplete debate or a bare scaffold. A dir that
+    DOES contain ``synthesis.md`` is a completed decision record and is KEPT
+    regardless of age (never deleted by this cleanup).
     """
     debates_dir = crew_dir / "debates"
     if not debates_dir.is_dir():
@@ -104,6 +109,10 @@ def cleanup_stale_debate_dirs(crew_dir: Path) -> None:
             age = now - entry.stat().st_mtime  # OSError raised here if stat fails
         except OSError:
             continue  # Skip entries whose stat() raises (e.g. dangling symlink)
+        # A completed debate (has synthesis.md) is a decision record — KEEP it
+        # regardless of age. Only sweep stale, incomplete/abandoned scaffolds.
+        if (entry / "synthesis.md").exists():
+            continue
         if age > STALE_INACTIVE_SECONDS:
             shutil.rmtree(str(entry), ignore_errors=True)
 

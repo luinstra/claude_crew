@@ -102,7 +102,10 @@ AUTH_BANNER_MAX_CHARS = 1000
 _REVIEW_STRUCTURE_MARKERS = (
     "[blocking]",
     "[minor]",
-    "confidence",
+    # The rubric emits "CONFIDENCE: <level>" — match the colon form so an auth
+    # banner saying "confidence level: LOW — please authenticate" (no colon
+    # right after the word) does NOT masquerade as a review (false-negative).
+    "confidence:",
     "direct take",
     "strongest objection",
     "risks / tradeoff",
