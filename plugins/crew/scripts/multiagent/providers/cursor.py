@@ -17,8 +17,10 @@ binary name, so availability is confirmed by an identity probe on
 like ``2026.06.24-...`` with NO literal "cursor", so the date-stamp regex is the
 load-bearing check).
 
-CLI signature:
-    agent --print --sandbox enabled --trust --workspace <cwd> --model <model> <prompt>
+CLI signature (read-only review default):
+    agent --print --mode plan --sandbox enabled --trust --workspace <cwd> --model <model> <prompt>
+``--mode plan`` is the read-only enforcement (see ``run``): it applies no edits,
+which plain ``--print`` does NOT guarantee. Dropped only for workspace-write.
 """
 
 from __future__ import annotations
@@ -155,8 +157,15 @@ class CursorProvider(Provider):
     ) -> ProviderResult:
         """Invoke Cursor Agent and return a normalized ProviderResult.
 
-        ``sandbox`` is accepted for ABC compatibility; Cursor always runs under
-        its own ``--sandbox enabled`` confinement (any value maps to that).
+        ``sandbox="read-only"`` (the default, and what review/debate/council seats
+        use) runs the agent in ``--mode plan`` — analyse + read-only shell (it CAN
+        run ``git diff`` and read files, and it produces its review text), but it
+        does NOT apply edits. This is load-bearing and EMPIRICALLY verified: plain
+        ``--print --sandbox enabled`` (no ``--mode``) actually WRITES to the
+        workspace despite the headless docs saying changes are "only proposed"
+        without ``--force`` — a review seat must never mutate the repo. ``--sandbox
+        enabled`` additionally blocks network + out-of-workspace access. Only
+        ``sandbox="workspace-write"`` drops ``--mode plan`` (writes permitted).
         """
         chosen_model = model or os.environ.get(self._model_env_var, self._default_model)
         if not chosen_model:
@@ -177,8 +186,13 @@ class CursorProvider(Provider):
                 elapsed=0.0,
             )
 
-        cmd = [
-            "agent", "--print", "--sandbox", "enabled", "--trust",
+        cmd = ["agent", "--print"]
+        # read-only review posture: --mode plan applies NO edits (verified) while
+        # still allowing read-only shell (git diff) + producing review output.
+        if sandbox != "workspace-write":
+            cmd += ["--mode", "plan"]
+        cmd += [
+            "--sandbox", "enabled", "--trust",
             "--workspace", cwd, "--model", chosen_model, prompt,
         ]
         start = time.monotonic()

@@ -1748,14 +1748,23 @@ def test_cursor():
 
             r = prov.run("REVIEW-PROMPT", timeout=10)
             argv = json.loads(cap.read_text())
-            check("cursor run() argv == agent --print --sandbox enabled --trust --workspace .. --model .. <prompt>",
-                  argv[:5] == ["--print", "--sandbox", "enabled", "--trust", "--workspace"]
-                  and "--model" in argv and "glm-5.2-max" in argv and argv[-1] == "REVIEW-PROMPT",
-                  "correct argv", str(argv))
+            # Read-only default: --mode plan is REQUIRED (plain --print writes to
+            # disk — empirically verified). Order: --print --mode plan --sandbox …
+            check("cursor run() read-only argv leads with --print --mode plan --sandbox enabled",
+                  argv[:5] == ["--print", "--mode", "plan", "--sandbox", "enabled"]
+                  and "--trust" in argv and "--model" in argv and "glm-5.2-max" in argv
+                  and argv[-1] == "REVIEW-PROMPT",
+                  "--print --mode plan --sandbox …", str(argv))
             check("cursor run() strips ANSI, returns ok=True with the resolved model",
                   r.ok is True and "PASS" in r.output and "\x1b" not in r.output
                   and r.model == "glm-5.2-max",
                   "ok + clean output + model", f"ok={r.ok} out={r.output!r} model={r.model}")
+            # workspace-write drops --mode plan (writes permitted); read-only keeps it.
+            prov.run("X", sandbox="workspace-write", timeout=10)
+            argv_w = json.loads(cap.read_text())
+            check("cursor run(sandbox='workspace-write') drops --mode plan",
+                  "--mode" not in argv_w and "plan" not in argv_w,
+                  "no --mode plan", str(argv_w))
 
             # env var overrides the pinned model.
             os.environ["CREW_MA_GLM_MODEL"] = "glm-override"
