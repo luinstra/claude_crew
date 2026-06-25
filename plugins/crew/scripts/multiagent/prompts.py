@@ -68,7 +68,14 @@ Score the diff against EACH criterion (PASS or FAIL, with a one-line reason):
 - Correctness: Does the change do what it claims, without obvious bugs?
 - Completeness: Are all requirements met; any gaps or missing cases?
 - Quality: Style consistency, readability, error handling.
-- Safety: Security, data-loss, and performance concerns."""
+- Safety: Security, data-loss, and performance concerns.
+
+Do NOT treat the version-control state of the change as a finding: that it is \
+uncommitted, unstaged, or an untracked/new file is the EXPECTED state of a \
+working-tree review — committing is a separate downstream step, so "not committed \
+yet" or "add this file to git" is never a finding. Review each file's content \
+(and its intended mode, e.g. an executable bit) as if it will be committed; flag \
+only issues in the change itself."""
 
 
 def _rubric_footer() -> str:
