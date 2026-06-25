@@ -49,9 +49,10 @@ _VERSION_DATESTAMP_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}-")
 # Add a model = add ONE line here. Model strings verified via `agent models`.
 # Env override lets you retune a seat without code (e.g. CREW_MA_GLM_MODEL=...).
 CURSOR_SEATS: dict[str, tuple[str, str]] = {
-    "cursor-gemini":   ("gemini-3.1-pro", "CREW_MA_GEMINI_MODEL"),
-    "cursor-glm":      ("glm-5.2-max",    "CREW_MA_GLM_MODEL"),
-    "cursor-composer": ("composer-2.5",   "CREW_MA_COMPOSER_MODEL"),
+    "cursor-gpt":      ("gpt-5.5-extra-high", "CREW_MA_GPT_MODEL"),
+    "cursor-gemini":   ("gemini-3.1-pro",     "CREW_MA_GEMINI_MODEL"),
+    "cursor-glm":      ("glm-5.2-max",        "CREW_MA_GLM_MODEL"),
+    "cursor-composer": ("composer-2.5",       "CREW_MA_COMPOSER_MODEL"),
 }
 
 # Fallback env var for a bare/unconfigured CursorProvider instance.

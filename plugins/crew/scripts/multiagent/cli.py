@@ -55,7 +55,9 @@ from multiagent.providers import (
 # seat (`--seats agy`) but is no longer a default. Override the whole list with
 # CREW_MA_SEATS. Any name here must be a registered subprocess seat (see
 # providers/__init__._build_registry); unknown names are dropped.
-_DEFAULT_SUBPROCESS_PANEL = ("codex", "cursor-gemini", "cursor-glm", "cursor-composer")
+_DEFAULT_SUBPROCESS_PANEL = (
+    "codex", "cursor-gpt", "cursor-gemini", "cursor-glm", "cursor-composer",
+)
 
 
 def _default_subprocess_seats() -> list[str]:

@@ -455,9 +455,9 @@ def test_default_seats():
     try:
         os.environ.pop("CREW_MA_SEATS", None)
         seats = _default_subprocess_seats()
-        check("default subprocess panel == codex + cursor-gemini/glm/composer",
-              seats == ["codex", "cursor-gemini", "cursor-glm", "cursor-composer"],
-              "['codex', 'cursor-gemini', 'cursor-glm', 'cursor-composer']", str(seats))
+        check("default subprocess panel == codex + cursor-gpt/gemini/glm/composer",
+              seats == ["codex", "cursor-gpt", "cursor-gemini", "cursor-glm", "cursor-composer"],
+              "['codex', 'cursor-gpt', 'cursor-gemini', 'cursor-glm', 'cursor-composer']", str(seats))
         # opus/sonnet (Task seats) AND unknown names in CREW_MA_SEATS are dropped;
         # agy is registered, so it's honored as an opt-in seat.
         os.environ["CREW_MA_SEATS"] = "codex,agy,opus,sonnet,bogus"
