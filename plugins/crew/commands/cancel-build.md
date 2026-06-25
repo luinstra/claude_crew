@@ -12,7 +12,7 @@ The user has requested early exit from the build loop.
 Execute this command to fully cancel the build loop:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate bl --reason "User cancelled via /crew:cancel-build"
+"${CLAUDE_PLUGIN_ROOT}/crew" state deactivate bl --reason "User cancelled via /crew:cancel-build"
 ```
 
 ## After Running

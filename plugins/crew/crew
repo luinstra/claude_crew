@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Plugin-root dispatcher for the crew engine.
+
+Invoked DIRECTLY as ``"${CLAUDE_PLUGIN_ROOT}/crew" <subcommand> …`` (bare, no
+``python`` prefix, relying on the shebang + exec bit) so every rendered engine
+line drops the ``scripts/multiagent/cli.py`` tail. A sys.path guard (mirroring
+cli.py's) inserts the sibling ``scripts/`` dir so the ``from multiagent …``
+package import resolves regardless of cwd. This bare shebang-exec form matches
+the existing ``crew-state.py`` precedent, which already ships as a bare
+executable invoked without ``python`` — so it is proven fresh-install safe.
+
+The ``state`` subcommand routes to ``scripts/crew-state.py``'s ``main()`` (loaded
+via importlib, since ``crew-state.py`` is not a valid module name and its
+``main()`` takes no args). Routing state through here means one allowlist pattern
+covers BOTH the engine and state, and crew-state's bare ``from models import …``
+resolves because this dispatcher's guard already put ``scripts/`` on sys.path.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# --- sys.path guard: make the sibling `scripts/` package dir importable ------
+# crew lives at plugins/crew/crew; the package parent is plugins/crew/scripts.
+# (cli.py inserts parent.parent because it sits one level DEEPER, inside
+# scripts/multiagent/. Here we insert parent/"scripts" — same destination dir,
+# different relative offset.)
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent / "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+# -----------------------------------------------------------------------------
+
+from multiagent.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    # The `state` branch runs BEFORE the engine delegation: route `crew state …`
+    # to scripts/crew-state.py's no-arg main(). crew-state.py is not a valid
+    # module name (hyphen) and its main() reads sys.argv directly, so load it via
+    # importlib and swap sys.argv around the call inside a try/finally. Let
+    # crew-state's own SystemExit (sys.exit(1) / argparse sys.exit(2)) propagate
+    # — do NOT wrap in a bare except (that would mask the nonzero exit). The
+    # explicit SystemExit(0) runs only when main() RETURNS normally (None).
+    if len(sys.argv) > 1 and sys.argv[1] == "state":
+        import importlib.util
+
+        _cs_path = Path(__file__).resolve().parent / "scripts" / "crew-state.py"
+        spec = importlib.util.spec_from_file_location("crew_state", str(_cs_path))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # scripts/ on sys.path → `from models import` works
+        saved = sys.argv
+        sys.argv = ["crew-state.py", *sys.argv[2:]]  # strip the "state" token
+        try:
+            mod.main()  # NO args — reads sys.argv, returns None
+        finally:
+            sys.argv = saved  # always restore, even on SystemExit
+        raise SystemExit(0)  # crew-state.main() returned normally → success
+    raise SystemExit(main())  # default: engine delegation (all other subcommands)

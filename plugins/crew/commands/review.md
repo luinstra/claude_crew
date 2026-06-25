@@ -96,7 +96,7 @@ silently guess.
 
 **Skip this step if the resolved panel has no subprocess seat** (e.g.
 `--panel lite`) — go straight to Step 4. Otherwise fan the subprocess seats out
-**one `cli.py run` call per seat, in parallel** — each is a separate, visible,
+**one `crew run` call per seat, in parallel** — each is a separate, visible,
 individually-killable shell (the same per-seat shape `/crew:debate`'s multi-round
 path uses, instead
 of one opaque `review` call hiding them in an internal thread pool). Use the
@@ -107,7 +107,7 @@ expanded to real seat names before you can loop. Ask the engine (keeps the
 registry authoritative — no hardcoded cursor list in this command):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" seats --seats <resolved codex/cursor-* seats>
+"${CLAUDE_PLUGIN_ROOT}/crew" seats --seats <resolved codex/cursor-* seats>
 ```
 
 It prints one seat per line. (For `--panel cursor`, pass `--seats cursor` — it
@@ -119,7 +119,7 @@ the SAME target with the SAME criteria (no per-seat label), so render it once vi
 `[Session ID: …]` value; never the literal placeholder or a `${…}` expansion):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render "<TARGET>" --mode review --base "<BASE>" --stage --session-id <session-id>
+"${CLAUDE_PLUGIN_ROOT}/crew" render "<TARGET>" --mode review --base "<BASE>" --stage --session-id <session-id>
 ```
 
 It prints the staged path — `.crew/reviews/<session-id>/prompt-seat.txt`. **Quote
@@ -129,11 +129,11 @@ review). Reference mode is the default — each seat fetches the diff/plan itsel
 add `--inline-diff` to embed it instead (rarely needed).
 
 **3.2 — run EACH seat in its own parallel shell.** For every seat from 3.0, launch
-a SEPARATE `cli.py run <seat>` Bash call, all concurrently (e.g. background calls)
+a SEPARATE `crew run <seat>` Bash call, all concurrently (e.g. background calls)
 so they are distinct shells you can watch and kill individually:
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" run <seat> -f .crew/reviews/<session-id>/prompt-seat.txt --json -o .crew/reviews/<session-id>/<seat>.json
+"${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f .crew/reviews/<session-id>/prompt-seat.txt --json -o .crew/reviews/<session-id>/<seat>.json
 ```
 
 - `run --json` ALWAYS exits 0 and writes the six-field result
@@ -160,27 +160,28 @@ seat, render its prompt over the SAME resolved `<TARGET>` (and `--base "<BASE>"`
 you passed the engine in Step 3:
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render "<TARGET>" --mode review --seat-role opus --base "<BASE>" --stage --session-id <session-id>
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render "<TARGET>" --mode review --seat-role sonnet --base "<BASE>" --stage --session-id <session-id>
-# opt-in — render this third line ONLY if opus-4.6 is in the panel (staged as
-# prompt-opus-46.txt; --stage strips the dot from the seat-role for the filename):
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render "<TARGET>" --mode review --seat-role opus-4.6 --base "<BASE>" --stage --session-id <session-id>
+"${CLAUDE_PLUGIN_ROOT}/crew" render "<TARGET>" --mode review --base "<BASE>" --stage-all opus,sonnet --session-id <session-id>
+# opt-in — add opus-4.6 to the list ONLY if it is in the resolved panel
+# (staged as prompt-opus-46.txt — the dot is stripped from the role for the
+# filename): … --stage-all opus,sonnet,opus-4.6 …
 ```
 
 (`<TARGET>` is the plan `.md` path or git scope from Step 1; `<BASE>` is the same
 base passed in Step 3 — drop `--base` for a plan-file or working-tree target.)
-`--stage` derives `.crew/reviews/<session-id>/prompt-<seat-role>.txt` from the
-`--seat-role` + session id, writes it (creating the dir), and prints the path —
-session-scoped so concurrent sessions never clobber each other. **Substitute your
-actual session id for `<session-id>`** — the `[Session ID: …]` value from the
-SessionStart context (the same id `crew-state.py` uses). Pass it as a literal
-`--session-id` value — NOT the placeholder text, and NOT a `${CLAUDE_SESSION_ID}`
-shell expansion (a `$…` expansion isn't allowlistable and isn't reliably exported
-to the command shell; the engine resolves the id itself, arg → env). The engine
-**rejects an unsubstituted `<…>` placeholder** with a loud error, so a missed
-substitution fails fast instead of silently sharing one dir. `.crew/` is
-gitignored. **Read** each staged file with the Read tool and pass its contents to
-the matching seat.
+`--stage-all` stages one LABELED prompt PER comma-listed role in a SINGLE call —
+`.crew/reviews/<session-id>/prompt-<role>.txt` for each (`prompt-opus.txt`,
+`prompt-sonnet.txt`, opt-in `prompt-opus-46.txt`), each carrying its own
+"acting as the **<role>** seat" label — and prints a JSON `{role: path}` map to
+stdout. It is session-scoped so concurrent sessions never clobber each other.
+**Substitute your actual session id for `<session-id>`** — the `[Session ID: …]`
+value from the SessionStart context (the same id `crew state` uses). Pass it as a
+literal `--session-id` value — NOT the placeholder text, and NOT a
+`${CLAUDE_SESSION_ID}` shell expansion (a `$…` expansion isn't allowlistable and
+isn't reliably exported to the command shell; the engine resolves the id itself,
+arg → env). The engine **rejects an unsubstituted `<…>` placeholder** with a loud
+error, so a missed substitution fails fast instead of silently sharing one dir.
+`.crew/` is gitignored. **Read** each path from the JSON map with the Read tool
+and pass its contents to the matching seat.
 Then dispatch each seat with the rendered text as its prompt — the SAME agent
 (`crew:reviewer`) with a per-spawn `model` override selecting the voice (spawn
 only the ones in the panel):

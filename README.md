@@ -73,12 +73,24 @@ To avoid permission prompts for loop state management, add this to your Claude C
 ```json
 {
   "allowedPrompts": [
-    "Bash(*/crew-state.py *)"
+    "Bash(*/crew *)"
   ]
 }
 ```
 
-This allows the `crew-state.py` script (used by `/crew:build`, `/crew:measure-twice`, and their cancel commands) to run without confirmation.
+This allows the plugin-root `crew` dispatcher to run without confirmation. A
+single `*/crew *` rule covers BOTH the review/debate engine (`crew render`,
+`crew run`, `crew seats`, `crew debate`) AND loop state management
+(`crew state …`, used by `/crew:build`, `/crew:measure-twice`, and their cancel
+commands).
+
+> **Migrating from an older install?** Earlier versions invoked
+> `…/scripts/multiagent/cli.py` and `…/scripts/crew-state.py` directly. The
+> shipped commands now call the bare `…/crew` dispatcher instead, so replace any
+> `Bash(*/crew-state.py *)` (and `Bash(*/cli.py *)`) allowlist rule with the
+> single `Bash(*/crew *)` above. The old direct paths still work (nothing forbids
+> them), so an un-migrated allowlist won't hard-break — but the shipped commands
+> now emit only `crew`, so the new rule is what they need.
 
 ### Requirements
 
@@ -193,12 +205,16 @@ hand-built `agy -p "$(cat …)"`. That raw form can't be permission-allowlisted
 because the prompt path changes every time; the `run` wrapper is one stable,
 allowlistable command:
 
+The engine is invoked through the plugin-root bare `crew` dispatcher (a thin
+launcher run directly via its shebang + exec bit — no `python` prefix, no
+`.py` tail), which keeps each call short and allowlistable:
+
 ```bash
 # prompt from a file (handles "the cat" for you)
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" run agy -f <prompt-file>
+"${CLAUDE_PLUGIN_ROOT}/crew" run agy -f <prompt-file>
 
 # or a direct prompt string
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" run codex "summarize this"
+"${CLAUDE_PLUGIN_ROOT}/crew" run codex "summarize this"
 ```
 
 `run <seat>` accepts any subprocess seat (`codex`, `agy`, `cursor-gpt`,
@@ -287,6 +303,7 @@ claude-crew/
 │   ├── crew/
 │   │   ├── .claude-plugin/
 │   │   │   └── plugin.json   # Plugin manifest
+│   │   ├── crew              # Plugin-root engine dispatcher (bare executable)
 │   │   ├── agents/           # Agent definitions
 │   │   ├── commands/         # Slash commands
 │   │   ├── hooks/

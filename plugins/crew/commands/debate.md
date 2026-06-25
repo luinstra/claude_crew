@@ -81,7 +81,7 @@ subprocess seats (the per-seat fan-out happens visibly in A2). One allowlistable
 call, no `mkdir`/heredoc/redirect:
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" debate -f .crew/debates/staged-question-<slug>.txt --slug <short-kebab-slug> --seats none --consume
+"${CLAUDE_PLUGIN_ROOT}/crew" debate -f .crew/debates/staged-question-<slug>.txt --slug <short-kebab-slug> --seats none --consume
 ```
 
 **Always `--seats none` here** — it scaffolds the dir with NO subprocess seats
@@ -96,7 +96,7 @@ it; that's the debate dir where every per-seat result + the synthesis go.
 
 **Skip this step if the resolved panel has no subprocess seat** (e.g.
 `--panel lite`/`solo`) — go straight to A3. Otherwise fan the subprocess seats out
-**one `cli.py run` call per seat, in parallel** — each a separate, visible,
+**one `crew run` call per seat, in parallel** — each a separate, visible,
 individually-killable shell (the same per-seat shape Section B's multi-round path
 and `/crew:review` Step 3 use, instead of one opaque `debate` call hiding them in
 an internal thread pool). Use the bare-script path (its top-of-file `sys.path`
@@ -107,7 +107,7 @@ expanded to real seat names before you can loop. Ask the engine (keeps the
 registry authoritative — no hardcoded cursor list in this command):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" seats --seats <resolved codex/cursor-* seats>
+"${CLAUDE_PLUGIN_ROOT}/crew" seats --seats <resolved codex/cursor-* seats>
 ```
 
 It prints one seat per line. (For `--panel cursor`, pass `--seats cursor` — it
@@ -119,7 +119,7 @@ shape Section B uses, minus the `--run-id`/`--round` round-threading — a singl
 round has no prior):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render --mode discuss --seat-role <seat> -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-<seat>.txt
+"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role <seat> -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-<seat>.txt
 ```
 
 This labels each subprocess seat ("acting as the **<seat>** seat") — a deliberate
@@ -129,11 +129,11 @@ parity improvement over the old bundled `debate` call, which ran one shared
 the Task seats.)
 
 **A2.2 — run EACH seat in its own parallel shell.** For every seat from A2.0,
-launch a SEPARATE `cli.py run <seat>` Bash call, all concurrently (e.g. background
+launch a SEPARATE `crew run <seat>` Bash call, all concurrently (e.g. background
 calls) so they are distinct shells you can watch and kill individually:
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" run <seat> -f .crew/debates/<dir>/.prompt-<seat>.txt --json -o .crew/debates/<dir>/<seat>.json
+"${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f .crew/debates/<dir>/.prompt-<seat>.txt --json -o .crew/debates/<dir>/<seat>.json
 ```
 
 - `run --json` ALWAYS exits 0 and writes the six-field result
@@ -159,10 +159,10 @@ render line per Claude seat in the panel** — then dispatch the discuss seat
 (`crew:panelist`) in parallel:
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render --mode discuss --seat-role opus -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-opus.txt
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render --mode discuss --seat-role sonnet -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-sonnet.txt
+"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role opus -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-opus.txt
+"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role sonnet -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-sonnet.txt
 # opt-in — only if opus-4.6 is in the panel:
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render --mode discuss --seat-role opus-4.6 -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-opus-4.6.txt
+"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role opus-4.6 -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-opus-4.6.txt
 ```
 
 ```
@@ -174,7 +174,7 @@ Task(subagent_type="crew:panelist", model="claude-opus-4-6", prompt="<contents o
 
 (Review mode: render with `--mode review <target>` instead of `-f question`, and
 dispatch `crew:reviewer` for the Task seats — the subprocess fan-out in A2 is
-already the same per-seat `cli.py run` shape as `/crew:review` Step 3. But most
+already the same per-seat `crew run` shape as `/crew:review` Step 3. But most
 debates are discuss.)
 
 > **Why `-o` here (both A2 and A3), not `--stage`:** `/crew:review`,
@@ -238,7 +238,7 @@ reads prior rounds from.)
 and folds them in as injection-guarded DATA — on round 1 there is no prior):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render --mode discuss --seat-role <seat> \
+"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role <seat> \
   -f .crew/debates/<run-id>/question.md \
   --run-id <run-id> --round <n> --base-dir .crew/debates \
   -o .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt
@@ -248,7 +248,7 @@ Then run the round's seats (in parallel where possible):
 
 - **Subprocess seats** (the `codex`/`cursor-*` entries, plus opt-in `agy`): execute the rendered prompt via the engine —
   ```bash
-  python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" run <seat> -f .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt --json -o .crew/debates/<run-id>/<seat>-r<n>.json
+  "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt --json -o .crew/debates/<run-id>/<seat>-r<n>.json
   ```
 - **Task seats** (`opus`/`sonnet`): `Task(subagent_type="crew:panelist", model="<seat>", prompt="<contents of .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt>")`. Use each Task's RETURNED result as its take and completion signal — never an output-file size or other proxy (see A3).
 

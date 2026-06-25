@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """CLI entry point for the multi-model review engine (SUBPROCESS seats only).
 
-Invocation mechanism (Step 1.6 — mechanism **C**, the bare-script path):
-the command markdown references this as
-``${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py``. A sys.path guard at the
-top inserts the package's PARENT dir (``.../scripts``) onto ``sys.path`` so the
-package-relative imports (``from multiagent...``) resolve when run as a bare
-script. ``python -m multiagent.cli`` also works (the guard is a harmless no-op
-when the parent is already importable).
+Invocation mechanism: the shipped command markdown reaches this via the
+plugin-root bare dispatcher ``"${CLAUDE_PLUGIN_ROOT}/crew" <sub> …`` (which
+imports ``multiagent.cli.main`` after putting ``scripts/`` on ``sys.path``). This
+module ALSO still runs directly as a bare script
+(``${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py``) or via
+``python -m multiagent.cli`` — a sys.path guard at the top inserts the package's
+PARENT dir (``.../scripts``) onto ``sys.path`` so the package-relative imports
+(``from multiagent...``) resolve in every case (the guard is a harmless no-op when
+the parent is already importable, e.g. under the dispatcher).
 
 Subcommands: ``review`` (fan-out over a resolved target), ``council`` (fan-out
 of a free-form question — the engine half of /crew:debate's crew-native
@@ -245,7 +247,8 @@ def _emit(text: str, out_path: str | None) -> None:
     """Write engine output to a file (``--out``) or stdout.
 
     A file destination is what keeps the whole invocation a single,
-    allowlistable ``python cli.py …`` command: callers no longer wrap it in
+    allowlistable ``"${CLAUDE_PLUGIN_ROOT}/crew" …`` command: callers no longer
+    wrap it in
     ``> "$dir/file"`` (an output redirect the permission matcher can't whitelist)
     or a ``$(…)``-derived path. The engine owns the write; the shell stays out of
     it. stderr (the all-seats-failed diagnostic) is intentionally NOT redirected
@@ -564,21 +567,38 @@ def _render_prior(args: argparse.Namespace) -> str | None:
     return None
 
 
-def cmd_render(args: argparse.Namespace) -> int:
-    """Build ONE seat's prompt and emit it — no execution.
+class _RenderInputError(Exception):
+    """Internal: a render input-resolution failure carrying the CLI exit code.
 
-    This is the single prompt source the orchestrator uses to obtain a Claude
-    Task seat's prompt (so it is byte-identical to what a subprocess seat would
-    receive for the same target/mode/round — every prompt, every seat, every
-    round flows through ``prompts.build_prompt``/``council`` and nowhere else).
-    It builds for either a git/plan TARGET or, in discuss mode, a free-form
-    QUESTION (``-q``/``-f``). It never spawns a seat.
+    Lets ``_resolve_render_inputs`` raise a single error type (with the message
+    already printed to stderr) that both the single-seat and ``--stage-all`` code
+    paths translate into the SAME nonzero exit, so neither path can drift on
+    input validation.
+    """
+
+    def __init__(self, code: int) -> None:
+        super().__init__()
+        self.code = code
+
+
+def _resolve_render_inputs(
+    args: argparse.Namespace,
+) -> tuple[str | None, "targets.Target | None", str | None]:
+    """Resolve the prompt-content inputs shared by EVERY rendered seat.
+
+    Returns ``(question, target, prior)`` — only ``seat_role`` and the output
+    path vary per seat, so this single helper guarantees the single-seat
+    ``--stage`` path and the per-role ``--stage-all`` loop feed BYTE-IDENTICAL
+    inputs to the builder (a ``--stage-all opus`` file == ``--stage --seat-role
+    opus``; a ``--stage-all seat`` file == ``--stage`` with no role). Exactly one
+    of ``question`` / ``target`` is non-None. Prints the error and raises
+    ``_RenderInputError`` (with the exit code) on any invalid combination.
     """
     try:
         prior = _render_prior(args)
     except rounds.RoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 2
+        raise _RenderInputError(2)
 
     # Loud (not silent) when a later round has no prior context to thread.
     if args.round is not None and args.round > 1 and not prior:
@@ -591,7 +611,7 @@ def cmd_render(args: argparse.Namespace) -> int:
     # Free-form question (discuss) XOR a target.
     if args.question is not None and args.file:
         print("error: provide either -q/--question OR -f/--file, not both", file=sys.stderr)
-        return 2
+        raise _RenderInputError(2)
     # A free-form question and an explicit positional target are mutually
     # exclusive — passing both is ambiguous (the target would be silently
     # ignored). The default target is "auto"; only a NON-default target conflicts.
@@ -601,14 +621,14 @@ def cmd_render(args: argparse.Namespace) -> int:
             "(-q/--question, -f/--file), not both",
             file=sys.stderr,
         )
-        return 2
+        raise _RenderInputError(2)
     question: str | None = None
     if args.file:
         try:
             question = Path(args.file).read_text(encoding="utf-8")
         except OSError as exc:
             print(f"error: cannot read question file {args.file!r}: {exc}", file=sys.stderr)
-            return 2
+            raise _RenderInputError(2)
     elif args.question is not None:
         question = args.question
 
@@ -618,21 +638,68 @@ def cmd_render(args: argparse.Namespace) -> int:
                 "error: a free-form question (-q/-f) is only valid with --mode discuss",
                 file=sys.stderr,
             )
-            return 2
-        text = prompts.council(question, seat_role=args.seat_role, prior_round=prior)
-    else:
-        try:
-            target = targets.resolve(args.target, base=args.base)
-        except targets.TargetError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-        text = prompts.build_prompt(
-            target,
-            seat_role=args.seat_role,
-            mode=args.mode,
-            prior_round=prior,
-            inline=args.inline_diff,
-        )
+            raise _RenderInputError(2)
+        return question, None, prior
+
+    try:
+        target = targets.resolve(args.target, base=args.base)
+    except targets.TargetError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise _RenderInputError(2)
+    return None, target, prior
+
+
+def _build_render_text(
+    question: str | None,
+    target: "targets.Target | None",
+    prior: str | None,
+    seat_role: str | None,
+    inline_diff: bool,
+    mode: str,
+) -> str:
+    """Build ONE seat's prompt text from pre-resolved inputs.
+
+    The SINGLE place the builder is invoked for render — both ``--stage`` and the
+    ``--stage-all`` loop call here, varying only ``seat_role``, so the per-role
+    content can never diverge from the single-seat content.
+    """
+    if question is not None:
+        return prompts.council(question, seat_role=seat_role, prior_round=prior)
+    return prompts.build_prompt(
+        target,
+        seat_role=seat_role,
+        mode=mode,
+        prior_round=prior,
+        inline=inline_diff,
+    )
+
+
+def cmd_render(args: argparse.Namespace) -> int:
+    """Build ONE seat's prompt and emit it — no execution.
+
+    This is the single prompt source the orchestrator uses to obtain a Claude
+    Task seat's prompt (so it is byte-identical to what a subprocess seat would
+    receive for the same target/mode/round — every prompt, every seat, every
+    round flows through ``prompts.build_prompt``/``council`` and nowhere else).
+    It builds for either a git/plan TARGET or, in discuss mode, a free-form
+    QUESTION (``-q``/``-f``). It never spawns a seat.
+
+    ``--stage-all <comma-roles>`` collapses N single-seat ``--stage`` renders into
+    ONE call: it stages a LABELED prompt per role into
+    ``.crew/reviews/<session-id>/prompt-<role>.txt`` and prints a JSON
+    ``{role: path}`` map. (See ``cmd_render_stage_all``.)
+    """
+    if args.stage_all is not None:
+        return cmd_render_stage_all(args)
+
+    try:
+        question, target, prior = _resolve_render_inputs(args)
+    except _RenderInputError as exc:
+        return exc.code
+
+    text = _build_render_text(
+        question, target, prior, args.seat_role, args.inline_diff, args.mode
+    )
 
     out_path = args.out
     if args.stage:
@@ -664,6 +731,90 @@ def cmd_render(args: argparse.Namespace) -> int:
     # shell expansion) and hands its contents to the Task seat.
     if args.stage:
         print(out_path)
+    return 0
+
+
+def cmd_render_stage_all(args: argparse.Namespace) -> int:
+    """Stage one LABELED prompt PER comma-listed role in a SINGLE call.
+
+    Collapses the N per-seat ``render --stage --seat-role <role>`` calls the
+    review-bearing commands used to emit into ONE. Each role gets its own
+    ``.crew/reviews/<session-id>/prompt-<role>.txt`` carrying its "acting as the
+    **<role>** seat" label; the special role ``seat`` maps to ``seat_role=None``
+    (no label — matching today's shared ``prompt-seat.txt``). Prints a JSON
+    ``{role: path}`` map on success.
+
+    Reuses ``_resolve_session_id`` + the placeholder guard + ``_stage_path``'s
+    charset/traversal guard + the SAME ``_resolve_render_inputs`` /
+    ``_build_render_text`` machinery as the single-seat path, so a
+    ``--stage-all opus`` file is byte-identical to ``--stage --seat-role opus``.
+    The roles are PROMPT LABELS, NOT registry seats, so they are NOT filtered
+    through ``known_seat_names()``.
+    """
+    # Mutually exclusive with the single-destination flags (each names ONE path;
+    # --stage-all owns the destinations for every listed role).
+    if args.stage or args.out or args.seat_role:
+        print(
+            "error: --stage-all is mutually exclusive with --stage, "
+            "--seat-role, and -o/--out",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Resolve + placeholder-guard the session id ONCE, up front (same shape as the
+    # single-seat --stage path) — before any file is written.
+    session_id = _resolve_session_id(args.session_id)
+    if "<" in session_id or ">" in session_id:
+        print(
+            f"error: session id looks like an unsubstituted placeholder "
+            f"({session_id!r}); pass your actual session id (the "
+            "[Session ID: …] value), not the literal template",
+            file=sys.stderr,
+        )
+        return 2
+
+    roles = [r.strip() for r in args.stage_all.split(",") if r.strip()]
+    if not roles:
+        print(
+            "error: --stage-all requires a non-empty comma-separated role list",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Reject duplicate / normalization-colliding roles BEFORE writing anything:
+    # two roles that collapse to the same staged filename (e.g. `opus,opus`, or
+    # `a.b,ab` → both prompt-ab.txt) would silently stage fewer files than asked.
+    staged: dict[str, str] = {}
+    path_to_role: dict[str, str] = {}
+    for role in roles:
+        path = _stage_path(session_id, None if role == "seat" else role)
+        if path in path_to_role:
+            print(
+                f"error: roles {path_to_role[path]!r} and {role!r} both stage to "
+                f"{path!r}; give distinct roles (no duplicate/normalization collision)",
+                file=sys.stderr,
+            )
+            return 2
+        path_to_role[path] = role
+        staged[role] = path
+
+    # Resolve the prompt-content inputs ONCE (the per-role loop varies ONLY
+    # seat_role + output path — no duplicated resolution logic).
+    try:
+        question, target, prior = _resolve_render_inputs(args)
+    except _RenderInputError as exc:
+        return exc.code
+
+    for role, path in staged.items():
+        # role == "seat" → seat_role=None (no spurious "seat" label; matches the
+        # shared prompt-seat.txt). Every other role passes through as its label.
+        builder_role = None if role == "seat" else role
+        text = _build_render_text(
+            question, target, prior, builder_role, args.inline_diff, args.mode
+        )
+        _emit(text, path)
+
+    print(json.dumps(staged))
     return 0
 
 
@@ -883,6 +1034,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="stage the prompt to .crew/reviews/<session-id>/prompt-<seat-role>.txt "
              "— path derived from --seat-role + session id, so no -o and no shell "
              "expansion. Prints the staged path to stdout.",
+    )
+    rndr.add_argument(
+        "--stage-all", dest="stage_all", default=None,
+        help="stage one labeled prompt PER comma-listed seat-role into "
+             ".crew/reviews/<session-id>/prompt-<role>.txt in a single call; "
+             "prints a JSON {role: path} map. The role 'seat' maps to no label "
+             "(matching the shared prompt-seat.txt). Mutually exclusive with "
+             "--stage/--seat-role/-o.",
     )
     rndr.set_defaults(func=cmd_render)
 

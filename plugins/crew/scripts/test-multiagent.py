@@ -974,6 +974,30 @@ def _run_cli(args, env=None, cwd=None, input_text=None, timeout=60):
     )
 
 
+# PLUGIN_ROOT = plugins/crew (the dispatcher lives at its top level, NOT in
+# scripts/). The dispatcher is invoked BARE (relying on its shebang + exec bit) —
+# the REAL shipped path — so these tests exercise exactly what the commands do.
+PLUGIN_ROOT = SCRIPT_DIR.parent
+CREW_DISPATCHER = PLUGIN_ROOT / "crew"
+
+
+def _run_dispatcher(args, env=None, cwd=None, timeout=60):
+    """Invoke the bare ``plugins/crew/crew`` dispatcher directly (no ``python``).
+
+    Defensively re-set the exec bit so a CI checkout that strips it still runs the
+    bare-invocation tests — this is SEPARATE from the committed-mode assertion in
+    test_dispatcher, which asserts the SHIPPED file's mode.
+    """
+    try:
+        os.chmod(CREW_DISPATCHER, 0o755)
+    except OSError:
+        pass
+    return subprocess.run(
+        [str(CREW_DISPATCHER), *args],
+        capture_output=True, text=True, env=env, cwd=cwd, timeout=timeout,
+    )
+
+
 def test_production_invocation_and_fanout():
     log_section("production invocation path + fan-out (bare-script cli.py)")
 
@@ -1963,12 +1987,257 @@ def test_cursor():
           ) is not None, "non-None", "None")
 
 
+def test_dispatcher():
+    log_section("plugin-root bare `crew` dispatcher")
+
+    # (a.5) Committed exec bit: the SHIPPED file must carry the user-exec bit so a
+    # fresh install can run `…/crew …` directly. Asserted on the committed mode
+    # (NOT the defensive chmod the helper does for CI robustness).
+    mode = os.stat(CREW_DISPATCHER).st_mode
+    check("crew dispatcher exists",
+          CREW_DISPATCHER.is_file(), "file", str(CREW_DISPATCHER))
+    check("crew dispatcher has the committed user-exec bit (st_mode & 0o100)",
+          bool(mode & 0o100), "exec bit set", oct(mode))
+
+    # (a.1) Sibling-import / any-cwd: run BARE from an unrelated temp cwd. A wrong
+    # sys.path offset (parent.parent vs parent/"scripts") would ModuleNotFoundError
+    # here; the bare invocation also proves the shebang + exec bit resolve python3.
+    with tempfile.TemporaryDirectory() as td:
+        proc = _run_dispatcher(
+            ["render", "--mode", "discuss", "-q", "Redis?"], cwd=td, timeout=30,
+        )
+        check("bare crew runs from an unrelated cwd (no ModuleNotFoundError)",
+              "ModuleNotFoundError" not in proc.stderr,
+              "no ModuleNotFoundError", proc.stderr[:200])
+        check("bare crew render exits 0",
+              proc.returncode == 0, "0", f"{proc.returncode}: {proc.stderr[:200]}")
+        check("bare crew render emits the prompt on stdout",
+              "Redis?" in proc.stdout, "prompt body", proc.stdout[:120])
+
+    # (a.2) Delegation parity: bare crew stdout == cli.py stdout (pure rename).
+    with tempfile.TemporaryDirectory() as td:
+        d = _run_dispatcher(
+            ["render", "--mode", "discuss", "-q", "Parity?"], cwd=td, timeout=30,
+        )
+        c = _run_cli(
+            ["render", "--mode", "discuss", "-q", "Parity?"], cwd=td, timeout=30,
+        )
+        check("bare crew render stdout == cli.py render stdout (pure rename)",
+              d.stdout == c.stdout and d.returncode == c.returncode == 0,
+              "byte-identical, both rc=0",
+              f"crew_rc={d.returncode} cli_rc={c.returncode} equal={d.stdout == c.stdout}")
+
+    # (a.3) `state` delegation happy path: `crew state init bl …` creates the same
+    # state file `crew-state.py init bl …` would, with NO ModuleNotFoundError:
+    # models (proves crew-state's bare `from models import` resolved via crew's
+    # sys.path guard).
+    with tempfile.TemporaryDirectory() as td:
+        env = dict(os.environ)
+        env["CLAUDE_PROJECT_DIR"] = td
+        proc = _run_dispatcher(
+            ["state", "init", "bl", "--prompt", "x", "--session-id", "testsess"],
+            env=env, cwd=td, timeout=30,
+        )
+        state_file = Path(td) / ".crew" / "build-state-testsess.json"
+        check("crew state init: no ModuleNotFoundError: models",
+              "ModuleNotFoundError" not in proc.stderr,
+              "no ModuleNotFoundError", proc.stderr[:200])
+        ok_state = state_file.is_file()
+        active = False
+        if ok_state:
+            try:
+                active = json.loads(state_file.read_text()).get("active") is True
+            except Exception:
+                active = False
+        check("crew state init creates build-state-testsess.json with active=true",
+              proc.returncode == 0 and ok_state and active,
+              "state file, active=true",
+              f"rc={proc.returncode} exists={ok_state} active={active} err={proc.stderr[:150]}")
+
+    # (a.4) `state` delegation exit-propagation: a bad subcommand / loop name must
+    # exit NONZERO (crew-state's argparse sys.exit(2) propagates through crew's
+    # try/finally — NOT swallowed by the explicit SystemExit(0)).
+    with tempfile.TemporaryDirectory() as td:
+        bogus = _run_dispatcher(["state", "bogus"], cwd=td, timeout=30)
+        check("crew state <bad-subcommand> exits NONZERO (exit propagates)",
+              bogus.returncode != 0, "nonzero", str(bogus.returncode))
+        badloop = _run_dispatcher(["state", "show", "xx"], cwd=td, timeout=30)
+        check("crew state show <bad-loop> exits NONZERO (exit propagates)",
+              badloop.returncode != 0, "nonzero", str(badloop.returncode))
+
+
+def test_stage_all():
+    log_section("render --stage-all (N labeled files in one call)")
+    OPUS_LABEL = "You are acting as the **opus** seat"
+    SONNET_LABEL = "You are acting as the **sonnet** seat"
+
+    # (b.1) N labeled files in ONE call.
+    with tempfile.TemporaryDirectory() as td:
+        proc = _run_dispatcher(
+            ["render", "--mode", "discuss", "-q", "Redis?",
+             "--stage-all", "opus,sonnet", "--session-id", "sess-XYZ"],
+            cwd=td, timeout=30,
+        )
+        opus_f = Path(td) / ".crew" / "reviews" / "sess-XYZ" / "prompt-opus.txt"
+        sonnet_f = Path(td) / ".crew" / "reviews" / "sess-XYZ" / "prompt-sonnet.txt"
+        check("--stage-all exits 0 and stages both labeled files in one call",
+              proc.returncode == 0 and opus_f.is_file() and sonnet_f.is_file(),
+              "both files, rc=0",
+              f"rc={proc.returncode} opus={opus_f.is_file()} sonnet={sonnet_f.is_file()} err={proc.stderr[:150]}")
+
+        # (b.2) Per-seat labels preserved (NOT merged) — files carry their own
+        # label and DIFFER.
+        opus_txt = opus_f.read_text() if opus_f.is_file() else ""
+        sonnet_txt = sonnet_f.read_text() if sonnet_f.is_file() else ""
+        check("--stage-all prompt-opus.txt carries the opus seat label",
+              OPUS_LABEL in opus_txt, OPUS_LABEL, opus_txt[:120])
+        check("--stage-all prompt-sonnet.txt carries the sonnet seat label",
+              SONNET_LABEL in sonnet_txt, SONNET_LABEL, sonnet_txt[:120])
+        check("--stage-all files differ per seat (not one merged body)",
+              opus_txt != sonnet_txt and bool(opus_txt),
+              "files differ", f"equal={opus_txt == sonnet_txt}")
+
+        # (b.5) Output is the JSON {role: path} map equal to the _stage_path values.
+        try:
+            out_map = json.loads(proc.stdout)
+        except Exception as exc:
+            out_map = None
+            check("--stage-all prints a JSON {role: path} map", False,
+                  "valid json", f"{exc}: {proc.stdout[:150]}")
+        if out_map is not None:
+            check("--stage-all JSON map == per-role _stage_path values",
+                  out_map == {
+                      "opus": ".crew/reviews/sess-XYZ/prompt-opus.txt",
+                      "sonnet": ".crew/reviews/sess-XYZ/prompt-sonnet.txt",
+                  },
+                  "{opus:…/prompt-opus.txt, sonnet:…/prompt-sonnet.txt}", str(out_map))
+
+    # (b.3) Byte-for-byte equivalence to single-seat --stage for a labeled role.
+    # DISTINCT session ids so the two writes don't share a path (no self-compare).
+    with tempfile.TemporaryDirectory() as td:
+        _run_dispatcher(
+            ["render", "--mode", "discuss", "-q", "Eq?",
+             "--stage-all", "opus", "--session-id", "eqA"], cwd=td, timeout=30)
+        _run_dispatcher(
+            ["render", "--mode", "discuss", "-q", "Eq?",
+             "--seat-role", "opus", "--stage", "--session-id", "eqB"], cwd=td, timeout=30)
+        a = Path(td) / ".crew" / "reviews" / "eqA" / "prompt-opus.txt"
+        b = Path(td) / ".crew" / "reviews" / "eqB" / "prompt-opus.txt"
+        check("--stage-all opus == --stage --seat-role opus (byte-for-byte)",
+              a.is_file() and b.is_file() and a.read_bytes() == b.read_bytes(),
+              "identical bytes",
+              f"a={a.is_file()} b={b.is_file()} equal={a.is_file() and b.is_file() and a.read_bytes() == b.read_bytes()}")
+
+    # (b.4) The `seat` role maps to seat_role=None → byte-equal to --stage with NO
+    # --seat-role (today's shared prompt-seat.txt). Distinct session ids again.
+    with tempfile.TemporaryDirectory() as td:
+        _run_dispatcher(
+            ["render", "--mode", "discuss", "-q", "Eq?",
+             "--stage-all", "seat", "--session-id", "eqC"], cwd=td, timeout=30)
+        _run_dispatcher(
+            ["render", "--mode", "discuss", "-q", "Eq?",
+             "--stage", "--session-id", "eqD"], cwd=td, timeout=30)
+        c = Path(td) / ".crew" / "reviews" / "eqC" / "prompt-seat.txt"
+        d = Path(td) / ".crew" / "reviews" / "eqD" / "prompt-seat.txt"
+        same = c.is_file() and d.is_file() and c.read_bytes() == d.read_bytes()
+        check("--stage-all seat == --stage (no --seat-role), byte-for-byte",
+              same, "identical bytes",
+              f"c={c.is_file()} d={d.is_file()} equal={same}")
+        # And no spurious "seat" label leaked in.
+        check("--stage-all seat carries NO 'acting as the **seat**' label",
+              c.is_file() and "acting as the **seat**" not in c.read_text(),
+              "no seat label", (c.read_text()[:80] if c.is_file() else "(missing)"))
+
+    # (b.6) `seat` role accepted alongside a labeled role; both staged.
+    with tempfile.TemporaryDirectory() as td:
+        proc = _run_dispatcher(
+            ["render", "--mode", "discuss", "-q", "X",
+             "--stage-all", "seat,opus", "--session-id", "mix"], cwd=td, timeout=30)
+        seat_f = Path(td) / ".crew" / "reviews" / "mix" / "prompt-seat.txt"
+        opus_f = Path(td) / ".crew" / "reviews" / "mix" / "prompt-opus.txt"
+        check("--stage-all seat,opus stages both prompt-seat.txt and prompt-opus.txt",
+              proc.returncode == 0 and seat_f.is_file() and opus_f.is_file(),
+              "both files",
+              f"rc={proc.returncode} seat={seat_f.is_file()} opus={opus_f.is_file()}")
+
+    # (b.7) Duplicate / collision / empty role lists rejected nonzero, no partial.
+    with tempfile.TemporaryDirectory() as td:
+        dup = _run_dispatcher(
+            ["render", "--mode", "discuss", "-q", "X",
+             "--stage-all", "opus,opus", "--session-id", "dup"], cwd=td, timeout=30)
+        check("--stage-all opus,opus -> nonzero (duplicate role rejected)",
+              dup.returncode != 0, "nonzero", str(dup.returncode))
+        check("--stage-all opus,opus leaves no partial staged file",
+              not (Path(td) / ".crew" / "reviews" / "dup").exists(),
+              "no dir written", "dir exists")
+    with tempfile.TemporaryDirectory() as td:
+        coll = _run_dispatcher(
+            ["render", "--mode", "discuss", "-q", "X",
+             "--stage-all", "a.b,ab", "--session-id", "coll"], cwd=td, timeout=30)
+        check("--stage-all a.b,ab -> nonzero (normalization collision rejected)",
+              coll.returncode != 0, "nonzero", str(coll.returncode))
+        check("--stage-all collision leaves no partial staged file",
+              not (Path(td) / ".crew" / "reviews" / "coll").exists(),
+              "no dir written", "dir exists")
+    with tempfile.TemporaryDirectory() as td:
+        empty = _run_dispatcher(
+            ["render", "--mode", "discuss", "-q", "X",
+             "--stage-all", " , ", "--session-id", "emp"], cwd=td, timeout=30)
+        check("--stage-all ' , ' (whitespace-only) -> nonzero (empty list rejected)",
+              empty.returncode != 0, "nonzero", str(empty.returncode))
+
+    # (b.8) Guards reused: placeholder, mutual exclusion, traversal collapse.
+    with tempfile.TemporaryDirectory() as td:
+        ph = _run_dispatcher(
+            ["render", "--mode", "discuss", "-q", "X",
+             "--stage-all", "opus,sonnet", "--session-id", "<session-id>"],
+            cwd=td, timeout=30)
+        check("--stage-all rejects an unsubstituted <session-id> placeholder",
+              ph.returncode != 0 and "placeholder" in ph.stderr.lower(),
+              "nonzero + placeholder", f"rc={ph.returncode} err={ph.stderr[:150]}")
+        check("--stage-all placeholder rejection writes no file",
+              not (Path(td) / ".crew" / "reviews").exists(),
+              "no reviews dir", "dir exists")
+    with tempfile.TemporaryDirectory() as td:
+        for extra in (["--stage"], ["-o", str(Path(td) / "x.txt")],
+                      ["--seat-role", "opus"]):
+            mx = _run_dispatcher(
+                ["render", "--mode", "discuss", "-q", "X",
+                 "--stage-all", "opus", "--session-id", "mx", *extra],
+                cwd=td, timeout=30)
+            check(f"--stage-all + {extra[0]} -> nonzero (mutual exclusion)",
+                  mx.returncode != 0, "nonzero", f"{extra}: rc={mx.returncode}")
+    with tempfile.TemporaryDirectory() as td:
+        trav = _run_dispatcher(
+            ["render", "--mode", "discuss", "-q", "X",
+             "--stage-all", "../../evil,opus", "--session-id", "trav"],
+            cwd=td, timeout=30)
+        evil_f = Path(td) / ".crew" / "reviews" / "trav" / "prompt-evil.txt"
+        check("--stage-all charset-collapses a traversal role (no escape)",
+              trav.returncode == 0 and evil_f.is_file(),
+              "prompt-evil.txt staged inside reviews dir",
+              f"rc={trav.returncode} evil={evil_f.is_file()}")
+
+    # (b.9) opus-4.6 filename normalization -> prompt-opus-46.txt (no drift from
+    # the single-seat path).
+    with tempfile.TemporaryDirectory() as td:
+        n = _run_dispatcher(
+            ["render", "--mode", "discuss", "-q", "X",
+             "--stage-all", "opus-4.6", "--session-id", "norm"], cwd=td, timeout=30)
+        norm_f = Path(td) / ".crew" / "reviews" / "norm" / "prompt-opus-46.txt"
+        check("--stage-all opus-4.6 normalizes to prompt-opus-46.txt",
+              n.returncode == 0 and norm_f.is_file(),
+              "prompt-opus-46.txt", f"rc={n.returncode} exists={norm_f.is_file()}")
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
     test_default_seats()
     test_resolve_timeout()
     test_stage()
+    test_stage_all()
+    test_dispatcher()
     test_registry()
     test_codex()
     test_agy_helpers()

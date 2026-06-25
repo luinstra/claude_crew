@@ -39,7 +39,7 @@ Resolve the flags to a **seat list** once, then split it:
 
 Below, **"the task"** means `$ARGUMENTS` with these panel flags removed — use it
 as the requirements / design-doc path. Keep the raw `$ARGUMENTS` (flags included)
-only in the `crew-state.py --task` so the panel survives across iterations. A
+only in the `crew state … --task` so the panel survives across iterations. A
 one-seat panel is fine — synthesis / never-choke handle any count down to one.
 
 ## How This Works
@@ -84,13 +84,13 @@ When the user says "create the plan", "generate the plan", or "I'm ready" — **
 ### Step 1: Activate the Loop
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py init mt --task "$ARGUMENTS" --auto-plan
+"${CLAUDE_PLUGIN_ROOT}/crew" state init mt --task "$ARGUMENTS" --auto-plan
 ```
 
 Then get the state to find the plan file path:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py show mt
+"${CLAUDE_PLUGIN_ROOT}/crew" state show mt
 ```
 
 ### Step 2: Generate Initial Plan
@@ -149,7 +149,7 @@ from whichever seats succeed.
 
 **Skip this step if the resolved panel has no subprocess seat** (e.g.
 `--panel lite`) — go straight to 3b. Otherwise fan the subprocess seats out over
-the plan file (`[plan_file from state]`) **one `cli.py run` call per seat, in
+the plan file (`[plan_file from state]`) **one `crew run` call per seat, in
 parallel** — each a separate, visible, individually-killable shell (the per-seat
 shape `/crew:debate`'s multi-round path uses), not one opaque `review` call hiding
 them in an internal
@@ -160,7 +160,7 @@ package imports resolve).
 the registry authoritative — no hardcoded cursor list here):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" seats --seats <resolved codex/cursor-* seats>
+"${CLAUDE_PLUGIN_ROOT}/crew" seats --seats <resolved codex/cursor-* seats>
 ```
 
 It prints one seat per line. (For `--panel cursor`, pass `--seats cursor`.)
@@ -170,17 +170,17 @@ It prints one seat per line. (For `--panel cursor`, pass `--seats cursor`.)
 value; never the literal placeholder or a `${…}` expansion):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render "[plan_file from state]" --mode review --stage --session-id <session-id>
+"${CLAUDE_PLUGIN_ROOT}/crew" render "[plan_file from state]" --mode review --stage --session-id <session-id>
 ```
 
 It prints the staged path — `.crew/reviews/<session-id>/prompt-seat.txt`. Reference
 mode (the default) makes each seat read the plan file itself.
 
 **3a.2 — run EACH seat in its own parallel shell.** For every seat from 3a.0, launch
-a SEPARATE `cli.py run <seat>` Bash call, all concurrently (e.g. background calls):
+a SEPARATE `crew run <seat>` Bash call, all concurrently (e.g. background calls):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" run <seat> -f .crew/reviews/<session-id>/prompt-seat.txt --json -o .crew/reviews/<session-id>/<seat>.json
+"${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f .crew/reviews/<session-id>/prompt-seat.txt --json -o .crew/reviews/<session-id>/<seat>.json
 ```
 
 - `run --json` ALWAYS exits 0 and writes the six-field result
@@ -204,24 +204,25 @@ so the panel reviews a single identical plan. Render each Claude seat's
 prompt over the SAME `[plan_file from state]` target:
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render "[plan_file from state]" --mode review --seat-role opus   --stage --session-id <session-id>
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render "[plan_file from state]" --mode review --seat-role sonnet --stage --session-id <session-id>
-# opt-in — only if opus-4.6 is in the panel (staged as prompt-opus-46.txt):
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render "[plan_file from state]" --mode review --seat-role opus-4.6 --stage --session-id <session-id>
+"${CLAUDE_PLUGIN_ROOT}/crew" render "[plan_file from state]" --mode review --stage-all opus,sonnet --session-id <session-id>
+# opt-in — add opus-4.6 to the list ONLY if it is in the resolved panel
+# (staged as prompt-opus-46.txt): … --stage-all opus,sonnet,opus-4.6 …
 ```
 
-`--stage` derives `.crew/reviews/<session-id>/prompt-<seat-role>.txt` from the
-`--seat-role` + session id, writes it (creating the dir), and prints the path —
-session-scoped so concurrent sessions never clobber each other. **Substitute your
-actual session id for `<session-id>`** — the `[Session ID: …]` value from the
-SessionStart context (the same id `crew-state.py` uses). Pass it as a literal
-`--session-id` value — NOT the placeholder text, and NOT a `${CLAUDE_SESSION_ID}`
-shell expansion (a `$…` expansion isn't allowlistable and isn't reliably exported
-to the command shell; the engine resolves the id itself, arg → env). The engine
-**rejects an unsubstituted `<…>` placeholder** with a loud error, so a missed
-substitution fails fast instead of silently sharing one dir. `.crew/` is
-gitignored. **Read** each staged file with the Read tool and pass its contents to
-the matching seat.
+`--stage-all` stages one LABELED prompt PER comma-listed role in a SINGLE call —
+`.crew/reviews/<session-id>/prompt-<role>.txt` for each (`prompt-opus.txt`,
+`prompt-sonnet.txt`, opt-in `prompt-opus-46.txt`), each carrying its own
+"acting as the **<role>** seat" label — and prints a JSON `{role: path}` map to
+stdout. It is session-scoped so concurrent sessions never clobber each other.
+**Substitute your actual session id for `<session-id>`** — the `[Session ID: …]`
+value from the SessionStart context (the same id `crew state` uses). Pass it as a
+literal `--session-id` value — NOT the placeholder text, and NOT a
+`${CLAUDE_SESSION_ID}` shell expansion (a `$…` expansion isn't allowlistable and
+isn't reliably exported to the command shell; the engine resolves the id itself,
+arg → env). The engine **rejects an unsubstituted `<…>` placeholder** with a loud
+error, so a missed substitution fails fast instead of silently sharing one dir.
+`.crew/` is gitignored. **Read** each path from the JSON map with the Read tool
+and pass its contents to the matching seat.
 
 Then dispatch each seat with the rendered text as its prompt — the SAME agent
 (`crew:reviewer`) with a per-spawn `model` override selecting the voice (spawn
@@ -320,7 +321,7 @@ When the panel's verdict is **APPROVED** (or REVISE with only [MINOR] issues):
 
 1. **Deactivate the loop:**
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate mt --reason "Advisor approved"
+"${CLAUDE_PLUGIN_ROOT}/crew" state deactivate mt --reason "Advisor approved"
 ```
 
 2. **Present the final plan to the user:**

@@ -9,9 +9,14 @@ This directory contains the Python backend for crew's persistence features. Hook
 
 ## Structure
 
+> **Invocation:** the engine + state CLI are reached through the plugin-root bare
+> dispatcher `plugins/crew/crew` (one level up — `../crew`), invoked as
+> `"${CLAUDE_PLUGIN_ROOT}/crew" <sub> …` (engine) and `… crew state <sub> …`
+> (state). See the "Plugin-root `crew` dispatcher" + "`crew state …`" bullets below.
+
 ```
 scripts/
-├── crew-state.py        # CLI for loop state management
+├── crew-state.py        # CLI for loop state management (reached via `crew state …`)
 ├── models.py            # Dataclasses for all JSON structures
 ├── persistent-mode.py   # Stop hook: enforces continuation
 ├── session-start.py     # SessionStart hook: restores state
@@ -32,7 +37,7 @@ their results into the same six-field shape the engine returns.
 
 ```
 multiagent/
-├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `render` | `seats` subcommands
+├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `render` (incl. `--stage-all`) | `seats` subcommands (reached via the bare `../crew` dispatcher)
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
@@ -94,12 +99,37 @@ Key contracts (do NOT regress):
   `CURSOR_SEATS`. `render --stage --session-id <id>` stages a seat prompt to
   `.crew/reviews/<session-id>/prompt-<seat-role>.txt` (session resolved in Python —
   arg → `CLAUDE_SESSION_ID` env — so the command carries no `${…}` expansion).
+- **Plugin-root `crew` dispatcher (canonical invocation).** Commands invoke the
+  engine via the bare `"${CLAUDE_PLUGIN_ROOT}/crew" <sub> …` dispatcher (a thin
+  launcher at `plugins/crew/crew`, run directly via its shebang + exec bit — no
+  `python` prefix, no `.py` tail), NOT the longer `…/scripts/multiagent/cli.py`
+  path. It has its own `sys.path` guard (inserts the sibling `scripts/` dir) and
+  delegates to `multiagent.cli.main()`, inheriting every subcommand unchanged —
+  it is a pure path-prefix rename (identical args, output, exit codes). The old
+  `cli.py` path still works (the dispatcher just imports it), but shipped commands
+  emit only `crew`. Users add ONE allowlist rule (`Bash(*/crew *)`) covering the
+  engine AND `crew state …` (see below).
+- **`render --stage-all <comma-roles>` (N→1 collapse).** Stages one LABELED prompt
+  PER comma-listed role in a SINGLE call — `.crew/reviews/<session-id>/prompt-<role>.txt`
+  for each — and prints a JSON `{role: path}` map. The review-bearing commands
+  (`review`/`build`/`measure-twice`) use it to collapse their N per-seat
+  `render --stage --seat-role <role>` calls into ONE. Each role gets its own
+  "acting as the **<role>** seat" label; the special role `seat` maps to
+  `seat_role=None` (no label — matching the shared `prompt-seat.txt`). It reuses
+  `_stage_path` + `_resolve_session_id` + the placeholder/traversal guards (so a
+  `--stage-all opus` file is byte-identical to `--stage --seat-role opus`), is
+  mutually exclusive with `--stage`/`--seat-role`/`-o`, and rejects
+  duplicate/normalization-colliding/empty role lists (nonzero, no partial files).
+  Roles are prompt LABELS, NOT registry seats — they are NOT filtered through
+  `known_seat_names()`. `debate` keeps its per-seat `-o` renders (it stages into
+  its own `.crew/debates/<dir>/` for round threading, which `--stage-all`'s
+  `.crew/reviews/` layout doesn't model) — it gets the dispatcher prefix only.
 - **Per-seat fan-out (visibility).** The review-bearing commands
   (`review`/`build`/`measure-twice`) fan subprocess seats out ONE
-  `cli.py run <seat>` call PER seat — each a separate, visible, killable shell —
-  rather than one opaque `cli.py review --seats <all>` call that hides them in the
+  `crew run <seat>` call PER seat — each a separate, visible, killable shell —
+  rather than one opaque `crew review --seats <all>` call that hides them in the
   `_fan_out` thread pool. The orchestrator gets the concrete (group-expanded) seat
-  list from `cli.py seats --seats <spec>`, renders the shared subprocess prompt
+  list from `crew seats --seats <spec>`, renders the shared subprocess prompt
   once with `render --stage`, then runs each seat via `run <seat> -f <prompt>
   --json`. `run --json` always exits 0 with the six-field result, so per-seat
   never-choke is automatic (no all-failed abort to handle). The `review`
@@ -107,8 +137,18 @@ Key contracts (do NOT regress):
   it. (`/crew:debate` fans out per-seat in BOTH paths now — its multi-round path
   always did, and the single-round path scaffolds via `debate --seats none` then
   runs each subprocess seat with `run <seat>`, same as the commands above.)
+- **`crew state …` routes crew-state through the dispatcher.** Loop state
+  management is invoked as `"${CLAUDE_PLUGIN_ROOT}/crew" state <sub> …`, NOT the
+  bare `scripts/crew-state.py` path, so ONE allowlist rule covers both engine and
+  state. The dispatcher loads `crew-state.py` via `importlib` and swaps `sys.argv`
+  around its no-arg `main()` (letting crew-state's own `SystemExit` propagate for
+  correct exit codes). WHY route it rather than ship a plugin-root `crew-state.py`
+  shim: `crew-state.py` does a bare `from models import …` with NO `sys.path`
+  guard — a plugin-root shim would put the plugin root (not `scripts/`) on
+  `sys.path[0]` and break that import. The `crew` dispatcher's guard already adds
+  `scripts/`, so the import resolves with NO edit to `crew-state.py`.
 - One engine-side
-  affordance: `cli.py debate --seats none` (or `""`) scaffolds the dir + writes an
+  affordance: `crew debate --seats none` (or `""`) scaffolds the dir + writes an
   empty `subprocess.json` (exit 0) instead of erroring. The single-round
   `/crew:debate` path now ALWAYS uses this scaffold-only mode, then fans seats out
   per-seat into individual `<seat>.json` files — the scaffold's `subprocess.json`
@@ -188,32 +228,37 @@ You were working on: fixing the auth bug
 print(result.to_json())
 ```
 
-## crew-state.py CLI
+## crew-state CLI
+
+Loop state management ships in `crew-state.py` but the commands invoke it through
+the plugin-root dispatcher as `crew state <sub> …` (one allowlist rule covering
+both engine and state; see the `crew state …` bullet above for WHY). The bare
+`crew-state.py` path still runs standalone during transition.
 
 All subcommands accept `--session-id SESSION_ID` for session-scoped state files.
 If omitted, falls back to `CLAUDE_SESSION_ID` env var, then legacy unsuffixed filenames.
 
 ```bash
 # Show loop state
-crew-state.py show bl --session-id abc123
-crew-state.py show mt
+crew state show bl --session-id abc123
+crew state show mt
 
 # Check if active (exit code 0=active, 1=inactive)
-crew-state.py is-active bl --session-id abc123
+crew state is-active bl --session-id abc123
 
 # Initialize a loop
-crew-state.py init bl --prompt "Fix the auth bug" --session-id abc123
-crew-state.py init mt --task "Add user profiles" --auto-plan --session-id abc123
+crew state init bl --prompt "Fix the auth bug" --session-id abc123
+crew state init mt --task "Add user profiles" --auto-plan --session-id abc123
 
 # Check if this session has conflicts (other sessions ignored)
-crew-state.py check-conflicts --session-id abc123
+crew state check-conflicts --session-id abc123
 
 # Set specific fields
-crew-state.py set bl iteration 5 --session-id abc123
-crew-state.py set mt last_verdict REVISE --session-id abc123
+crew state set bl iteration 5 --session-id abc123
+crew state set mt last_verdict REVISE --session-id abc123
 
 # Deactivate
-crew-state.py deactivate bl --reason "User cancelled" --session-id abc123
+crew state deactivate bl --reason "User cancelled" --session-id abc123
 ```
 
 **Session ID resolution order:**

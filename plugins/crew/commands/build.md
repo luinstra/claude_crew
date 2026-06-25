@@ -39,13 +39,13 @@ Resolve the flags to a **seat list** once, then split it:
 
 Below, **"the task"** means `$ARGUMENTS` with these panel flags removed — use it
 wherever a step references the task. Keep the raw `$ARGUMENTS` (flags included)
-only in the `crew-state.py --prompt` so the panel survives across iterations. A
+only in the `crew state … --prompt` so the panel survives across iterations. A
 one-seat panel is fine — synthesis / never-choke handle any count down to one.
 
 ## MANDATORY: Activate the Loop
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py init bl --prompt "$ARGUMENTS"
+"${CLAUDE_PLUGIN_ROOT}/crew" state init bl --prompt "$ARGUMENTS"
 ```
 
 ## How This Works
@@ -108,7 +108,7 @@ synthesized from whichever seats succeed.
 
 **Skip this step if the resolved panel has no subprocess seat** (e.g.
 `--panel lite`) — go straight to Step 2b. Otherwise fan the subprocess seats out
-over the working-tree diff **one `cli.py run` call per seat, in parallel** — each a
+over the working-tree diff **one `crew run` call per seat, in parallel** — each a
 separate, visible, individually-killable shell (the per-seat shape
 `/crew:debate`'s multi-round path uses), not one opaque `review` call hiding them
 in an internal thread pool. Use the
@@ -118,7 +118,7 @@ bare-script path (its top-of-file `sys.path` guard makes package imports resolve
 the registry authoritative — no hardcoded cursor list here):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" seats --seats <resolved codex/cursor-* seats>
+"${CLAUDE_PLUGIN_ROOT}/crew" seats --seats <resolved codex/cursor-* seats>
 ```
 
 It prints one seat per line. (For `--panel cursor`, pass `--seats cursor`.)
@@ -128,7 +128,7 @@ It prints one seat per line. (For `--panel cursor`, pass `--seats cursor`.)
 `[Session ID: …]` value; never the literal placeholder or a `${…}` expansion):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render working-tree --mode review --stage --session-id <session-id>
+"${CLAUDE_PLUGIN_ROOT}/crew" render working-tree --mode review --stage --session-id <session-id>
 ```
 
 It prints the staged path — `.crew/reviews/<session-id>/prompt-seat.txt`. Reference
@@ -136,10 +136,10 @@ mode (the default) makes each seat reproduce the compound working-tree diff itse
 untracked files included — so a seat can't miss files the executor just created.
 
 **2a.2 — run EACH seat in its own parallel shell.** For every seat from 2a.0, launch
-a SEPARATE `cli.py run <seat>` Bash call, all concurrently (e.g. background calls):
+a SEPARATE `crew run <seat>` Bash call, all concurrently (e.g. background calls):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" run <seat> -f .crew/reviews/<session-id>/prompt-seat.txt --json -o .crew/reviews/<session-id>/<seat>.json
+"${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f .crew/reviews/<session-id>/prompt-seat.txt --json -o .crew/reviews/<session-id>/<seat>.json
 ```
 
 - `run --json` ALWAYS exits 0 and writes the six-field result
@@ -167,24 +167,25 @@ seats see them. Render each `opus`/`sonnet` seat's prompt over the SAME `working
 target:
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render working-tree --mode review --seat-role opus   --stage --session-id <session-id>
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render working-tree --mode review --seat-role sonnet --stage --session-id <session-id>
-# opt-in — only if opus-4.6 is in the panel (staged as prompt-opus-46.txt):
-python "${CLAUDE_PLUGIN_ROOT}/scripts/multiagent/cli.py" render working-tree --mode review --seat-role opus-4.6 --stage --session-id <session-id>
+"${CLAUDE_PLUGIN_ROOT}/crew" render working-tree --mode review --stage-all opus,sonnet --session-id <session-id>
+# opt-in — add opus-4.6 to the list ONLY if it is in the resolved panel
+# (staged as prompt-opus-46.txt): … --stage-all opus,sonnet,opus-4.6 …
 ```
 
-`--stage` derives `.crew/reviews/<session-id>/prompt-<seat-role>.txt` from the
-`--seat-role` + session id, writes it (creating the dir), and prints the path —
-session-scoped so concurrent sessions never clobber each other. **Substitute your
-actual session id for `<session-id>`** — the `[Session ID: …]` value from the
-SessionStart context (the same id `crew-state.py` uses). Pass it as a literal
-`--session-id` value — NOT the placeholder text, and NOT a `${CLAUDE_SESSION_ID}`
-shell expansion (a `$…` expansion isn't allowlistable and isn't reliably exported
-to the command shell; the engine resolves the id itself, arg → env). The engine
-**rejects an unsubstituted `<…>` placeholder** with a loud error, so a missed
-substitution fails fast instead of silently sharing one dir. `.crew/` is
-gitignored. **Read** each staged file with the Read tool and pass its contents to
-the matching seat.
+`--stage-all` stages one LABELED prompt PER comma-listed role in a SINGLE call —
+`.crew/reviews/<session-id>/prompt-<role>.txt` for each (`prompt-opus.txt`,
+`prompt-sonnet.txt`, opt-in `prompt-opus-46.txt`), each carrying its own
+"acting as the **<role>** seat" label — and prints a JSON `{role: path}` map to
+stdout. It is session-scoped so concurrent sessions never clobber each other.
+**Substitute your actual session id for `<session-id>`** — the `[Session ID: …]`
+value from the SessionStart context (the same id `crew state` uses). Pass it as a
+literal `--session-id` value — NOT the placeholder text, and NOT a
+`${CLAUDE_SESSION_ID}` shell expansion (a `$…` expansion isn't allowlistable and
+isn't reliably exported to the command shell; the engine resolves the id itself,
+arg → env). The engine **rejects an unsubstituted `<…>` placeholder** with a loud
+error, so a missed substitution fails fast instead of silently sharing one dir.
+`.crew/` is gitignored. **Read** each path from the JSON map with the Read tool
+and pass its contents to the matching seat.
 
 Then dispatch each seat with the rendered text as its prompt, appending the
 executor's summary inline (it's small) so every seat shares the same intent. Each
@@ -293,7 +294,7 @@ When the panel's verdict is APPROVED (or REVISE with only [MINOR] issues):
 
 1. **Deactivate the loop:**
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py deactivate bl --reason "Advisor verified complete"
+"${CLAUDE_PLUGIN_ROOT}/crew" state deactivate bl --reason "Advisor verified complete"
 ```
 
 2. **Summarize what was accomplished** and let the user know the task is complete.

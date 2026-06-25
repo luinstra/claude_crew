@@ -78,7 +78,7 @@ git commit -m "ci: update workflow permissions"
 |---------|---------|
 | `/plugin` | Install plugin from current directory (run from `plugins/crew/` or `plugins/sk/`) |
 | `python plugins/crew/scripts/test-hooks.py` | Run hook unit tests |
-| `python plugins/crew/scripts/crew-state.py show bl` | Debug build loop state |
+| `"${CLAUDE_PLUGIN_ROOT}/crew" state show bl` | Debug build loop state (via the bare dispatcher) |
 
 ### Install Git Hook (Required for Contributors)
 
@@ -186,13 +186,13 @@ plugins/
 The crew plugin uses Python scripts to manage persistence:
 
 ```
-User starts loop → crew-state.py init → JSON state file created
+User starts loop → crew state init → JSON state file created
     ↓
 Claude works → session continues
     ↓
 Claude tries to stop → Stop hook reads state → blocks if loop active
     ↓
-Loop complete → crew-state.py deactivate → JSON deleted
+Loop complete → crew state deactivate → JSON deleted
 ```
 
 **State files** (in project's `.crew/`):
@@ -206,9 +206,9 @@ Loop complete → crew-state.py deactivate → JSON deleted
 # Run hook tests
 python plugins/crew/scripts/test-hooks.py
 
-# Manual state inspection
-python plugins/crew/scripts/crew-state.py show bl
-python plugins/crew/scripts/crew-state.py show mt
+# Manual state inspection (via the bare crew dispatcher)
+"${CLAUDE_PLUGIN_ROOT}/crew" state show bl
+"${CLAUDE_PLUGIN_ROOT}/crew" state show mt
 ```
 
 ## Key Patterns

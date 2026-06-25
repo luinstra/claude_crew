@@ -245,7 +245,7 @@ def build_session_status(
     if session_id:
         messages.append(
             f"[Session ID: {session_id}]\n"
-            f"Pass this session ID when invoking crew-state.py commands: --session-id {session_id}\n"
+            f"Pass this session ID when invoking crew state … commands: --session-id {session_id}\n"
             f"Also exported as CLAUDE_SESSION_ID environment variable."
         )
 

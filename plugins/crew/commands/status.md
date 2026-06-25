@@ -9,10 +9,10 @@ Check the state of active loops by running these commands:
 
 ```bash
 # Check build loop
-BL_STATE=$(${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py show bl --verbose 2>/dev/null)
+BL_STATE=$("${CLAUDE_PLUGIN_ROOT}/crew" state show bl --verbose 2>/dev/null)
 
 # Check measure-twice loop
-MT_STATE=$(${CLAUDE_PLUGIN_ROOT}/scripts/crew-state.py show mt --verbose 2>/dev/null)
+MT_STATE=$("${CLAUDE_PLUGIN_ROOT}/crew" state show mt --verbose 2>/dev/null)
 ```
 
 ### Report Format
@@ -31,4 +31,4 @@ After running both commands, report the status in this format:
 - Check if `.crew/context-snapshot.md` exists
 - If yes, report its age in days
 
-Run both `crew-state.py show` commands and present the results clearly to the user.
+Run both `crew state show` commands and present the results clearly to the user.
