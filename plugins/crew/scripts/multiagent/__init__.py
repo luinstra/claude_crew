@@ -2,8 +2,9 @@
 
 This package drives the *subprocess* seats (codex + cursor-gpt/cursor-gemini/
 cursor-glm/cursor-composer; agy opt-in) of a multi-model
-review panel. Task seats (Claude voices: opus, sonnet) are driven from inside
-Claude Code by the orchestrating command markdown, NOT by this engine.
+review panel. Task seats (Claude voices — ``seats.TASK_SEAT_NAMES``: opus,
+sonnet, plus opt-in opus-4.6) are driven from inside Claude Code by the
+orchestrating command markdown, NOT by this engine.
 
 Both seat kinds resolve to ONE normalized result shape — the six-field
 ``ProviderResult`` (name, model, ok, output, error, elapsed). Subprocess seats

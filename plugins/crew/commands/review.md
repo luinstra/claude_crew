@@ -20,29 +20,21 @@ $ARGUMENTS
 ## Panel options (optional)
 
 Flags at the **start** of `$ARGUMENTS` choose which models review; the rest is
-the review request. Default (no flag) = the full panel.
+the review request. Default (no flag) = the full panel — pass `--panel full`.
 
-- `--panel full` = `codex,cursor-gemini,cursor-glm,cursor-composer,opus,sonnet`
-  (default) · `--panel lite` = `opus,sonnet` · `--panel solo` = `opus`
-- `--panel cursor` = all Cursor model-seats (`--seats cursor`, which the engine
-  expands to every registered cursor-* seat — cursor-gpt, cursor-gemini,
-  cursor-glm, cursor-composer, and any future ones); a pure cross-model Cursor
-  panel — NO codex, NO opus/sonnet Task seats.
-- `--seats <list>` = an explicit comma-list of any registered seat
-  (`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-composer, opus, sonnet`;
-  e.g. `--seats codex,opus`). `agy` is opt-in — works via `--seats agy` but is
-  not in the default panel. `--seats` wins if both are given.
-- **Opt-in `opus-4.6` Claude seat** — a third Claude voice pinned to the
-  `claude-opus-4-6` model (some reviewers prefer 4.6 over 4.7/4.8). NOT in any
-  default; add it explicitly, e.g. `--seats codex,opus,sonnet,opus-4.6`. It's a
-  Task seat like `opus`/`sonnet` (Step 4), just with a version-pinned model.
-
-Resolve to a **seat list**, then split it: the `codex`/`cursor-*` entries (and
-opt-in `agy`) are the engine's `--seats` (Step 3 — **skip Step 3 if there are
-none**); the `opus`/`sonnet`/`opus-4.6` entries are the Task seats (Step 4 — spawn
-only those). A one-seat panel is fine. For `--panel cursor` the subprocess seats are
-all cursor-* (pass `--seats cursor` to the engine, which expands it to every
-cursor-* seat) and the Task-seats step is SKIPPED (no opus/sonnet).
+- `--panel full|lite|solo|cursor` — a named preset. `--seats <comma-list>` — an
+  explicit subset of any registered seat (e.g. `--seats codex,opus`); `--seats`
+  wins if both are given. `agy` and `cursor-gpt` are opt-in (add via `--seats`).
+  Opt-in `opus-4.6` is a third Claude voice pinned to a version-locked model — add
+  it explicitly (e.g. `--seats codex,opus,sonnet,opus-4.6`).
+- **The engine resolves the preset — the orchestrator does NOT.** `review-prep`
+  (Step 3) takes the user's `--panel`/`--seats` and resolves it into
+  `subprocess_seats` (the `codex`/`cursor-*`/opt-in `agy` entries),
+  `task_seats` (the Claude voices), and `task_seat_models` (each Task seat's
+  model pin). The orchestrator never defines presets, classifies seat names, or
+  hardcodes a model pin — it passes the flag through and reads the JSON. Pass
+  `--panel full` when the user gives no panel flag; otherwise pass the user's
+  chosen `--panel <preset>` / `--seats <subset>`.
 
 ## What this does
 
@@ -94,8 +86,11 @@ silently guess.
 
 ## Step 3 — Fan out subprocess seats (one visible shell PER SEAT)
 
-**Skip this step if the resolved panel has no subprocess seat** (e.g.
-`--panel lite`) — go straight to Step 4. Otherwise fan the subprocess seats out
+**ALWAYS run `review-prep` (3.0–3.1 below) — it is the SOLE source of the
+`task_seats`/`task_seat_models` Step 4 needs.** Skip ONLY the per-seat subprocess
+fan-out (3.2) + the `collect` (3.3) when `subprocess_seats` is empty (e.g.
+`--panel lite`/`solo`) — go straight to Step 4 and synthesize from the Task seats
+alone. Otherwise fan the subprocess seats out
 **one `crew run` call per seat, in parallel** — each is a separate, visible,
 individually-killable shell (the same per-seat shape `/crew:debate`'s multi-round
 path uses, instead
@@ -103,11 +98,12 @@ of one opaque `review` call hiding them in an internal thread pool). Use the
 bare-script path (its top-of-file `sys.path` guard makes package imports resolve).
 
 **3.0–3.1 — prep the fan-out in ONE call.** `review-prep` does the deterministic
-prep — resolves the target, expands the SUBPROCESS seat list (group tokens like
-`cursor` expanded via the registry), and stages the ONE shared subprocess prompt
-(`--stage`, byte-identical to a standalone `render --mode review --stage`) — and
-PRINTS `{prompt_path, subprocess_seats, task_seats}` as one-line JSON. It runs
-NOTHING (the per-seat loop below stays yours). Substitute your real id for
+prep — resolves the target, resolves `--panel`/`--seats` into the SUBPROCESS seat
+list (group tokens like `cursor` expanded via the registry) AND the Task-seat
+split, and stages the ONE shared subprocess prompt (`--stage`, byte-identical to a
+standalone `render --mode review --stage`) — and PRINTS
+`{prompt_path, subprocess_seats, task_seats, task_seat_models}` as one-line JSON.
+It runs NOTHING (the per-seat loop below stays yours). Substitute your real id for
 `<session-id>` (the `[Session ID: …]` value; never the literal placeholder or a
 `${…}` expansion). **Quote `"<TARGET>"`/`"<BASE>"`** (a plan path can contain
 spaces); `<TARGET>` is the plan `.md` path or git scope from Step 1
@@ -116,12 +112,14 @@ default — each seat fetches the diff/plan itself; add `--inline-diff` to embed
 instead (rarely needed — it is forwarded to the staged prompt):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" review-prep "<TARGET>" --base "<BASE>" --seats <resolved codex/cursor-* seats> --session-id <session-id>
+"${CLAUDE_PLUGIN_ROOT}/crew" review-prep "<TARGET>" --base "<BASE>" --panel full --session-id <session-id>
 ```
 
-`review-prep` is SUBPROCESS-prep only — it does NOT resolve or stage the Claude
-Task seats; Step 4 still owns those (spawn only the `opus`/`sonnet`/`opus-4.6`
-entries the panel resolved to). **Parse the one-line JSON** it prints (read it
+Pass `--panel full` when the user gives no panel flag; otherwise pass the user's
+chosen `--panel <preset>` / `--seats <subset>`. `review-prep` resolves BOTH seat
+kinds: Step 4 reads `task_seats` + `task_seat_models` from this same JSON (it no
+longer classifies Claude seats itself), and the engine still EXECUTES only the
+subprocess seats. **Parse the one-line JSON** it prints (read it
 directly from the command's stdout — it is NOT a shell `$(…)` capture): use
 `prompt_path` for the per-seat loop's `-f` and `subprocess_seats` to iterate the
 loop AND (JOINED comma-separated) to pass to `collect --seats` in 3.3.
@@ -191,28 +189,31 @@ never positionally.
 
 ## Step 4 — Fan out Task seats (parallel)
 
-Spawn a reviewer seat **in parallel for each Claude-seat entry (`opus`, `sonnet`,
-or opt-in `opus-4.6`) in the resolved panel** (skip this step if none present). Do
+Spawn a reviewer seat **in parallel for each entry in `task_seats`** (from the
+3.0–3.1 `review-prep` JSON — skip this step if `task_seats` is empty). Do
 NOT hand-write each seat's prompt: **render it from the engine** so every seat —
 subprocess AND Task — reviews ONE identical target. `render` is the single prompt
 source, and it resolves the working-tree target the SAME way the engine's
 `review` step did (compound `Target.diff_cmd` including untracked files), so a
-Claude seat can't miss new files a subprocess seat sees. For each `opus`/`sonnet`
-seat, render its prompt over the SAME resolved `<TARGET>` (and `--base "<BASE>"`)
-you passed the engine in Step 3:
+Claude seat can't miss new files a subprocess seat sees. Render each Task seat's
+prompt over the SAME resolved `<TARGET>` (and `--base "<BASE>"`) you passed the
+engine in Step 3, staging ALL of them in ONE `--stage-all` call fed the
+**comma-joined `task_seats`** from the prep JSON (NOT a hardcoded role list):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" render "<TARGET>" --mode review --base "<BASE>" --stage-all opus,sonnet --session-id <session-id>
-# opt-in — add opus-4.6 to the list ONLY if it is in the resolved panel
-# (staged as prompt-opus-46.txt — the dot is stripped from the role for the
-# filename): … --stage-all opus,sonnet,opus-4.6 …
+"${CLAUDE_PLUGIN_ROOT}/crew" render "<TARGET>" --mode review --base "<BASE>" --stage-all <comma-joined task_seats from the review-prep JSON> --session-id <session-id>
 ```
+
+**Skip this `--stage-all` call entirely if `task_seats` is empty** (a
+subprocess-only panel like `--panel cursor`). A Task seat name with a `.` (e.g.
+`opus-4.6`) stages with the dot stripped from the filename
+(`prompt-opus-46.txt`) — the same derivation the spawn line below reads, so the
+staged file and the read file can never diverge.
 
 (`<TARGET>` is the plan `.md` path or git scope from Step 1; `<BASE>` is the same
 base passed in Step 3 — drop `--base` for a plan-file or working-tree target.)
 `--stage-all` stages one LABELED prompt PER comma-listed role in a SINGLE call —
-`.crew/reviews/<session-id>/prompt-<role>.txt` for each (`prompt-opus.txt`,
-`prompt-sonnet.txt`, opt-in `prompt-opus-46.txt`), each carrying its own
+`.crew/reviews/<session-id>/prompt-<role>.txt` for each, each carrying its own
 "acting as the **<role>** seat" label — and prints a JSON `{role: path}` map to
 stdout. It is session-scoped so concurrent sessions never clobber each other.
 **Substitute your actual session id for `<session-id>`** — the `[Session ID: …]`
@@ -225,17 +226,19 @@ error, so a missed substitution fails fast instead of silently sharing one dir.
 `.crew/` is gitignored. **Read** each path from the JSON map with the Read tool
 and pass its contents to the matching seat.
 Then dispatch each seat with the rendered text as its prompt — the SAME agent
-(`crew:reviewer`) with a per-spawn `model` override selecting the voice (spawn
-only the ones in the panel):
+(`crew:reviewer`) with a per-spawn `model` override selecting the voice. **Iterate
+`task_seats` from the prep JSON**; for each `<seat>` read its model from
+`task_seat_models[<seat>]` and its prompt from the staged
+`prompt-<seat, dot-stripped>.txt` (e.g. `opus-4.6` → `prompt-opus-46.txt`). Do NOT
+hardcode seat names or model pins — both come from the JSON:
 
 ```
-Task(subagent_type="crew:reviewer", model="opus",   prompt="<contents of .crew/reviews/<session-id>/prompt-opus.txt>")
-Task(subagent_type="crew:reviewer", model="sonnet", prompt="<contents of .crew/reviews/<session-id>/prompt-sonnet.txt>")
-# opt-in opus-4.6 seat — version-pinned model; spawn ONLY if in the resolved panel:
-Task(subagent_type="crew:reviewer", model="claude-opus-4-6", prompt="<contents of .crew/reviews/<session-id>/prompt-opus-46.txt>")
+# for each <seat> in task_seats:
+Task(subagent_type="crew:reviewer", model="<task_seat_models[<seat>]>", prompt="<contents of .crew/reviews/<session-id>/prompt-<seat, dot-stripped>.txt>")
 ```
 
-> **`opus-4.6` caveat:** `model="claude-opus-4-6"` is checked against your org's
+> **`opus-4.6` caveat:** the `claude-opus-4-6` pin (from `task_seat_models`) is
+> checked against your org's
 > model allowlist — if 4.6 isn't allowed it **silently falls back** to the
 > inherited model (you'd get another 4.8, with no error). Only trust the version
 > spread if 4.6 is actually available to you.

@@ -2559,9 +2559,9 @@ def test_review_prep():
             check("review-prep prints valid JSON", False, "valid json",
                   f"{exc}: {proc.stdout[:150]!r} err={proc.stderr[:150]!r}")
         if obj is not None:
-            check("review-prep JSON keys are [prompt_path, subprocess_seats, task_seats] IN ORDER, exit 0",
+            check("review-prep JSON keys are [prompt_path, subprocess_seats, task_seats, task_seat_models] IN ORDER, exit 0",
                   proc.returncode == 0
-                  and list(obj.keys()) == ["prompt_path", "subprocess_seats", "task_seats"],
+                  and list(obj.keys()) == ["prompt_path", "subprocess_seats", "task_seats", "task_seat_models"],
                   "exact key order", f"rc={proc.returncode} keys={list(obj.keys()) if obj else None}")
         check("review-prep stdout has no \\uXXXX escaping (ensure_ascii=False)",
               "\\u" not in proc.stdout, "no \\u", repr(proc.stdout[:160]))
@@ -2734,6 +2734,143 @@ def test_review_prep():
                   and obj["task_seats"] == ["opus", "sonnet"],
                   "empty subprocess + no stage + task echoed",
                   f"rc={proc.returncode} obj={obj} staged={staged.exists()}")
+
+    # ---- Step 2 (panel catalog): --panel resolution + unified --seats split ----
+    from multiagent.providers import known_seat_names as _known_seats  # noqa: E402
+    _registered_cursor = sorted(n for n in _known_seats() if n.startswith("cursor-"))
+
+    def _prep(args, cwd):
+        proc = _run_dispatcher(["review-prep", "plan.md", *args], cwd=cwd, timeout=30)
+        return proc, (json.loads(proc.stdout) if proc.returncode == 0 and proc.stdout.strip() else None)
+
+    # 8. --panel full: subprocess subset == today's default panel, task seats +
+    #    model pins from the catalog.
+    with tempfile.TemporaryDirectory() as td:
+        _write_plan(Path(td))
+        proc, obj = _prep(["--panel", "full", "--session-id", "pf"], td)
+        check("review-prep --panel full -> default subprocess subset + task_seats/models",
+              proc.returncode == 0 and obj is not None
+              and obj["subprocess_seats"] == ["codex", "cursor-gemini", "cursor-glm", "cursor-composer"]
+              and obj["task_seats"] == ["opus", "sonnet"]
+              and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"},
+              "full preset split", str(obj))
+
+    # 9. --panel lite: subprocess_seats==[], prompt_path=="", task path still
+    #    resolved (the BLOCKING lite/solo Task-path fix — review-prep ALWAYS emits
+    #    the task split even when the subprocess fan-out is skipped).
+    with tempfile.TemporaryDirectory() as td:
+        _write_plan(Path(td))
+        proc, obj = _prep(["--panel", "lite", "--session-id", "pl"], td)
+        staged = Path(td) / ".crew" / "reviews" / "pl" / "prompt-seat.txt"
+        check("review-prep --panel lite -> subprocess_seats==[], prompt_path=='', task path intact",
+              proc.returncode == 0 and obj is not None
+              and obj["subprocess_seats"] == [] and obj["prompt_path"] == ""
+              and not staged.exists()
+              and obj["task_seats"] == ["opus", "sonnet"]
+              and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"},
+              "lite: empty subprocess, full task split", str(obj))
+
+    # 10. --panel solo: one Claude seat, no subprocess.
+    with tempfile.TemporaryDirectory() as td:
+        _write_plan(Path(td))
+        proc, obj = _prep(["--panel", "solo", "--session-id", "ps"], td)
+        check("review-prep --panel solo -> subprocess_seats==[], task_seats==['opus']",
+              proc.returncode == 0 and obj is not None
+              and obj["subprocess_seats"] == []
+              and obj["task_seats"] == ["opus"]
+              and obj["task_seat_models"] == {"opus": "opus"},
+              "solo split", str(obj))
+
+    # 11. --panel cursor: every registered cursor-* seat (group token expanded IN
+    #     cli.py), NO Task seats.
+    with tempfile.TemporaryDirectory() as td:
+        _write_plan(Path(td))
+        proc, obj = _prep(["--panel", "cursor", "--session-id", "pc"], td)
+        check("review-prep --panel cursor -> all cursor-* subprocess seats, task_seats==[]",
+              proc.returncode == 0 and obj is not None
+              and sorted(obj["subprocess_seats"]) == _registered_cursor
+              and len(obj["subprocess_seats"]) >= 2
+              and obj["task_seats"] == [] and obj["task_seat_models"] == {},
+              str(_registered_cursor), str(obj))
+
+    # 12. Mixed unified --seats split: subprocess vs TASK_SEAT_NAMES, with model pin.
+    with tempfile.TemporaryDirectory() as td:
+        _write_plan(Path(td))
+        proc, obj = _prep(["--seats", "codex,opus,opus-4.6", "--session-id", "ms"], td)
+        check("review-prep --seats codex,opus,opus-4.6 splits subprocess vs task + pins opus-4.6",
+              proc.returncode == 0 and obj is not None
+              and obj["subprocess_seats"] == ["codex"]
+              and obj["task_seats"] == ["opus", "opus-4.6"]
+              and obj["task_seat_models"] == {"opus": "opus", "opus-4.6": "claude-opus-4-6"},
+              "mixed split + model pin", str(obj))
+
+    # 13. Unknown unified --seats name -> silently DROPPED (back-compat with
+    #     _resolve_seats's drop behavior); exit 0.
+    with tempfile.TemporaryDirectory() as td:
+        _write_plan(Path(td))
+        proc, obj = _prep(["--seats", "codex,opus,bogus", "--session-id", "us"], td)
+        check("review-prep --seats codex,opus,bogus drops 'bogus' from BOTH lists (exit 0)",
+              proc.returncode == 0 and obj is not None
+              and obj["subprocess_seats"] == ["codex"]
+              and obj["task_seats"] == ["opus"]
+              and obj["task_seat_models"] == {"opus": "opus"}
+              and "bogus" not in obj["subprocess_seats"]
+              and "bogus" not in obj["task_seats"]
+              and "bogus" not in obj["task_seat_models"],
+              "bogus dropped", str(obj))
+
+    # 14. Both --panel AND --seats omitted -> explicit-empty (exit 0).
+    with tempfile.TemporaryDirectory() as td:
+        _write_plan(Path(td))
+        proc, obj = _prep(["--session-id", "bo"], td)
+        staged = Path(td) / ".crew" / "reviews" / "bo" / "prompt-seat.txt"
+        check("review-prep both --panel and --seats omitted -> explicit-empty (exit 0)",
+              proc.returncode == 0 and obj is not None
+              and obj["subprocess_seats"] == [] and obj["task_seats"] == []
+              and obj["task_seat_models"] == {} and obj["prompt_path"] == ""
+              and not staged.exists(),
+              "explicit-empty both-omitted", str(obj))
+
+    # 15. Precedence: explicit --task-seats OVERRIDES the panel-derived task list;
+    #     explicit subprocess --seats OVERRIDES the panel subprocess list.
+    with tempfile.TemporaryDirectory() as td:
+        _write_plan(Path(td))
+        proc, obj = _prep(["--panel", "full", "--task-seats", "opus", "--session-id", "ov1"], td)
+        check("review-prep --panel full --task-seats opus -> task list overridden to ['opus']",
+              proc.returncode == 0 and obj is not None
+              and obj["subprocess_seats"] == ["codex", "cursor-gemini", "cursor-glm", "cursor-composer"]
+              and obj["task_seats"] == ["opus"]
+              and obj["task_seat_models"] == {"opus": "opus"},
+              "task-seats override", str(obj))
+    with tempfile.TemporaryDirectory() as td:
+        _write_plan(Path(td))
+        proc, obj = _prep(["--panel", "full", "--seats", "codex", "--session-id", "ov2"], td)
+        check("review-prep --panel full --seats codex -> subprocess overridden, task still full preset",
+              proc.returncode == 0 and obj is not None
+              and obj["subprocess_seats"] == ["codex"]
+              and obj["task_seats"] == ["opus", "sonnet"]
+              and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"},
+              "seats override subprocess, panel supplies task", str(obj))
+
+    # 16. Staging<->spawn consistency: the comma-joined task_seats (incl. opus-4.6)
+    #     fed to `render --stage-all` stages prompt-opus-46.txt (dot stripped) — the
+    #     SAME filename the spawn line reads, so they can never diverge.
+    with tempfile.TemporaryDirectory() as td:
+        _write_plan(Path(td))
+        prep, obj = _prep(["--seats", "opus,sonnet,opus-4.6", "--session-id", "sc"], td)
+        joined = ",".join(obj["task_seats"]) if obj else ""
+        render = _run_dispatcher(
+            ["render", "plan.md", "--mode", "review", "--stage-all", joined,
+             "--session-id", "sc"], cwd=td, timeout=30)
+        opus46 = Path(td) / ".crew" / "reviews" / "sc" / "prompt-opus-46.txt"
+        opus = Path(td) / ".crew" / "reviews" / "sc" / "prompt-opus.txt"
+        sonnet = Path(td) / ".crew" / "reviews" / "sc" / "prompt-sonnet.txt"
+        check("review-prep task_seats join feeds --stage-all -> stages prompt-opus-46.txt (dot stripped)",
+              prep.returncode == 0 and render.returncode == 0
+              and obj["task_seats"] == ["opus", "sonnet", "opus-4.6"]
+              and opus.is_file() and sonnet.is_file() and opus46.is_file(),
+              "prompt-opus-46.txt staged from joined task_seats",
+              f"join={joined!r} rc={render.returncode} opus46={opus46.is_file()}")
 
 
 def test_panel_catalog():

@@ -19,9 +19,10 @@ seat ad-hoc), ``render`` (build ONE seat's prompt, no execution), ``seats``
 ``collect`` (collapse the named per-seat ``<seat>.json`` result files into
 ONE faithful ``render_panel`` markdown digest — reads EXACTLY the seats named in
 ``--seats``, never globs), and ``review-prep`` (the deterministic PREP for the
-review-bearing commands: resolve target + subprocess seats, stage the ONE shared
-subprocess prompt, and PRINT ``{prompt_path, subprocess_seats, task_seats}`` —
-runs NOTHING; the per-seat ``run`` loop stays in the command markdown).
+review-bearing commands: resolve target + ``--panel``/``--seats`` → subprocess +
+task split, stage the ONE shared subprocess prompt, and PRINT
+``{prompt_path, subprocess_seats, task_seats, task_seat_models}`` — runs NOTHING;
+the per-seat ``run`` loop + the Task-seat dispatch stay in the command markdown).
 
 The engine EXECUTES only subprocess seats (codex/cursor-*, plus opt-in agy), but ``render`` BUILDS the
 prompt for ANY seat — including the Claude Task seats (opus/sonnet) the
@@ -51,7 +52,7 @@ import os
 import re
 import shutil
 
-from multiagent import prompts, render, rounds, targets
+from multiagent import prompts, render, rounds, seats, targets
 from multiagent.providers import (
     ProviderResult,
     available_seats,
@@ -956,13 +957,23 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     Consolidates the deterministic PREP the command markdown used to do inline
     across three engine calls (``seats`` + ``render --mode review --stage`` + the
     prose seat-splitting): (a) resolve the target via the SAME ``targets.resolve``
-    path ``render``/``review`` use; (b) resolve the SUBPROCESS seats through the
-    registry; (c) stage the ONE shared subprocess prompt via the SAME
+    path ``render``/``review`` use; (b) resolve ``--panel``/``--seats`` into the
+    SUBPROCESS seats (through the registry) AND the TASK seats (the Claude voices,
+    via ``seats.PANEL_PRESETS`` + ``seats.TASK_SEAT_NAMES``); (c) build the
+    ``task_seat_models`` map (``seats.MODEL_OVERRIDES`` is the SINGLE source of
+    every model pin); (d) stage the ONE shared subprocess prompt via the SAME
     ``_build_render_text`` + ``_stage_path`` machinery ``render --mode review
     --stage`` uses — so ``prompt_path``'s file is BYTE-IDENTICAL to ``render
     --mode review --stage`` for the same target. Then it prints ONE JSON object
-    ``{prompt_path, subprocess_seats, task_seats}`` (insertion key order,
-    ``ensure_ascii=False``) and exits.
+    ``{prompt_path, subprocess_seats, task_seats, task_seat_models}`` (insertion
+    key order, ``ensure_ascii=False``) and exits.
+
+    THIS function owns ``--panel``/``--seats`` → seat-split + model-pin
+    resolution. The orchestrator only READS the JSON: it iterates
+    ``subprocess_seats`` for the per-seat ``crew run`` fan-out, joins
+    ``task_seats`` into ``render --stage-all`` to stage the Task prompts, and
+    spawns each Task seat with ``model = task_seat_models[seat]``. The
+    orchestrator NEVER classifies seat names or hardcodes a model pin.
 
     LOAD-BEARING — prep PREPARES; it does NOT run seats. This function MUST NOT
     call ``_fan_out``, ``_run_seat``, ``_run_cli``, or any provider ``.run()``.
@@ -972,12 +983,14 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     re-hides every seat in one opaque thread pool and destroys per-shell
     killability. DO NOT add a run/fan-out call to this function.
 
-    ``--task-seats`` is a PURE OPAQUE ECHO: its value is split on commas and
-    echoed verbatim into ``task_seats``. The engine NEVER resolves it through the
-    registry, NEVER spawns it, NEVER runs it — Claude-seat ownership stays with
-    the orchestrator (the deliberately-rejected ``TaskProvider`` boundary;
-    scripts/CLAUDE.md "Provider = executor"). The orchestrator still owns
-    ``--panel``->seat resolution and Claude-seat dispatch.
+    ``--task-seats`` is a PURE OPAQUE ECHO and an EXPLICIT task-only override: its
+    value is split on commas and echoed verbatim into ``task_seats`` (taking
+    precedence over the ``--panel``/``--seats``-derived task list). The engine
+    NEVER resolves a task seat through the subprocess registry, NEVER spawns it,
+    NEVER runs it — Claude-seat ownership (the dispatch) stays with the
+    orchestrator (the deliberately-rejected ``TaskProvider`` boundary;
+    scripts/CLAUDE.md "Provider = executor"). What this function DOES own is the
+    NAME-level split + model-pin resolution that feeds that dispatch.
     """
     # 1. Target dispatch — the SAME call cmd_review/cmd_render make. --base
     #    defaults to "main" (parity with render/review); coerce before resolve.
@@ -988,19 +1001,60 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    # 2. Subprocess seat expansion WITH the empty-guard (the lite/solo fix):
-    #    _resolve_seats("") returns the DEFAULT subprocess panel, so an
-    #    empty/omitted --seats (a Claude-only lite/solo panel) MUST short-circuit
-    #    to [] — NOT the default panel. Only a non-empty --seats is resolved
-    #    through the registry (reusing _expand_seat_groups / known_seat_names, so
-    #    the `cursor` group token + registry filter behave exactly as `crew
-    #    seats`). SUBPROCESS SEATS ONLY — never Claude seats.
-    subprocess_seats = _resolve_seats(args.seats) if args.seats.strip() else []
+    # 2. --panel/--seats → unified source name list, then split into subprocess
+    #    vs task seats. Sentinel mechanics (--seats default is None, --panel
+    #    default is None/absent):
+    #      * --seats <given> (incl. "")  -> seats_given; classify ITS names
+    #      * --seats omitted + --panel P -> classify the PANEL_PRESETS[P] names
+    #      * BOTH omitted                -> explicit-empty (subprocess=[], task=[]
+    #                                       unless --task-seats given)
+    #    A name classifies as exactly one of: a registry subprocess seat
+    #    (-> subprocess_seats, via _resolve_seats), a seats.TASK_SEAT_NAMES member
+    #    (-> task_seats), or NEITHER (silently DROPPED — matching _resolve_seats's
+    #    existing drop behavior; never loud-error).
+    seats_given = args.seats is not None
+    source_names = (
+        [s.strip() for s in args.seats.split(",") if s.strip()]
+        if seats_given else []
+    )
+    preset_names = (
+        seats.PANEL_PRESETS[args.panel] if args.panel is not None else None
+    )
 
-    # 3. task_seats: OPAQUE echo. Split on commas, echo verbatim. NEVER resolve
-    #    through the registry, NEVER spawn/run. (See the guardrail in the
-    #    docstring.) Omitted/empty --task-seats -> [].
-    task_seats = [s.strip() for s in (args.task_seats or "").split(",") if s.strip()]
+    # 2a. Subprocess seats WITH the empty-guard (the lite/solo fix): _resolve_seats
+    #     ("") returns the DEFAULT panel, so an explicit-empty/omitted source MUST
+    #     short-circuit to []. Only a non-empty source is resolved through the
+    #     registry (reusing _expand_seat_groups / known_seat_names, so the `cursor`
+    #     group token + registry filter behave exactly as `crew seats`). SUBPROCESS
+    #     SEATS ONLY — task names + unknowns are dropped by the registry filter.
+    if seats_given:
+        subprocess_seats = _resolve_seats(",".join(source_names)) if source_names else []
+    elif preset_names is not None:
+        subprocess_seats = _resolve_seats(",".join(preset_names))
+    else:
+        subprocess_seats = []
+
+    # 2b. Task seats. Precedence: explicit --task-seats override > task names in an
+    #     explicit --seats > the --panel preset's task names > []. NEVER resolved
+    #     through the subprocess registry, NEVER spawned/run (opaque-echo contract).
+    explicit_task_seats = [
+        s.strip() for s in (args.task_seats or "").split(",") if s.strip()
+    ]
+    if explicit_task_seats:
+        task_seats = explicit_task_seats
+    else:
+        seats_task_names = [n for n in source_names if n in seats.TASK_SEAT_NAMES]
+        if seats_given and seats_task_names:
+            task_seats = seats_task_names
+        elif preset_names is not None:
+            task_seats = [n for n in preset_names if n in seats.TASK_SEAT_NAMES]
+        else:
+            task_seats = []
+
+    # 2c. task_seat_models: the per-seat model pin for each Task seat. MODEL_OVERRIDES
+    #     is the SINGLE source — a seat not in the map pins its own name. The
+    #     orchestrator reads `model` FROM here; it never hardcodes a pin.
+    task_seat_models = {n: seats.MODEL_OVERRIDES.get(n, n) for n in task_seats}
 
     # 4. Stage the shared SUBPROCESS prompt ONLY when subprocess seats exist —
     #    via the SAME machinery cmd_render --stage uses, so prompt_path's file is
@@ -1031,12 +1085,14 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
         _emit(text, prompt_path)
 
     # 5. Print the JSON contract — the ONLY output. FIXED insertion key order
-    #    (prompt_path, subprocess_seats, task_seats) IS the contract, so do NOT
-    #    sort_keys. ensure_ascii=False (Plan B's escaping lesson — no \uXXXX).
+    #    (prompt_path, subprocess_seats, task_seats, task_seat_models) IS the
+    #    contract, so do NOT sort_keys. ensure_ascii=False (Plan B's escaping
+    #    lesson — no \uXXXX).
     payload = {
         "prompt_path": prompt_path,
         "subprocess_seats": subprocess_seats,
         "task_seats": task_seats,
+        "task_seat_models": task_seat_models,
     }
     print(json.dumps(payload, ensure_ascii=False))
     return 0
@@ -1174,9 +1230,10 @@ def build_parser() -> argparse.ArgumentParser:
     rp = sub.add_parser(
         "review-prep",
         help="Prepare a review/build/measure-twice fan-out: resolve target + "
-             "subprocess seats, stage the ONE shared subprocess prompt, and PRINT "
-             "{prompt_path, subprocess_seats, task_seats} as JSON. Runs NOTHING — "
-             "the per-seat `crew run` loop stays in the command markdown.",
+             "--panel/--seats into subprocess + task seats, stage the ONE shared "
+             "subprocess prompt, and PRINT {prompt_path, subprocess_seats, "
+             "task_seats, task_seat_models} as JSON. Runs NOTHING — the per-seat "
+             "`crew run` loop + the Task-seat dispatch stay in the command markdown.",
     )
     rp.add_argument(
         "target", nargs="?", default="auto",
@@ -1186,10 +1243,23 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--base", dest="base", default=None,
                     help="base ref for branch/auto diffs (default: main)")
     rp.add_argument(
-        "--seats", dest="seats", default="",
-        help="resolved comma-separated SUBPROCESS-seat spec (group 'cursor' "
-             "allowed). EMPTY/omitted => no subprocess seats (Claude-only "
-             "lite/solo): subprocess_seats=[] and NO subprocess prompt is staged.",
+        "--panel", dest="panel", default=None,
+        choices=["full", "lite", "solo", "cursor"],
+        help="named preset resolved via seats.PANEL_PRESETS into BOTH subprocess "
+             "and task seats. Default absent (None): with no --seats either, "
+             "review-prep resolves explicit-empty. --seats overrides the "
+             "subprocess subset; --task-seats overrides the task subset.",
+    )
+    rp.add_argument(
+        "--seats", dest="seats", default=None,
+        help="comma-separated unified seat spec (subprocess + task names, group "
+             "'cursor' allowed). Sentinel: omitted (None) falls back to --panel; "
+             "explicit '' => no subprocess seats (Claude-only lite/solo: "
+             "subprocess_seats=[], no subprocess prompt staged); non-empty => "
+             "split into subprocess_seats (registry-resolved) + task_seats "
+             "(seats.TASK_SEAT_NAMES members), unknown names dropped. Both --seats "
+             "and --panel omitted => explicit-empty (subprocess=[], task=[] unless "
+             "--task-seats given, prompt_path='', exit 0).",
     )
     rp.add_argument(
         "--session-id", dest="session_id", default=None,

@@ -85,9 +85,13 @@ Key contracts (do NOT regress):
 - **`--out <file>`** writes results to a file so the call needs no shell redirect
   (stays permission-allowlistable).
 - **Panel selection** — the commands accept `--panel full|lite|solo|cursor` /
-  `--seats <subset>`; the ORCHESTRATOR resolves those to a seat list and passes
-  only the subprocess subset (the `codex`/`cursor-*` entries, plus opt-in `agy`) to
-  the engine's `--seats` (skipping the engine when there are none). The default
+  `--seats <subset>` and pass them STRAIGHT to `crew review-prep`, which OWNS the
+  resolution (`seats.PANEL_PRESETS` + `seats.MODEL_OVERRIDES`): it splits the
+  preset/`--seats` into `subprocess_seats` (the `codex`/`cursor-*` entries, plus
+  opt-in `agy`), `task_seats` (the Claude voices), and `task_seat_models` (each
+  Task seat's model pin), and the orchestrator just reads that JSON — it no longer
+  classifies seat names, defines presets, or hardcodes a model pin (the engine
+  still EXECUTES only the subprocess subset, skipped when empty). The default
   panel is `codex + cursor-gemini/glm/composer + opus + sonnet`; `cursor-gpt` and
   `agy` are registered but opt-in (codex already covers the GPT lineage, so
   `cursor-gpt` isn't defaulted); `--panel cursor` = `--seats cursor` (ALL Cursor
@@ -113,7 +117,12 @@ Key contracts (do NOT regress):
   PER comma-listed role in a SINGLE call — `.crew/reviews/<session-id>/prompt-<role>.txt`
   for each — and prints a JSON `{role: path}` map. The review-bearing commands
   (`review`/`build`/`measure-twice`) use it to collapse their N per-seat
-  `render --stage --seat-role <role>` calls into ONE. Each role gets its own
+  `render --stage --seat-role <role>` calls into ONE — and the role list they
+  pass is the **comma-joined `task_seats`** from the `review-prep` JSON (NOT a
+  hardcoded `opus,sonnet`), so staging, spawn, and model pins all derive from the
+  one catalog and the staged filename always matches what the spawn reads (a
+  `.`-bearing role like `opus-4.6` stages AND is read as `prompt-opus-46.txt`).
+  Each role gets its own
   "acting as the **<role>** seat" label; the special role `seat` maps to
   `seat_role=None` (no label — matching the shared `prompt-seat.txt`). It reuses
   `_stage_path` + `_resolve_session_id` + the placeholder/traversal guards (so a
@@ -129,14 +138,18 @@ Key contracts (do NOT regress):
   `crew run <seat>` call PER seat — each a separate, visible, killable shell —
   rather than one opaque `crew review --seats <all>` call that hides them in the
   `_fan_out` thread pool. The orchestrator preps the fan-out with ONE
-  `crew review-prep <target> --seats <spec> --session-id <id>` call, which resolves
-  the target, expands the subprocess seat list, stages the shared subprocess prompt
-  once (`render --stage` machinery, byte-identical), and PRINTS
-  `{prompt_path, subprocess_seats, task_seats}` as JSON — it runs NOTHING. The
-  orchestrator then iterates `subprocess_seats`, running each via `run <seat> -f
-  <prompt_path> --json`. (`review-prep` is subprocess-prep only — the Claude Task
-  seats stay orchestrator-owned; `task_seats` is an opaque echo the commands no
-  longer pass.) `run --json` always exits 0 with the six-field result, so per-seat
+  `crew review-prep <target> --panel <preset>` (or `--seats <spec>`)
+  `--session-id <id>` call, which resolves the target, splits `--panel`/`--seats`
+  into the subprocess seat list AND the Task-seat split, stages the shared
+  subprocess prompt once (`render --stage` machinery, byte-identical), and PRINTS
+  `{prompt_path, subprocess_seats, task_seats, task_seat_models}` as JSON — it runs
+  NOTHING. The orchestrator then iterates `subprocess_seats`, running each via
+  `run <seat> -f <prompt_path> --json`. (`review-prep` resolves BOTH seat kinds but
+  EXECUTES neither — the Claude Task seats stay orchestrator-DISPATCHED; the
+  commands now CONSUME `task_seats` + `task_seat_models` to stage via `--stage-all`
+  and spawn each Task seat with `model = task_seat_models[seat]`, so it is no longer
+  the opaque echo the commands ignored.) `run --json` always exits 0 with the
+  six-field result, so per-seat
   never-choke is automatic (no all-failed abort to handle). After the fan-out,
   the orchestrator collapses the N per-seat `<seat>.json` files into ONE markdown
   digest with `crew collect --session-id <id> --seats <comma-joined seat list>
