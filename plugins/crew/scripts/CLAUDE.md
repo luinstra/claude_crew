@@ -37,7 +37,7 @@ their results into the same six-field shape the engine returns.
 
 ```
 multiagent/
-├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `render` (incl. `--stage-all`) | `seats` | `collect` subcommands (reached via the bare `../crew` dispatcher)
+├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `render` (incl. `--stage-all`) | `seats` | `collect` | `review-prep` subcommands (reached via the bare `../crew` dispatcher)
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
@@ -128,10 +128,15 @@ Key contracts (do NOT regress):
   (`review`/`build`/`measure-twice`) fan subprocess seats out ONE
   `crew run <seat>` call PER seat — each a separate, visible, killable shell —
   rather than one opaque `crew review --seats <all>` call that hides them in the
-  `_fan_out` thread pool. The orchestrator gets the concrete (group-expanded) seat
-  list from `crew seats --seats <spec>`, renders the shared subprocess prompt
-  once with `render --stage`, then runs each seat via `run <seat> -f <prompt>
-  --json`. `run --json` always exits 0 with the six-field result, so per-seat
+  `_fan_out` thread pool. The orchestrator preps the fan-out with ONE
+  `crew review-prep <target> --seats <spec> --session-id <id>` call, which resolves
+  the target, expands the subprocess seat list, stages the shared subprocess prompt
+  once (`render --stage` machinery, byte-identical), and PRINTS
+  `{prompt_path, subprocess_seats, task_seats}` as JSON — it runs NOTHING. The
+  orchestrator then iterates `subprocess_seats`, running each via `run <seat> -f
+  <prompt_path> --json`. (`review-prep` is subprocess-prep only — the Claude Task
+  seats stay orchestrator-owned; `task_seats` is an opaque echo the commands no
+  longer pass.) `run --json` always exits 0 with the six-field result, so per-seat
   never-choke is automatic (no all-failed abort to handle). After the fan-out,
   the orchestrator collapses the N per-seat `<seat>.json` files into ONE markdown
   digest with `crew collect --session-id <id> --seats <comma-joined seat list>

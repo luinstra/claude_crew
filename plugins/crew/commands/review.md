@@ -102,31 +102,33 @@ path uses, instead
 of one opaque `review` call hiding them in an internal thread pool). Use the
 bare-script path (its top-of-file `sys.path` guard makes package imports resolve).
 
-**3.0 — get the concrete seat list.** Group tokens (e.g. `cursor`) must be
-expanded to real seat names before you can loop. Ask the engine (keeps the
-registry authoritative — no hardcoded cursor list in this command):
+**3.0–3.1 — prep the fan-out in ONE call.** `review-prep` does the deterministic
+prep — resolves the target, expands the SUBPROCESS seat list (group tokens like
+`cursor` expanded via the registry), and stages the ONE shared subprocess prompt
+(`--stage`, byte-identical to a standalone `render --mode review --stage`) — and
+PRINTS `{prompt_path, subprocess_seats, task_seats}` as one-line JSON. It runs
+NOTHING (the per-seat loop below stays yours). Substitute your real id for
+`<session-id>` (the `[Session ID: …]` value; never the literal placeholder or a
+`${…}` expansion). **Quote `"<TARGET>"`/`"<BASE>"`** (a plan path can contain
+spaces); `<TARGET>` is the plan `.md` path or git scope from Step 1
+(`working-tree`/`auto` for a working-tree code review). Reference mode is the
+default — each seat fetches the diff/plan itself; add `--inline-diff` to embed it
+instead (rarely needed — it is forwarded to the staged prompt):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" seats --seats <resolved codex/cursor-* seats>
+"${CLAUDE_PLUGIN_ROOT}/crew" review-prep "<TARGET>" --base "<BASE>" --seats <resolved codex/cursor-* seats> --session-id <session-id>
 ```
 
-It prints one seat per line. (For `--panel cursor`, pass `--seats cursor` — it
-expands to every registered `cursor-*` seat.)
-
-**3.1 — render the shared subprocess prompt ONCE.** Every subprocess seat reviews
-the SAME target with the SAME criteria (no per-seat label), so render it once via
-`--stage` (session-scoped — substitute your real id for `<session-id>`, the
-`[Session ID: …]` value; never the literal placeholder or a `${…}` expansion):
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" render "<TARGET>" --mode review --base "<BASE>" --stage --session-id <session-id>
-```
-
-It prints the staged path — `.crew/reviews/<session-id>/prompt-seat.txt`. **Quote
-`"<TARGET>"`/`"<BASE>"`** (a plan path can contain spaces); `<TARGET>` is the plan
-`.md` path or git scope from Step 1 (`working-tree`/`auto` for a working-tree code
-review). Reference mode is the default — each seat fetches the diff/plan itself;
-add `--inline-diff` to embed it instead (rarely needed).
+`review-prep` is SUBPROCESS-prep only — it does NOT resolve or stage the Claude
+Task seats; Step 4 still owns those (spawn only the `opus`/`sonnet`/`opus-4.6`
+entries the panel resolved to). **Parse the one-line JSON** it prints (read it
+directly from the command's stdout — it is NOT a shell `$(…)` capture): use
+`prompt_path` for the per-seat loop's `-f` and `subprocess_seats` to iterate the
+loop AND (JOINED comma-separated) to pass to `collect --seats` in 3.3.
+**If `subprocess_seats` is empty** (a Claude-only `--panel lite`/`solo` resolves to
+no subprocess seats, so `prompt_path` is `""` and nothing was staged), **SKIP the
+3.2 per-seat loop AND the 3.3 collect** entirely — go straight to Step 4 and
+synthesize from the Task seats alone.
 
 **3.2 — run EACH seat in its own parallel shell.** First, **clear any pre-existing
 `<seat>.json`** for the seats you are about to run — the session dir
@@ -140,9 +142,10 @@ SKIPPED, not stale-OK. Remove the expected target file for each seat first:
 rm -f .crew/reviews/<session-id>/<seat>.json
 ```
 
-Then, for every seat from 3.0, launch a SEPARATE `crew run <seat>` Bash call, all
-concurrently (e.g. background calls) so they are distinct shells you can watch and
-kill individually:
+Then, for every seat in `subprocess_seats` (from the 3.0–3.1 prep JSON), launch a
+SEPARATE `crew run <seat>` Bash call, all concurrently (e.g. background calls) so
+they are distinct shells you can watch and kill individually (the `-f` path is
+`prompt_path` — `.crew/reviews/<session-id>/prompt-seat.txt`):
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f .crew/reviews/<session-id>/prompt-seat.txt --json -o .crew/reviews/<session-id>/<seat>.json
@@ -165,18 +168,18 @@ early would silently drop a slow-but-still-running seat from the verdict. Only
 after ALL per-seat run shells have completed do you run collect.
 
 Then collapse the per-seat result files into ONE markdown digest instead of
-reading N `<seat>.json` files. You ALREADY have the resolved
-subprocess-seat list from the `crew seats --seats <spec>` step you ran in 3.0 for
-the per-seat loop (it prints one seat per line). **JOIN those seat names
-comma-separated** and pass that SAME list as `collect --seats <comma-list>` so
-collect digests EXACTLY the seats that ran:
+reading N `<seat>.json` files. You ALREADY have the resolved subprocess-seat list
+as the `subprocess_seats` array from the 3.0–3.1 `review-prep` JSON (the SAME list
+the per-seat loop iterated). **JOIN those seat names comma-separated** and pass
+that SAME list as `collect --seats <comma-list>` so collect digests EXACTLY the
+seats that ran:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" collect --session-id <session-id> --seats <resolved-subprocess-seats> -o .crew/reviews/<session-id>/panel.md
 ```
 
-where `<resolved-subprocess-seats>` is the comma-separated join of the per-line
-seat names from your 3.0 `crew seats` output. `collect` reads EXACTLY those named
+where `<resolved-subprocess-seats>` is the comma-separated join of `subprocess_seats`
+from the `review-prep` JSON. `collect` reads EXACTLY those named
 `<seat>.json` files (never globs — a stale/foreign file is never folded in), and a
 named-but-missing seat renders as a SKIPPED block labeled with its name. It writes
 a faithful `render_panel` digest (it does NOT summarize, vote, or reorder) and

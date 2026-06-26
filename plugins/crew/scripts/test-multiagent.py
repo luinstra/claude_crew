@@ -2533,6 +2533,209 @@ def test_collect():
               "exit0 + cursor-glm rendered", f"rc={proc.returncode} got={ok_content[:120]!r}")
 
 
+def _write_plan(td: Path) -> Path:
+    """Write a tiny plan .md (a target that resolves with NO git repo) and return
+    its path relative to ``td`` (review-prep resolves it against cwd=td)."""
+    plan = td / "plan.md"
+    plan.write_text("# Plan\n\nDo the thing.\n", encoding="utf-8")
+    return plan
+
+
+def test_review_prep():
+    log_section("crew review-prep subcommand (PREP only — resolves+stages, runs nothing)")
+
+    # 1. Output shape + pinned JSON contract (keys IN ORDER, no \uXXXX).
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        proc = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex,cursor",
+             "--session-id", "s1", "--task-seats", "opus,sonnet"],
+            cwd=td, timeout=30)
+        obj = None
+        try:
+            obj = json.loads(proc.stdout)
+        except Exception as exc:
+            check("review-prep prints valid JSON", False, "valid json",
+                  f"{exc}: {proc.stdout[:150]!r} err={proc.stderr[:150]!r}")
+        if obj is not None:
+            check("review-prep JSON keys are [prompt_path, subprocess_seats, task_seats] IN ORDER, exit 0",
+                  proc.returncode == 0
+                  and list(obj.keys()) == ["prompt_path", "subprocess_seats", "task_seats"],
+                  "exact key order", f"rc={proc.returncode} keys={list(obj.keys()) if obj else None}")
+        check("review-prep stdout has no \\uXXXX escaping (ensure_ascii=False)",
+              "\\u" not in proc.stdout, "no \\u", repr(proc.stdout[:160]))
+
+    # 2. Subprocess-seats-only + opaque task echo.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        # group `cursor` expands; opus/sonnet NEVER appear in subprocess_seats.
+        proc = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex,cursor,opus,sonnet",
+             "--session-id", "s2", "--task-seats", "opus,sonnet"],
+            cwd=td, timeout=30)
+        obj = json.loads(proc.stdout)
+        subs = obj["subprocess_seats"]
+        check("review-prep subprocess_seats are registry seats only (no opus/sonnet)",
+              proc.returncode == 0 and "opus" not in subs and "sonnet" not in subs
+              and "codex" in subs and any(s.startswith("cursor-") for s in subs),
+              "registry subprocess seats only", str(subs))
+        check("review-prep task_seats echoes --task-seats verbatim",
+              obj["task_seats"] == ["opus", "sonnet"], "['opus','sonnet']",
+              str(obj["task_seats"]))
+        # nonsense labels echo unchanged — NEVER registry-filtered.
+        proc = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex",
+             "--session-id", "s2b", "--task-seats", "foo,bar"],
+            cwd=td, timeout=30)
+        obj = json.loads(proc.stdout)
+        check("review-prep task_seats echoes nonsense labels verbatim (opaque, no filter)",
+              obj["task_seats"] == ["foo", "bar"], "['foo','bar']", str(obj["task_seats"]))
+        # omitted --task-seats -> [].
+        proc = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex", "--session-id", "s2c"],
+            cwd=td, timeout=30)
+        obj = json.loads(proc.stdout)
+        check("review-prep omitted --task-seats -> []",
+              obj["task_seats"] == [], "[]", str(obj["task_seats"]))
+
+    # 3. prompt_path BYTE-IDENTICAL to `render --mode review --stage` (BOTH
+    #    inline-diff modes). Distinct session ids so the two writes don't share a
+    #    path (no self-compare).
+    for flag in ([], ["--inline-diff"]):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            _write_plan(tdp)
+            prep = _run_dispatcher(
+                ["review-prep", "plan.md", "--seats", "codex",
+                 "--session-id", "pa", *flag], cwd=td, timeout=30)
+            stage = _run_dispatcher(
+                ["render", "plan.md", "--mode", "review", "--stage",
+                 "--session-id", "sb", *flag], cwd=td, timeout=30)
+            prep_path = json.loads(prep.stdout)["prompt_path"]
+            prep_f = tdp / prep_path
+            stage_f = tdp / ".crew" / "reviews" / "sb" / "prompt-seat.txt"
+            same = (prep_f.is_file() and stage_f.is_file()
+                    and prep_f.read_bytes() == stage_f.read_bytes())
+            label = "with --inline-diff" if flag else "no flag"
+            check(f"review-prep prompt_path file == render --stage file ({label}, byte-identical)",
+                  prep.returncode == 0 and stage.returncode == 0 and same,
+                  "identical bytes",
+                  f"prep={prep_f.is_file()} stage={stage_f.is_file()} equal={same}")
+
+    # 3b. WORKING-TREE byte-identity (locks the build.md/measure-twice git path —
+    #     the plan.md case above doesn't exercise targets.resolve's git diff).
+    #     Two IDENTICAL temp git repos (identical init + identical change) so
+    #     prep's staged .crew/ file can't perturb render's working-tree diff;
+    #     reference mode embeds the diff COMMAND, not content, so the prompts are
+    #     deterministic and byte-identical across the matched repos.
+    with tempfile.TemporaryDirectory() as tda, tempfile.TemporaryDirectory() as tdb:
+        for repo in (tda, tdb):
+            _init_repo(repo)                                   # commits a.txt=hello
+            (Path(repo) / "a.txt").write_text("hello\nchanged\n")
+        prep = _run_dispatcher(
+            ["review-prep", "working-tree", "--seats", "codex", "--session-id", "wa"],
+            cwd=tda, timeout=30)
+        stage = _run_dispatcher(
+            ["render", "working-tree", "--mode", "review", "--stage",
+             "--session-id", "wb"], cwd=tdb, timeout=30)
+        prep_path = json.loads(prep.stdout)["prompt_path"] if prep.returncode == 0 else ""
+        prep_f = Path(tda) / prep_path if prep_path else Path(tda) / "missing"
+        stage_f = Path(tdb) / ".crew" / "reviews" / "wb" / "prompt-seat.txt"
+        same = (prep_f.is_file() and stage_f.is_file()
+                and prep_f.read_bytes() == stage_f.read_bytes())
+        check("review-prep working-tree prompt_path == render working-tree --stage (byte-identical)",
+              prep.returncode == 0 and stage.returncode == 0 and same
+              and prep_path == ".crew/reviews/wa/prompt-seat.txt",
+              "identical bytes (git working-tree path)",
+              f"prep={prep_f.is_file()} stage={stage_f.is_file()} equal={same} path={prep_path!r}")
+
+    # 4. No internal fan-out / runs nothing / stages ONLY the subprocess prompt.
+    #    A fake codex on PATH that writes a sentinel must NEVER be invoked by prep.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        bins = tdp / "bin"
+        bins.mkdir()
+        sentinel = tdp / "codex_ran.sentinel"
+        make_fake_bin(bins, "codex", f"""
+        import sys
+        open({str(sentinel)!r}, "w").write("RAN")
+        sys.exit(0)
+        """)
+        env = path_with(bins)
+        proc = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex", "--session-id", "s4",
+             "--task-seats", "opus,sonnet"], cwd=td, env=env, timeout=30)
+        prompt_seat = tdp / ".crew" / "reviews" / "s4" / "prompt-seat.txt"
+        opus_f = tdp / ".crew" / "reviews" / "s4" / "prompt-opus.txt"
+        sonnet_f = tdp / ".crew" / "reviews" / "s4" / "prompt-sonnet.txt"
+        check("review-prep never invokes a seat (fake codex sentinel absent — prep runs nothing)",
+              proc.returncode == 0 and not sentinel.exists(),
+              "no sentinel", f"rc={proc.returncode} sentinel={sentinel.exists()}")
+        check("review-prep stages ONLY the subprocess prompt-seat.txt (no per-role Task prompts)",
+              prompt_seat.is_file() and not opus_f.exists() and not sonnet_f.exists(),
+              "only prompt-seat.txt",
+              f"seat={prompt_seat.is_file()} opus={opus_f.exists()} sonnet={sonnet_f.exists()}")
+
+    # 5. Placeholder + traversal guards (SANITIZE, not raise).
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        ph = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex",
+             "--session-id", "<session-id>"], cwd=td, timeout=30)
+        check("review-prep rejects an unsubstituted <session-id> placeholder (nonzero)",
+              ph.returncode != 0 and "placeholder" in ph.stderr.lower(),
+              "nonzero + placeholder", f"rc={ph.returncode} err={ph.stderr[:150]}")
+        trav = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex",
+             "--session-id", "../../x"], cwd=td, timeout=30)
+        # traversal id sanitizes/collapses to .crew/reviews/x (contained), not a raise.
+        staged = tdp / ".crew" / "reviews" / "x" / "prompt-seat.txt"
+        prep_path = json.loads(trav.stdout)["prompt_path"] if trav.returncode == 0 else ""
+        check("review-prep traversal session id is CONTAINED (sanitized to .crew/reviews/x)",
+              trav.returncode == 0 and staged.is_file()
+              and prep_path == ".crew/reviews/x/prompt-seat.txt",
+              "contained sanitized path", f"rc={trav.returncode} path={prep_path!r} exists={staged.is_file()}")
+
+    # 6. Group-token expansion: --seats cursor -> every registered cursor-* seat.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        proc = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "cursor", "--session-id", "s6"],
+            cwd=td, timeout=30)
+        subs = json.loads(proc.stdout)["subprocess_seats"]
+        from multiagent.providers import known_seat_names  # noqa: E402
+        expected_cursor = sorted(n for n in known_seat_names() if n.startswith("cursor-"))
+        check("review-prep --seats cursor expands to every registered cursor-* seat",
+              proc.returncode == 0 and sorted(subs) == expected_cursor and len(subs) >= 2,
+              str(expected_cursor), str(subs))
+
+    # 7. EMPTY/omitted --seats -> subprocess_seats==[] AND prompt_path=="" AND no
+    #    prompt-seat.txt staged (the lite/solo regression guard).
+    for seats_args in (["--seats", ""], []):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            _write_plan(tdp)
+            proc = _run_dispatcher(
+                ["review-prep", "plan.md", *seats_args, "--session-id", "s7",
+                 "--task-seats", "opus,sonnet"], cwd=td, timeout=30)
+            obj = json.loads(proc.stdout)
+            staged = tdp / ".crew" / "reviews" / "s7" / "prompt-seat.txt"
+            label = "--seats ''" if seats_args else "omitted --seats"
+            check(f"review-prep {label} -> subprocess_seats==[], prompt_path=='', no staged file, task echoed, exit 0",
+                  proc.returncode == 0
+                  and obj["subprocess_seats"] == []
+                  and obj["prompt_path"] == ""
+                  and not staged.exists()
+                  and obj["task_seats"] == ["opus", "sonnet"],
+                  "empty subprocess + no stage + task echoed",
+                  f"rc={proc.returncode} obj={obj} staged={staged.exists()}")
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -2561,6 +2764,7 @@ def main():
     test_cursor()
     test_from_dict_and_escaping()
     test_collect()
+    test_review_prep()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")

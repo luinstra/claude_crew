@@ -16,9 +16,12 @@ of a free-form question — the engine half of /crew:debate's crew-native
 council), ``debate`` (scaffold a debate dir + council in one call), ``run`` (one
 seat ad-hoc), ``render`` (build ONE seat's prompt, no execution), ``seats``
 (print the resolved subprocess seat list, one per line, for per-seat fan-out),
-and ``collect`` (collapse the named per-seat ``<seat>.json`` result files into
+``collect`` (collapse the named per-seat ``<seat>.json`` result files into
 ONE faithful ``render_panel`` markdown digest — reads EXACTLY the seats named in
-``--seats``, never globs).
+``--seats``, never globs), and ``review-prep`` (the deterministic PREP for the
+review-bearing commands: resolve target + subprocess seats, stage the ONE shared
+subprocess prompt, and PRINT ``{prompt_path, subprocess_seats, task_seats}`` —
+runs NOTHING; the per-seat ``run`` loop stays in the command markdown).
 
 The engine EXECUTES only subprocess seats (codex/cursor-*, plus opt-in agy), but ``render`` BUILDS the
 prompt for ANY seat — including the Claude Task seats (opus/sonnet) the
@@ -946,6 +949,99 @@ def cmd_collect(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review_prep(args: argparse.Namespace) -> int:
+    """Prepare a review/build/measure-twice fan-out and PRINT a JSON contract —
+    it runs NOTHING.
+
+    Consolidates the deterministic PREP the command markdown used to do inline
+    across three engine calls (``seats`` + ``render --mode review --stage`` + the
+    prose seat-splitting): (a) resolve the target via the SAME ``targets.resolve``
+    path ``render``/``review`` use; (b) resolve the SUBPROCESS seats through the
+    registry; (c) stage the ONE shared subprocess prompt via the SAME
+    ``_build_render_text`` + ``_stage_path`` machinery ``render --mode review
+    --stage`` uses — so ``prompt_path``'s file is BYTE-IDENTICAL to ``render
+    --mode review --stage`` for the same target. Then it prints ONE JSON object
+    ``{prompt_path, subprocess_seats, task_seats}`` (insertion key order,
+    ``ensure_ascii=False``) and exits.
+
+    LOAD-BEARING — prep PREPARES; it does NOT run seats. This function MUST NOT
+    call ``_fan_out``, ``_run_seat``, ``_run_cli``, or any provider ``.run()``.
+    The per-seat ``crew run <seat>`` loop stays in the command markdown, where
+    each seat is a SEPARATE, visible, individually-killable shell. Folding that
+    loop into ``_fan_out`` here is the EXACT regression Phase-2 reversed — it
+    re-hides every seat in one opaque thread pool and destroys per-shell
+    killability. DO NOT add a run/fan-out call to this function.
+
+    ``--task-seats`` is a PURE OPAQUE ECHO: its value is split on commas and
+    echoed verbatim into ``task_seats``. The engine NEVER resolves it through the
+    registry, NEVER spawns it, NEVER runs it — Claude-seat ownership stays with
+    the orchestrator (the deliberately-rejected ``TaskProvider`` boundary;
+    scripts/CLAUDE.md "Provider = executor"). The orchestrator still owns
+    ``--panel``->seat resolution and Claude-seat dispatch.
+    """
+    # 1. Target dispatch — the SAME call cmd_review/cmd_render make. --base
+    #    defaults to "main" (parity with render/review); coerce before resolve.
+    base = args.base if args.base is not None else "main"
+    try:
+        target = targets.resolve(args.target, base=base)
+    except targets.TargetError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    # 2. Subprocess seat expansion WITH the empty-guard (the lite/solo fix):
+    #    _resolve_seats("") returns the DEFAULT subprocess panel, so an
+    #    empty/omitted --seats (a Claude-only lite/solo panel) MUST short-circuit
+    #    to [] — NOT the default panel. Only a non-empty --seats is resolved
+    #    through the registry (reusing _expand_seat_groups / known_seat_names, so
+    #    the `cursor` group token + registry filter behave exactly as `crew
+    #    seats`). SUBPROCESS SEATS ONLY — never Claude seats.
+    subprocess_seats = _resolve_seats(args.seats) if args.seats.strip() else []
+
+    # 3. task_seats: OPAQUE echo. Split on commas, echo verbatim. NEVER resolve
+    #    through the registry, NEVER spawn/run. (See the guardrail in the
+    #    docstring.) Omitted/empty --task-seats -> [].
+    task_seats = [s.strip() for s in (args.task_seats or "").split(",") if s.strip()]
+
+    # 4. Stage the shared SUBPROCESS prompt ONLY when subprocess seats exist —
+    #    via the SAME machinery cmd_render --stage uses, so prompt_path's file is
+    #    BYTE-IDENTICAL to `render <target> --mode review --stage`. When there are
+    #    no subprocess seats (Claude-only lite/solo), stage NOTHING and leave
+    #    prompt_path == "".
+    prompt_path = ""
+    if subprocess_seats:
+        # Resolve + placeholder-guard the session id the SAME way cmd_render
+        # --stage does (arg -> CLAUDE_SESSION_ID env, THEN reject an
+        # unsubstituted <...> placeholder so a templating slip fails loud).
+        session_id = _resolve_session_id(args.session_id)
+        if "<" in session_id or ">" in session_id:
+            print(
+                f"error: session id looks like an unsubstituted placeholder "
+                f"({session_id!r}); pass your actual session id (the "
+                "[Session ID: …] value), not the literal template",
+                file=sys.stderr,
+            )
+            return 2
+        # The shared subprocess prompt has NO per-seat label (seat_role=None),
+        # no prior round, and forwards --inline-diff — exactly the inputs
+        # `render <target> --mode review --stage` feeds the builder.
+        text = _build_render_text(
+            None, target, None, None, args.inline_diff, args.mode
+        )
+        prompt_path = _stage_path(session_id, None)
+        _emit(text, prompt_path)
+
+    # 5. Print the JSON contract — the ONLY output. FIXED insertion key order
+    #    (prompt_path, subprocess_seats, task_seats) IS the contract, so do NOT
+    #    sort_keys. ensure_ascii=False (Plan B's escaping lesson — no \uXXXX).
+    payload = {
+        "prompt_path": prompt_path,
+        "subprocess_seats": subprocess_seats,
+        "task_seats": task_seats,
+    }
+    print(json.dumps(payload, ensure_ascii=False))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multiagent",
@@ -1074,6 +1170,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="write the digest to this file (keeps the call shell-redirect-free)",
     )
     coll.set_defaults(func=cmd_collect)
+
+    rp = sub.add_parser(
+        "review-prep",
+        help="Prepare a review/build/measure-twice fan-out: resolve target + "
+             "subprocess seats, stage the ONE shared subprocess prompt, and PRINT "
+             "{prompt_path, subprocess_seats, task_seats} as JSON. Runs NOTHING — "
+             "the per-seat `crew run` loop stays in the command markdown.",
+    )
+    rp.add_argument(
+        "target", nargs="?", default="auto",
+        help="plan .md path, working-tree, branch, commit:<sha>, a SHA, or auto "
+             "(same target vocabulary as render/review)",
+    )
+    rp.add_argument("--base", dest="base", default=None,
+                    help="base ref for branch/auto diffs (default: main)")
+    rp.add_argument(
+        "--seats", dest="seats", default="",
+        help="resolved comma-separated SUBPROCESS-seat spec (group 'cursor' "
+             "allowed). EMPTY/omitted => no subprocess seats (Claude-only "
+             "lite/solo): subprocess_seats=[] and NO subprocess prompt is staged.",
+    )
+    rp.add_argument(
+        "--session-id", dest="session_id", default=None,
+        help="session id for the staged prompt path (default: CLAUDE_SESSION_ID "
+             "env). Pass the literal id; the engine resolves it, so the command "
+             "needs no shell ${…} expansion.",
+    )
+    rp.add_argument(
+        "--mode", dest="mode", default="review", choices=["review", "discuss"],
+        help="prompt family for the staged subprocess prompt (default review)",
+    )
+    rp.add_argument(
+        "--inline-diff", action="store_true",
+        help="forward to the staging path (parity with `render --stage "
+             "--inline-diff`): embed the diff/plan instead of referencing it",
+    )
+    rp.add_argument(
+        "--task-seats", dest="task_seats", default="",
+        help="OPAQUE echo: resolved Claude-seat LABELS; echoed verbatim in "
+             "task_seats, never resolved/registry-filtered/spawned by the engine",
+    )
+    rp.set_defaults(func=cmd_review_prep)
 
     run = sub.add_parser(
         "run",
