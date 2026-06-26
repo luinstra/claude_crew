@@ -2736,6 +2736,67 @@ def test_review_prep():
                   f"rc={proc.returncode} obj={obj} staged={staged.exists()}")
 
 
+def test_panel_catalog():
+    log_section("plain-data panel catalog (seats.py)")
+    from multiagent import seats  # noqa: E402
+    from multiagent import cli  # noqa: E402
+
+    # Keys present, exactly the four presets.
+    check("PANEL_PRESETS keys == {full, lite, solo, cursor}",
+          set(seats.PANEL_PRESETS.keys()) == {"full", "lite", "solo", "cursor"},
+          "{full, lite, solo, cursor}", str(set(seats.PANEL_PRESETS.keys())))
+
+    # Task seats (strings) superset of the known Claude seats incl. opt-in 4.6.
+    check("TASK_SEAT_NAMES superset of {opus, sonnet, opus-4.6}",
+          {"opus", "sonnet", "opus-4.6"} <= set(seats.TASK_SEAT_NAMES),
+          "superset of {opus, sonnet, opus-4.6}", str(seats.TASK_SEAT_NAMES))
+
+    # The only model override today.
+    check("MODEL_OVERRIDES['opus-4.6'] == 'claude-opus-4-6'",
+          seats.MODEL_OVERRIDES.get("opus-4.6") == "claude-opus-4-6",
+          "claude-opus-4-6", str(seats.MODEL_OVERRIDES.get("opus-4.6")))
+
+    # ROSTER-FIDELITY drift guard: the subprocess subset of full (the names that
+    # are NOT Task seats) equals cli._DEFAULT_SUBPROCESS_PANEL as a sequence.
+    subprocess_subset = [n for n in seats.PANEL_PRESETS["full"]
+                         if n not in seats.TASK_SEAT_NAMES]
+    check("full's subprocess subset == cli._DEFAULT_SUBPROCESS_PANEL (sequence)",
+          subprocess_subset == list(cli._DEFAULT_SUBPROCESS_PANEL),
+          str(list(cli._DEFAULT_SUBPROCESS_PANEL)), str(subprocess_subset))
+
+    # The other presets, verbatim. cursor is the literal group TOKEN, NOT an
+    # expanded cursor-* list (seats.py is pure data; cli.py expands it later).
+    check("lite == ['opus', 'sonnet']",
+          seats.PANEL_PRESETS["lite"] == ["opus", "sonnet"],
+          "['opus', 'sonnet']", str(seats.PANEL_PRESETS["lite"]))
+    check("solo == ['opus']",
+          seats.PANEL_PRESETS["solo"] == ["opus"],
+          "['opus']", str(seats.PANEL_PRESETS["solo"]))
+    check("cursor == ['cursor'] (literal group token, unexpanded)",
+          seats.PANEL_PRESETS["cursor"] == ["cursor"],
+          "['cursor']", str(seats.PANEL_PRESETS["cursor"]))
+
+    # NO-PROVIDER-IMPORT, enforced STRUCTURALLY in a CLEAN subprocess: importing
+    # seats must NOT pull in multiagent.providers / build the registry. (A clean
+    # interpreter is required because earlier tests already imported providers
+    # into THIS process's sys.modules.)
+    probe = (
+        "import sys; import multiagent.seats as s; "
+        "assert 'multiagent.providers' not in sys.modules, "
+        "'seats imported providers'; "
+        "assert 'multiagent.cli' not in sys.modules, 'seats imported cli'; "
+        "assert not any('get_provider' in repr(v) for v in s.__dict__.values()), "
+        "'seats references get_provider'; "
+        "print('OK')"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(SCRIPT_DIR), capture_output=True, text=True, timeout=30)
+    check("importing seats in a clean interpreter pulls in NO provider/registry module",
+          proc.returncode == 0 and proc.stdout.strip() == "OK",
+          "rc=0 stdout=OK", f"rc={proc.returncode} stdout={proc.stdout!r} stderr={proc.stderr!r}")
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -2765,6 +2826,7 @@ def main():
     test_from_dict_and_escaping()
     test_collect()
     test_review_prep()
+    test_panel_catalog()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")
