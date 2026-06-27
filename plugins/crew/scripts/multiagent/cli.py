@@ -227,31 +227,36 @@ def _resolve_debate_seats(panel_arg: str | None, seats_arg: str | None) -> list[
     Precedence: explicit ``--seats`` (wins) > explicit ``--panel`` >
     ``config.debate_panel()`` > ``config.default_panel()`` > built-in ``full``.
 
-    Explicit ``--seats`` entries are VALIDATED after group expansion: each must be
-    path-safe AND a member of the UNION ``known_seat_names() ∪
+    Explicit ``--seats`` entries are VALIDATED after group expansion by EXACT
+    membership in the fixed UNION allowlist ``known_seat_names() ∪
     seats.TASK_SEAT_NAMES``. The union is the key — it KEEPS the Task seats
-    (opus/sonnet/opus-4.6, which are NOT in the registry) while REJECTING garbage.
-    A path-unsafe entry (e.g. ``cursor-../../x``) or an unknown name raises
-    ``_DebateSeatError(2)`` with a stderr message — debate.md classifies
-    ``cursor-*`` as a subprocess seat and writes ``.crew/debates/<dir>/<seat>.json``,
-    so an unfiltered traversal name would escape the debate dir. This mirrors
-    ``cmd_collect``'s seat-name guard (reject, never silently sanitize — a
-    sanitized name would name the WRONG seat). The preset path (no explicit
-    ``--seats``) is unaffected: preset/group-expanded names are always valid.
+    (opus/sonnet/opus-4.6, which are NOT in the registry, and whose dotted name a
+    charset filter would wrongly reject) while REJECTING garbage. Membership in
+    this enumerated allowlist IS the path-safety guarantee (strictly stronger than
+    a charset filter — no path-unsafe string can be a member), so no separate
+    regex guard is needed here. An unknown name (e.g. ``cursor-../../x``, which is
+    in NEITHER set) raises ``_DebateSeatError(2)`` with a stderr message — debate.md
+    classifies ``cursor-*`` as a subprocess seat and writes
+    ``.crew/debates/<dir>/<seat>.json``, so a traversal name must not reach the
+    debate dir (it can't: it's not in the allowlist). This differs from
+    ``cmd_collect``, which DOES need a charset guard because it accepts ARBITRARY
+    user seat names with no registry/allowlist to check against. The preset path
+    (no explicit ``--seats``) is unaffected: preset/group-expanded names are
+    always valid.
     """
     if seats_arg is not None:
         names = [s.strip() for s in seats_arg.split(",") if s.strip()]
         names = _expand_seat_groups(names)
         valid = set(known_seat_names()) | seats.TASK_SEAT_NAMES
         for n in names:
-            if re.sub(r"[^A-Za-z0-9_-]", "", n) != n or n not in valid:
+            if n not in valid:
                 print(
                     f"error: invalid debate seat name {n!r} in --seats; debate "
-                    "seats must match [A-Za-z0-9_-] (no path separators or dots) "
-                    "and be a known seat (a registered subprocess seat or a Claude "
-                    "Task seat: " + ", ".join(sorted(valid)) + "). debate writes "
-                    "per-seat results as .crew/debates/<dir>/<seat>.json and must "
-                    "not let a seat name escape the debate dir.",
+                    "seats must be a known seat (a registered subprocess seat or a "
+                    "Claude Task seat: " + ", ".join(sorted(valid)) + "). debate "
+                    "writes per-seat results as .crew/debates/<dir>/<seat>.json and "
+                    "must not let a seat name escape the debate dir; membership in "
+                    "this fixed allowlist is itself the path-safety guarantee.",
                     file=sys.stderr,
                 )
                 raise _DebateSeatError(2)

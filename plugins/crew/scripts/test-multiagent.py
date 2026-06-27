@@ -3715,6 +3715,18 @@ def test_debate_panel_resolver():
           rc == 0 and lines == ["codex", "opus"], "['codex', 'opus']",
           f"rc={rc} {lines}")
 
+    # 7b. REGRESSION GUARD: the dotted Task seat opus-4.6 (in TASK_SEAT_NAMES,
+    #     documented for `--seats opus,sonnet,opus-4.6`) must be ACCEPTED. A prior
+    #     charset filter rejecting dots wrongly bounced it; union membership alone
+    #     is the correct guard (the allowlist IS the path-safety guarantee).
+    rc, lines = resolve(None, ["--seats", "opus-4.6"])
+    check("seats --debate --seats opus-4.6 (dotted Task seat) -> ACCEPTED",
+          rc == 0 and lines == ["opus-4.6"], "['opus-4.6']", f"rc={rc} {lines}")
+    rc, lines = resolve(None, ["--seats", "opus,sonnet,opus-4.6"])
+    check("seats --debate --seats opus,sonnet,opus-4.6 -> all three KEPT (task seats)",
+          rc == 0 and lines == ["opus", "sonnet", "opus-4.6"],
+          "['opus', 'sonnet', 'opus-4.6']", f"rc={rc} {lines}")
+
     # 8. MINOR: `seats --panel <preset>` WITHOUT --debate errors (--panel only
     #    steers the debate resolver; it would otherwise be silently ignored).
     with tempfile.TemporaryDirectory() as td:
