@@ -81,8 +81,10 @@ opus + sonnet), `--panel lite` (opus + sonnet), `--panel solo` (opus),
 `/crew:build --panel lite "fix the bug"`.
 
 `full` is the **built-in** default. An optional per-repo `.crew/config.toml`
-`default_panel` overrides it (precedence: CLI flag > config > `CREW_MA_*` env >
-built-in; needs Python 3.11+, gracefully ignored on 3.10).
+`default_panel` overrides it when you name no panel (resolves config →
+built-in `full` — the panel name has no `CREW_MA_*` tier; the per-seat tuning
+knobs add the full CLI flag > config > `CREW_MA_*` env > built-in chain). Needs
+Python 3.11+, gracefully ignored on 3.10.
 
 ### Utilities
 

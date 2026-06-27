@@ -208,10 +208,12 @@ external CLI) or a single seat is plenty for routine work. (At the engine level,
 #### Per-repo config
 
 `full` is the **built-in** default panel. An optional, personal per-repo
-`.crew/config.toml` (gitignore it) can override that default and tune individual
-seats (model pin, timeout, codex `reasoning_effort`, agy `print_timeout`).
-Precedence is **CLI flag > config > `CREW_MA_*` env > built-in**. Needs Python
-3.11+ (stdlib `tomllib`); on 3.10 the file is gracefully ignored.
+`.crew/config.toml` (gitignore it) can override that default and tune per-seat
+models (plus codex `reasoning_effort`, agy `print_timeout`) and the global
+per-seat `timeout`. When you name no panel, `default_panel` resolves from
+config, falling back to built-in `full`; the per-seat tuning knobs follow
+**CLI flag > config > `CREW_MA_*` env > built-in**. Needs Python 3.11+ (stdlib
+`tomllib`); on 3.10 the file is gracefully ignored.
 
 ```toml
 # .crew/config.toml
@@ -221,8 +223,11 @@ default_panel = "lite"            # default panel when you name none
 model = "gpt-5.5"
 reasoning_effort = "high"
 
+[seats.agy]
+print_timeout = "8m"
+
 [tuning]
-timeout = 600                     # per-seat wall-clock seconds
+timeout = 600                     # global per-seat wall-clock seconds
 ```
 
 #### Ad-hoc single-provider runs
