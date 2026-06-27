@@ -1,10 +1,19 @@
 """CodexProvider — drives ``codex exec`` as a subprocess seat.
 
-Invocation (verified against codex-cli 0.139.0 `codex exec --help`):
-    codex exec - --sandbox <lvl> [--model X] --skip-git-repo-check -o <tmpfile>
+Invocation (verified against codex-cli 0.142.2 `codex exec --help`):
+    codex exec - --ignore-user-config --sandbox <lvl> [--model X] --skip-git-repo-check -o <tmpfile>
 Prompt is delivered via STDIN (the ``-`` arg). The final agent message is read
 from the ``-o`` temp file (avoids stderr progress noise). stderr is captured
 into ``error`` on nonzero exit (this is also the auth-failure path).
+
+``--ignore-user-config`` makes the review seat HERMETIC: it skips the user's
+``~/.codex/config.toml`` — their MCP servers (e.g. Neon), skills, RTK, and
+``AGENTS.md`` preamble — so a review seat doesn't drag ~40k tokens of unrelated
+personal-environment startup into every run, and executes in a clean,
+reproducible default config instead of whatever happens to be in ``~/.codex``.
+NOTE: this ALSO resets the config's ``model_reasoning_effort`` (e.g. ``xhigh``)
+to codex's default — add ``-c model_reasoning_effort=<level>`` to the argv if a
+review needs deeper reasoning than the default.
 """
 
 from __future__ import annotations
@@ -41,7 +50,11 @@ class CodexProvider(Provider):
         fd, out_path = tempfile.mkstemp(prefix="crew_codex_", suffix=".txt")
         os.close(fd)
 
-        argv = ["codex", "exec", "-", "--sandbox", sandbox]
+        # --ignore-user-config: hermetic review seat — skip the user's
+        # ~/.codex/config.toml (MCP servers, skills, RTK, AGENTS.md preamble +
+        # model_reasoning_effort). Cuts ~40k startup tokens and keeps the seat
+        # reproducible. (See module docstring for the reasoning-effort note.)
+        argv = ["codex", "exec", "-", "--ignore-user-config", "--sandbox", sandbox]
         if model:
             argv += ["--model", model]
         argv += ["--skip-git-repo-check", "-o", out_path]
