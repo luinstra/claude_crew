@@ -151,8 +151,8 @@ def _build_registry() -> dict:
     from .agy import AgyProvider
     from .cursor import CursorProvider, CURSOR_SEATS
 
-    # codex is the live OpenAI seat; agy stays registered as an opt-in seat
-    # (`--seats agy`) though it is no longer in the default panel.
+    # codex is the live OpenAI seat; agy is the flat-rate Gemini seat (Antigravity)
+    # — both are in the default subprocess panel.
     registry: dict = {
         "codex": CodexProvider,
         "agy": AgyProvider,

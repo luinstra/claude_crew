@@ -1,5 +1,5 @@
 ---
-description: Crew-native multi-model debate on a question — single round (council) or multi-round with rebuttals; default panel codex + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet; narrow with --panel/--seats
+description: Crew-native multi-model debate on a question — single round (council) or multi-round with rebuttals; default panel codex + agy + cursor-glm + cursor-composer + opus + sonnet; narrow with --panel/--seats
 argument-hint: "[--rounds N] [--panel ...] <question>"
 allowed-tools: Bash, Task, Read, Glob, Write
 ---
@@ -19,7 +19,7 @@ $ARGUMENTS
   council; `N>1` runs a multi-round debate where each round sees the prior
   round's positions and may rebut/revise.
 - **Panel** — `--panel full` =
-  `codex,cursor-gemini,cursor-glm,cursor-composer,opus,sonnet` (default) ·
+  `codex,agy,cursor-glm,cursor-composer,opus,sonnet` (default) ·
   `--panel lite` = `opus,sonnet` · `--panel solo` = `opus` · `--panel cursor` =
   all Cursor model-seats (`--seats cursor`, which the engine expands to every
   registered cursor-* seat — cursor-gpt, cursor-gemini, cursor-glm,
@@ -27,7 +27,8 @@ $ARGUMENTS
   codex, NO opus/sonnet Task seats · `--seats <list>` =
   an explicit comma-list of any registered seat
   (`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-composer, opus, sonnet`;
-  `agy` is opt-in — works via `--seats agy` but is not in the default panel).
+  `cursor-gemini` is opt-in — works via `--seats cursor-gemini` / `--panel cursor`
+  but is not in the default panel; `agy` covers the Gemini lineage flat-rate).
   `--seats` wins over `--panel`.
 - **Opt-in `opus-4.6` Claude seat** — a third Claude voice pinned to
   `claude-opus-4-6` (some prefer 4.6 over 4.7/4.8). NOT in any default; add it
@@ -50,8 +51,8 @@ $ARGUMENTS
 > (`render --run-id`) expects.
 
 Resolve the flags to a **seat list**, strip them from `$ARGUMENTS` (the remainder
-is the question/target), then split the seat list: the `codex`/`cursor-*` entries
-(and opt-in `agy`) are **subprocess seats** (the Python engine); `opus`/`sonnet`/`opus-4.6`
+is the question/target), then split the seat list: the `codex`/`agy`/`cursor-*`
+entries are **subprocess seats** (the Python engine); `opus`/`sonnet`/`opus-4.6`
 are **task seats** (`crew:panelist`
 for discuss / `crew:reviewer` for review, via the Task tool — in-session, on the
 subscription, no `claude -p`, no API key; `opus-4.6` pins `model="claude-opus-4-6"`).
@@ -251,7 +252,7 @@ and folds them in as injection-guarded DATA — on round 1 there is no prior):
 
 Then run the round's seats (in parallel where possible):
 
-- **Subprocess seats** (the `codex`/`cursor-*` entries, plus opt-in `agy`): execute the rendered prompt via the engine —
+- **Subprocess seats** (the `codex`/`agy`/`cursor-*` entries): execute the rendered prompt via the engine —
   ```bash
   "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt --json -o .crew/debates/<run-id>/<seat>-r<n>.json
   ```
@@ -304,7 +305,7 @@ and is NEVER silently dropped:
 ---
 
 Subscription safety: the engine drives only the subprocess seats — `codex` + the
-`cursor-*` seats (plus opt-in `agy`), all external-CLI auth; Claude voices are
+`agy`/`cursor-*` seats, all external-CLI auth; Claude voices are
 in-session Task seats. No `claude -p`, no Anthropic API — a stray
 `ANTHROPIC_API_KEY` is irrelevant here. This council is fully self-contained in
 crew — NEVER call `agy -p` / `codex exec` / `cursor-agent` directly, and NEVER

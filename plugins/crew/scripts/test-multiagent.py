@@ -455,9 +455,9 @@ def test_default_seats():
     try:
         os.environ.pop("CREW_MA_SEATS", None)
         seats = _default_subprocess_seats()
-        check("default subprocess panel == codex + cursor-gemini/glm/composer (cursor-gpt opt-in)",
-              seats == ["codex", "cursor-gemini", "cursor-glm", "cursor-composer"],
-              "['codex', 'cursor-gemini', 'cursor-glm', 'cursor-composer']", str(seats))
+        check("default subprocess panel == codex + agy + cursor-glm/composer (cursor-gemini/gpt opt-in)",
+              seats == ["codex", "agy", "cursor-glm", "cursor-composer"],
+              "['codex', 'agy', 'cursor-glm', 'cursor-composer']", str(seats))
         # opus/sonnet (Task seats) AND unknown names in CREW_MA_SEATS are dropped;
         # agy is registered, so it's honored as an opt-in seat.
         os.environ["CREW_MA_SEATS"] = "codex,agy,opus,sonnet,bogus"
@@ -2903,7 +2903,7 @@ def test_review_prep():
         proc, obj = _prep(["--panel", "full", "--session-id", "pf"], td)
         check("review-prep --panel full -> default subprocess subset + task_seats/models",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex", "cursor-gemini", "cursor-glm", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "agy", "cursor-glm", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"]
               and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"},
               "full preset split", str(obj))
@@ -2991,7 +2991,7 @@ def test_review_prep():
         proc, obj = _prep(["--panel", "full", "--task-seats", "opus", "--session-id", "ov1"], td)
         check("review-prep --panel full --task-seats opus -> task list overridden to ['opus']",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex", "cursor-gemini", "cursor-glm", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "agy", "cursor-glm", "cursor-composer"]
               and obj["task_seats"] == ["opus"]
               and obj["task_seat_models"] == {"opus": "opus"},
               "task-seats override", str(obj))

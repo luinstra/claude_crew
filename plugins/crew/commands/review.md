@@ -1,5 +1,5 @@
 ---
-description: Multi-model review of a plan OR code diff (default panel codex + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet; narrow with --panel/--seats)
+description: Multi-model review of a plan OR code diff (default panel codex + agy + cursor-glm + cursor-composer + opus + sonnet; narrow with --panel/--seats)
 argument-hint: "<the plan | the code | a .md path | a git scope>"
 allowed-tools: Bash, Task, Read, Glob
 ---
@@ -24,12 +24,12 @@ the review request. Default (no flag) = the full panel — pass `--panel full`.
 
 - `--panel full|lite|solo|cursor` — a named preset. `--seats <comma-list>` — an
   explicit subset of any registered seat (e.g. `--seats codex,opus`); `--seats`
-  wins if both are given. `agy` and `cursor-gpt` are opt-in (add via `--seats`).
+  wins if both are given. `cursor-gemini` and `cursor-gpt` are opt-in (add via `--seats`).
   Opt-in `opus-4.6` is a third Claude voice pinned to a version-locked model — add
   it explicitly (e.g. `--seats codex,opus,sonnet,opus-4.6`).
 - **The engine resolves the preset — the orchestrator does NOT.** `review-prep`
   (Step 3) takes the user's `--panel`/`--seats` and resolves it into
-  `subprocess_seats` (the `codex`/`cursor-*`/opt-in `agy` entries),
+  `subprocess_seats` (the `codex`/`agy`/`cursor-*` entries),
   `task_seats` (the Claude voices), and `task_seat_models` (each Task seat's
   model pin). The orchestrator never defines presets, classifies seat names, or
   hardcodes a model pin — it passes the flag through and reads the JSON. Pass
@@ -42,14 +42,14 @@ The same review prompt fans out across a multi-model panel and you synthesize
 the results into the existing `APPROVED / REVISE / [BLOCKING] / [MINOR]`
 verdict. Two seat kinds:
 
-- **subprocess seats** — the `codex`/`cursor-*` entries (and opt-in `agy`) of
+- **subprocess seats** — the `codex`/`agy`/`cursor-*` entries of
   the resolved panel, via the Python engine.
 - **task seats** — the `opus`/`sonnet` entries of the resolved panel, each a
   `crew:reviewer` via the Task tool (in-session, on the subscription — no
   `claude -p`, no API key).
 
 The panel is whatever the Panel-options flags resolved to (default **codex +
-cursor-gemini + cursor-glm + cursor-composer + opus + sonnet**); only fan out the
+agy + cursor-glm + cursor-composer + opus + sonnet**); only fan out the
 seats in that list. This is safe because a
 failed/skipped seat NEVER aborts the review (see Step 6) — the verdict is
 synthesized from whichever seats succeed.
@@ -310,6 +310,6 @@ emit the existing verdict format:
 ---
 
 Subscription safety: the engine drives only the subprocess seats — `codex` + the
-`cursor-*` seats (plus opt-in `agy`), all external-CLI auth; Claude voices are
+`agy`/`cursor-*` seats, all external-CLI auth; Claude voices are
 in-session Task seats. No `claude -p`, no Anthropic API — a stray
 `ANTHROPIC_API_KEY` is irrelevant here.

@@ -33,12 +33,12 @@ TASK_SEAT_NAMES = {"opus", "sonnet", "opus-4.6"}
 # name (e.g. opus → opus, sonnet → sonnet).
 MODEL_OVERRIDES = {"opus-4.6": "claude-opus-4-6"}
 
-# The named panel presets. ``full``'s subprocess subset (codex + three Cursor
+# The named panel presets. ``full``'s subprocess subset (codex + agy + two Cursor
 # model-seats) MUST equal cli._DEFAULT_SUBPROCESS_PANEL as a sequence — the
 # roster-fidelity drift guard. ``cursor`` is the literal group token (expanded
 # later in cli.py), NOT a baked-in cursor-* list.
 PANEL_PRESETS = {
-    "full": ["codex", "cursor-gemini", "cursor-glm", "cursor-composer", "opus", "sonnet"],
+    "full": ["codex", "agy", "cursor-glm", "cursor-composer", "opus", "sonnet"],
     "lite": ["opus", "sonnet"],
     "solo": ["opus"],
     "cursor": ["cursor"],

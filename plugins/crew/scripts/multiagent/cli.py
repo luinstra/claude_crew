@@ -25,7 +25,7 @@ task split, stage the ONE shared subprocess prompt, and PRINT
 ``{prompt_path, subprocess_seats, task_seats, task_seat_models}`` — runs NOTHING;
 the per-seat ``run`` loop + the Task-seat dispatch stay in the command markdown).
 
-The engine EXECUTES only subprocess seats (codex/cursor-*, plus opt-in agy), but ``render`` BUILDS the
+The engine EXECUTES only subprocess seats (codex/agy/cursor-*), but ``render`` BUILDS the
 prompt for ANY seat — including the Claude Task seats (opus/sonnet) the
 orchestrator dispatches — so every seat's prompt comes from the one builder
 (``prompts.build_prompt``/``council``) and the subprocess and Task paths can
@@ -61,15 +61,17 @@ from multiagent.providers import (
     known_seat_names,
 )
 
-# The default subprocess panel. codex (OpenAI) + three Cursor model-seats for
-# cross-model diversity at one Cursor price. `cursor-gpt` is NOT a default —
-# codex already covers the GPT lineage, so defaulting it too is redundant model
-# coverage at extra token cost; it stays registered and opt-in (`--seats cursor-gpt`
-# / `--panel cursor`). agy is likewise registered-but-opt-in (`--seats agy`).
+# The default subprocess panel. codex (OpenAI) + agy (Gemini via Antigravity,
+# flat-rate) + two Cursor model-seats for cross-model diversity. `cursor-gpt` is
+# NOT a default — codex already covers the GPT lineage, so defaulting it too is
+# redundant model coverage at extra token cost; it stays registered and opt-in
+# (`--seats cursor-gpt` / `--panel cursor`). `cursor-gemini` is likewise
+# registered-but-opt-in (`--seats cursor-gemini` / `--panel cursor`) — agy covers
+# the Gemini lineage flat-rate, so the metered Cursor gemini seat isn't defaulted.
 # Override the whole list with CREW_MA_SEATS. Any name here must be a registered
 # subprocess seat (see providers/__init__._build_registry); unknown names dropped.
 _DEFAULT_SUBPROCESS_PANEL = (
-    "codex", "cursor-gemini", "cursor-glm", "cursor-composer",
+    "codex", "agy", "cursor-glm", "cursor-composer",
 )
 
 

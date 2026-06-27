@@ -142,7 +142,7 @@ For work requiring verification before declaring "done," use `/crew:build` inste
 | `/crew:plan "description"` | Start a planning session with the advisor agent |
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (keeps main context clean) |
 | `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (natural-language dispatch) → `APPROVED`/`REVISE` verdict |
-| `/crew:debate "question"` | Crew-native council — single-round multi-model take on a question (codex + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet), synthesized into agreement/disagreement/recommendation |
+| `/crew:debate "question"` | Crew-native council — single-round multi-model take on a question (codex + agy + cursor-glm + cursor-composer + opus + sonnet), synthesized into agreement/disagreement/recommendation |
 | `/crew:build "task"` | Start a persistence loop — Claude won't stop until task is verified complete |
 | `/crew:cancel-build` | Exit an active build loop early |
 | `/crew:measure-twice "task"` | Start a self-refining plan loop — generates plan, reviews, revises until approved |
@@ -170,9 +170,10 @@ For work requiring verification before declaring "done," use `/crew:build` inste
 
 `/crew:review` fans the same review prompt across a panel of models and
 synthesizes one verdict. The default panel is
-**codex + cursor-gemini + cursor-glm + cursor-composer + opus + sonnet**:
-the `codex` and `cursor-*` seats run via the bundled `multiagent` engine
-(`plugins/crew/scripts/multiagent/`) — `agy` is opt-in via `--seats agy` — while
+**codex + agy + cursor-glm + cursor-composer + opus + sonnet**:
+the `codex`, `agy`, and `cursor-*` seats run via the bundled `multiagent` engine
+(`plugins/crew/scripts/multiagent/`) — `cursor-gemini` is opt-in via
+`--seats cursor-gemini` (agy covers the Gemini lineage flat-rate) — while
 the two Claude voices are the
 `crew:reviewer` agent spawned at `model: opus` and `model: sonnet`. It dispatches
 plan-vs-code from natural language and reports `APPROVED`/`REVISE` with
@@ -183,15 +184,16 @@ succeed, and only an all-seats-failed panel skips the verdict.
 **Choosing the panel.** `/crew:review`, `/crew:debate`, `/crew:build`, and
 `/crew:measure-twice` all accept panel flags at the start of their argument:
 
-- `--panel full` = `codex,cursor-gemini,cursor-glm,cursor-composer,opus,sonnet`
+- `--panel full` = `codex,agy,cursor-glm,cursor-composer,opus,sonnet`
   (the default) · `--panel lite` = `opus,sonnet` · `--panel solo` = `opus`
 - `--panel cursor` = all Cursor model-seats (`--seats cursor`, which the engine
   expands to every registered `cursor-*` seat) — a pure cross-model Cursor panel,
   no codex and no opus/sonnet Task seats
 - `--seats <list>` — an explicit subset of
   `codex,agy,cursor-gpt,cursor-gemini,cursor-glm,cursor-composer,opus,sonnet`
-  (e.g. `/crew:build --seats codex,opus "fix the bug"`). `agy` is opt-in — it
-  works via `--seats agy` but is not in the default panel.
+  (e.g. `/crew:build --seats codex,opus "fix the bug"`). `cursor-gemini` is opt-in
+  — it works via `--seats cursor-gemini` (or `--panel cursor`) but is not in the
+  default panel; `agy` covers the Gemini lineage flat-rate.
 
 Not every change needs the full panel — `lite` (the two Claude voices, no
 external CLI) or a single seat is plenty for routine work. (At the engine level,
