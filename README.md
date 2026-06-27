@@ -195,11 +195,13 @@ succeed, and only an all-seats-failed panel skips the verdict.
   expands to every registered `cursor-*` seat) — a pure cross-model Cursor panel,
   no codex and no opus/sonnet Task seats
 - `--seats <list>` — an explicit subset of
-  `codex,agy,cursor-gpt,cursor-gemini,cursor-glm,cursor-auto,cursor-composer,opus,sonnet`
+  `codex,agy,cursor-gpt,cursor-gemini,cursor-glm,cursor-auto,cursor-composer,opus,sonnet,opus-4.6`
   (e.g. `/crew:build --seats codex,opus "fix the bug"`). `cursor-gpt`,
   `cursor-gemini`, and `cursor-glm` are opt-in — they work via `--seats` (or
   `--panel cursor`) but are not in the default panel; `codex` already covers the
-  GPT lineage and `agy` covers the Gemini lineage flat-rate.
+  GPT lineage and `agy` covers the Gemini lineage flat-rate. `opus-4.6` is an
+  opt-in third Claude voice pinned to `claude-opus-4-6` (version-locked; falls
+  back to the inherited model if 4.6 isn't on your org allowlist).
 
 Not every change needs the full panel — `lite` (the two Claude voices, no
 external CLI) or a single seat is plenty for routine work. (At the engine level,
