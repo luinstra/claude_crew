@@ -41,9 +41,11 @@ $ARGUMENTS
 
 > **Question-file naming (one convention):** both paths write the question to
 > **`question.md`** inside the debate dir. Single-round (section A) uses the
-> engine `debate` subcommand **as a scaffolder only** (`--seats none` — writes
-> `question.md` into a `<timestamp>-<slug>/` dir and runs NO seats; A2 fans the
-> subprocess seats out per-seat). Multi-round (section B) writes `question.md` into a
+> engine `debate` subcommand, which is **ALWAYS scaffold-only** — it writes
+> `question.md` + an empty `subprocess.json` into a `<timestamp>-<slug>/` dir and
+> NEVER runs subprocess seats internally, regardless of `--seats` (the shipped
+> call passes `--seats none`; A2 fans the subprocess seats out per-seat in
+> visible, killable shells). Multi-round (section B) writes `question.md` into a
 > `run-<id>/` dir — the filename + dir layout the `rounds.py` reader
 > (`render --run-id`) expects.
 
@@ -84,13 +86,16 @@ call, no `mkdir`/heredoc/redirect:
 "${CLAUDE_PLUGIN_ROOT}/crew" debate -f .crew/debates/staged-question-<slug>.txt --slug <short-kebab-slug> --seats none --consume
 ```
 
-**Always `--seats none` here** — it scaffolds the dir with NO subprocess seats
-run; every subprocess seat is instead launched in its own visible shell in A2 (so
-a `--panel lite`/`solo` Claude-only panel uses the identical A1 call and simply
-skips A2). `--consume` deletes the staging file after the question is copied in.
-The subcommand creates `.crew/debates/<timestamp>-<slug>/`, writes `question.md`
-(and an empty `subprocess.json`), and prints a JSON summary with **`dir`** — read
-it; that's the debate dir where every per-seat result + the synthesis go.
+**Always `--seats none` here** — though `debate` is ALWAYS scaffold-only and
+never runs subprocess seats internally regardless of `--seats` (a non-empty
+`--seats` just prints a stderr advisory and still scaffolds), so passing `none`
+is the explicit, advisory-free form. Every subprocess seat is instead launched in
+its own visible shell in A2 (so a `--panel lite`/`solo` Claude-only panel uses the
+identical A1 call and simply skips A2). `--consume` deletes the staging file after
+the question is copied in. The subcommand creates `.crew/debates/<timestamp>-<slug>/`,
+writes `question.md` (and an always-empty `subprocess.json`), and prints a JSON
+summary with **`dir`** and `seats: []` — read it; that's the debate dir where
+every per-seat result + the synthesis go.
 
 ## A2 — Fan out subprocess seats (one visible shell PER SEAT)
 

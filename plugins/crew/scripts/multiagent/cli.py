@@ -13,7 +13,8 @@ the parent is already importable, e.g. under the dispatcher).
 
 Subcommands: ``review`` (fan-out over a resolved target), ``council`` (fan-out
 of a free-form question — the engine half of /crew:debate's crew-native
-council), ``debate`` (scaffold a debate dir + council in one call), ``run`` (one
+council), ``debate`` (scaffold-only: writes the debate dir + question.md + an
+empty subprocess.json; NEVER runs seats internally), ``run`` (one
 seat ad-hoc), ``render`` (build ONE seat's prompt, no execution), ``seats``
 (print the resolved subprocess seat list, one per line, for per-seat fan-out),
 ``collect`` (collapse the named per-seat ``<seat>.json`` result files into
@@ -392,16 +393,23 @@ def _slugify(text: str, max_words: int = 6) -> str:
 
 
 def cmd_debate(args: argparse.Namespace) -> int:
-    """Scaffold a debate dir + run the subprocess-seat council in ONE allowlistable call.
+    """Scaffold a debate dir in ONE allowlistable call — SCAFFOLD-ONLY, never runs seats.
 
-    Folds the steps /crew:debate used to do in the shell — `mkdir` the dir, a
-    heredoc to write the question, a redirect to capture results — into a single
-    ``python cli.py debate …`` invocation that matches the allowlist rule (so it
-    never prompts). Creates ``<base-dir>/<timestamp>-<slug>/``, writes
-    ``question.md`` + ``subprocess.json`` into it, and prints a JSON summary
-    (including ``dir``) so the orchestrator knows where to drop the Claude-seat
-    outputs + synthesis. The opus/sonnet Task seats are still spawned by the
-    orchestrator — the engine cannot spawn in-session Claude agents.
+    Folds the shell steps /crew:debate used to do — `mkdir` the dir, a heredoc
+    to write the question — into a single allowlistable ``crew debate …`` call
+    (so it never prompts). Creates ``<base-dir>/<timestamp>-<slug>/``, writes
+    ``question.md`` + an ALWAYS-EMPTY ``subprocess.json`` into it, and prints a
+    JSON summary (``dir`` + ``seats: []``) so the orchestrator knows where to
+    drop the per-seat outputs + synthesis.
+
+    It NEVER fans out subprocess seats internally — that was a split-brain
+    foot-gun (review-prep forbids internal `_fan_out` for killability, but
+    debate used to call it). The orchestrator fans the subprocess seats out
+    per-seat via ``crew run <seat>`` (visible, killable shells) and spawns the
+    opus/sonnet Task seats (the engine cannot spawn in-session Claude agents).
+    ``--seats none``/`""` is the only meaning; a non-empty ``--seats`` does NOT
+    execute those seats — it prints a one-line stderr advisory and still
+    scaffolds (exit 0).
     """
     # Exactly one question source: -f <file> XOR positional <question>.
     if args.file and args.question is not None:
@@ -467,18 +475,23 @@ def cmd_debate(args: argparse.Namespace) -> int:
         except OSError:
             pass
 
-    # A Claude-only panel (e.g. --panel lite/solo) has NO subprocess seat but
-    # still wants the dir + question.md scaffolded so the orchestrator can run
-    # the opus/sonnet Task seats and log there. `--seats none` (or "") means
-    # exactly that — distinct from OMITTING --seats (which defaults to the
-    # subprocess panel: codex,cursor-gemini,cursor-glm,cursor-composer).
-    if args.seats is not None and args.seats.strip().lower() in ("", "none"):
-        seats: list[str] = []
-    else:
-        seats = _resolve_seats(args.seats)
-
-    timeout = _resolve_timeout(args.timeout)
-    results = _fan_out(seats, prompts.council(question), timeout) if seats else []
+    # Scaffold-only: debate NEVER runs subprocess seats internally — that path
+    # was a split-brain foot-gun (one prep path killable, the other an opaque
+    # `_fan_out` thread pool). The orchestrator fans seats out per-seat via
+    # `crew run <seat>` (visible, killable shells), so the engine just writes an
+    # EMPTY subprocess.json here. ONLY an EXPLICIT `--seats none` (or "") is the
+    # silent no-op; ANY other case — a non-empty `--seats` (e.g. `--seats codex`)
+    # OR an OMITTED `--seats` (None, which pre-Step-5 ran the default panel) —
+    # no longer executes those seats: emit a one-line advisory and still scaffold
+    # (exit 0). Short-circuit-safe: when args.seats is None the first operand is
+    # True and `.strip()` is never evaluated.
+    if args.seats is None or args.seats.strip().lower() not in ("", "none"):
+        print(
+            "debate no longer runs subprocess seats internally — fan them out "
+            "per-seat via 'crew run <seat>'; scaffolding the dir only",
+            file=sys.stderr,
+        )
+    results: list[ProviderResult] = []
     try:
         (debate_dir / "subprocess.json").write_text(
             render.render_json(results), encoding="utf-8"
@@ -487,8 +500,9 @@ def cmd_debate(args: argparse.Namespace) -> int:
         print(f"error: cannot write subprocess.json to {debate_dir}: {exc}", file=sys.stderr)
         return 2
 
-    # The orchestrator reads this to find the dir + see how the subprocess seats
-    # fared, then spawns the opus/sonnet Task seats and writes the synthesis here.
+    # The orchestrator reads this to find the dir, then fans the subprocess
+    # seats out per-seat (`crew run <seat>`) and spawns the opus/sonnet Task
+    # seats, writing the synthesis here. `seats` is always [] (scaffold-only).
     print(json.dumps({
         "dir": str(debate_dir),
         "question_file": str(debate_dir / "question.md"),
@@ -498,7 +512,7 @@ def cmd_debate(args: argparse.Namespace) -> int:
             for r in results
         ],
     }, indent=2))
-    return _all_failed_exit(results)
+    return 0
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -1174,8 +1188,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     debate = sub.add_parser(
         "debate",
-        help="Scaffold a debate dir + run the subprocess-seat council in one call "
-             "(no mkdir/heredoc/redirect to approve).",
+        help="Scaffold a debate dir (question.md + empty subprocess.json) in one "
+             "call — SCAFFOLD-ONLY, never runs subprocess seats internally "
+             "(no mkdir/heredoc to approve).",
     )
     debate.add_argument(
         "question",
@@ -1200,10 +1215,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     debate.add_argument(
         "--seats", default=None,
-        help="comma-separated subprocess seats (e.g. codex,cursor-gemini,cursor-glm,cursor-composer); 'none' scaffolds the "
-             "dir but runs no subprocess seats (a Claude-only panel)",
+        help="ignored for execution — debate is SCAFFOLD-ONLY and never runs "
+             "subprocess seats internally (fan them out per-seat via 'crew run "
+             "<seat>'). A non-empty value (e.g. codex) prints a one-line stderr "
+             "advisory and still scaffolds; 'none'/'' is the no-op default.",
     )
-    debate.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
+    debate.add_argument(
+        "--timeout", type=int, default=None,
+        help="ignored — debate is scaffold-only and runs no seats (compat only)",
+    )
     debate.add_argument(
         "--consume", action="store_true",
         help="delete the -f staging file after copying the question into the "

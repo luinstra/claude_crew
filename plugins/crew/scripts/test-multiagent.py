@@ -1514,8 +1514,12 @@ def test_council_subcommand():
 
 
 def test_debate_subcommand():
-    log_section("debate subcommand (scaffold dir + council in one allowlistable call)")
+    log_section("debate subcommand (SCAFFOLD-ONLY — never runs subprocess seats internally)")
 
+    # codex stub is present on PATH but must NEVER be invoked: debate is
+    # scaffold-only, so even `--seats codex` runs no seat. If cmd_debate ever
+    # regressed to internal fan-out this stub would write a non-empty
+    # subprocess.json and the [] assertions below would fail.
     codex_echo = """
     import sys
     a = sys.argv[1:]
@@ -1529,13 +1533,15 @@ def test_debate_subcommand():
     sys.exit(0)
     """
 
-    # positional question + --slug: scaffolds <base>/<ts>-<slug>/ with question.md
-    # and subprocess.json, prints a JSON summary with the dir.
+    # positional question + --slug + `--seats codex`: SCAFFOLD-ONLY. The dir +
+    # question.md are scaffolded, subprocess.json is ALWAYS [], the printed
+    # summary has `seats == []`, a stderr advisory is emitted, and exit is 0 —
+    # NO codex seat is run (the split-brain internal `_fan_out` is gone).
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
         bins = d / "bin"
         bins.mkdir()
-        make_fake_bin(bins, "codex", codex_echo)
+        make_fake_bin(bins, "codex", codex_echo)  # present, but must NOT be invoked
         env = path_with(bins)
         base = d / "debates"
         proc = _run_cli(
@@ -1543,7 +1549,7 @@ def test_debate_subcommand():
              "--slug", "x-vs-y", "--base-dir", str(base)],
             env=env, timeout=30,
         )
-        check("debate: exit 0",
+        check("debate --seats codex: exit 0 (scaffold-only, no seat run)",
               proc.returncode == 0, "0", f"{proc.returncode}: {proc.stderr[:200]}")
         info = {}
         try:
@@ -1560,22 +1566,27 @@ def test_debate_subcommand():
               bool(ddir) and (ddir / "question.md").exists()
               and "Is X better than Y?" in (ddir / "question.md").read_text(),
               "question.md holds the question", "?")
-        ok_json = False
+        check("debate --seats codex: summary seats == [] (no seat executed)",
+              info.get("seats") == [], "[]", repr(info.get("seats")))
+        is_empty = False
         if ddir and (ddir / "subprocess.json").exists():
             try:
-                arr = json.loads((ddir / "subprocess.json").read_text())
-                ok_json = isinstance(arr, list) and arr and arr[0]["name"] == "codex"
+                is_empty = json.loads((ddir / "subprocess.json").read_text()) == []
             except Exception:
-                ok_json = False
-        check("debate: subprocess.json written (six-field array)",
-              ok_json, "subprocess.json array", "?")
+                is_empty = False
+        check("debate --seats codex: subprocess.json is [] (codex NEVER run)",
+              is_empty, "[]", "?")
+        check("debate --seats codex: stderr advisory printed (no internal fan-out)",
+              "no longer runs subprocess seats internally" in proc.stderr,
+              "advisory on stderr", repr(proc.stderr[:200]))
 
-    # -f reads the question from a file; auto-slug when --slug omitted.
+    # -f + `--seats codex`: same scaffold-only contract via the question-file path
+    # (auto-slug when --slug omitted). subprocess.json [] + advisory + no seat run.
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
         bins = d / "bin"
         bins.mkdir()
-        make_fake_bin(bins, "codex", codex_echo)
+        make_fake_bin(bins, "codex", codex_echo)  # present, but must NOT be invoked
         env = path_with(bins)
         base = d / "debates"
         qf = d / "q.txt"
@@ -1589,13 +1600,24 @@ def test_debate_subcommand():
             ddir = Path(json.loads(proc.stdout)["dir"])
         except Exception:
             ddir = None
-        check("debate -f: reads question file and scaffolds the dir",
+        check("debate -f --seats codex: reads question file and scaffolds the dir",
               proc.returncode == 0 and bool(ddir) and ddir.exists()
               and (ddir / "question.md").exists(),
               "exit0 + dir + question.md", f"{proc.returncode}: {proc.stdout[:160]}")
         check("debate: auto-slug derived from the question when --slug omitted",
               bool(ddir) and "should-we-adopt" in ddir.name,
               "slug from first words", str(ddir.name if ddir else None))
+        ff_empty = False
+        if ddir and (ddir / "subprocess.json").exists():
+            try:
+                ff_empty = json.loads((ddir / "subprocess.json").read_text()) == []
+            except Exception:
+                ff_empty = False
+        check("debate -f --seats codex: subprocess.json is [] (codex NEVER run)",
+              ff_empty, "[]", "?")
+        check("debate -f --seats codex: stderr advisory printed",
+              "no longer runs subprocess seats internally" in proc.stderr,
+              "advisory on stderr", repr(proc.stderr[:200]))
 
     # malicious --slug is sanitized (no path traversal) + --consume deletes staging.
     with tempfile.TemporaryDirectory() as td:
@@ -1680,6 +1702,96 @@ def test_debate_subcommand():
               "exit0 + dir + question.md", f"{proc.returncode}: {proc.stdout[:160]}")
         check("debate --seats none: subprocess.json is [] (no codex/agy run)",
               is_empty, "[]", str(ddir))
+        # NEGATIVE advisory assertion: an EXPLICIT `--seats none` is the silent
+        # no-op — the advisory must be ABSENT. Guards against an accidental flip
+        # of the inverted condition (which would otherwise pass silently).
+        check("debate --seats none: NO stderr advisory (explicit silent no-op)",
+              "no longer runs subprocess seats internally" not in proc.stderr,
+              "advisory ABSENT", repr(proc.stderr[:200]))
+
+    # OMITTED --seats (the BLOCKING-fix case): a bare `debate "q"` with NO --seats
+    # at all pre-Step-5 RAN the default panel; now it scaffolds-only AND prints the
+    # advisory (None falls through the `args.seats is None` branch). Still empty
+    # subprocess.json, seats == [], exit 0 — no seat is ever run.
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        bins = d / "bin"
+        bins.mkdir()
+        make_fake_bin(bins, "codex", codex_echo)  # present, but must NOT be invoked
+        env = path_with(bins)
+        base = d / "debates"
+        proc = _run_cli(
+            ["debate", "Omitted seats?", "--base-dir", str(base)],
+            env=env, timeout=30,
+        )
+        info = {}
+        try:
+            info = json.loads(proc.stdout)
+        except Exception:
+            info = {}
+        ddir = Path(info["dir"]) if info.get("dir") else None
+        is_empty = False
+        if ddir and (ddir / "subprocess.json").exists():
+            try:
+                is_empty = json.loads((ddir / "subprocess.json").read_text()) == []
+            except Exception:
+                is_empty = False
+        check("debate (omitted --seats): scaffolds dir + question.md, exit 0, seats []",
+              proc.returncode == 0 and bool(ddir) and (ddir / "question.md").exists()
+              and info.get("seats") == [],
+              "exit0 + dir + question.md + seats []",
+              f"{proc.returncode}: {proc.stdout[:160]}")
+        check("debate (omitted --seats): subprocess.json is [] (no codex/agy run)",
+              is_empty, "[]", str(ddir))
+        check("debate (omitted --seats): stderr advisory PRESENT (BLOCKING fix)",
+              "no longer runs subprocess seats internally" in proc.stderr,
+              "advisory PRESENT", repr(proc.stderr[:200]))
+
+    # GUARD: cmd_debate must NEVER reach _fan_out, even with `--seats codex`.
+    # We monkeypatch cli._fan_out to RAISE and call cmd_debate IN-PROCESS — if it
+    # still calls _fan_out the exception would surface (nonzero / traceback);
+    # instead it must scaffold-only and exit 0 with empty results. This in-process
+    # stub also guarantees NO real codex/cursor seat is ever invoked here (no
+    # metered calls). (The subprocess sub-cases above can't monkeypatch the child,
+    # so this complements them by proving the call path itself never branches in.)
+    import argparse as _argparse
+    import contextlib as _contextlib
+    import io as _io
+    from multiagent import cli as _cli
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / "debates"
+
+        def _boom(*a, **k):  # pragma: no cover - must never be called
+            raise AssertionError("cmd_debate reached _fan_out (split-brain regression)")
+
+        orig_fan_out = _cli._fan_out
+        _cli._fan_out = _boom
+        try:
+            ns = _argparse.Namespace(
+                question="Guarded question?", file=None, slug="guard",
+                base_dir=str(base), seats="codex", timeout=None, consume=False,
+            )
+            buf = _io.StringIO()
+            try:
+                with _contextlib.redirect_stdout(buf):
+                    rc = _cli.cmd_debate(ns)
+                raised = False
+            except AssertionError:
+                rc = None
+                raised = True
+            summary = {}
+            try:
+                summary = json.loads(buf.getvalue())
+            except Exception:
+                summary = {}
+            check("debate guard: cmd_debate NEVER calls _fan_out (--seats codex)",
+                  not raised, "no _fan_out call", "AssertionError raised" if raised else "ok")
+            check("debate guard: cmd_debate exits 0 with empty results (scaffold-only)",
+                  rc == 0 and summary.get("seats") == [],
+                  "rc=0 + seats []", f"rc={rc} seats={summary.get('seats')!r}")
+        finally:
+            _cli._fan_out = orig_fan_out
 
     # neither prompt source -> clean error.
     proc = _run_cli(["debate"], timeout=30)

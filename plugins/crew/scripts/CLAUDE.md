@@ -178,13 +178,17 @@ Key contracts (do NOT regress):
   guard — a plugin-root shim would put the plugin root (not `scripts/`) on
   `sys.path[0]` and break that import. The `crew` dispatcher's guard already adds
   `scripts/`, so the import resolves with NO edit to `crew-state.py`.
-- One engine-side
-  affordance: `crew debate --seats none` (or `""`) scaffolds the dir + writes an
-  empty `subprocess.json` (exit 0) instead of erroring. The single-round
-  `/crew:debate` path now ALWAYS uses this scaffold-only mode, then fans seats out
-  per-seat into individual `<seat>.json` files — the scaffold's `subprocess.json`
-  stays empty and unused. (It also still lets a Claude-only `lite`/`solo` council
-  get its log dir.) `review`/`council` intentionally do NOT support empty seats
+- One engine-side affordance: `crew debate` is now **scaffold-only regardless of
+  `--seats`** — it ALWAYS writes the dir + `question.md` + an empty
+  `subprocess.json` (exit 0) and NEVER runs subprocess seats internally (the old
+  internal `_fan_out` branch was a killability split-brain vs. `review-prep`).
+  `--seats none`/`""` is the no-op default; a non-empty `--seats` (e.g. `codex`)
+  prints a one-line stderr advisory and still scaffolds (it does NOT execute the
+  seats). The single-round `/crew:debate` path uses this scaffold-only mode, then
+  fans seats out per-seat into individual `<seat>.json` files — the scaffold's
+  `subprocess.json` stays empty and unused. (It also still lets a Claude-only
+  `lite`/`solo` council get its log dir.) `review`/`council` are unchanged — they
+  still fan out via `_fan_out` and intentionally do NOT support empty seats
   (they're pure fan-out; the orchestrator skips them).
 - Tuning env: `CREW_MA_SEATS`, `CREW_MA_TIMEOUT`, `CREW_MA_CODEX_MODEL`,
   `CREW_MA_GPT_MODEL`, `CREW_MA_GEMINI_MODEL`, `CREW_MA_GLM_MODEL`,
