@@ -503,6 +503,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     Valid seats are whatever the registry holds (codex, agy, cursor-*).
     """
     seat = args.seat
+    if seat in seats.TASK_SEAT_NAMES:
+        print(
+            f"error: '{seat}' is a Task seat — owned by the orchestrator, not "
+            f"runnable by the engine (engine runs subprocess seats only: "
+            f"{', '.join(known_seat_names())})",
+            file=sys.stderr,
+        )
+        return 2
     if seat not in known_seat_names():
         known = ", ".join(known_seat_names())
         print(

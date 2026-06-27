@@ -1187,12 +1187,37 @@ def test_run_subcommand():
               proc.returncode == 0 and ok_json,
               "exit0 + six fields", f"{proc.returncode}: {proc.stdout!r}")
 
-    # unknown / non-subprocess seat -> clear error + nonzero exit.
-    proc = _run_cli(["run", "opus", "hi"], timeout=30)
-    check("run unknown/non-subprocess seat -> nonzero + clear error",
+    # Task seat (orchestrator-owned) -> LOUD, specific failure: exit 2 with a
+    # message naming "Task seat" + "orchestrator" (NOT the generic unknown one).
+    for task_seat in ("opus", "sonnet", "opus-4.6"):
+        proc = _run_cli(["run", task_seat, "hi"], timeout=30)
+        check(f"run {task_seat} (Task seat) -> exit 2 + 'Task seat'/'orchestrator' message",
+              proc.returncode == 2
+              and "Task seat" in proc.stderr
+              and "orchestrator" in proc.stderr
+              and task_seat in proc.stderr,
+              "exit2 + 'Task seat'/'orchestrator'", f"{proc.returncode}: {proc.stderr!r}")
+
+    # A genuine typo (not a Task seat, not registered) still gets the GENERIC
+    # unknown-seat message -> the Task-seat branch is scoped, not over-broad.
+    proc = _run_cli(["run", "notaseat", "hi"], timeout=30)
+    check("run unknown/typo seat -> generic 'subprocess seat' error (NOT Task-seat msg)",
           proc.returncode != 0
-          and "opus" in proc.stderr and "subprocess seat" in proc.stderr,
-          "nonzero + 'opus'/'subprocess seat'", f"{proc.returncode}: {proc.stderr!r}")
+          and "subprocess seat" in proc.stderr
+          and "Task seat" not in proc.stderr,
+          "nonzero + generic 'subprocess seat'", f"{proc.returncode}: {proc.stderr!r}")
+
+    # REGRESSION GUARD: codex (a real subprocess seat) gets PAST the seat-validation
+    # guard. We do NOT invoke/meter it — calling with no prompt source proves it
+    # cleared the Task-seat/unknown rejection (it hits the 'no prompt' error, NOT
+    # 'Task seat' or 'subprocess seat').
+    proc = _run_cli(["run", "codex"], timeout=30)
+    check("run codex passes seat-validation (no Task-seat/unknown rejection)",
+          proc.returncode != 0
+          and "no prompt" in proc.stderr
+          and "Task seat" not in proc.stderr
+          and "subprocess seat" not in proc.stderr,
+          "'no prompt' (past seat guard)", f"{proc.returncode}: {proc.stderr!r}")
 
     # neither prompt source -> error.
     proc = _run_cli(["run", "codex"], timeout=30)
@@ -2934,6 +2959,46 @@ def test_panel_catalog():
           "rc=0 stdout=OK", f"rc={proc.returncode} stdout={proc.stdout!r} stderr={proc.stderr!r}")
 
 
+def test_catalog_registry_disjoint():
+    log_section("TASK_SEAT_NAMES ⟂ subprocess registry (the safety the catalog buys)")
+    from multiagent import seats  # noqa: E402
+    from multiagent.providers import known_seat_names, get_provider  # noqa: E402
+
+    # The invariant: no Task-seat NAME is a registered subprocess seat.
+    check("TASK_SEAT_NAMES ∩ known_seat_names() == ∅ (disjoint)",
+          set(seats.TASK_SEAT_NAMES) & set(known_seat_names()) == set(),
+          "empty intersection",
+          str(set(seats.TASK_SEAT_NAMES) & set(known_seat_names())))
+
+    # Each Task-seat name fails to resolve through the executor registry.
+    for n in seats.TASK_SEAT_NAMES:
+        raised = False
+        try:
+            get_provider(n)
+        except ValueError:
+            raised = True
+        check(f"get_provider({n!r}) raises ValueError (no executor)",
+              raised, "ValueError raised", "no exception")
+
+    # CONVERSE guard: the SUBPROCESS entries of a preset (codex + cursor-*, i.e.
+    # the non-Task-seat names) ARE registry seats and DO resolve. This proves the
+    # disjointness assertion is scoped to TASK_SEAT_NAMES ONLY, not over-broad.
+    subprocess_entries = [n for n in seats.PANEL_PRESETS["full"]
+                          if n not in seats.TASK_SEAT_NAMES]
+    for n in subprocess_entries:
+        in_registry = n in known_seat_names()
+        resolves = False
+        try:
+            get_provider(n)
+            resolves = True
+        except ValueError:
+            resolves = False
+        check(f"subprocess preset entry {n!r} IS in registry + resolves",
+              in_registry and resolves,
+              "in known_seat_names() + get_provider ok",
+              f"in_registry={in_registry} resolves={resolves}")
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -2964,6 +3029,7 @@ def main():
     test_collect()
     test_review_prep()
     test_panel_catalog()
+    test_catalog_registry_disjoint()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")
