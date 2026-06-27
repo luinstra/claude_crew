@@ -1085,8 +1085,9 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     #    default is None/absent):
     #      * --seats <given> (incl. "")  -> seats_given; classify ITS names
     #      * --seats omitted + --panel P -> classify the PANEL_PRESETS[P] names
-    #      * BOTH omitted                -> explicit-empty (subprocess=[], task=[]
-    #                                       unless --task-seats given)
+    #      * BOTH omitted                -> the per-repo config's default_panel
+    #                                       (.crew/config.toml) → built-in "full"
+    #                                       (see the default-panel fallback below)
     #    A name classifies as exactly one of: a registry subprocess seat
     #    (-> subprocess_seats, via _resolve_seats), a seats.TASK_SEAT_NAMES member
     #    (-> task_seats), or NEITHER (silently DROPPED — matching _resolve_seats's
@@ -1202,7 +1203,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="plan .md path, working-tree, branch, commit:<sha>, a SHA, or auto",
     )
-    review.add_argument("--seats", default=None, help="comma-separated subprocess seats (e.g. codex,cursor-gemini,cursor-glm,cursor-composer)")
+    review.add_argument("--seats", default=None, help="comma-separated subprocess seats (e.g. codex,cursor-auto,cursor-composer)")
     review.add_argument("--json", action="store_true", help="emit a JSON array of results")
     review.add_argument("--base", default="main", help="base ref for branch/auto diffs")
     review.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
@@ -1233,7 +1234,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="read the question from this file instead of the positional string",
     )
-    council.add_argument("--seats", default=None, help="comma-separated subprocess seats (e.g. codex,cursor-gemini,cursor-glm,cursor-composer)")
+    council.add_argument("--seats", default=None, help="comma-separated subprocess seats (e.g. codex,cursor-auto,cursor-composer)")
     council.add_argument("--json", action="store_true", help="emit a JSON array of results")
     council.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
     council.add_argument(
@@ -1343,8 +1344,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["full", "lite", "solo", "cursor"],
         help="named preset resolved via seats.PANEL_PRESETS into BOTH subprocess "
              "and task seats. Default absent (None): with no --seats either, "
-             "review-prep resolves explicit-empty. --seats overrides the "
-             "subprocess subset; --task-seats overrides the task subset.",
+             "review-prep resolves the per-repo config's default_panel "
+             "(.crew/config.toml), falling back to the built-in `full`. --seats "
+             "overrides the subprocess subset; --task-seats overrides the task subset.",
     )
     rp.add_argument(
         "--seats", dest="seats", default=None,
@@ -1354,8 +1356,8 @@ def build_parser() -> argparse.ArgumentParser:
              "subprocess_seats=[], no subprocess prompt staged); non-empty => "
              "split into subprocess_seats (registry-resolved) + task_seats "
              "(seats.TASK_SEAT_NAMES members), unknown names dropped. Both --seats "
-             "and --panel omitted => explicit-empty (subprocess=[], task=[] unless "
-             "--task-seats given, prompt_path='', exit 0).",
+             "and --panel omitted => the per-repo config's default_panel "
+             "(.crew/config.toml), falling back to the built-in `full`.",
     )
     rp.add_argument(
         "--session-id", dest="session_id", default=None,

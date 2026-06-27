@@ -95,6 +95,7 @@ commands).
 ### Requirements
 
 - **Python 3.10+** — macOS 12+ and most modern Linux distributions include this. Check with `python3 --version`.
+  - The optional per-repo `.crew/config.toml` (see [Per-repo config](#per-repo-config)) needs **Python 3.11+** (stdlib `tomllib`); on 3.10 the config file is gracefully ignored and everything else works.
 
 ## Usage
 
@@ -172,8 +173,10 @@ For work requiring verification before declaring "done," use `/crew:build` inste
 synthesizes one verdict. The default panel is
 **codex + agy + cursor-auto + cursor-composer + opus + sonnet**:
 the `codex`, `agy`, and `cursor-*` seats run via the bundled `multiagent` engine
-(`plugins/crew/scripts/multiagent/`) — `cursor-gemini` and `cursor-glm` are opt-in via
-`--seats` (agy covers the Gemini lineage flat-rate; glm-max draws on Cursor's
+(`plugins/crew/scripts/multiagent/`) — `cursor-gpt`, `cursor-gemini`, and
+`cursor-glm` are opt-in via
+`--seats` (codex covers the GPT lineage; agy covers the Gemini lineage flat-rate;
+glm-max draws on Cursor's
 shared premium MAX allotment, so cursor-auto takes its default slot from the
 cheap/dedicated bucket) — while
 the two Claude voices are the
@@ -193,13 +196,34 @@ succeed, and only an all-seats-failed panel skips the verdict.
   no codex and no opus/sonnet Task seats
 - `--seats <list>` — an explicit subset of
   `codex,agy,cursor-gpt,cursor-gemini,cursor-glm,cursor-auto,cursor-composer,opus,sonnet`
-  (e.g. `/crew:build --seats codex,opus "fix the bug"`). `cursor-gemini` and
-  `cursor-glm` are opt-in — they work via `--seats` (or `--panel cursor`) but are
-  not in the default panel; `agy` covers the Gemini lineage flat-rate.
+  (e.g. `/crew:build --seats codex,opus "fix the bug"`). `cursor-gpt`,
+  `cursor-gemini`, and `cursor-glm` are opt-in — they work via `--seats` (or
+  `--panel cursor`) but are not in the default panel; `codex` already covers the
+  GPT lineage and `agy` covers the Gemini lineage flat-rate.
 
 Not every change needs the full panel — `lite` (the two Claude voices, no
 external CLI) or a single seat is plenty for routine work. (At the engine level,
 `CREW_MA_SEATS` still pins the default subprocess seats.)
+
+#### Per-repo config
+
+`full` is the **built-in** default panel. An optional, personal per-repo
+`.crew/config.toml` (gitignore it) can override that default and tune individual
+seats (model pin, timeout, codex `reasoning_effort`, agy `print_timeout`).
+Precedence is **CLI flag > config > `CREW_MA_*` env > built-in**. Needs Python
+3.11+ (stdlib `tomllib`); on 3.10 the file is gracefully ignored.
+
+```toml
+# .crew/config.toml
+default_panel = "lite"            # default panel when you name none
+
+[seats.codex]
+model = "gpt-5.5"
+reasoning_effort = "high"
+
+[tuning]
+timeout = 600                     # per-seat wall-clock seconds
+```
 
 #### Ad-hoc single-provider runs
 

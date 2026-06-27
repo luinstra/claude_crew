@@ -27,8 +27,8 @@ $ARGUMENTS
   codex, NO opus/sonnet Task seats · `--seats <list>` =
   an explicit comma-list of any registered seat
   (`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-auto, cursor-composer, opus, sonnet`;
-  `cursor-gemini` and `cursor-glm` are opt-in — work via `--seats …` / `--panel cursor`
-  but are not in the default panel; `agy` covers the Gemini lineage flat-rate).
+  `cursor-gpt`, `cursor-gemini`, and `cursor-glm` are opt-in — work via `--seats …` / `--panel cursor`
+  but are not in the default panel; `codex` covers the GPT lineage and `agy` covers the Gemini lineage flat-rate).
   `--seats` wins over `--panel`.
 - **Opt-in `opus-4.6` Claude seat** — a third Claude voice pinned to
   `claude-opus-4-6` (some prefer 4.6 over 4.7/4.8). NOT in any default; add it

@@ -41,6 +41,7 @@ multiagent/
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
+├── config.py            # memoized `.crew/config.toml` loader + validating getters (default_panel + per-seat tuning; pure leaf, no cli/providers import; Python 3.11+ tomllib, else gracefully ignored)
 ├── render.py            # side-by-side panel + --json rendering
 └── providers/
     ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC (executor: run()), registry + known_seat_names()
@@ -97,7 +98,11 @@ Key contracts (do NOT regress):
   the GPT lineage, so `cursor-gpt` isn't defaulted; `agy` covers the Gemini lineage
   flat-rate, so the metered `cursor-gemini` is left opt-in; and `cursor-glm`'s
   glm-max draws on Cursor's shared premium MAX allotment, so it's opt-in too —
-  `cursor-auto` fills that slot from the cheap/dedicated bucket); `--panel cursor` =
+  `cursor-auto` fills that slot from the cheap/dedicated bucket). When the user
+  names NEITHER `--panel` nor `--seats`, the default panel NAME comes from
+  `.crew/config.toml`'s `default_panel` (`config.py`), falling back to the
+  built-in `full`; precedence is CLI flag > config > `CREW_MA_*` env > builtin.
+  `--panel cursor` =
   `--seats cursor` (ALL Cursor seats incl. cursor-gpt/cursor-gemini/cursor-glm/cursor-auto,
   no codex/Claude).
   The engine itself only knows subprocess seats, and its subprocess-seat allowlist
@@ -201,7 +206,9 @@ Key contracts (do NOT regress):
 - Tuning env: `CREW_MA_SEATS`, `CREW_MA_TIMEOUT`, `CREW_MA_CODEX_MODEL`,
   `CREW_MA_GPT_MODEL`, `CREW_MA_GEMINI_MODEL`, `CREW_MA_GLM_MODEL`,
   `CREW_MA_AUTO_MODEL`, `CREW_MA_COMPOSER_MODEL`, `CREW_MA_AGY_MODEL`,
-  `CREW_MA_AGY_PRINT_TIMEOUT`.
+  `CREW_MA_AGY_PRINT_TIMEOUT`. These env vars are now BELOW per-repo
+  `.crew/config.toml` in precedence (CLI flag > config > `CREW_MA_*` env >
+  builtin) — `config.py`'s getters layer ABOVE the env read at each call site.
 
 Run its tests with `python plugins/crew/scripts/test-multiagent.py`.
 

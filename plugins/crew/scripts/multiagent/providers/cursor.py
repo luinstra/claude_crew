@@ -112,7 +112,9 @@ class CursorProvider(Provider):
     """A review-panel seat backed by the Cursor Agent CLI subprocess.
 
     Pinned to one model. Multiple named instances (see ``CURSOR_SEATS``) run as
-    distinct seats — ``cursor-gpt``, ``cursor-gemini``, ``cursor-glm``, ``cursor-composer``, …
+    distinct seats — ``cursor-auto`` and ``cursor-composer`` are the default
+    cursor model-seats; ``cursor-gpt``, ``cursor-gemini``, and ``cursor-glm`` are
+    registered but opt-in (via ``--seats`` / ``--panel cursor``).
     """
 
     def __init__(

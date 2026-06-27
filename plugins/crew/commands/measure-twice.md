@@ -250,7 +250,7 @@ a faithful `render_panel` digest (it does NOT summarize, vote, or reorder) and
 prints only the output path. Then **Read `panel.md` once** — it is the full
 subprocess panel as labeled blocks — and carry it into 3d alongside the Task
 seats. `panel.md` blocks follow the `--seats` ORDER; each is seat-labeled, so
-reference seats by their LABEL ("the codex block", "the cursor-glm verdict"),
+reference seats by their LABEL ("the codex block", "the cursor-auto verdict"),
 never positionally.
 
 #### 3b — Fan out Task seats (parallel)
