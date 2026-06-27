@@ -84,7 +84,7 @@ opus + sonnet), `--panel lite` (opus + sonnet), `--panel solo` (opus),
 `default_panel` overrides it when you name no panel (resolves config →
 built-in `full` — the panel name has no `CREW_MA_*` tier; the per-seat tuning
 knobs add the full CLI flag > config > `CREW_MA_*` env > built-in chain). Needs
-Python 3.11+, gracefully ignored on 3.10.
+Python 3.11+; on 3.10 the file is gracefully ignored with a one-time stderr note.
 
 ### Utilities
 
