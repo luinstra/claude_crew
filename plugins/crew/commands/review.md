@@ -20,7 +20,10 @@ $ARGUMENTS
 ## Panel options (optional)
 
 Flags at the **start** of `$ARGUMENTS` choose which models review; the rest is
-the review request. Default (no flag) = the full panel — pass `--panel full`.
+the review request. Default (no flag) = **OMIT the `--panel`/`--seats` flag
+entirely** and let `review-prep` apply the configured default (a repo's
+`.crew/config.toml` `default_panel`, else the built-in **full** panel). Do NOT
+hardcode `--panel full` — passing it would override a user's configured default.
 
 - `--panel full|lite|solo|cursor` — a named preset. `--seats <comma-list>` — an
   explicit subset of any registered seat (e.g. `--seats codex,opus`); `--seats`
@@ -32,9 +35,10 @@ the review request. Default (no flag) = the full panel — pass `--panel full`.
   `subprocess_seats` (the `codex`/`agy`/`cursor-*` entries),
   `task_seats` (the Claude voices), and `task_seat_models` (each Task seat's
   model pin). The orchestrator never defines presets, classifies seat names, or
-  hardcodes a model pin — it passes the flag through and reads the JSON. Pass
-  `--panel full` when the user gives no panel flag; otherwise pass the user's
-  chosen `--panel <preset>` / `--seats <subset>`.
+  hardcodes a model pin — it passes the flag through and reads the JSON. **Pass
+  `--panel`/`--seats` ONLY when the user named a panel or seats** (an explicit
+  flag, or natural-language intent like "use the lite panel"); otherwise OMIT the
+  flag and let `review-prep` apply the configured/built-in default.
 
 ## What this does
 
@@ -112,11 +116,13 @@ default — each seat fetches the diff/plan itself; add `--inline-diff` to embed
 instead (rarely needed — it is forwarded to the staged prompt):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" review-prep "<TARGET>" --base "<BASE>" --panel full --session-id <session-id>
+"${CLAUDE_PLUGIN_ROOT}/crew" review-prep "<TARGET>" --base "<BASE>" --session-id <session-id>
 ```
 
-Pass `--panel full` when the user gives no panel flag; otherwise pass the user's
-chosen `--panel <preset>` / `--seats <subset>`. `review-prep` resolves BOTH seat
+**OMIT `--panel`/`--seats` when the user named no panel** (as shown above) — so
+`review-prep` applies the repo's configured `default_panel` or the built-in
+**full** panel. Pass `--panel <preset>` / `--seats <subset>` ONLY when the user
+chose one explicitly. `review-prep` resolves BOTH seat
 kinds: Step 4 reads `task_seats` + `task_seat_models` from this same JSON (it no
 longer classifies Claude seats itself), and the engine still EXECUTES only the
 subprocess seats. **Parse the one-line JSON** it prints (read it

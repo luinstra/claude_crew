@@ -53,7 +53,7 @@ import os
 import re
 import shutil
 
-from multiagent import prompts, render, rounds, seats, targets
+from multiagent import config, prompts, render, rounds, seats, targets
 from multiagent.providers import (
     ProviderResult,
     available_seats,
@@ -116,6 +116,11 @@ def _resolve_timeout(arg: int | None) -> int:
     # direction) for faster interactive loops or bigger jobs.
     if arg is not None:
         return arg
+    # Precedence: --timeout arg (above) > .crew/config.toml [tuning].timeout >
+    # CREW_MA_TIMEOUT env (legacy) > built-in 600s floor.
+    cfg = config.default_timeout()
+    if cfg is not None:
+        return cfg
     env = os.environ.get("CREW_MA_TIMEOUT")
     if env:
         try:
@@ -126,7 +131,10 @@ def _resolve_timeout(arg: int | None) -> int:
 
 
 def _codex_model() -> str | None:
-    return os.environ.get("CREW_MA_CODEX_MODEL") or None
+    # Precedence: .crew/config.toml [seats.codex].model > CREW_MA_CODEX_MODEL env
+    # (legacy) > None (codex's own default). An explicit CLI --model is applied
+    # ABOVE this at the call sites (cmd_run).
+    return config.seat_model("codex") or os.environ.get("CREW_MA_CODEX_MODEL") or None
 
 
 def _run_seat(name: str, prompt: str, timeout: int) -> ProviderResult:
@@ -1091,6 +1099,17 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     preset_names = (
         seats.PANEL_PRESETS[args.panel] if args.panel is not None else None
     )
+
+    # Default-panel fallback: when the user named NEITHER a panel NOR seats, seed
+    # the EFFECTIVE preset from .crew/config.toml's default_panel (→ "full" if
+    # unset/invalid). This drives BOTH both-omitted branches below — the
+    # subprocess split (2a) AND the task split (2b) — via the same `preset_names`
+    # the explicit --panel path uses, so the default review keeps its opus/sonnet
+    # Claude voices, not just its codex/agy subprocess seats. (An explicit
+    # --seats "" or --panel still wins; this only fills the truly-omitted case.)
+    if args.panel is None and args.seats is None:
+        default_name = config.default_panel() or "full"
+        preset_names = seats.PANEL_PRESETS[default_name]
 
     # 2a. Subprocess seats WITH the empty-guard (the lite/solo fix): _resolve_seats
     #     ("") returns the DEFAULT panel, so an explicit-empty/omitted source MUST

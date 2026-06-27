@@ -48,6 +48,8 @@ import signal
 import subprocess
 import time
 
+from multiagent import config
+
 from . import Provider, ProviderResult
 
 
@@ -181,12 +183,20 @@ class AgyProvider(Provider):
         return (False, "agy not found on PATH")
 
     def _resolved_model(self, model: str | None) -> str:
+        # Precedence: explicit model (CLI) > .crew/config.toml [seats.agy].model >
+        # CREW_MA_AGY_MODEL env (legacy) > built-in Gemini default.
         if model:
             return model
-        return os.environ.get("CREW_MA_AGY_MODEL", "Gemini 3.1 Pro (High)")
+        return config.seat_model("agy") or os.environ.get(
+            "CREW_MA_AGY_MODEL", "Gemini 3.1 Pro (High)"
+        )
 
     def _print_timeout(self) -> str:
-        return os.environ.get("CREW_MA_AGY_PRINT_TIMEOUT", DEFAULT_PRINT_TIMEOUT)
+        # Precedence: .crew/config.toml [seats.agy].print_timeout >
+        # CREW_MA_AGY_PRINT_TIMEOUT env (legacy) > built-in 8m default.
+        return config.agy_print_timeout() or os.environ.get(
+            "CREW_MA_AGY_PRINT_TIMEOUT", DEFAULT_PRINT_TIMEOUT
+        )
 
     def effective_timeout(self, timeout: int) -> float:
         """Wall-clock timeout >= --print-timeout (BLOCKING #1).

@@ -2880,6 +2880,389 @@ def _write_plan(td: Path) -> Path:
     return plan
 
 
+def test_config():
+    log_section(".crew/config.toml loader + typed getters (config.py)")
+    import io  # noqa: E402
+    from contextlib import contextmanager, redirect_stderr  # noqa: E402
+    from multiagent import config  # noqa: E402
+    from multiagent.providers.cursor import CursorProvider  # noqa: E402
+
+    @contextmanager
+    def project(toml_text, *, write_file=True):
+        """Point CLAUDE_PROJECT_DIR at a temp repo holding .crew/config.toml,
+        reset the memoized config, and restore env + cache on exit."""
+        saved = os.environ.get("CLAUDE_PROJECT_DIR")
+        with tempfile.TemporaryDirectory() as td:
+            if write_file:
+                crew = Path(td) / ".crew"
+                crew.mkdir(parents=True)
+                (crew / "config.toml").write_text(toml_text)
+            os.environ["CLAUDE_PROJECT_DIR"] = td
+            config._reset_cache_for_tests()
+            try:
+                yield Path(td)
+            finally:
+                if saved is None:
+                    os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                else:
+                    os.environ["CLAUDE_PROJECT_DIR"] = saved
+                config._reset_cache_for_tests()
+
+    @contextmanager
+    def env(**kv):
+        """Set CREW_MA_* env vars, restoring prior values on exit."""
+        saved = {k: os.environ.get(k) for k in kv}
+        for k, v in kv.items():
+            os.environ[k] = v
+        try:
+            yield
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    VALID = textwrap.dedent("""
+        default_panel = "lite"
+
+        [seats.codex]
+        model = "gpt-5.5"
+        reasoning_effort = "high"
+
+        [seats.agy]
+        model = "Gemini Config Model"
+        print_timeout = "3m"
+
+        [seats.cursor-glm]
+        model = "glm-config-max"
+
+        [tuning]
+        timeout = 777
+    """)
+
+    # 1. Valid TOML -> every getter returns its value.
+    with project(VALID):
+        check("config valid: default_panel() -> 'lite'",
+              config.default_panel() == "lite", "lite", str(config.default_panel()))
+        check("config valid: seat_model('codex') -> 'gpt-5.5'",
+              config.seat_model("codex") == "gpt-5.5", "gpt-5.5", str(config.seat_model("codex")))
+        check("config valid: seat_model('agy') -> 'Gemini Config Model'",
+              config.seat_model("agy") == "Gemini Config Model",
+              "Gemini Config Model", str(config.seat_model("agy")))
+        check("config valid: seat_model('cursor-glm') -> 'glm-config-max'",
+              config.seat_model("cursor-glm") == "glm-config-max",
+              "glm-config-max", str(config.seat_model("cursor-glm")))
+        check("config valid: codex_reasoning_effort() -> 'high'",
+              config.codex_reasoning_effort() == "high", "high", str(config.codex_reasoning_effort()))
+        check("config valid: agy_print_timeout() -> '3m'",
+              config.agy_print_timeout() == "3m", "3m", str(config.agy_print_timeout()))
+        check("config valid: default_timeout() -> 777",
+              config.default_timeout() == 777, "777", str(config.default_timeout()))
+        # A seat with no table -> None (no crash).
+        check("config valid: seat_model('nonexistent') -> None",
+              config.seat_model("cursor-gpt") is None, "None", str(config.seat_model("cursor-gpt")))
+
+    # 2. Missing file -> every getter returns None/default (no crash, no warn).
+    with project("", write_file=False):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            vals = (config.default_panel(), config.seat_model("codex"),
+                    config.codex_reasoning_effort(), config.agy_print_timeout(),
+                    config.default_timeout())
+        check("config missing file: all getters None, no stderr noise",
+              all(v is None for v in vals) and buf.getvalue() == "",
+              "all None + silent", f"vals={vals} stderr={buf.getvalue()!r}")
+
+    # 3. Malformed TOML -> soft-ignore the WHOLE file (no raise), warn ONCE.
+    with project("default_panel = \nthis is not = = toml"):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            dp = config.default_panel()
+            tmo = config.default_timeout()
+        first = buf.getvalue()
+        check("config malformed TOML: getters return None (whole file ignored, no raise)",
+              dp is None and tmo is None, "None/None", f"dp={dp} tmo={tmo}")
+        check("config malformed TOML: warns to stderr (not stdout)",
+              "not valid TOML" in first, "warn 'not valid TOML'", repr(first))
+        # one-time: a SECOND call emits nothing new.
+        buf2 = io.StringIO()
+        with redirect_stderr(buf2):
+            config.default_panel()
+        check("config malformed TOML: warning fires AT MOST ONCE per process",
+              buf2.getvalue() == "", "no repeat warn", repr(buf2.getvalue()))
+
+    # 4. Bad-typed / out-of-range field -> THAT getter None, SIBLINGS unaffected.
+    BAD = textwrap.dedent("""
+        default_panel = "huge"
+
+        [seats.codex]
+        reasoning_effort = 123
+        model = "kept-codex-model"
+
+        [seats.agy]
+        print_timeout = ""
+
+        [tuning]
+        timeout = "soon"
+    """)
+    with project(BAD):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            dp = config.default_panel()
+            re_ = config.codex_reasoning_effort()
+            pt = config.agy_print_timeout()
+            tmo = config.default_timeout()
+            kept = config.seat_model("codex")
+        check("config bad fields: each invalid getter -> None",
+              dp is None and re_ is None and pt is None and tmo is None,
+              "all None", f"dp={dp} re={re_} pt={pt} tmo={tmo}")
+        check("config bad fields: a VALID sibling (seats.codex.model) still returns",
+              kept == "kept-codex-model", "kept-codex-model", str(kept))
+        check("config bad fields: warnings go to stderr",
+              "default_panel" in buf.getvalue() and "timeout" in buf.getvalue(),
+              "stderr warnings", repr(buf.getvalue()[:200]))
+
+    # 4b. Negative timeout is out-of-range -> None.
+    with project("[tuning]\ntimeout = -5\n"):
+        check("config negative timeout -> None (out of range)",
+              config.default_timeout() is None, "None", str(config.default_timeout()))
+    # 4c. bool timeout is rejected (bool is an int subclass).
+    with project("[tuning]\ntimeout = true\n"):
+        check("config bool timeout -> None (bool rejected)",
+              config.default_timeout() is None, "None", str(config.default_timeout()))
+
+    # 5. Unknown default_panel -> default_panel() returns None (caller falls back).
+    with project("default_panel = \"nope\"\n"):
+        check("config unknown default_panel -> None (validated vs PANEL_PRESETS)",
+              config.default_panel() is None, "None", str(config.default_panel()))
+
+    # 6. < 3.11 path: simulate tomllib ABSENT -> file ignored + ONE-TIME stderr note.
+    with project(VALID):
+        saved_tomllib = config.tomllib
+        config.tomllib = None
+        config._reset_cache_for_tests()
+        try:
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                dp = config.default_panel()
+                tmo = config.default_timeout()
+            note = buf.getvalue()
+            check("config <3.11 (no tomllib): file ignored -> getters None",
+                  dp is None and tmo is None, "None/None", f"dp={dp} tmo={tmo}")
+            check("config <3.11 (no tomllib): emits the mandatory one-time stderr note",
+                  "3.11" in note and "ignoring" in note.lower(),
+                  "note mentions 3.11 + ignoring", repr(note))
+            buf2 = io.StringIO()
+            with redirect_stderr(buf2):
+                config.default_panel()
+            check("config <3.11 note fires AT MOST ONCE per process",
+                  buf2.getvalue() == "", "no repeat", repr(buf2.getvalue()))
+        finally:
+            config.tomllib = saved_tomllib
+            config._reset_cache_for_tests()
+
+    # ---- Precedence: config BEATS a SET CREW_MA_* (config > env) ----------------
+    from multiagent.cli import _resolve_timeout, _codex_model  # noqa: E402
+
+    # 7a. [tuning].timeout beats CREW_MA_TIMEOUT; explicit arg beats config.
+    with project("[tuning]\ntimeout = 777\n"):
+        with env(CREW_MA_TIMEOUT="120"):
+            check("precedence: [tuning].timeout (777) BEATS CREW_MA_TIMEOUT (120)",
+                  _resolve_timeout(None) == 777, "777", str(_resolve_timeout(None)))
+            check("precedence: explicit --timeout arg beats BOTH config and env",
+                  _resolve_timeout(45) == 45, "45", str(_resolve_timeout(45)))
+    # 7b. No config -> env still honored (legacy fallback untouched).
+    with project("", write_file=False):
+        with env(CREW_MA_TIMEOUT="222"):
+            check("precedence: no config -> CREW_MA_TIMEOUT (222) still wins over builtin",
+                  _resolve_timeout(None) == 222, "222", str(_resolve_timeout(None)))
+
+    # 7c. [seats.codex].model beats CREW_MA_CODEX_MODEL.
+    with project("[seats.codex]\nmodel = \"codex-from-config\"\n"):
+        with env(CREW_MA_CODEX_MODEL="codex-from-env"):
+            check("precedence: [seats.codex].model BEATS CREW_MA_CODEX_MODEL",
+                  _codex_model() == "codex-from-config", "codex-from-config", str(_codex_model()))
+
+    # ---- Per-seat argv/resolution assertions (NO metered seat calls) ------------
+    # 8. codex reasoning_effort from config flows into the -c argv; absent -> xhigh.
+    with project("[seats.codex]\nreasoning_effort = \"medium\"\n"):
+        with tempfile.TemporaryDirectory() as bd:
+            d = Path(bd)
+            cap = d / "capture.json"
+            make_fake_bin(d, "codex", f"""
+            import sys, json
+            a = sys.argv[1:]
+            out = None
+            for i, x in enumerate(a):
+                if x == "-o":
+                    out = a[i+1]
+            json.dump(a, open({str(cap)!r}, "w"))
+            sys.stdin.read()
+            open(out, "w").write("OK")
+            sys.exit(0)
+            """)
+            old_path = os.environ["PATH"]
+            os.environ["PATH"] = str(d) + os.pathsep + old_path
+            try:
+                CodexProvider().run("PROMPT", timeout=15)
+            finally:
+                os.environ["PATH"] = old_path
+            argv = json.loads(cap.read_text())
+            check("per-seat: config codex reasoning_effort -> -c model_reasoning_effort=medium",
+                  "model_reasoning_effort=medium" in argv, "medium in argv", str(argv))
+    # 8b. absent config -> the built-in xhigh default (point PROJECT_DIR at empty repo).
+    with project("", write_file=False):
+        with tempfile.TemporaryDirectory() as bd:
+            d = Path(bd)
+            cap = d / "capture.json"
+            make_fake_bin(d, "codex", f"""
+            import sys, json
+            a = sys.argv[1:]
+            out = None
+            for i, x in enumerate(a):
+                if x == "-o":
+                    out = a[i+1]
+            json.dump(a, open({str(cap)!r}, "w"))
+            sys.stdin.read()
+            open(out, "w").write("OK")
+            sys.exit(0)
+            """)
+            old_path = os.environ["PATH"]
+            os.environ["PATH"] = str(d) + os.pathsep + old_path
+            try:
+                CodexProvider().run("PROMPT", timeout=15)
+            finally:
+                os.environ["PATH"] = old_path
+            argv = json.loads(cap.read_text())
+            check("per-seat: no config -> codex reasoning_effort falls back to xhigh",
+                  "model_reasoning_effort=xhigh" in argv, "xhigh in argv", str(argv))
+
+    # 9. cursor seat model from config reaches CursorProvider.run()'s --model;
+    #    config BEATS the CREW_MA_*_MODEL env.
+    fake_agent = '''
+    import sys, json, os
+    if "--version" in sys.argv:
+        print("2026.06.24-00-45-58-9f61de7")
+        sys.exit(0)
+    cap = os.environ.get("CURSOR_CAPTURE")
+    if cap:
+        json.dump(sys.argv[1:], open(cap, "w"))
+    sys.stdout.write("review body output")
+    sys.exit(0)
+    '''
+    with project("[seats.cursor-glm]\nmodel = \"glm-from-config\"\n"):
+        with tempfile.TemporaryDirectory() as bd:
+            d = Path(bd)
+            make_fake_bin(d, "agent", fake_agent)
+            cap = d / "argv.json"
+            old_path = os.environ["PATH"]
+            os.environ["PATH"] = str(d) + os.pathsep + old_path
+            os.environ["CURSOR_CAPTURE"] = str(cap)
+            try:
+                r = CursorProvider("cursor-glm", "glm-5.2-max", "CREW_MA_GLM_MODEL").run("P", timeout=10)
+                argv = json.loads(cap.read_text())
+                check("per-seat: config cursor model reaches run() --model argv",
+                      "glm-from-config" in argv and r.model == "glm-from-config",
+                      "glm-from-config", f"argv_model={'glm-from-config' in argv} r.model={r.model}")
+                with env(CREW_MA_GLM_MODEL="glm-from-env"):
+                    r2 = CursorProvider("cursor-glm", "glm-5.2-max", "CREW_MA_GLM_MODEL").run("P", timeout=10)
+                    check("per-seat: config cursor model BEATS CREW_MA_GLM_MODEL env",
+                          r2.model == "glm-from-config", "glm-from-config", str(r2.model))
+            finally:
+                os.environ["PATH"] = old_path
+                os.environ.pop("CURSOR_CAPTURE", None)
+
+    # 10. agy model + print_timeout from config reach the argv; config BEATS env.
+    with project("[seats.agy]\nmodel = \"Agy Config Model\"\nprint_timeout = \"4m\"\n"):
+        res, cap = _run_agy_with_fake("""
+        import sys, json
+        json.dump(sys.argv[1:], open(CAPTURE, "w"))
+        sys.stdout.write("review body")
+        sys.exit(0)
+        """)
+        check("per-seat: config agy model + print_timeout reach argv",
+              cap is not None and "Agy Config Model" in cap and "4m" in cap,
+              "model + 4m in argv", str(cap))
+        with env(CREW_MA_AGY_MODEL="Env Model", CREW_MA_AGY_PRINT_TIMEOUT="9m"):
+            res2, cap2 = _run_agy_with_fake("""
+            import sys, json
+            json.dump(sys.argv[1:], open(CAPTURE, "w"))
+            sys.stdout.write("review body")
+            sys.exit(0)
+            """)
+            check("per-seat: config agy model/print_timeout BEAT CREW_MA_AGY_* env",
+                  cap2 is not None and "Agy Config Model" in cap2 and "4m" in cap2
+                  and "Env Model" not in cap2 and "9m" not in cap2,
+                  "config wins over env", str(cap2))
+
+    # ---- review-prep default_panel wiring (subprocess BUILDS the panel) ---------
+    # 11. config default_panel="lite" + NO flags -> BOTH branches fire for lite
+    #     (subprocess split [] AND task split [opus,sonnet]) — not just subprocess.
+    with project("default_panel = \"lite\"\n") as proj:
+        _write_plan(proj)
+        proc = _run_dispatcher(["review-prep", "plan.md", "--session-id", "cfgl"],
+                               cwd=str(proj), timeout=30)
+        obj = json.loads(proc.stdout)
+        staged = proj / ".crew" / "reviews" / "cfgl" / "prompt-seat.txt"
+        check("review-prep config default_panel=lite + no flags -> lite split (subprocess [] AND task [opus,sonnet])",
+              proc.returncode == 0
+              and obj["subprocess_seats"] == []
+              and obj["task_seats"] == ["opus", "sonnet"]
+              and obj["prompt_path"] == "" and not staged.exists(),
+              "lite split both branches", str(obj))
+
+    # 12. config default_panel="cursor" -> the subprocess branch is ALSO driven by
+    #     config (all cursor-* seats), task_seats==[].
+    from multiagent.providers import known_seat_names as _kn  # noqa: E402
+    _cursor_all = sorted(n for n in _kn() if n.startswith("cursor-"))
+    with project("default_panel = \"cursor\"\n") as proj:
+        _write_plan(proj)
+        proc = _run_dispatcher(["review-prep", "plan.md", "--session-id", "cfgc"],
+                               cwd=str(proj), timeout=30)
+        obj = json.loads(proc.stdout)
+        check("review-prep config default_panel=cursor + no flags -> all cursor-* subprocess, no task",
+              proc.returncode == 0
+              and sorted(obj["subprocess_seats"]) == _cursor_all
+              and obj["task_seats"] == [],
+              str(_cursor_all), str(obj))
+
+    # 13. Explicit --panel full OVERRIDES config default_panel="lite".
+    with project("default_panel = \"lite\"\n") as proj:
+        _write_plan(proj)
+        proc = _run_dispatcher(["review-prep", "plan.md", "--panel", "full",
+                                "--session-id", "cfgo"], cwd=str(proj), timeout=30)
+        obj = json.loads(proc.stdout)
+        check("review-prep explicit --panel full OVERRIDES config default_panel=lite",
+              proc.returncode == 0
+              and obj["subprocess_seats"] == ["codex", "agy", "cursor-auto", "cursor-composer"]
+              and obj["task_seats"] == ["opus", "sonnet"],
+              "full overrides config", str(obj))
+
+    # 14. Explicit --seats "" OVERRIDES config default_panel (named-empty != omitted).
+    with project("default_panel = \"full\"\n") as proj:
+        _write_plan(proj)
+        proc = _run_dispatcher(["review-prep", "plan.md", "--seats", "",
+                                "--session-id", "cfge"], cwd=str(proj), timeout=30)
+        obj = json.loads(proc.stdout)
+        check("review-prep explicit --seats '' OVERRIDES config default_panel (stays empty)",
+              proc.returncode == 0
+              and obj["subprocess_seats"] == [] and obj["task_seats"] == [],
+              "named-empty beats config", str(obj))
+
+    # 15. Invalid config default_panel -> falls back to built-in 'full' (no KeyError).
+    with project("default_panel = \"bogus\"\n") as proj:
+        _write_plan(proj)
+        proc = _run_dispatcher(["review-prep", "plan.md", "--session-id", "cfgb"],
+                               cwd=str(proj), timeout=30)
+        obj = json.loads(proc.stdout) if proc.returncode == 0 else None
+        check("review-prep invalid config default_panel -> built-in 'full' (no KeyError)",
+              proc.returncode == 0 and obj is not None
+              and obj["subprocess_seats"] == ["codex", "agy", "cursor-auto", "cursor-composer"]
+              and obj["task_seats"] == ["opus", "sonnet"],
+              "full fallback on invalid", f"rc={proc.returncode} obj={obj}")
+
+
 def test_review_prep():
     log_section("crew review-prep subcommand (PREP only — resolves+stages, runs nothing)")
 
@@ -3053,26 +3436,26 @@ def test_review_prep():
               proc.returncode == 0 and sorted(subs) == expected_cursor and len(subs) >= 2,
               str(expected_cursor), str(subs))
 
-    # 7. EMPTY/omitted --seats -> subprocess_seats==[] AND prompt_path=="" AND no
-    #    prompt-seat.txt staged (the lite/solo regression guard).
-    for seats_args in (["--seats", ""], []):
-        with tempfile.TemporaryDirectory() as td:
-            tdp = Path(td)
-            _write_plan(tdp)
-            proc = _run_dispatcher(
-                ["review-prep", "plan.md", *seats_args, "--session-id", "s7",
-                 "--task-seats", "opus,sonnet"], cwd=td, timeout=30)
-            obj = json.loads(proc.stdout)
-            staged = tdp / ".crew" / "reviews" / "s7" / "prompt-seat.txt"
-            label = "--seats ''" if seats_args else "omitted --seats"
-            check(f"review-prep {label} -> subprocess_seats==[], prompt_path=='', no staged file, task echoed, exit 0",
-                  proc.returncode == 0
-                  and obj["subprocess_seats"] == []
-                  and obj["prompt_path"] == ""
-                  and not staged.exists()
-                  and obj["task_seats"] == ["opus", "sonnet"],
-                  "empty subprocess + no stage + task echoed",
-                  f"rc={proc.returncode} obj={obj} staged={staged.exists()}")
+    # 7. EXPLICIT-EMPTY --seats "" -> subprocess_seats==[] AND prompt_path=="" AND
+    #    no prompt-seat.txt staged (the lite/solo regression guard). An EXPLICIT
+    #    empty seats flag is "the user named seats" (just none) — it does NOT fall
+    #    through to the default panel (that's the truly-omitted case, test 14).
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        proc = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "", "--session-id", "s7",
+             "--task-seats", "opus,sonnet"], cwd=td, timeout=30)
+        obj = json.loads(proc.stdout)
+        staged = tdp / ".crew" / "reviews" / "s7" / "prompt-seat.txt"
+        check("review-prep --seats '' -> subprocess_seats==[], prompt_path=='', no staged file, task echoed, exit 0",
+              proc.returncode == 0
+              and obj["subprocess_seats"] == []
+              and obj["prompt_path"] == ""
+              and not staged.exists()
+              and obj["task_seats"] == ["opus", "sonnet"],
+              "empty subprocess + no stage + task echoed",
+              f"rc={proc.returncode} obj={obj} staged={staged.exists()}")
 
     # ---- Step 2 (panel catalog): --panel resolution + unified --seats split ----
     from multiagent.providers import known_seat_names as _known_seats  # noqa: E402
@@ -3158,17 +3541,24 @@ def test_review_prep():
               and "bogus" not in obj["task_seat_models"],
               "bogus dropped", str(obj))
 
-    # 14. Both --panel AND --seats omitted -> explicit-empty (exit 0).
+    # 14. Both --panel AND --seats omitted + NO config -> the BUILT-IN default
+    #     panel ("full"), INCLUDING its opus/sonnet task seats. This is the exact
+    #     regression the orchestrator change (commands stop hardcoding --panel
+    #     full) could introduce — patching only the subprocess branch would keep
+    #     codex/agy but silently drop the Claude voices. (The temp dir has no
+    #     .crew/config.toml, so default_panel() is None → "full".)
     with tempfile.TemporaryDirectory() as td:
         _write_plan(Path(td))
         proc, obj = _prep(["--session-id", "bo"], td)
         staged = Path(td) / ".crew" / "reviews" / "bo" / "prompt-seat.txt"
-        check("review-prep both --panel and --seats omitted -> explicit-empty (exit 0)",
+        check("review-prep both --panel and --seats omitted + no config -> built-in 'full' (subprocess AND task seats)",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == [] and obj["task_seats"] == []
-              and obj["task_seat_models"] == {} and obj["prompt_path"] == ""
-              and not staged.exists(),
-              "explicit-empty both-omitted", str(obj))
+              and obj["subprocess_seats"] == ["codex", "agy", "cursor-auto", "cursor-composer"]
+              and obj["task_seats"] == ["opus", "sonnet"]
+              and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"}
+              and obj["prompt_path"] == ".crew/reviews/bo/prompt-seat.txt"
+              and staged.exists(),
+              "built-in full default both-omitted", str(obj))
 
     # 15. Precedence: explicit --task-seats OVERRIDES the panel-derived task list;
     #     explicit subprocess --seats OVERRIDES the panel subprocess list.
@@ -3372,6 +3762,7 @@ def main():
     test_cursor()
     test_from_dict_and_escaping()
     test_collect()
+    test_config()
     test_review_prep()
     test_panel_catalog()
     test_catalog_registry_disjoint()

@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import time
 
+from multiagent import config
 from multiagent.providers import Provider, ProviderResult
 
 # ANSI escape code pattern for stripping terminal colour sequences.
@@ -169,7 +170,14 @@ class CursorProvider(Provider):
         enabled`` additionally blocks network + out-of-workspace access. Only
         ``sandbox="workspace-write"`` drops ``--mode plan`` (writes permitted).
         """
-        chosen_model = model or os.environ.get(self._model_env_var, self._default_model)
+        # Precedence: explicit model (CLI --model) > .crew/config.toml
+        # [seats.<name>].model > CREW_MA_*_MODEL env (legacy) > the seat's
+        # built-in default. config goes ABOVE env, NOT in place of the default.
+        chosen_model = (
+            model
+            or config.seat_model(self.name)
+            or os.environ.get(self._model_env_var, self._default_model)
+        )
         if not chosen_model:
             return ProviderResult(
                 name=self.name, model=None, ok=False, output="",

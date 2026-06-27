@@ -26,6 +26,8 @@ import subprocess
 import tempfile
 import time
 
+from multiagent import config
+
 from . import Provider, ProviderResult
 
 
@@ -57,10 +59,14 @@ class CodexProvider(Provider):
         # Cuts ~40k startup tokens and keeps the seat reproducible. Because that
         # also drops the config's model_reasoning_effort, we RE-PIN it in code
         # via -c so reviews keep deep reasoning without the user-config bloat.
+        # reasoning_effort: .crew/config.toml [seats.codex].reasoning_effort wins,
+        # else the built-in xhigh default (re-pinned because --ignore-user-config
+        # drops the config's own model_reasoning_effort).
+        effort = config.codex_reasoning_effort() or "xhigh"
         argv = [
             "codex", "exec", "-",
             "--ignore-user-config",
-            "-c", "model_reasoning_effort=xhigh",
+            "-c", f"model_reasoning_effort={effort}",
             "--sandbox", sandbox,
         ]
         if model:

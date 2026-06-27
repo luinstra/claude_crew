@@ -11,8 +11,11 @@ $ARGUMENTS
 ## Panel options (optional)
 
 Flags at the **start** of `$ARGUMENTS` choose which models review the plan; the
-rest is the task / design-doc path. Default (no flag) = the full panel — pass
-`--panel full`.
+rest is the task / design-doc path. Default (no flag) = **OMIT the
+`--panel`/`--seats` flag entirely** and let `review-prep` apply the configured
+default (a repo's `.crew/config.toml` `default_panel`, else the built-in **full**
+panel). Do NOT hardcode `--panel full` — passing it would override a user's
+configured default.
 
 - `--panel full|lite|solo|cursor` — a named preset. `--seats <comma-list>` — an
   explicit subset of any registered seat (e.g. `--seats codex,opus`); `--seats`
@@ -25,9 +28,10 @@ rest is the task / design-doc path. Default (no flag) = the full panel — pass
   `task_seats` (the Claude voices), and `task_seat_models` (each Task seat's
   model pin). The orchestrator never defines presets, classifies seat names, or
   hardcodes a model pin — it passes the flag through and reads the JSON: Step 3a
-  iterates `subprocess_seats`, Step 3b stages + spawns `task_seats`. Pass
-  `--panel full` when the user gives no panel flag; otherwise pass the user's
-  chosen `--panel <preset>` / `--seats <subset>`.
+  iterates `subprocess_seats`, Step 3b stages + spawns `task_seats`. **Pass
+  `--panel`/`--seats` ONLY when the user named a panel or seats** (an explicit
+  flag, or natural-language intent like "use the lite panel"); otherwise OMIT the
+  flag and let `review-prep` apply the configured/built-in default.
 
 Below, **"the task"** means `$ARGUMENTS` with these panel flags removed — use it
 as the requirements / design-doc path. Keep the raw `$ARGUMENTS` (flags included)
@@ -163,11 +167,13 @@ id for `<session-id>` (the `[Session ID: …]` value; never the literal placehol
 a `${…}` expansion):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" review-prep "[plan_file from state]" --panel full --session-id <session-id>
+"${CLAUDE_PLUGIN_ROOT}/crew" review-prep "[plan_file from state]" --session-id <session-id>
 ```
 
-Pass `--panel full` when the user gives no panel flag; otherwise pass the user's
-chosen `--panel <preset>` / `--seats <subset>`.
+**OMIT `--panel`/`--seats` when the user named no panel** (as shown above) — so
+`review-prep` applies the repo's configured `default_panel` or the built-in
+**full** panel. Pass `--panel <preset>` / `--seats <subset>` ONLY when the user
+chose one explicitly.
 
 (No `--base` here: a plan-file target reviews the plan body and ignores the base
 ref, so omitting it matches the historical `render "[plan_file]" --stage` call and

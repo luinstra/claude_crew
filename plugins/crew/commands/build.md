@@ -11,7 +11,10 @@ $ARGUMENTS
 ## Panel options (optional)
 
 Flags at the **start** of `$ARGUMENTS` choose which models verify; the rest is
-the task. Default (no flag) = the full panel — pass `--panel full`.
+the task. Default (no flag) = **OMIT the `--panel`/`--seats` flag entirely** and
+let `review-prep` apply the configured default (a repo's `.crew/config.toml`
+`default_panel`, else the built-in **full** panel). Do NOT hardcode `--panel
+full` — passing it would override a user's configured default.
 
 - `--panel full|lite|solo|cursor` — a named preset. `--seats <comma-list>` — an
   explicit subset of any registered seat (e.g. `--seats codex,opus`); `--seats`
@@ -24,9 +27,10 @@ the task. Default (no flag) = the full panel — pass `--panel full`.
   `task_seats` (the Claude voices), and `task_seat_models` (each Task seat's
   model pin). The orchestrator never defines presets, classifies seat names, or
   hardcodes a model pin — it passes the flag through and reads the JSON: Step 2a
-  iterates `subprocess_seats`, Step 2b stages + spawns `task_seats`. Pass
-  `--panel full` when the user gives no panel flag; otherwise pass the user's
-  chosen `--panel <preset>` / `--seats <subset>`.
+  iterates `subprocess_seats`, Step 2b stages + spawns `task_seats`. **Pass
+  `--panel`/`--seats` ONLY when the user named a panel or seats** (an explicit
+  flag, or natural-language intent like "use the lite panel"); otherwise OMIT the
+  flag and let `review-prep` apply the configured/built-in default.
 
 Below, **"the task"** means `$ARGUMENTS` with these panel flags removed — use it
 wherever a step references the task. Keep the raw `$ARGUMENTS` (flags included)
@@ -119,11 +123,13 @@ your real id for `<session-id>` (the `[Session ID: …]` value; never the litera
 placeholder or a `${…}` expansion):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" review-prep working-tree --panel full --session-id <session-id>
+"${CLAUDE_PLUGIN_ROOT}/crew" review-prep working-tree --session-id <session-id>
 ```
 
-Pass `--panel full` when the user gives no panel flag; otherwise pass the user's
-chosen `--panel <preset>` / `--seats <subset>`.
+**OMIT `--panel`/`--seats` when the user named no panel** (as shown above) — so
+`review-prep` applies the repo's configured `default_panel` or the built-in
+**full** panel. Pass `--panel <preset>` / `--seats <subset>` ONLY when the user
+chose one explicitly.
 
 (No `--base` here: the `working-tree` target reviews the uncommitted diff vs `HEAD`
 and ignores the base ref, so omitting it matches the historical `render
