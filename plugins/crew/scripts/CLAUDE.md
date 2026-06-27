@@ -145,7 +145,11 @@ Key contracts (do NOT regress):
   subprocess prompt once (`render --stage` machinery, byte-identical), and PRINTS
   `{prompt_path, subprocess_seats, task_seats, task_seat_models}` as JSON — it runs
   NOTHING. The orchestrator then iterates `subprocess_seats`, running each via
-  `run <seat> -f <prompt_path> --json`. (`review-prep` resolves BOTH seat kinds but
+  `run <seat> --session-id <id> --json` — `run` DERIVES `-f` (`prompt-seat.txt`)
+  and `-o` (`<seat>.json`) from the session dir when they're omitted, so the
+  fan-out line no longer types either path; explicit `-f`/`-o` still override
+  independently (debate's own `.crew/debates/` layout keeps passing explicit
+  paths). (`review-prep` resolves BOTH seat kinds but
   EXECUTES neither — the Claude Task seats stay orchestrator-DISPATCHED; the
   commands now CONSUME `task_seats` + `task_seat_models` to stage via `--stage-all`
   and spawn each Task seat with `model = task_seat_models[seat]`, so it is no longer

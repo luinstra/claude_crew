@@ -121,8 +121,10 @@ kinds: Step 4 reads `task_seats` + `task_seat_models` from this same JSON (it no
 longer classifies Claude seats itself), and the engine still EXECUTES only the
 subprocess seats. **Parse the one-line JSON** it prints (read it
 directly from the command's stdout — it is NOT a shell `$(…)` capture): use
-`prompt_path` for the per-seat loop's `-f` and `subprocess_seats` to iterate the
-loop AND (JOINED comma-separated) to pass to `collect --seats` in 3.3.
+`subprocess_seats` to iterate the per-seat loop AND (JOINED comma-separated) to
+pass to `collect --seats` in 3.3. The per-seat `run` DERIVES its `-f` from
+`--session-id` (= `prompt_path`, `.crew/reviews/<session-id>/prompt-seat.txt`), so
+you do NOT pass `prompt_path` as `-f` yourself (see 3.2).
 **If `subprocess_seats` is empty** (a Claude-only `--panel lite`/`solo` resolves to
 no subprocess seats, so `prompt_path` is `""` and nothing was staged), **SKIP the
 3.2 per-seat loop AND the 3.3 collect** entirely — go straight to Step 4 and
@@ -142,11 +144,13 @@ rm -f .crew/reviews/<session-id>/<seat>.json
 
 Then, for every seat in `subprocess_seats` (from the 3.0–3.1 prep JSON), launch a
 SEPARATE `crew run <seat>` Bash call, all concurrently (e.g. background calls) so
-they are distinct shells you can watch and kill individually (the `-f` path is
-`prompt_path` — `.crew/reviews/<session-id>/prompt-seat.txt`):
+they are distinct shells you can watch and kill individually. Passing
+`--session-id <session-id>` lets `run` DERIVE both paths from
+`.crew/reviews/<session-id>/`: `-f` = `prompt-seat.txt` (the `prompt_path` from
+prep) and `-o` = `<seat>.json`:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f .crew/reviews/<session-id>/prompt-seat.txt --json -o .crew/reviews/<session-id>/<seat>.json
+"${CLAUDE_PLUGIN_ROOT}/crew" run <seat> --session-id <session-id> --json
 ```
 
 - `run --json` ALWAYS exits 0 and writes the six-field result

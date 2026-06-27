@@ -1279,6 +1279,182 @@ def test_run_subcommand():
               proc.returncode == 0 and ok_json,
               "exit0 + ok=False JSON", f"{proc.returncode}: {proc.stdout!r}")
 
+    # -------------------------------------------------------------------------
+    # --session-id derivation: run DERIVES -f (prompt-seat.txt) and -o
+    # (<seat>.json) from .crew/reviews/<session-id>/ when omitted. Each case runs
+    # in an ISOLATED temp cwd (fresh .crew/reviews tree) so cross-case residue can
+    # never false-pass a "not written" negative assertion. NO metered seat — the
+    # fake codex (echoes stdin -> its own -o tmp) drives every case.
+    _CODEX_ECHO = """
+    import sys
+    a = sys.argv[1:]
+    out = None
+    for i, x in enumerate(a):
+        if x == "-o":
+            out = a[i + 1]
+    body = sys.stdin.read()
+    with open(out, "w") as f:
+        f.write("RAN:" + body.strip())
+    sys.exit(0)
+    """
+
+    def _sid_env(cwd):
+        bins = cwd / "bin"
+        bins.mkdir()
+        make_fake_bin(bins, "codex", _CODEX_ECHO)
+        return path_with(bins)
+
+    # Case 1: derive BOTH -f and -o. Stage prompt-seat.txt; run with only
+    # --session-id; assert the derived <seat>.json is the six-field object and
+    # stdout did NOT also carry the JSON (output went to the derived -o).
+    with tempfile.TemporaryDirectory() as td:
+        cwd = Path(td)
+        env = _sid_env(cwd)
+        rd = cwd / ".crew" / "reviews" / "S"
+        rd.mkdir(parents=True)
+        (rd / "prompt-seat.txt").write_text("SHARED-PROMPT")
+        proc = _run_cli(["run", "codex", "--session-id", "S", "--json"],
+                        env=env, cwd=str(cwd), timeout=30)
+        derived = rd / "codex.json"
+        ok_json = False
+        if derived.exists():
+            try:
+                obj = json.loads(derived.read_text())
+                ok_json = (set(obj.keys())
+                           == {"name", "model", "ok", "output", "error", "elapsed"}
+                           and obj["name"] == "codex"
+                           and "SHARED-PROMPT" in obj["output"])
+            except Exception:
+                ok_json = False
+        check("run --session-id derives BOTH -f (prompt-seat.txt) and -o (<seat>.json)",
+              proc.returncode == 0 and ok_json and proc.stdout.strip() == "",
+              "exit0 + derived codex.json six-field + empty stdout",
+              f"{proc.returncode}: exists={derived.exists()} out={proc.stdout!r}")
+
+    # Case 2: explicit -o OVERRIDES output derivation — writes <X>, NOT the
+    # derived .crew/reviews/S/codex.json.
+    with tempfile.TemporaryDirectory() as td:
+        cwd = Path(td)
+        env = _sid_env(cwd)
+        rd = cwd / ".crew" / "reviews" / "S"
+        rd.mkdir(parents=True)
+        (rd / "prompt-seat.txt").write_text("SHARED-PROMPT")
+        x = cwd / "explicit-out.json"
+        proc = _run_cli(["run", "codex", "--session-id", "S", "-o", str(x), "--json"],
+                        env=env, cwd=str(cwd), timeout=30)
+        check("run --session-id + explicit -o overrides (writes -o, not <seat>.json)",
+              proc.returncode == 0 and x.exists() and not (rd / "codex.json").exists(),
+              "exit0 + -o written + codex.json absent",
+              f"{proc.returncode}: x={x.exists()} derived={(rd / 'codex.json').exists()}")
+
+    # Case 3: explicit -f OVERRIDES input derivation (reads <Y>), still derives -o
+    # to .crew/reviews/S/codex.json.
+    with tempfile.TemporaryDirectory() as td:
+        cwd = Path(td)
+        env = _sid_env(cwd)
+        rd = cwd / ".crew" / "reviews" / "S"
+        rd.mkdir(parents=True)
+        (rd / "prompt-seat.txt").write_text("SHARED-PROMPT")
+        y = cwd / "explicit-in.txt"
+        y.write_text("OVERRIDE-INPUT")
+        proc = _run_cli(["run", "codex", "--session-id", "S", "-f", str(y), "--json"],
+                        env=env, cwd=str(cwd), timeout=30)
+        derived = rd / "codex.json"
+        read_y = False
+        if derived.exists():
+            try:
+                obj = json.loads(derived.read_text())
+                read_y = ("OVERRIDE-INPUT" in obj["output"]
+                          and "SHARED-PROMPT" not in obj["output"])
+            except Exception:
+                read_y = False
+        check("run --session-id + explicit -f overrides input (reads -f), still derives -o",
+              proc.returncode == 0 and read_y,
+              "exit0 + derived codex.json from -f body",
+              f"{proc.returncode}: exists={derived.exists()} out={proc.stdout!r}")
+
+    # Case 4: path-traversal seat name is rejected by the EXISTING unknown-seat
+    # guard BEFORE derivation — exit 2, no .crew/reviews/S file attempted.
+    with tempfile.TemporaryDirectory() as td:
+        cwd = Path(td)
+        proc = _run_cli(["run", "../evil", "--session-id", "S"],
+                        cwd=str(cwd), timeout=30)
+        leaked = (cwd / ".crew" / "reviews" / "S").exists()
+        check("run ../evil --session-id S -> exit 2 via unknown-seat guard, no path derived",
+              proc.returncode == 2
+              and "unknown or non-subprocess seat" in proc.stderr
+              and not leaked,
+              "exit2 + 'unknown or non-subprocess seat' + no .crew/reviews/S",
+              f"{proc.returncode}: {proc.stderr!r} leaked={leaked}")
+
+    # Case 5: literal placeholder session-id -> exit 2 with the placeholder message
+    # (mirrors collect's <>/guard).
+    proc = _run_cli(["run", "codex", "--session-id", "<session-id>", "--json"], timeout=30)
+    check("run --session-id '<session-id>' (placeholder) -> exit 2 + placeholder message",
+          proc.returncode == 2 and "unsubstituted placeholder" in proc.stderr,
+          "exit2 + 'unsubstituted placeholder'", f"{proc.returncode}: {proc.stderr!r}")
+
+    # Case 6: no --session-id AND no -f/prompt -> unchanged 'no prompt' error.
+    proc = _run_cli(["run", "codex"], timeout=30)
+    check("run codex (no --session-id, no source) -> unchanged 'no prompt' error",
+          proc.returncode != 0 and "no prompt" in proc.stderr,
+          "nonzero + 'no prompt'", f"{proc.returncode}: {proc.stderr!r}")
+
+    # Case 7: CLAUDE_SESSION_ID env set but NO --session-id arg -> does NOT derive;
+    # ad-hoc output stays on stdout (Decision A: env fallback never triggers derive).
+    with tempfile.TemporaryDirectory() as td:
+        cwd = Path(td)
+        env = _sid_env(cwd)
+        env["CLAUDE_SESSION_ID"] = "S"
+        proc = _run_cli(["run", "codex", "hi"], env=env, cwd=str(cwd), timeout=30)
+        derived = cwd / ".crew" / "reviews" / "S" / "codex.json"
+        check("run with CLAUDE_SESSION_ID env but no --session-id -> no derive (stdout)",
+              proc.returncode == 0 and "RAN:hi" in proc.stdout and not derived.exists(),
+              "exit0 + stdout output + codex.json absent",
+              f"{proc.returncode}: derived={derived.exists()} out={proc.stdout!r}")
+
+    # Case 8: explicit --session-id "" (empty) does NOT derive even with env set —
+    # the truthy gate blocks it; output stays on stdout.
+    with tempfile.TemporaryDirectory() as td:
+        cwd = Path(td)
+        env = _sid_env(cwd)
+        env["CLAUDE_SESSION_ID"] = "S"
+        proc = _run_cli(["run", "codex", "hi", "--session-id", "", "--json"],
+                        env=env, cwd=str(cwd), timeout=30)
+        derived = cwd / ".crew" / "reviews" / "S" / "codex.json"
+        on_stdout = False
+        try:
+            on_stdout = json.loads(proc.stdout)["name"] == "codex"
+        except Exception:
+            on_stdout = False
+        check("run --session-id '' (empty) does NOT derive (truthy gate) -> stdout",
+              proc.returncode == 0 and on_stdout and not derived.exists(),
+              "exit0 + JSON on stdout + codex.json absent",
+              f"{proc.returncode}: derived={derived.exists()} out={proc.stdout!r}")
+
+    # Case 9: explicit --session-id "   " (whitespace-only) does NOT derive — the
+    # .strip() in the gate rejects it before it would strip to "" and derive the
+    # FLAT .crew/reviews/ dir. Neither the per-session nor the flat file is written.
+    with tempfile.TemporaryDirectory() as td:
+        cwd = Path(td)
+        env = _sid_env(cwd)
+        env["CLAUDE_SESSION_ID"] = "S"
+        proc = _run_cli(["run", "codex", "hi", "--session-id", "   ", "--json"],
+                        env=env, cwd=str(cwd), timeout=30)
+        per_session = cwd / ".crew" / "reviews" / "S" / "codex.json"
+        flat = cwd / ".crew" / "reviews" / "codex.json"
+        on_stdout = False
+        try:
+            on_stdout = json.loads(proc.stdout)["name"] == "codex"
+        except Exception:
+            on_stdout = False
+        check("run --session-id '   ' (whitespace) does NOT derive (non-blank gate) -> stdout",
+              proc.returncode == 0 and on_stdout
+              and not per_session.exists() and not flat.exists(),
+              "exit0 + JSON on stdout + neither codex.json written",
+              f"{proc.returncode}: per_session={per_session.exists()} "
+              f"flat={flat.exists()} out={proc.stdout!r}")
+
     # -m invocation path reaches `run` too.
     env3 = dict(os.environ)
     env3["PYTHONPATH"] = str(SCRIPT_DIR) + os.pathsep + env3.get("PYTHONPATH", "")

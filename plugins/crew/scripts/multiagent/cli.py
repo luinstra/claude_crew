@@ -528,6 +528,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     ``review`` so invocation shape, ANSI-strip, auth/error-banner detection,
     timeout floor, ARG_MAX guard, and ``CREW_MA_*`` env all apply unchanged.
     Valid seats are whatever the registry holds (codex, agy, cursor-*).
+
+    With a TRUTHY, non-blank ``--session-id <id>``, ``-f`` and ``-o`` are DERIVED
+    from ``.crew/reviews/<id>/`` when omitted: ``-f`` defaults to the shared
+    ``prompt-seat.txt`` and ``-o`` to ``<seat>.json``. Explicit ``-f``/``-o``
+    (and a positional prompt, for input) override their derivation independently,
+    so debate's explicit paths and ad-hoc stdout use are untouched.
     """
     seat = args.seat
     if seat in seats.TASK_SEAT_NAMES:
@@ -546,6 +552,30 @@ def cmd_run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # Derive -f/-o from .crew/reviews/<session-id>/ when a TRUTHY, non-blank
+    # --session-id is given. The truthy + non-blank gate is load-bearing: an
+    # omitted (None), explicit-empty ("") or whitespace-only ("   ") arg must NOT
+    # derive — neither re-entering _resolve_session_id's env fallback nor
+    # deriving the flat .crew/reviews/ dir (Decision A). Runs AFTER the seat
+    # guards (so the seat is a registry-clean [A-Za-z0-9_-] name and the derived
+    # <seat>.json can never escape the dir — no path-char guard needed, Decision E)
+    # and BEFORE the prompt-source checks (so a positional prompt / explicit -f
+    # overrides input derivation without tripping the "both sources" error).
+    if args.session_id and args.session_id.strip():
+        sid = _resolve_session_id(args.session_id)
+        if "<" in sid or ">" in sid:
+            print(
+                f"error: session id looks like an unsubstituted placeholder "
+                f"({sid!r}); pass your actual session id (the "
+                "[Session ID: …] value), not the literal template",
+                file=sys.stderr,
+            )
+            return 2
+        if args.file is None and args.prompt is None:
+            args.file = str(_reviews_subdir(sid) / "prompt-seat.txt")
+        if args.out is None:
+            args.out = str(_reviews_subdir(sid) / f"{seat}.json")
 
     # Exactly one prompt source: -f <file> XOR positional <prompt-string>.
     if args.file and args.prompt is not None:
@@ -1354,6 +1384,12 @@ def build_parser() -> argparse.ArgumentParser:
         "-o", "--out", default=None,
         help="write output to this file instead of stdout (keeps the call "
              "shell-redirect-free and allowlistable)",
+    )
+    run.add_argument(
+        "--session-id", dest="session_id", default=None,
+        help="derive -f and -o from .crew/reviews/<session-id>/ when omitted: "
+             "-f defaults to prompt-seat.txt, -o defaults to <seat>.json. "
+             "Explicit -f/-o override independently.",
     )
     run.set_defaults(func=cmd_run)
 
