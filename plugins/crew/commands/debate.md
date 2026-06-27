@@ -276,13 +276,34 @@ and folds them in as injection-guarded DATA — on round 1 there is no prior):
   -o .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt
 ```
 
+Render EVERY seat in the panel — subprocess AND task, including the opt-in
+`opus-4.6` Task seat when it's present — exactly as A3 renders one prompt per
+Claude seat. For `opus-4.6` stage to `.prompt-opus-46-r<n>.txt` (drop the dot,
+the same `opus-4.6` → `opus-46` filename A3 uses); just keep the render `-o` and
+the matching Task `prompt="<contents of …>"` pointed at the same file.
+
 Then run the round's seats (in parallel where possible):
 
 - **Subprocess seats** (the `codex`/`agy`/`cursor-*` entries): execute the rendered prompt via the engine —
   ```bash
   "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt --json -o .crew/debates/<run-id>/<seat>-r<n>.json
   ```
-- **Task seats** (`opus`/`sonnet`): `Task(subagent_type="crew:panelist", model="<seat>", prompt="<contents of .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt>")`. Use each Task's RETURNED result as its take and completion signal — never an output-file size or other proxy (see A3).
+- **Task seats** (`opus`/`sonnet`/opt-in `opus-4.6`): dispatch one `crew:panelist`
+  per Claude seat in the panel, **pinning each seat by its required model id** —
+  `opus` → `model="opus"`, `sonnet` → `model="sonnet"`, `opus-4.6` →
+  `model="claude-opus-4-6"`. NEVER blindly `model="<seat>"`: `opus-4.6` is not a
+  valid model id and would silently fall back to the inherited model (wrong voice,
+  no error) — the exact silent-fallback caveat A3 carries (`opus-4.6` is
+  version-pinned; it falls back to the inherited model if 4.6 isn't on your org
+  allowlist). This is the SAME task-seat set and SAME pinning A3 uses, so
+  single-round and multi-round stay in lockstep.
+  ```
+  Task(subagent_type="crew:panelist", model="opus",            prompt="<contents of .crew/debates/<run-id>/.prompt-opus-r<n>.txt>")
+  Task(subagent_type="crew:panelist", model="sonnet",          prompt="<contents of .crew/debates/<run-id>/.prompt-sonnet-r<n>.txt>")
+  # opt-in opus-4.6 — only if it's in the panel; version-pinned, silent fallback if not allowlisted:
+  Task(subagent_type="crew:panelist", model="claude-opus-4-6", prompt="<contents of .crew/debates/<run-id>/.prompt-opus-46-r<n>.txt>")
+  ```
+  Use each Task's RETURNED result as its take and completion signal — never an output-file size or other proxy (see A3).
 
 **Record the round.** Normalize every seat to the six-field shape, then with the
 **Write tool** write all seats' positions for this round into — wait for every
