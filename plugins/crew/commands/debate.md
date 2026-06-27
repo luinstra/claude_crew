@@ -162,14 +162,14 @@ render line per Claude seat in the panel** — then dispatch the discuss seat
 "${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role opus -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-opus.txt
 "${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role sonnet -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-sonnet.txt
 # opt-in — only if opus-4.6 is in the panel:
-"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role opus-4.6 -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-opus-4.6.txt
+"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role opus-4.6 -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-opus-46.txt
 ```
 
 ```
 Task(subagent_type="crew:panelist", model="opus",   prompt="<contents of .crew/debates/<dir>/.prompt-opus.txt>")
 Task(subagent_type="crew:panelist", model="sonnet", prompt="<contents of .crew/debates/<dir>/.prompt-sonnet.txt>")
 # opt-in opus-4.6 — version-pinned; silently falls back to the inherited model if 4.6 isn't on your org allowlist:
-Task(subagent_type="crew:panelist", model="claude-opus-4-6", prompt="<contents of .crew/debates/<dir>/.prompt-opus-4.6.txt>")
+Task(subagent_type="crew:panelist", model="claude-opus-4-6", prompt="<contents of .crew/debates/<dir>/.prompt-opus-46.txt>")
 ```
 
 (Review mode: render with `--mode review <target>` instead of `-f question`, and

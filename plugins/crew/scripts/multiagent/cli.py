@@ -202,6 +202,17 @@ def _reviews_subdir(session_id: str) -> Path:
     return Path(_REVIEWS_BASE) / seg if seg else Path(_REVIEWS_BASE)
 
 
+def _seat_role_slug(role: str) -> str:
+    """Derive the staged-filename slug for a seat role: charset-guard the role to
+    ``[A-Za-z0-9_-]`` (stripping ``.``/``/`` etc. so it can never escape
+    ``.crew/reviews/``) and fall back to ``seat`` when empty. This is the ONE
+    canonical role→filename-slug source that ``_stage_path``/``--stage-all`` funnel
+    through, so staging and spawn always agree on the staged filename (e.g. a
+    ``.``-bearing role like ``opus-4.6`` stages AND is read as ``prompt-opus-46.txt``).
+    """
+    return re.sub(r"[^A-Za-z0-9_-]", "", (role or "").strip()) or "seat"
+
+
 def _stage_path(session_id: str, seat_role: str | None) -> str:
     """Derive the session-scoped staging path for a rendered prompt:
     ``.crew/reviews/<session-id>/prompt-<seat-role>.txt``.
@@ -218,7 +229,7 @@ def _stage_path(session_id: str, seat_role: str | None) -> str:
     The session-segment containment is shared with ``cmd_collect`` via
     ``_reviews_subdir`` so both resolve the dir identically.
     """
-    role = re.sub(r"[^A-Za-z0-9_-]", "", (seat_role or "").strip()) or "seat"
+    role = _seat_role_slug(seat_role or "")
     return str(_reviews_subdir(session_id) / f"prompt-{role}.txt")
 
 

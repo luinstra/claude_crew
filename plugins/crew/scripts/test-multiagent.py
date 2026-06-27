@@ -547,6 +547,22 @@ def test_stage():
           cli._stage_path("s", None) == ".crew/reviews/s/prompt-seat.txt",
           ".crew/reviews/s/prompt-seat.txt", cli._stage_path("s", None))
 
+    # _seat_role_slug: the ONE canonical role→filename-slug source _stage_path /
+    # --stage-all funnel through. A `.`-bearing role like opus-4.6 is charset-
+    # stripped to opus-46, plain roles pass through, empty falls back to 'seat'.
+    check("seat-role slug strips '.' (opus-4.6 -> opus-46)",
+          cli._seat_role_slug("opus-4.6") == "opus-46",
+          "opus-46", cli._seat_role_slug("opus-4.6"))
+    check("seat-role slug passes a plain role through",
+          cli._seat_role_slug("opus") == "opus",
+          "opus", cli._seat_role_slug("opus"))
+    check("seat-role slug defaults to 'seat' when empty",
+          cli._seat_role_slug("") == "seat",
+          "seat", cli._seat_role_slug(""))
+    check("stage path derives prompt-opus-46.txt for opus-4.6 (dot stripped)",
+          cli._stage_path("s", "opus-4.6").endswith("prompt-opus-46.txt"),
+          "ends with prompt-opus-46.txt", cli._stage_path("s", "opus-4.6"))
+
     # End-to-end: render --stage writes the prompt to the derived path and prints
     # that path — no -o, no shell expansion. Run in a temp cwd so nothing leaks
     # into the repo. discuss -q needs no git repo.
@@ -2999,6 +3015,37 @@ def test_catalog_registry_disjoint():
               f"in_registry={in_registry} resolves={resolves}")
 
 
+def test_no_dotkept_staged_filename():
+    log_section("no dot-kept opus-4.6 staged FILENAME drift under plugins/crew/")
+    import re as _re
+
+    # FILENAME-SCOPED guard: the staged-prompt filename for the opus-4.6 seat must
+    # always be the dot-stripped `prompt-opus-46` (what _seat_role_slug derives).
+    # debate.md hand-writes its render `-o` filenames, so _seat_role_slug can't
+    # reach them — this scan is what stops the dot-KEPT staged-filename drift from
+    # silently recurring. SCOPED to the FILENAME spelling ONLY: we deliberately do
+    # NOT scan a bare `opus-4.6`, which would false-positive on the LEGIT
+    # `--seat-role opus-4.6` render token, the `opus-4.6` seat name in
+    # `--seats`/prose, and MODEL_OVERRIDES/TASK_SEAT_NAMES entries — all of which
+    # STAY. Only the dot-kept FILENAME spelling is forbidden.
+    crew_root = SCRIPT_DIR.parent  # plugins/crew/
+    forbidden = _re.compile(r"prompt-opus-4\.6|opus-4\.6\.txt")
+    offenders = []
+    for path in crew_root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if forbidden.search(line):
+                offenders.append(f"{path.relative_to(crew_root)}:{lineno}: {line.strip()}")
+    check("no dot-kept opus-4.6 staged FILENAME anywhere under plugins/crew/",
+          not offenders, "zero matches",
+          "; ".join(offenders) if offenders else "zero matches")
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -3030,6 +3077,7 @@ def main():
     test_review_prep()
     test_panel_catalog()
     test_catalog_registry_disjoint()
+    test_no_dotkept_staged_filename()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")
