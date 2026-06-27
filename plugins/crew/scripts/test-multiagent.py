@@ -3699,6 +3699,35 @@ def test_debate_panel_resolver():
           rc == 0 and lines == ["opus", "sonnet"], "['opus', 'sonnet']",
           f"rc={rc} {lines}")
 
+    # 7. BLOCKING regression guard: an explicit --seats with a path-traversal /
+    #    unknown name is REJECTED (nonzero, nothing on stdout) so a hostile seat
+    #    name can never reach .crew/debates/<dir>/<seat>.json. The valid subset
+    #    that KEEPS a task seat (case 4b) must still pass.
+    rc, lines = resolve(None, ["--seats", "cursor-../../x"])
+    check("seats --debate --seats cursor-../../x -> REJECTED (nonzero, no stdout)",
+          rc != 0 and lines == [], "rc!=0 and []", f"rc={rc} {lines}")
+    rc, lines = resolve(None, ["--seats", "codex,bogusseat"])
+    check("seats --debate --seats codex,bogusseat (unknown name) -> REJECTED",
+          rc != 0 and lines == [], "rc!=0 and []", f"rc={rc} {lines}")
+    # A valid subset incl. a task seat still succeeds and KEEPS opus.
+    rc, lines = resolve(None, ["--seats", "codex,opus"])
+    check("seats --debate --seats codex,opus (valid subset) -> KEEPS opus",
+          rc == 0 and lines == ["codex", "opus"], "['codex', 'opus']",
+          f"rc={rc} {lines}")
+
+    # 8. MINOR: `seats --panel <preset>` WITHOUT --debate errors (--panel only
+    #    steers the debate resolver; it would otherwise be silently ignored).
+    with tempfile.TemporaryDirectory() as td:
+        env = {**os.environ, "CLAUDE_PROJECT_DIR": td}
+        proc = _run_dispatcher(["seats", "--panel", "lite"],
+                               env=env, cwd=td, timeout=30)
+    out_lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    check("seats --panel lite WITHOUT --debate -> errors (nonzero, no stdout)",
+          proc.returncode != 0 and out_lines == []
+          and "--panel" in proc.stderr,
+          "rc!=0, no stdout, stderr mentions --panel",
+          f"rc={proc.returncode} stdout={out_lines} stderr={proc.stderr!r}")
+
 
 def test_panel_catalog():
     log_section("plain-data panel catalog (seats.py)")

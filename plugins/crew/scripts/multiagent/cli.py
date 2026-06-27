@@ -205,6 +205,17 @@ def _resolve_debate_panel_name(panel_arg: str | None) -> str:
     return config.debate_panel() or config.default_panel() or "full"
 
 
+class _DebateSeatError(Exception):
+    """Internal: a ``seats --debate --seats`` validation failure carrying the CLI
+    exit code. The message is already printed to stderr; ``cmd_seats`` translates
+    this into the nonzero exit (mirroring ``_RenderInputError``).
+    """
+
+    def __init__(self, code: int) -> None:
+        super().__init__()
+        self.code = code
+
+
 def _resolve_debate_seats(panel_arg: str | None, seats_arg: str | None) -> list[str]:
     """Resolve the FULL debate panel seat list — subprocess AND Claude Task seats.
 
@@ -215,12 +226,38 @@ def _resolve_debate_seats(panel_arg: str | None, seats_arg: str | None) -> list[
 
     Precedence: explicit ``--seats`` (wins) > explicit ``--panel`` >
     ``config.debate_panel()`` > ``config.default_panel()`` > built-in ``full``.
+
+    Explicit ``--seats`` entries are VALIDATED after group expansion: each must be
+    path-safe AND a member of the UNION ``known_seat_names() ∪
+    seats.TASK_SEAT_NAMES``. The union is the key — it KEEPS the Task seats
+    (opus/sonnet/opus-4.6, which are NOT in the registry) while REJECTING garbage.
+    A path-unsafe entry (e.g. ``cursor-../../x``) or an unknown name raises
+    ``_DebateSeatError(2)`` with a stderr message — debate.md classifies
+    ``cursor-*`` as a subprocess seat and writes ``.crew/debates/<dir>/<seat>.json``,
+    so an unfiltered traversal name would escape the debate dir. This mirrors
+    ``cmd_collect``'s seat-name guard (reject, never silently sanitize — a
+    sanitized name would name the WRONG seat). The preset path (no explicit
+    ``--seats``) is unaffected: preset/group-expanded names are always valid.
     """
     if seats_arg is not None:
         names = [s.strip() for s in seats_arg.split(",") if s.strip()]
+        names = _expand_seat_groups(names)
+        valid = set(known_seat_names()) | seats.TASK_SEAT_NAMES
+        for n in names:
+            if re.sub(r"[^A-Za-z0-9_-]", "", n) != n or n not in valid:
+                print(
+                    f"error: invalid debate seat name {n!r} in --seats; debate "
+                    "seats must match [A-Za-z0-9_-] (no path separators or dots) "
+                    "and be a known seat (a registered subprocess seat or a Claude "
+                    "Task seat: " + ", ".join(sorted(valid)) + "). debate writes "
+                    "per-seat results as .crew/debates/<dir>/<seat>.json and must "
+                    "not let a seat name escape the debate dir.",
+                    file=sys.stderr,
+                )
+                raise _DebateSeatError(2)
     else:
         names = list(seats.PANEL_PRESETS[_resolve_debate_panel_name(panel_arg)])
-    names = _expand_seat_groups(names)
+        names = _expand_seat_groups(names)
     seen: set[str] = set()
     return [n for n in names if not (n in seen or seen.add(n))]
 
@@ -977,9 +1014,23 @@ def cmd_seats(args: argparse.Namespace) -> int:
     the user names no ``--panel``/``--seats`` (the markdown cannot read TOML).
     """
     if args.debate:
-        for s in _resolve_debate_seats(args.panel, args.seats):
+        try:
+            resolved = _resolve_debate_seats(args.panel, args.seats)
+        except _DebateSeatError as e:
+            return e.code
+        for s in resolved:
             print(s)
         return 0
+    if args.panel is not None:
+        # --panel only steers the DEBATE panel resolver; without --debate it would
+        # be silently ignored (the default path resolves the subprocess panel from
+        # --seats only). Fail loud rather than no-op.
+        print(
+            "error: --panel is only valid with --debate; without --debate, "
+            "`seats` resolves the subprocess panel from --seats only.",
+            file=sys.stderr,
+        )
+        return 2
     for s in _resolve_seats(args.seats):
         print(s)
     return 0
@@ -1340,13 +1391,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     seats_p = sub.add_parser(
         "seats",
-        help="print the resolved subprocess seat list (group tokens expanded), "
-             "one per line — for per-seat fan-out",
+        help="print the resolved seat list (group tokens expanded), one per line "
+             "— for per-seat fan-out. Default: the subprocess panel. With "
+             "--debate: the FULL debate panel (subprocess AND Claude Task seats).",
     )
     seats_p.add_argument(
         "--seats", default=None,
         help="comma-separated seats / group tokens (e.g. 'cursor'); "
-             "default = the default subprocess panel",
+             "default = the default subprocess panel. With --debate, explicit "
+             "entries are validated against known subprocess + Task seats and "
+             "path-unsafe/unknown names are rejected.",
     )
     seats_p.add_argument(
         "--panel", default=None, choices=["full", "lite", "solo", "cursor"],

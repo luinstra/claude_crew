@@ -1,5 +1,5 @@
 ---
-description: Crew-native multi-model debate on a question — single round (council) or multi-round with rebuttals; default panel codex + agy + cursor-auto + cursor-composer + opus + sonnet; narrow with --panel/--seats
+description: Crew-native multi-model debate on a question — single round (council) or multi-round with rebuttals; panel is config-aware (per-repo .crew/config.toml [debate].panel / default_panel, falling back to the built-in full = codex + agy + cursor-auto + cursor-composer + opus + sonnet); override with --panel/--seats
 argument-hint: "[--rounds N] [--panel ...] <question>"
 allowed-tools: Bash, Task, Read, Glob, Write
 ---
@@ -135,16 +135,15 @@ and `/crew:review` Step 3 use, instead of one opaque `debate` call hiding them i
 an internal thread pool). Use the bare-script path (its top-of-file `sys.path`
 guard makes package imports resolve).
 
-**A2.0 — get the concrete seat list.** Group tokens (e.g. `cursor`) must be
-expanded to real seat names before you can loop. Ask the engine (keeps the
-registry authoritative — no hardcoded cursor list in this command):
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" seats --seats <resolved codex/cursor-* seats>
-```
-
-It prints one seat per line. (For `--panel cursor`, pass `--seats cursor` — it
-expands to every registered `cursor-*` seat.)
+**A2.0 — isolate the subprocess seats.** The `seats --debate` output you split
+above is ALREADY group-expanded (the engine expands `cursor` → every registered
+`cursor-*` seat before printing), so the `codex`/`agy`/`cursor-*` entries are
+already concrete seat names — just take those entries from the resolved panel and
+loop. No second expansion call is needed. (If you ever need to re-expand a bare
+group token in isolation — e.g. you only have `--panel cursor` and not the
+`--debate` output — `crew seats --seats cursor` expands it to every registered
+`cursor-*` seat, keeping the registry authoritative with no hardcoded cursor list
+in this command.)
 
 **A2.1 — render each seat's prompt.** Discuss-mode council prompts carry a
 per-seat label, so render ONE prompt per seat from the single builder (the same
