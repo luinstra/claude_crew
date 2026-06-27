@@ -1,5 +1,5 @@
 ---
-description: Crew-native multi-model debate on a question — single round (council) or multi-round with rebuttals; default panel codex + agy + cursor-glm + cursor-composer + opus + sonnet; narrow with --panel/--seats
+description: Crew-native multi-model debate on a question — single round (council) or multi-round with rebuttals; default panel codex + agy + cursor-auto + cursor-composer + opus + sonnet; narrow with --panel/--seats
 argument-hint: "[--rounds N] [--panel ...] <question>"
 allowed-tools: Bash, Task, Read, Glob, Write
 ---
@@ -19,16 +19,16 @@ $ARGUMENTS
   council; `N>1` runs a multi-round debate where each round sees the prior
   round's positions and may rebut/revise.
 - **Panel** — `--panel full` =
-  `codex,agy,cursor-glm,cursor-composer,opus,sonnet` (default) ·
+  `codex,agy,cursor-auto,cursor-composer,opus,sonnet` (default) ·
   `--panel lite` = `opus,sonnet` · `--panel solo` = `opus` · `--panel cursor` =
   all Cursor model-seats (`--seats cursor`, which the engine expands to every
-  registered cursor-* seat — cursor-gpt, cursor-gemini, cursor-glm,
+  registered cursor-* seat — cursor-gpt, cursor-gemini, cursor-glm, cursor-auto,
   cursor-composer, and any future ones); a pure cross-model Cursor panel — NO
   codex, NO opus/sonnet Task seats · `--seats <list>` =
   an explicit comma-list of any registered seat
-  (`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-composer, opus, sonnet`;
-  `cursor-gemini` is opt-in — works via `--seats cursor-gemini` / `--panel cursor`
-  but is not in the default panel; `agy` covers the Gemini lineage flat-rate).
+  (`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-auto, cursor-composer, opus, sonnet`;
+  `cursor-gemini` and `cursor-glm` are opt-in — work via `--seats …` / `--panel cursor`
+  but are not in the default panel; `agy` covers the Gemini lineage flat-rate).
   `--seats` wins over `--panel`.
 - **Opt-in `opus-4.6` Claude seat** — a third Claude voice pinned to
   `claude-opus-4-6` (some prefer 4.6 over 4.7/4.8). NOT in any default; add it

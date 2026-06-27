@@ -68,10 +68,16 @@ from multiagent.providers import (
 # (`--seats cursor-gpt` / `--panel cursor`). `cursor-gemini` is likewise
 # registered-but-opt-in (`--seats cursor-gemini` / `--panel cursor`) — agy covers
 # the Gemini lineage flat-rate, so the metered Cursor gemini seat isn't defaulted.
+# `cursor-glm` is ALSO registered-but-opt-in (`--seats cursor-glm` / `--panel
+# cursor`): glm-max draws on Cursor's shared premium MAX allotment, so it's pulled
+# from the default to keep the default off the premium bucket. `cursor-auto`
+# (Cursor's auto model routing) is defaulted in its place — auto bills from
+# Cursor's cheap/dedicated bucket (like composer), so no default crew panel touches
+# the premium allotment.
 # Override the whole list with CREW_MA_SEATS. Any name here must be a registered
 # subprocess seat (see providers/__init__._build_registry); unknown names dropped.
 _DEFAULT_SUBPROCESS_PANEL = (
-    "codex", "agy", "cursor-glm", "cursor-composer",
+    "codex", "agy", "cursor-auto", "cursor-composer",
 )
 
 

@@ -38,7 +38,7 @@ MODEL_OVERRIDES = {"opus-4.6": "claude-opus-4-6"}
 # roster-fidelity drift guard. ``cursor`` is the literal group token (expanded
 # later in cli.py), NOT a baked-in cursor-* list.
 PANEL_PRESETS = {
-    "full": ["codex", "agy", "cursor-glm", "cursor-composer", "opus", "sonnet"],
+    "full": ["codex", "agy", "cursor-auto", "cursor-composer", "opus", "sonnet"],
     "lite": ["opus", "sonnet"],
     "solo": ["opus"],
     "cursor": ["cursor"],

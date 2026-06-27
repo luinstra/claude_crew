@@ -16,7 +16,7 @@ rest is the task / design-doc path. Default (no flag) = the full panel — pass
 
 - `--panel full|lite|solo|cursor` — a named preset. `--seats <comma-list>` — an
   explicit subset of any registered seat (e.g. `--seats codex,opus`); `--seats`
-  wins if both are given. `cursor-gemini` and `cursor-gpt` are opt-in (add via `--seats`).
+  wins if both are given. `cursor-gemini`, `cursor-glm`, and `cursor-gpt` are opt-in (add via `--seats`).
   Opt-in `opus-4.6` is a third Claude voice pinned to a version-locked model — add
   it explicitly (e.g. `--seats codex,opus,sonnet,opus-4.6`).
 - **The engine resolves the preset — the orchestrator does NOT.** `review-prep`
@@ -128,7 +128,7 @@ synthesize the results into the existing verdict. Two seat kinds:
   no `claude -p`, no API key).
 
 The panel is whatever the Panel-options flags resolved to (default **codex +
-agy + cursor-glm + cursor-composer + opus + sonnet**). Only fan out the
+agy + cursor-auto + cursor-composer + opus + sonnet**). Only fan out the
 seats in that list. A failed/skipped seat
 NEVER aborts the review (see "Synthesize" below) — the verdict is synthesized
 from whichever seats succeed.

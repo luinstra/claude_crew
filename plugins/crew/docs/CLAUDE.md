@@ -68,16 +68,16 @@ Skills provide specialized guidance that activates automatically based on contex
 | `/crew:cancel-measure-twice` | Exit an active measure-twice loop |
 | `/crew:plan "description"` | Start planning session |
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (saves context) |
-| `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (codex + agy + cursor-glm + cursor-composer + opus + sonnet) → `APPROVED`/`REVISE` verdict |
-| `/crew:debate "question"` | Crew-native multi-model debate (codex + agy + cursor-glm + cursor-composer + opus + sonnet) — single-round council by default, or `--rounds N` for a multi-round debate with rebuttals; synthesized into agreement/disagreement/recommendation (self-contained, no external plugin) |
+| `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (codex + agy + cursor-auto + cursor-composer + opus + sonnet) → `APPROVED`/`REVISE` verdict |
+| `/crew:debate "question"` | Crew-native multi-model debate (codex + agy + cursor-auto + cursor-composer + opus + sonnet) — single-round council by default, or `--rounds N` for a multi-round debate with rebuttals; synthesized into agreement/disagreement/recommendation (self-contained, no external plugin) |
 
 **Panel size (build / measure-twice / review / debate):** start the argument with
-`--panel full` (default — codex + agy + cursor-glm + cursor-composer +
+`--panel full` (default — codex + agy + cursor-auto + cursor-composer +
 opus + sonnet), `--panel lite` (opus + sonnet), `--panel solo` (opus),
-`--panel cursor` (all Cursor models — gpt/gemini/glm/composer, no codex/Claude), or
+`--panel cursor` (all Cursor models — gpt/gemini/glm/auto/composer, no codex/Claude), or
 `--seats codex,opus` (any subset of
-`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-composer, opus, sonnet`; `cursor-gemini`
-is opt-in — agy covers the Gemini lineage flat-rate). Not every change needs the full panel — e.g.
+`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-auto, cursor-composer, opus, sonnet`; `cursor-gemini`
+and `cursor-glm` are opt-in — agy covers the Gemini lineage flat-rate). Not every change needs the full panel — e.g.
 `/crew:build --panel lite "fix the bug"`.
 
 ### Utilities

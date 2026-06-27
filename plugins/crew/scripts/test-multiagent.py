@@ -457,9 +457,9 @@ def test_default_seats():
     try:
         os.environ.pop("CREW_MA_SEATS", None)
         seats = _default_subprocess_seats()
-        check("default subprocess panel == codex + agy + cursor-glm/composer (cursor-gemini/gpt opt-in)",
-              seats == ["codex", "agy", "cursor-glm", "cursor-composer"],
-              "['codex', 'agy', 'cursor-glm', 'cursor-composer']", str(seats))
+        check("default subprocess panel == codex + agy + cursor-auto/composer (cursor-gemini/glm/gpt opt-in)",
+              seats == ["codex", "agy", "cursor-auto", "cursor-composer"],
+              "['codex', 'agy', 'cursor-auto', 'cursor-composer']", str(seats))
         # opus/sonnet (Task seats) AND unknown names in CREW_MA_SEATS are dropped;
         # agy is registered, so it's honored as an opt-in seat.
         os.environ["CREW_MA_SEATS"] = "codex,agy,opus,sonnet,bogus"
@@ -2170,7 +2170,7 @@ def test_cursor():
     from multiagent.providers.cursor import CursorProvider, CURSOR_SEATS
     from multiagent import cli
 
-    check("cursor model-seats are registered (cursor-gemini/glm/composer)",
+    check("all cursor-* seats are registered",
           all(s in known_seat_names() for s in CURSOR_SEATS),
           "all present", str(known_seat_names()))
     check("engine resolves a cursor seat (--seats cursor-glm,codex)",
@@ -2248,6 +2248,14 @@ def test_cursor():
             check("CREW_MA_<seat>_MODEL overrides the pinned model",
                   r2.model == "glm-override", "glm-override", str(r2.model))
             os.environ.pop("CREW_MA_GLM_MODEL", None)
+
+            # cursor-auto's CREW_MA_AUTO_MODEL override (mirrors the glm case).
+            prov_auto = CursorProvider("cursor-auto", "auto", "CREW_MA_AUTO_MODEL")
+            os.environ["CREW_MA_AUTO_MODEL"] = "auto-override"
+            r3 = prov_auto.run("X", timeout=10)
+            check("CREW_MA_AUTO_MODEL overrides cursor-auto's pinned model",
+                  r3.model == "auto-override", "auto-override", str(r3.model))
+            os.environ.pop("CREW_MA_AUTO_MODEL", None)
         finally:
             os.environ["PATH"] = old_path
             os.environ.pop("CURSOR_CAPTURE", None)
@@ -3081,7 +3089,7 @@ def test_review_prep():
         proc, obj = _prep(["--panel", "full", "--session-id", "pf"], td)
         check("review-prep --panel full -> default subprocess subset + task_seats/models",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex", "agy", "cursor-glm", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "agy", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"]
               and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"},
               "full preset split", str(obj))
@@ -3169,7 +3177,7 @@ def test_review_prep():
         proc, obj = _prep(["--panel", "full", "--task-seats", "opus", "--session-id", "ov1"], td)
         check("review-prep --panel full --task-seats opus -> task list overridden to ['opus']",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex", "agy", "cursor-glm", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "agy", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus"]
               and obj["task_seat_models"] == {"opus": "opus"},
               "task-seats override", str(obj))
