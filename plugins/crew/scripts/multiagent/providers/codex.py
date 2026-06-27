@@ -1,7 +1,8 @@
 """CodexProvider — drives ``codex exec`` as a subprocess seat.
 
 Invocation (verified against codex-cli 0.142.2 `codex exec --help`):
-    codex exec - --ignore-user-config --sandbox <lvl> [--model X] --skip-git-repo-check -o <tmpfile>
+    codex exec - --ignore-user-config -c model_reasoning_effort=xhigh \
+        --sandbox <lvl> [--model X] --skip-git-repo-check -o <tmpfile>
 Prompt is delivered via STDIN (the ``-`` arg). The final agent message is read
 from the ``-o`` temp file (avoids stderr progress noise). stderr is captured
 into ``error`` on nonzero exit (this is also the auth-failure path).
@@ -11,9 +12,10 @@ into ``error`` on nonzero exit (this is also the auth-failure path).
 ``AGENTS.md`` preamble — so a review seat doesn't drag ~40k tokens of unrelated
 personal-environment startup into every run, and executes in a clean,
 reproducible default config instead of whatever happens to be in ``~/.codex``.
-NOTE: this ALSO resets the config's ``model_reasoning_effort`` (e.g. ``xhigh``)
-to codex's default — add ``-c model_reasoning_effort=<level>`` to the argv if a
-review needs deeper reasoning than the default.
+Because ignoring the config ALSO drops its ``model_reasoning_effort``, we
+RE-PIN it explicitly with ``-c model_reasoning_effort=xhigh`` so reviews keep
+deep reasoning WITHOUT the user-config bloat — the value is set in code, not
+inherited. (Lower it via this same flag if a faster/cheaper review is wanted.)
 """
 
 from __future__ import annotations
@@ -51,10 +53,16 @@ class CodexProvider(Provider):
         os.close(fd)
 
         # --ignore-user-config: hermetic review seat — skip the user's
-        # ~/.codex/config.toml (MCP servers, skills, RTK, AGENTS.md preamble +
-        # model_reasoning_effort). Cuts ~40k startup tokens and keeps the seat
-        # reproducible. (See module docstring for the reasoning-effort note.)
-        argv = ["codex", "exec", "-", "--ignore-user-config", "--sandbox", sandbox]
+        # ~/.codex/config.toml (MCP servers, skills, RTK, AGENTS.md preamble).
+        # Cuts ~40k startup tokens and keeps the seat reproducible. Because that
+        # also drops the config's model_reasoning_effort, we RE-PIN it in code
+        # via -c so reviews keep deep reasoning without the user-config bloat.
+        argv = [
+            "codex", "exec", "-",
+            "--ignore-user-config",
+            "-c", "model_reasoning_effort=xhigh",
+            "--sandbox", sandbox,
+        ]
         if model:
             argv += ["--model", model]
         argv += ["--skip-git-repo-check", "-o", out_path]

@@ -156,12 +156,13 @@ def test_codex():
             os.environ["PATH"] = env_path
 
         cap = json.loads(capture.read_text())
-        check("codex argv: exec -, --ignore-user-config, --sandbox, --skip-git-repo-check, -o",
+        check("codex argv: exec -, --ignore-user-config, -c reasoning=xhigh, --sandbox, --skip-git-repo-check, -o",
               cap["args"][0] == "exec" and cap["args"][1] == "-"
               and "--ignore-user-config" in cap["args"]
+              and "-c" in cap["args"] and "model_reasoning_effort=xhigh" in cap["args"]
               and "--sandbox" in cap["args"] and "--skip-git-repo-check" in cap["args"]
               and "-o" in cap["args"],
-              "exec - --ignore-user-config --sandbox ... --skip-git-repo-check -o", str(cap["args"]))
+              "exec - --ignore-user-config -c model_reasoning_effort=xhigh --sandbox ... -o", str(cap["args"]))
         check("codex argv carries NO prompt body (stdin only)",
               "PROMPT-BODY" not in cap["args"], "no prompt in argv", str(cap["args"]))
         check("codex prompt delivered via stdin", cap["stdin"] == "PROMPT-BODY",
