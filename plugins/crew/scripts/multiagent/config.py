@@ -152,6 +152,34 @@ def default_panel() -> str | None:
     return val
 
 
+def debate_panel() -> str | None:
+    """The configured ``/crew:debate`` default panel, validated against ``PANEL_PRESETS``.
+
+    Reads the ``[debate].panel`` key. Returns ``None`` when unset, the wrong
+    type, or not a known preset — so the caller falls back to ``default_panel()``
+    and then the built-in ``full`` (debate precedence: CLI ``--panel``/``--seats``
+    > ``[debate].panel`` > ``default_panel`` > ``full``). Validated EXACTLY like
+    ``default_panel()`` so an unknown value never reaches a raw ``KeyError``.
+    """
+    debate_tbl = _load().get("debate")
+    if not isinstance(debate_tbl, dict):
+        return None
+    val = debate_tbl.get("panel")
+    if val is None:
+        return None
+    # Lazy import keeps this module a pure leaf (see default_panel).
+    from multiagent import seats
+
+    if not isinstance(val, str) or val not in seats.PANEL_PRESETS:
+        _warn_once(
+            "debate_panel",
+            f"[debate].panel={val!r} is not a known panel "
+            f"({', '.join(sorted(seats.PANEL_PRESETS))}); ignoring",
+        )
+        return None
+    return val
+
+
 def seat_model(seat: str) -> str | None:
     """The ``[seats.<seat>].model`` pin, or ``None`` if unset/invalid."""
     tbl = _seat_table(seat)

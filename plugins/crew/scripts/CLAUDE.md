@@ -37,11 +37,11 @@ their results into the same six-field shape the engine returns.
 
 ```
 multiagent/
-├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `render` (incl. `--stage-all`) | `seats` | `collect` | `review-prep` subcommands (reached via the bare `../crew` dispatcher)
+├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `render` (incl. `--stage-all`) | `seats` (incl. `--debate`: config-aware full debate panel) | `collect` | `review-prep` subcommands (reached via the bare `../crew` dispatcher)
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
-├── config.py            # memoized `.crew/config.toml` loader + validating getters (default_panel + per-seat tuning; pure leaf, no cli/providers import; Python 3.11+ tomllib, else gracefully ignored)
+├── config.py            # memoized `.crew/config.toml` loader + validating getters (default_panel + debate_panel ([debate].panel) + per-seat tuning; pure leaf, no cli/providers import; Python 3.11+ tomllib, else gracefully ignored)
 ├── render.py            # side-by-side panel + --json rendering
 └── providers/
     ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC (executor: run()), registry + known_seat_names()
@@ -102,6 +102,14 @@ Key contracts (do NOT regress):
   names NEITHER `--panel` nor `--seats`, the default panel NAME comes from
   `.crew/config.toml`'s `default_panel` (`config.py`), falling back to the
   built-in `full`; precedence is CLI flag > config > `CREW_MA_*` env > builtin.
+  `/crew:debate` honors config via a separate resolver: it cannot call
+  `review-prep` (it resolves its panel in the command markdown), so `crew seats
+  --debate` prints the FULL debate panel (subprocess AND Claude Task seats),
+  applying the debate precedence `--seats`/`--panel` > `config.debate_panel()`
+  (`[debate].panel`) > `config.default_panel()` > built-in `full`. This is the
+  lightest hook (extending the existing `seats` subcommand, not a heavyweight
+  `debate-prep` mirror of `review-prep`); note debate adds the `debate_panel`
+  tier that `review-prep` has no equivalent for.
   `--panel cursor` =
   `--seats cursor` (ALL Cursor seats incl. cursor-gpt/cursor-gemini/cursor-glm/cursor-auto,
   no codex/Claude).

@@ -3037,6 +3037,34 @@ def test_config():
         check("config unknown default_panel -> None (validated vs PANEL_PRESETS)",
               config.default_panel() is None, "None", str(config.default_panel()))
 
+    # 5a. debate_panel() getter: valid [debate].panel -> its value.
+    with project("[debate]\npanel = \"full\"\n"):
+        check("config valid: debate_panel() -> 'full'",
+              config.debate_panel() == "full", "full", str(config.debate_panel()))
+    # 5b. Missing [debate] table -> None (no crash); a default_panel alone does NOT
+    #     leak into debate_panel() (that fallback is the resolver's job, not the getter).
+    with project("default_panel = \"lite\"\n"):
+        check("config missing [debate] table -> debate_panel() None",
+              config.debate_panel() is None, "None", str(config.debate_panel()))
+    # 5c. [debate] table present but no panel key -> None.
+    with project("[debate]\nrounds = 3\n"):
+        check("config [debate] without panel key -> debate_panel() None",
+              config.debate_panel() is None, "None", str(config.debate_panel()))
+    # 5d. Unknown [debate].panel value -> None (validated vs PANEL_PRESETS), no raise.
+    with project("[debate]\npanel = \"huge\"\n"):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            dp = config.debate_panel()
+        check("config unknown [debate].panel -> None (validated, no raise)",
+              dp is None, "None", str(dp))
+        check("config unknown [debate].panel warns to stderr",
+              "debate" in buf.getvalue().lower() and "panel" in buf.getvalue().lower(),
+              "stderr warn", repr(buf.getvalue()[:160]))
+    # 5e. Wrong-typed [debate].panel (non-string) -> None.
+    with project("[debate]\npanel = 7\n"):
+        check("config non-string [debate].panel -> None",
+              config.debate_panel() is None, "None", str(config.debate_panel()))
+
     # 6. < 3.11 path: simulate tomllib ABSENT -> file ignored + ONE-TIME stderr note.
     with project(VALID):
         saved_tomllib = config.tomllib
@@ -3602,6 +3630,76 @@ def test_review_prep():
               f"join={joined!r} rc={render.returncode} opus46={opus46.is_file()}")
 
 
+def test_debate_panel_resolver():
+    log_section("crew seats --debate (config-aware debate panel resolver)")
+    from multiagent.providers import known_seat_names as _kn  # noqa: E402
+    _cursor_all = sorted(n for n in _kn() if n.startswith("cursor-"))
+
+    def resolve(config_toml=None, extra_args=()):
+        """Run `crew seats --debate [extra_args]` with CLAUDE_PROJECT_DIR pointing
+        at a temp repo holding the given .crew/config.toml (or none). Returns the
+        printed seat list (one per line). The dispatcher is a fresh subprocess, so
+        config memoization needs no reset here."""
+        with tempfile.TemporaryDirectory() as td:
+            if config_toml is not None:
+                crew = Path(td) / ".crew"
+                crew.mkdir(parents=True)
+                (crew / "config.toml").write_text(config_toml)
+            env = {**os.environ, "CLAUDE_PROJECT_DIR": td}
+            proc = _run_dispatcher(["seats", "--debate", *extra_args],
+                                   env=env, cwd=td, timeout=30)
+            lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+            return proc.returncode, lines
+
+    FULL = ["codex", "agy", "cursor-auto", "cursor-composer", "opus", "sonnet"]
+
+    # 1. [debate].panel="full" BEATS default_panel="lite" -> debate resolves full.
+    rc, lines = resolve("default_panel = \"lite\"\n\n[debate]\npanel = \"full\"\n")
+    check("seats --debate: [debate].panel='full' BEATS default_panel='lite' -> full",
+          rc == 0 and lines == FULL, str(FULL), f"rc={rc} {lines}")
+
+    # 2. default_panel="lite" + no [debate] -> debate falls back to default_panel.
+    rc, lines = resolve("default_panel = \"lite\"\n")
+    check("seats --debate: default_panel='lite' + no [debate] -> lite (opus,sonnet)",
+          rc == 0 and lines == ["opus", "sonnet"], "['opus', 'sonnet']",
+          f"rc={rc} {lines}")
+
+    # 3. Neither set -> built-in 'full'.
+    rc, lines = resolve(None)
+    check("seats --debate: no config -> built-in 'full'",
+          rc == 0 and lines == FULL, str(FULL), f"rc={rc} {lines}")
+    rc, lines = resolve("")  # empty config file, present but empty
+    check("seats --debate: empty config -> built-in 'full'",
+          rc == 0 and lines == FULL, str(FULL), f"rc={rc} {lines}")
+
+    # 4. Explicit --panel BEATS [debate].panel (explicit wins).
+    rc, lines = resolve("[debate]\npanel = \"full\"\n", ["--panel", "lite"])
+    check("seats --debate --panel lite BEATS [debate].panel='full' (explicit wins)",
+          rc == 0 and lines == ["opus", "sonnet"], "['opus', 'sonnet']",
+          f"rc={rc} {lines}")
+
+    # 4b. Explicit --seats BEATS [debate].panel (explicit wins; keeps Task seats).
+    rc, lines = resolve("[debate]\npanel = \"full\"\n", ["--seats", "codex,opus"])
+    check("seats --debate --seats codex,opus BEATS [debate].panel (explicit wins)",
+          rc == 0 and lines == ["codex", "opus"], "['codex', 'opus']",
+          f"rc={rc} {lines}")
+
+    # 5. Resolved seat list for each tier is correct (solo + cursor expansion).
+    rc, lines = resolve("[debate]\npanel = \"solo\"\n")
+    check("seats --debate: [debate].panel='solo' -> ['opus']",
+          rc == 0 and lines == ["opus"], "['opus']", f"rc={rc} {lines}")
+    rc, lines = resolve("[debate]\npanel = \"cursor\"\n")
+    check("seats --debate: [debate].panel='cursor' -> all cursor-* (group expanded), no task",
+          rc == 0 and sorted(lines) == _cursor_all,
+          str(_cursor_all), f"rc={rc} {lines}")
+
+    # 6. Invalid [debate].panel -> falls back to default_panel (then full), no crash.
+    rc, lines = resolve("default_panel = \"lite\"\n\n[debate]\npanel = \"bogus\"\n")
+    check("seats --debate: invalid [debate].panel -> falls back to default_panel='lite'",
+          rc == 0 and lines == ["opus", "sonnet"], "['opus', 'sonnet']",
+          f"rc={rc} {lines}")
+
+
 def test_panel_catalog():
     log_section("plain-data panel catalog (seats.py)")
     from multiagent import seats  # noqa: E402
@@ -3764,6 +3862,7 @@ def main():
     test_collect()
     test_config()
     test_review_prep()
+    test_debate_panel_resolver()
     test_panel_catalog()
     test_catalog_registry_disjoint()
     test_no_dotkept_staged_filename()

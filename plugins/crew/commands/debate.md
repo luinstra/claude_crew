@@ -19,7 +19,7 @@ $ARGUMENTS
   council; `N>1` runs a multi-round debate where each round sees the prior
   round's positions and may rebut/revise.
 - **Panel** — `--panel full` =
-  `codex,agy,cursor-auto,cursor-composer,opus,sonnet` (default) ·
+  `codex,agy,cursor-auto,cursor-composer,opus,sonnet` (the built-in fallback) ·
   `--panel lite` = `opus,sonnet` · `--panel solo` = `opus` · `--panel cursor` =
   all Cursor model-seats (`--seats cursor`, which the engine expands to every
   registered cursor-* seat — cursor-gpt, cursor-gemini, cursor-glm, cursor-auto,
@@ -30,6 +30,14 @@ $ARGUMENTS
   `cursor-gpt`, `cursor-gemini`, and `cursor-glm` are opt-in — work via `--seats …` / `--panel cursor`
   but are not in the default panel; `codex` covers the GPT lineage and `agy` covers the Gemini lineage flat-rate).
   `--seats` wins over `--panel`.
+- **Config-aware default** — when you name NEITHER `--panel` NOR `--seats`, the
+  panel is NOT hard-`full`: it is resolved from the per-repo
+  `.crew/config.toml` via the engine (see the flag-resolution step below).
+  Debate precedence is `CLI --panel/--seats` (explicit, wins) >
+  `[debate].panel` (debate-only override) > `default_panel` (the shared
+  review/build/measure-twice default) > the built-in `full`. So a repo can
+  default its debates fuller than its reviews — debate's value is cross-model
+  diversity. An explicit `--panel`/`--seats` always wins, exactly as before.
 - **Opt-in `opus-4.6` Claude seat** — a third Claude voice pinned to
   `claude-opus-4-6` (some prefer 4.6 over 4.7/4.8). NOT in any default; add it
   explicitly (e.g. `--seats opus,sonnet,opus-4.6`). A Task seat (`crew:panelist`
@@ -51,7 +59,26 @@ $ARGUMENTS
 > (`render --run-id`) expects.
 
 Resolve the flags to a **seat list**, strip them from `$ARGUMENTS` (the remainder
-is the question/target), then split the seat list: the `codex`/`agy`/`cursor-*`
+is the question/target). **When the user named NEITHER `--panel` NOR `--seats`,
+do NOT assume `full`** — ask the engine for the config-aware default seat list
+(it reads `.crew/config.toml`, which the markdown cannot, and applies the debate
+precedence `[debate].panel` → `default_panel` → built-in `full`):
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate
+```
+
+When the user DID name `--panel`/`--seats`, pass it through so the explicit
+choice wins (`--seats` over `--panel`):
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --panel <preset>     # explicit preset
+"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --seats <list>       # explicit seat list
+```
+
+`seats --debate` prints the FULL resolved panel — one seat per line, group
+tokens (`cursor`) already expanded, including the Claude voices — so it is the
+single seat list to split. Then split it: the `codex`/`agy`/`cursor-*`
 entries are **subprocess seats** (the Python engine); `opus`/`sonnet`/`opus-4.6`
 are **task seats** (`crew:panelist`
 for discuss / `crew:reviewer` for review, via the Task tool — in-session, on the

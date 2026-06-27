@@ -83,8 +83,11 @@ opus + sonnet), `--panel lite` (opus + sonnet), `--panel solo` (opus),
 `full` is the **built-in** default. An optional per-repo `.crew/config.toml`
 `default_panel` overrides it when you name no panel (resolves config →
 built-in `full` — the panel name has no `CREW_MA_*` tier; the per-seat tuning
-knobs add the full CLI flag > config > `CREW_MA_*` env > built-in chain). Needs
-Python 3.11+; on 3.10 the file is gracefully ignored with a one-time stderr note.
+knobs add the full CLI flag > config > `CREW_MA_*` env > built-in chain).
+`/crew:debate` honors config too, with its own `[debate].panel` override
+(precedence `--panel`/`--seats` > `[debate].panel` > `default_panel` > built-in
+`full`) — so debates can default fuller than reviews. Needs Python 3.11+; on
+3.10 the file is gracefully ignored with a one-time stderr note.
 
 ### Utilities
 

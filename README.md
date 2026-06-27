@@ -217,9 +217,17 @@ config, falling back to built-in `full`; the per-seat tuning knobs follow
 note, so a `default_panel = "lite"` set to save cost can't silently hand you the
 full panel.
 
+`/crew:debate` honors config too, with its own `[debate].panel` override so a
+repo can default its debates fuller than its reviews (debate's value is
+cross-model diversity). Debate precedence is **`--panel`/`--seats` (explicit) >
+`[debate].panel` > `default_panel` > built-in `full`**.
+
 ```toml
 # .crew/config.toml
 default_panel = "lite"            # default panel when you name none
+
+[debate]
+panel = "full"                    # /crew:debate-only default; falls back to default_panel, then full
 
 [seats.codex]
 model = "gpt-5.5"

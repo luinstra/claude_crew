@@ -187,6 +187,44 @@ def _resolve_seats(seats_arg: str | None) -> list[str]:
     return [s for s in seats if s in known and not (s in seen or seen.add(s))]
 
 
+def _resolve_debate_panel_name(panel_arg: str | None) -> str:
+    """Effective DEBATE panel NAME when no explicit ``--seats`` is given.
+
+    Debate precedence (differs from review-prep, which has NO debate tier):
+
+        explicit ``--panel`` > ``config.debate_panel()`` > ``config.default_panel()``
+        > built-in ``full``
+
+    ``config.debate_panel()`` reads ``[debate].panel`` and ``config.default_panel()``
+    reads ``default_panel`` — both validate against ``seats.PANEL_PRESETS`` and
+    return ``None`` on a missing/unknown value, so the returned name is ALWAYS a
+    known preset key (``PANEL_PRESETS[name]`` can never ``KeyError``).
+    """
+    if panel_arg is not None:
+        return panel_arg
+    return config.debate_panel() or config.default_panel() or "full"
+
+
+def _resolve_debate_seats(panel_arg: str | None, seats_arg: str | None) -> list[str]:
+    """Resolve the FULL debate panel seat list — subprocess AND Claude Task seats.
+
+    Unlike ``_resolve_seats`` (subprocess-only, registry-filtered), this KEEPS the
+    Claude Task seats (opus/sonnet/opus-4.6) so the debate orchestrator can split
+    the resolved panel into its per-seat subprocess fan-out and its Task dispatch.
+    Group tokens (``cursor``) are expanded; order preserved, de-duplicated.
+
+    Precedence: explicit ``--seats`` (wins) > explicit ``--panel`` >
+    ``config.debate_panel()`` > ``config.default_panel()`` > built-in ``full``.
+    """
+    if seats_arg is not None:
+        names = [s.strip() for s in seats_arg.split(",") if s.strip()]
+    else:
+        names = list(seats.PANEL_PRESETS[_resolve_debate_panel_name(panel_arg)])
+    names = _expand_seat_groups(names)
+    seen: set[str] = set()
+    return [n for n in names if not (n in seen or seen.add(n))]
+
+
 _REVIEWS_BASE = ".crew/reviews"
 
 
@@ -922,15 +960,26 @@ def cmd_render_stage_all(args: argparse.Namespace) -> int:
 
 
 def cmd_seats(args: argparse.Namespace) -> int:
-    """Print the resolved subprocess seat list — one per line.
+    """Print the resolved seat list — one per line.
 
-    Resolves ``--seats`` (group tokens like ``cursor`` expanded, filtered to the
-    registry, de-duped) the SAME way ``review``/``council`` do, but prints the
-    concrete names instead of running them. This lets an orchestrator that fans
-    out PER-SEAT — one ``run <seat>`` call each, so every subprocess seat is its
-    own visible shell — obtain the expanded list without hardcoding the cursor
-    group, keeping the registry the single source of truth.
+    DEFAULT (no ``--debate``): the resolved SUBPROCESS seat list — ``--seats``
+    (group tokens like ``cursor`` expanded, filtered to the registry, de-duped)
+    the SAME way ``review``/``council`` resolve it, but printed instead of run.
+    This lets an orchestrator that fans out PER-SEAT — one ``run <seat>`` call
+    each, every subprocess seat its own visible shell — obtain the expanded list
+    without hardcoding the cursor group, keeping the registry the single source.
+
+    ``--debate``: the FULL debate panel (subprocess AND Claude Task seats, so the
+    /crew:debate orchestrator can split it into its subprocess fan-out + Task
+    dispatch), applying debate precedence ``--seats > --panel >
+    config.debate_panel() > config.default_panel() > full``. This is the engine
+    hook that lets the LLM-driven ``debate.md`` honor ``.crew/config.toml`` when
+    the user names no ``--panel``/``--seats`` (the markdown cannot read TOML).
     """
+    if args.debate:
+        for s in _resolve_debate_seats(args.panel, args.seats):
+            print(s)
+        return 0
     for s in _resolve_seats(args.seats):
         print(s)
     return 0
@@ -1298,6 +1347,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--seats", default=None,
         help="comma-separated seats / group tokens (e.g. 'cursor'); "
              "default = the default subprocess panel",
+    )
+    seats_p.add_argument(
+        "--panel", default=None, choices=["full", "lite", "solo", "cursor"],
+        help="named preset (only used with --debate): resolved via "
+             "seats.PANEL_PRESETS into the full debate seat list",
+    )
+    seats_p.add_argument(
+        "--debate", action="store_true",
+        help="print the FULL debate panel (subprocess AND Claude Task seats), "
+             "applying debate precedence --seats > --panel > "
+             "config.debate_panel() ([debate].panel) > config.default_panel() > "
+             "built-in 'full'. The engine hook that lets debate.md honor "
+             ".crew/config.toml when no --panel/--seats is named.",
     )
     seats_p.set_defaults(func=cmd_seats)
 
