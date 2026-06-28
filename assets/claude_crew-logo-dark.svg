@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="200" viewBox="0 0 760 200" fill="none">
+  <g transform="translate(12,10) scale(0.9)">
+    <circle cx="100" cy="100" r="56" stroke="#e8602c" stroke-width="8"></circle>
+    <g stroke="#f2f2f2" stroke-width="7" stroke-linecap="round">
+      <line x1="100" y1="100" x2="178" y2="100"></line>
+      <line x1="100" y1="100" x2="155.15" y2="44.85"></line>
+      <line x1="100" y1="100" x2="100" y2="22"></line>
+      <line x1="100" y1="100" x2="44.85" y2="44.85"></line>
+      <line x1="100" y1="100" x2="22" y2="100"></line>
+      <line x1="100" y1="100" x2="44.85" y2="155.15"></line>
+      <line x1="100" y1="100" x2="100" y2="178"></line>
+      <line x1="100" y1="100" x2="155.15" y2="155.15"></line>
+    </g>
+    <g fill="#e8602c">
+      <circle cx="178" cy="100" r="9"></circle>
+      <circle cx="155.15" cy="44.85" r="9"></circle>
+      <circle cx="100" cy="22" r="9"></circle>
+      <circle cx="44.85" cy="44.85" r="9"></circle>
+      <circle cx="22" cy="100" r="9"></circle>
+      <circle cx="44.85" cy="155.15" r="9"></circle>
+      <circle cx="100" cy="178" r="9"></circle>
+      <circle cx="155.15" cy="155.15" r="9"></circle>
+    </g>
+    <circle cx="100" cy="100" r="11" stroke="#e8602c" stroke-width="8"></circle>
+  </g>
+  <line x1="232" y1="48" x2="232" y2="152" stroke="#f2f2f2" stroke-opacity="0.25" stroke-width="2"></line>
+  <text x="270" y="108" font-family="&#39;JetBrains Mono&#39;, ui-monospace, &#39;SFMono-Regular&#39;, Menlo, Consolas, monospace" font-weight="700" font-size="62" letter-spacing="-1" fill="#f2f2f2">claude<tspan fill="#e8602c">_crew</tspan></text>
+  <text x="272" y="146" font-family="&#39;JetBrains Mono&#39;, ui-monospace, &#39;SFMono-Regular&#39;, Menlo, Consolas, monospace" font-weight="500" font-size="16.5" letter-spacing="5" fill="#f2f2f2" fill-opacity="0.55">AI AGENT ORCHESTRATION</text>
+</svg>

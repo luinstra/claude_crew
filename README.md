@@ -1,4 +1,9 @@
-# Claude Crew
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/claude_crew-logo-dark.svg">
+    <img alt="claude_crew" src="assets/claude_crew-logo-light.svg" width="440">
+  </picture>
+</p>
 
 A Claude Code plugin for persistence, specialized agents, and tech-stack guidance.
 
