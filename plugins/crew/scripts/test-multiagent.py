@@ -3558,6 +3558,77 @@ def test_panel_availability_consistency():
               "unavailable" in rp.stderr.lower() and "cursor-auto" in rp.stderr,
               "stderr skip-note", repr(rp.stderr[:160]))
 
+    # 8. BLOCKING: review-prep availability is WHOLE-PANEL, not per-split.
+    #    Disabling BOTH task seats in `full` empties the TASK split only — it must
+    #    NOT trip the unfiltered-panel fallback (which would re-add opus/sonnet)
+    #    because the four subprocess seats remain. Expected: subprocess intact,
+    #    task_seats == [] (deliberately-disabled seat-KIND stays disabled).
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        _write_cfg(proj, '[seats.opus]\navailable = false\n[seats.sonnet]\navailable = false\n')
+        _write_plan(proj)
+        env = _clean_env(td)
+        rp = _run_dispatcher(["review-prep", "plan.md", "--panel", "full", "--session-id", "wp1"],
+                             cwd=td, env=env, timeout=30)
+        obj = json.loads(rp.stdout)
+        check("review-prep disabling BOTH task seats in full -> task_seats == [] (no opus/sonnet restoration)",
+              rp.returncode == 0
+              and obj["subprocess_seats"] == ["codex", "agy", "cursor-auto", "cursor-composer"]
+              and obj["task_seats"] == [],
+              "subprocess intact, task []", str(obj))
+        # The empty TASK split must NOT fire the all-unavailable whole-panel warn
+        # (the panel as a whole is NOT empty).
+        check("review-prep disabling both task seats does NOT emit the all-unavailable warn",
+              "all seats in the resolved panel" not in rp.stderr,
+              "no whole-panel fallback warn", repr(rp.stderr[:200]))
+
+    # 8b. Symmetric: disabling ALL FOUR subprocess seats in `full` empties the
+    #     SUBPROCESS split only — task seats remain, no fallback, review runs
+    #     task-only (subprocess_seats == []).
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        _write_cfg(proj,
+                   '[seats.codex]\navailable = false\n'
+                   '[seats.agy]\navailable = false\n'
+                   '[seats.cursor-auto]\navailable = false\n'
+                   '[seats.cursor-composer]\navailable = false\n')
+        _write_plan(proj)
+        env = _clean_env(td)
+        rp = _run_dispatcher(["review-prep", "plan.md", "--panel", "full", "--session-id", "wp2"],
+                             cwd=td, env=env, timeout=30)
+        obj = json.loads(rp.stdout)
+        check("review-prep disabling ALL subprocess seats in full -> subprocess_seats == [] (task seats kept)",
+              rp.returncode == 0
+              and obj["subprocess_seats"] == []
+              and obj["task_seats"] == ["opus", "sonnet"],
+              "subprocess [], task [opus,sonnet]", str(obj))
+
+    # 9. Disabling EVERY seat in `full` -> the SINGLE whole-panel fallback fires
+    #    ONCE (one warn) and restores the unfiltered panel (subprocess + task),
+    #    rather than running nothing.
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        _write_cfg(proj,
+                   '[seats.codex]\navailable = false\n'
+                   '[seats.agy]\navailable = false\n'
+                   '[seats.cursor-auto]\navailable = false\n'
+                   '[seats.cursor-composer]\navailable = false\n'
+                   '[seats.opus]\navailable = false\n'
+                   '[seats.sonnet]\navailable = false\n')
+        _write_plan(proj)
+        env = _clean_env(td)
+        rp = _run_dispatcher(["review-prep", "plan.md", "--panel", "full", "--session-id", "wp3"],
+                             cwd=td, env=env, timeout=30)
+        obj = json.loads(rp.stdout)
+        check("review-prep disabling EVERY seat -> whole-panel fallback restores the unfiltered panel",
+              rp.returncode == 0
+              and obj["subprocess_seats"] == ["codex", "agy", "cursor-auto", "cursor-composer"]
+              and obj["task_seats"] == ["opus", "sonnet"],
+              "unfiltered full restored", str(obj))
+        check("review-prep all-unavailable -> the whole-panel fallback warn fires once",
+              "all seats in the resolved panel" in rp.stderr,
+              "all-unavailable warn", repr(rp.stderr[:200]))
+
 
 def test_review_prep():
     log_section("crew review-prep subcommand (PREP only — resolves+stages, runs nothing)")
@@ -4007,6 +4078,39 @@ def test_debate_panel_resolver():
           and "--panel" in proc.stderr,
           "rc!=0, no stdout, stderr mentions --panel",
           f"rc={proc.returncode} stdout={out_lines} stderr={proc.stderr!r}")
+
+    # 9. MINOR: a NAMED --panel's members are EXPLICIT in the debate resolver
+    #    (mirror review-prep) — an unavailable member is skipped WITH a one-time
+    #    stderr note, not silently dropped.
+    with tempfile.TemporaryDirectory() as td:
+        crew = Path(td) / ".crew"
+        crew.mkdir(parents=True)
+        (crew / "config.toml").write_text('[seats.cursor-auto]\navailable = false\n')
+        env = {**os.environ, "CLAUDE_PROJECT_DIR": td}
+        proc = _run_dispatcher(["seats", "--debate", "--panel", "cursor"],
+                               env=env, cwd=td, timeout=30)
+    dlines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    check("seats --debate --panel cursor drops the unavailable member from the list",
+          proc.returncode == 0 and "cursor-auto" not in dlines and "cursor-composer" in dlines,
+          "no cursor-auto, cursor-composer kept", str(dlines))
+    check("seats --debate --panel <named> unavailable member -> one-time stderr skip-note",
+          "unavailable" in proc.stderr.lower() and "cursor-auto" in proc.stderr,
+          "stderr skip-note", repr(proc.stderr[:160]))
+
+    # 9b. WITHOUT a named --panel (default/[debate].panel resolution) the same
+    #     unavailable seat is dropped SILENTLY — no user-named seat to annotate.
+    with tempfile.TemporaryDirectory() as td:
+        crew = Path(td) / ".crew"
+        crew.mkdir(parents=True)
+        (crew / "config.toml").write_text(
+            'default_panel = "cursor"\n[seats.cursor-auto]\navailable = false\n')
+        env = {**os.environ, "CLAUDE_PROJECT_DIR": td}
+        proc = _run_dispatcher(["seats", "--debate"], env=env, cwd=td, timeout=30)
+    dlines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    check("seats --debate (no --panel) drops the unavailable seat SILENTLY",
+          proc.returncode == 0 and "cursor-auto" not in dlines
+          and "cursor-auto" not in proc.stderr,
+          "dropped, no skip-note", f"lines={dlines} stderr={proc.stderr[:120]!r}")
 
 
 def test_panel_catalog():

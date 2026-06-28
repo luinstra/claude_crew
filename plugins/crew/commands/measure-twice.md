@@ -13,12 +13,15 @@ $ARGUMENTS
 Flags at the **start** of `$ARGUMENTS` choose which models review the plan; the
 rest is the task / design-doc path. Default (no flag) = **OMIT the
 `--panel`/`--seats` flag entirely** and let `review-prep` apply the configured
-default (a repo's `.crew/config.toml` `default_panel`, else the built-in **full**
-panel). Do NOT hardcode `--panel full` — passing it would override a user's
-configured default.
+default. The default `default_panel` resolves across tiers (precedence CLI flag
+> per-repo `.crew/config.toml` > global `~/.crew-config.toml` > built-in
+**full**; no env tier). Do NOT hardcode `--panel full` — passing it would
+override a user's configured default.
 
-- `--panel full|lite|solo|cursor` — a named preset. `--seats <comma-list>` — an
-  explicit subset of any registered seat (e.g. `--seats codex,opus`); `--seats`
+- `--panel full|lite|solo|cursor|<custom>` — a named preset. The four are
+  built in; `<custom>` is any roster defined under `[panels]` in per-repo or
+  global config. `--seats <comma-list>` — an explicit subset of any registered
+  seat (e.g. `--seats codex,opus`); `--seats`
   wins if both are given. `cursor-gemini`, `cursor-glm`, and `cursor-gpt` are opt-in (add via `--seats`).
   Opt-in `opus-4.6` is a third Claude voice pinned to a version-locked model — add
   it explicitly (e.g. `--seats codex,opus,sonnet,opus-4.6`).

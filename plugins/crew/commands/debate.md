@@ -29,15 +29,18 @@ $ARGUMENTS
   (`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-auto, cursor-composer, opus, sonnet`;
   `cursor-gpt`, `cursor-gemini`, and `cursor-glm` are opt-in — work via `--seats …` / `--panel cursor`
   but are not in the default panel; `codex` covers the GPT lineage and `agy` covers the Gemini lineage flat-rate).
-  `--seats` wins over `--panel`.
+  `--panel <name>` also accepts any **custom roster** defined under `[panels]`
+  in per-repo or global config (e.g. `--panel quick`). `--seats` wins over `--panel`.
 - **Config-aware default** — when you name NEITHER `--panel` NOR `--seats`, the
-  panel is NOT hard-`full`: it is resolved from the per-repo
-  `.crew/config.toml` via the engine (see the flag-resolution step below).
-  Debate precedence is `CLI --panel/--seats` (explicit, wins) >
-  `[debate].panel` (debate-only override) > `default_panel` (the shared
-  review/build/measure-twice default) > the built-in `full`. So a repo can
-  default its debates fuller than its reviews — debate's value is cross-model
-  diversity. An explicit `--panel`/`--seats` always wins, exactly as before.
+  panel is NOT hard-`full`: it is resolved by the engine from config across two
+  tiers — per-repo `.crew/config.toml` then global `~/.crew-config.toml` (see the
+  flag-resolution step below). Debate precedence is `CLI --panel/--seats`
+  (explicit, wins) > `[debate].panel` (debate-only override) > `default_panel`
+  (the shared review/build/measure-twice default) > the built-in `full`, with
+  per-repo config taking precedence over global at each tier (no env tier). So a
+  repo can default its debates fuller than its reviews — debate's value is
+  cross-model diversity. An explicit `--panel`/`--seats` always wins, exactly as
+  before.
 - **Opt-in `opus-4.6` Claude seat** — a third Claude voice pinned to
   `claude-opus-4-6` (some prefer 4.6 over 4.7/4.8). NOT in any default; add it
   explicitly (e.g. `--seats opus,sonnet,opus-4.6`). A Task seat (`crew:panelist`

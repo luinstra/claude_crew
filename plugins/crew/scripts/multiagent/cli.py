@@ -141,15 +141,19 @@ def _panel_seat_list(name: str) -> list[str]:
     return list(seats.PANEL_PRESETS["full"])
 
 
-def _filter_available(names: list[str], explicit: set[str]) -> list[str]:
+def _drop_unavailable(names: list[str], explicit: set[str]) -> list[str]:
     """Drop seats marked ``available = false`` — applied AFTER panel/roster
-    resolution, BEFORE the subprocess/task split.
-
-    A dropped seat that was EXPLICITLY named (via ``--seats`` or a named
+    resolution. An EXPLICITLY-named dropped seat (via ``--seats`` or a named
     ``--panel`` preset member) emits a one-time stderr skip-note rather than a
-    silent drop. If filtering empties the list, emit a one-time warn and return
-    the UNFILTERED list — a misconfiguration must never silently produce an empty
-    review/run.
+    silent drop.
+
+    NO empty-after-filter fallback here — the CALLER owns the empty decision.
+    This is the load-bearing split that lets ``review-prep`` apply a WHOLE-PANEL
+    fallback (subprocess + task seats considered TOGETHER) instead of the
+    per-list fallback ``_filter_available`` bakes in: a per-list fallback re-adds
+    a deliberately-disabled seat-KIND whenever the OTHER kind still kept a seat
+    (e.g. disabling both task seats in ``full`` would wrongly restore opus+sonnet
+    just because the four subprocess seats remain).
     """
     kept: list[str] = []
     for n in names:
@@ -160,12 +164,35 @@ def _filter_available(names: list[str], explicit: set[str]) -> list[str]:
                 f"seat-skip:{n}",
                 f"crew config: seat {n!r} is marked unavailable; skipping it",
             )
+    return kept
+
+
+def _all_unavailable_warn() -> None:
+    """One-time warn that a resolved panel was entirely unavailable and the
+    unfiltered panel is being used instead of running nothing."""
+    _warn_once(
+        "all-unavailable",
+        "crew config: all seats in the resolved panel are marked unavailable; "
+        "using the unfiltered panel instead of running nothing",
+    )
+
+
+def _filter_available(names: list[str], explicit: set[str]) -> list[str]:
+    """SINGLE-UNIFIED-LIST availability filter — drop ``available = false`` seats
+    (skip-noting an explicitly-named one), and if filtering empties a NON-empty
+    list, warn once and return the UNFILTERED list (a misconfiguration must never
+    silently produce an empty review/run).
+
+    Used by the paths that resolve ONE unified panel list (``_resolve_seats``,
+    ``_resolve_debate_seats``): there the whole panel IS this list, so the
+    fallback is already whole-panel. Callers that split one resolution into TWO
+    seat-KINDS (``cmd_review_prep``: subprocess vs task) must NOT use this — its
+    per-list fallback would re-add a disabled kind. They compose
+    ``_drop_unavailable`` + a single whole-panel fallback instead.
+    """
+    kept = _drop_unavailable(names, explicit)
     if names and not kept:
-        _warn_once(
-            "all-unavailable",
-            "crew config: all seats in the resolved panel are marked unavailable; "
-            "using the unfiltered panel instead of running nothing",
-        )
+        _all_unavailable_warn()
         return names
     return kept
 
@@ -333,9 +360,15 @@ def _resolve_debate_seats(panel_arg: str | None, seats_arg: str | None) -> list[
     else:
         # Roster resolution through the single shared point (honors [panels]).
         names = _expand_seat_groups(_panel_seat_list(_resolve_debate_panel_name(panel_arg)))
-        explicit = set()
+        # A NAMED --panel's members are EXPLICIT (mirror review-prep): an
+        # unavailable one is skipped WITH a one-time note, not silently dropped.
+        # A default/[debate].panel resolution (no --panel given) keeps the silent
+        # drop — there is no user-named seat to annotate.
+        explicit = set(names) if panel_arg is not None else set()
     # Availability filter (skip-note for an explicitly-named unavailable seat;
-    # empty-after-filter falls back to the unfiltered panel).
+    # empty-after-filter falls back to the unfiltered panel). This is ONE unified
+    # debate panel list (subprocess + task together), so _filter_available's
+    # fallback is already whole-panel here.
     names = _filter_available(names, explicit)
     seen: set[str] = set()
     return [n for n in names if not (n in seen or seen.add(n))]
@@ -1280,9 +1313,14 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     #    subprocess (2a) and task (2b) splits (refinement 5). Panel-name resolution
     #    goes through the shared _panel_seat_list (consults [panels] before
     #    PANEL_PRESETS; unknown name → 'full', never a raw KeyError). Availability
-    #    (_filter_available) is applied to EACH split AFTER roster resolution. A name
-    #    classifies as exactly one of: a registry subprocess seat (-> subprocess_seats),
-    #    a seats.TASK_SEAT_NAMES member (-> task_seats), or NEITHER (silently DROPPED;
+    #    is applied WHOLE-PANEL: each split is drop-filtered (skip-noting an
+    #    explicitly-named unavailable seat) WITHOUT a per-split empty-fallback, and
+    #    the unfiltered-panel fallback fires ONCE, only when the ENTIRE resolved
+    #    panel (subprocess + task TOGETHER) would be empty — so disabling a whole
+    #    seat-KIND (e.g. both task seats in `full`) drops it for real instead of
+    #    re-adding it because the other kind still has seats. A name classifies as
+    #    exactly one of: a registry subprocess seat (-> subprocess_seats), a
+    #    seats.TASK_SEAT_NAMES member (-> task_seats), or NEITHER (silently DROPPED;
     #    never loud-error). A NAMED --panel's members are EXPLICIT (an unavailable one
     #    is skipped WITH a note); a default_panel's are silent drops (refinement 3).
     seats_given = args.seats is not None
@@ -1304,8 +1342,10 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
         seen: set[str] = set()
         return [x for x in xs if not (x in seen or seen.add(x))]
 
-    # 2a. Subprocess seats: registry filter + availability, dedup, order preserved.
-    #     An explicit-empty/omitted --seats yields [].
+    # 2a. Subprocess RAW backing (registry-filtered, pre-availability) + explicit
+    #     set. An explicit-empty/omitted --seats yields []. Availability is NOT
+    #     applied yet — that happens whole-panel in 2d so a per-split empty can't
+    #     trigger the fallback on its own.
     if seats_given:
         sub_expanded = _expand_seat_groups(source_names)
         sub_explicit = set(sub_expanded)                       # --seats names explicit
@@ -1315,35 +1355,52 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     else:
         sub_expanded = []
         sub_explicit = set()
-    subprocess_seats = _dedup(
-        _filter_available([s for s in sub_expanded if s in known], sub_explicit)
-    )
+    sub_raw = [s for s in sub_expanded if s in known]
 
-    # 2b. Task seats. Precedence: explicit --task-seats override (OPAQUE echo, never
-    #     resolved/availability-filtered) > task names in an explicit --seats > the
-    #     --panel/default preset's task names > []. NEVER resolved through the
-    #     subprocess registry, NEVER spawned/run.
+    # 2b. Task RAW backing + explicit set. Precedence: explicit --task-seats override
+    #     (OPAQUE echo, never resolved/availability-filtered) > task names in an
+    #     explicit --seats > the --panel/default preset's task names > []. NEVER
+    #     resolved through the subprocess registry, NEVER spawned/run. When the
+    #     opaque override is in play the task list bypasses availability entirely
+    #     (task_raw stays empty so 2d's whole-panel fallback considers ONLY the
+    #     subprocess seats — the override IS the task panel).
     explicit_task_seats = [
         s.strip() for s in (args.task_seats or "").split(",") if s.strip()
     ]
-    if explicit_task_seats:
-        task_seats = explicit_task_seats
+    override_task = bool(explicit_task_seats)
+    if override_task:
+        task_raw: list[str] = []
+        task_explicit: set[str] = set()
     else:
         seats_task_names = (
             [n for n in _expand_seat_groups(source_names) if n in seats.TASK_SEAT_NAMES]
             if seats_given else []
         )
         if seats_given and seats_task_names:
-            task_src = seats_task_names
+            task_raw = seats_task_names
             task_explicit = set(_expand_seat_groups(source_names))
         elif preset_names is not None:
             preset_expanded = _expand_seat_groups(preset_names)
-            task_src = [n for n in preset_expanded if n in seats.TASK_SEAT_NAMES]
+            task_raw = [n for n in preset_expanded if n in seats.TASK_SEAT_NAMES]
             task_explicit = set(preset_expanded) if panel_named else set()
         else:
-            task_src = []
+            task_raw = []
             task_explicit = set()
-        task_seats = _dedup(_filter_available(task_src, task_explicit))
+
+    # 2d. Availability — WHOLE-PANEL. Drop unavailable seats per-split (skip-noting
+    #     an explicitly-named one) with NO per-split fallback, then apply the
+    #     unfiltered-panel fallback ONCE only if the ENTIRE resolved panel
+    #     (subprocess + task) is empty. This is the BLOCKING fix: disabling both
+    #     task seats in `full` yields task_seats == [] with the four subprocess
+    #     seats intact (no opus/sonnet restoration); disabling EVERY seat triggers
+    #     a single whole-panel fallback (one warn) restoring the unfiltered panel.
+    sub_kept = _drop_unavailable(sub_raw, sub_explicit)
+    task_kept = _drop_unavailable(task_raw, task_explicit)
+    if (sub_raw or task_raw) and not sub_kept and not task_kept:
+        _all_unavailable_warn()
+        sub_kept, task_kept = sub_raw, task_raw
+    subprocess_seats = _dedup(sub_kept)
+    task_seats = explicit_task_seats if override_task else _dedup(task_kept)
 
     # 2c. task_seat_models: the per-seat model pin for each Task seat. MODEL_OVERRIDES
     #     is the SINGLE source — a seat not in the map pins its own name. The
