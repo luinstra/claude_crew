@@ -46,19 +46,17 @@ _ARG_MAX_BYTES = 256 * 1024
 _VERSION_DATESTAMP_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}-")
 
 # === The cursor panel seats — SINGLE SOURCE OF TRUTH ==========================
-# name -> (model string `agent --model` accepts, env var to override it).
+# name -> model string `agent --model` accepts.
 # Add a model = add ONE line here. Model strings verified via `agent models`.
-# Env override lets you retune a seat without code (e.g. CREW_MA_GLM_MODEL=...).
-CURSOR_SEATS: dict[str, tuple[str, str]] = {
-    "cursor-gpt":      ("gpt-5.5-extra-high", "CREW_MA_GPT_MODEL"),
-    "cursor-gemini":   ("gemini-3.1-pro",     "CREW_MA_GEMINI_MODEL"),
-    "cursor-glm":      ("glm-5.2-max",        "CREW_MA_GLM_MODEL"),
-    "cursor-auto":     ("auto",               "CREW_MA_AUTO_MODEL"),
-    "cursor-composer": ("composer-2.5",       "CREW_MA_COMPOSER_MODEL"),
+# Retune a seat without code via [seats.<name>].model in .crew/config.toml or
+# the global ~/.crew-config.toml.
+CURSOR_SEATS: dict[str, str] = {
+    "cursor-gpt":      "gpt-5.5-extra-high",
+    "cursor-gemini":   "gemini-3.1-pro",
+    "cursor-glm":      "glm-5.2-max",
+    "cursor-auto":     "auto",
+    "cursor-composer": "composer-2.5",
 }
-
-# Fallback env var for a bare/unconfigured CursorProvider instance.
-_MODEL_ENV_VAR = "CREW_MA_CURSOR_MODEL"
 
 # Auth-failure substrings for Cursor-specific error detection.
 _AUTH_MARKERS = (
@@ -121,11 +119,9 @@ class CursorProvider(Provider):
         self,
         name: str = "cursor",
         default_model: str | None = None,
-        model_env_var: str = _MODEL_ENV_VAR,
     ) -> None:
         self.name = name
         self._default_model = default_model
-        self._model_env_var = model_env_var
 
     def is_available(self) -> tuple[bool, str]:
         """PATH check + a Cursor-identity probe on ``agent --version``.
@@ -172,19 +168,20 @@ class CursorProvider(Provider):
         enabled`` additionally blocks network + out-of-workspace access. Only
         ``sandbox="workspace-write"`` drops ``--mode plan`` (writes permitted).
         """
-        # Precedence: explicit model (CLI --model) > .crew/config.toml
-        # [seats.<name>].model > CREW_MA_*_MODEL env (legacy) > the seat's
-        # built-in default. config goes ABOVE env, NOT in place of the default.
+        # Precedence: explicit model (CLI --model) > per-repo .crew/config.toml >
+        # global ~/.crew-config.toml ([seats.<name>].model, both via
+        # config.seat_model) > the seat's built-in default.
         chosen_model = (
             model
             or config.seat_model(self.name)
-            or os.environ.get(self._model_env_var, self._default_model)
+            or self._default_model
         )
         if not chosen_model:
             return ProviderResult(
                 name=self.name, model=None, ok=False, output="",
-                error=(f"cursor seat {self.name!r} has no model configured; set "
-                       f"{self._model_env_var} or pass --model"),
+                error=(f"cursor seat {self.name!r} has no model configured; pass "
+                       f"--model or set [seats.{self.name}].model in .crew/config.toml "
+                       f"or ~/.crew-config.toml"),
                 elapsed=0.0,
             )
         cwd = os.environ.get("CLAUDE_WORKING_DIRECTORY", os.getcwd())
@@ -261,7 +258,7 @@ class CursorProvider(Provider):
 
 # =============================================================================
 # To add another Cursor model as a panel seat:
-#   1. Add ONE line to CURSOR_SEATS above: "cursor-<x>": ("<model>", "CREW_MA_<X>_MODEL").
+#   1. Add ONE line to CURSOR_SEATS above: "cursor-<x>": "<model>".
 #      (Find the model string with `agent models`.)
 #   2. That's it. providers/__init__._build_registry() registers every
 #      CURSOR_SEATS entry, the engine's subprocess-seat allowlist is derived from

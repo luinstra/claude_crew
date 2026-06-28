@@ -41,7 +41,7 @@ multiagent/
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
-├── config.py            # memoized `.crew/config.toml` loader + validating getters (default_panel + debate_panel ([debate].panel) + per-seat tuning; pure leaf, no cli/providers import; Python 3.11+ tomllib, else gracefully ignored)
+├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel + debate_panel ([debate].panel) + per-seat tuning + [panels] roster + seat `available`; per-repo>global>builtin; pure leaf, no cli/providers import; Python 3.11+ tomllib, else gracefully ignored)
 ├── render.py            # side-by-side panel + --json rendering
 └── providers/
     ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC (executor: run()), registry + known_seat_names()
@@ -100,8 +100,16 @@ Key contracts (do NOT regress):
   glm-max draws on Cursor's shared premium MAX allotment, so it's opt-in too —
   `cursor-auto` fills that slot from the cheap/dedicated bucket). When the user
   names NEITHER `--panel` nor `--seats`, the default panel NAME comes from
-  `.crew/config.toml`'s `default_panel` (`config.py`), falling back to the
-  built-in `full`; precedence is CLI flag > config > `CREW_MA_*` env > builtin.
+  `default_panel` (`config.py`, per-repo `.crew/config.toml` → global
+  `~/.crew-config.toml`), falling back to the built-in `full`; precedence is
+  CLI flag > per-repo config > global config > builtin (no env tier — the old
+  env surface is retired). Panel-NAME resolution AND the `available` filter funnel through ONE
+  shared point in `cli.py` (`_panel_seat_list` consults `config.panels()` before
+  `seats.PANEL_PRESETS`; `_filter_available` drops `available=false` seats,
+  skip-noting an explicitly-named one and falling back to the unfiltered panel
+  if it would empty), wired into ALL panel paths — `review-prep`, the debate
+  resolver, AND the ad-hoc `crew review`/`council`/`seats` chokepoint
+  (`_resolve_seats`) — so `[panels]` + availability behave identically everywhere.
   `/crew:debate` honors config via a separate resolver: it cannot call
   `review-prep` (it resolves its panel in the command markdown), so `crew seats
   --debate` prints the FULL debate panel (subprocess AND Claude Task seats),
@@ -115,7 +123,7 @@ Key contracts (do NOT regress):
   no codex/Claude).
   The engine itself only knows subprocess seats, and its subprocess-seat allowlist
   is registry-derived via `known_seat_names()` (no hardcoded codex/agy list). The
-  `cursor` GROUP TOKEN (in `--seats` AND `CREW_MA_SEATS`) expands to every
+  `cursor` GROUP TOKEN (in `--seats` and `[panels]` rosters) expands to every
   registered `cursor-*` seat via `_expand_seat_groups`, so it grows with
   `CURSOR_SEATS`. `render --stage --session-id <id>` stages a seat prompt to
   `.crew/reviews/<session-id>/prompt-<seat-role>.txt` (session resolved in Python —
@@ -211,12 +219,17 @@ Key contracts (do NOT regress):
   `lite`/`solo` council get its log dir.) `review`/`council` are unchanged — they
   still fan out via `_fan_out` and intentionally do NOT support empty seats
   (they're pure fan-out; the orchestrator skips them).
-- Tuning env: `CREW_MA_SEATS`, `CREW_MA_TIMEOUT`, `CREW_MA_CODEX_MODEL`,
-  `CREW_MA_GPT_MODEL`, `CREW_MA_GEMINI_MODEL`, `CREW_MA_GLM_MODEL`,
-  `CREW_MA_AUTO_MODEL`, `CREW_MA_COMPOSER_MODEL`, `CREW_MA_AGY_MODEL`,
-  `CREW_MA_AGY_PRINT_TIMEOUT`. These env vars are now BELOW per-repo
-  `.crew/config.toml` in precedence (CLI flag > config > `CREW_MA_*` env >
-  builtin) — `config.py`'s getters layer ABOVE the env read at each call site.
+- Two-tier config (env retired): tuning lives in TWO TOML files — per-repo
+  `.crew/config.toml` and global `~/.crew-config.toml` (`config.py`, two memoized
+  loaders). Knobs: `default_panel`, `[debate].panel`, `[seats.<name>]`
+  (`model`/`reasoning_effort`/`print_timeout`/`available`), `[tuning].timeout`,
+  and the global-tier `[panels]` roster. Resolution is PER-KEY (per-seat-per-key
+  for `[seats.<name>]`): CLI flag > per-repo > global > builtin. The old tuning
+  env surface is RETIRED — consulted at no call site. `[panels]` redefines a
+  built-in preset or adds a custom one (validated vs known seats; unknown dropped
+  + one-time warn); `available = false` opt-outs a seat (filtered from any
+  resolved panel after roster resolution, before the run; explicit-named →
+  skip-note; all-unavailable → warn + unfiltered fallback).
 
 Run its tests with `python plugins/crew/scripts/test-multiagent.py`.
 

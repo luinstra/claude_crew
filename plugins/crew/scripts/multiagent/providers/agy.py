@@ -57,7 +57,7 @@ from . import Provider, ProviderResult
 # rest of argv + the environment block.
 AGY_PROMPT_MAX_BYTES = 256 * 1024  # 256 KB
 
-# Default print-timeout if CREW_MA_AGY_PRINT_TIMEOUT is unset.
+# Default print-timeout when [seats.agy].print_timeout is unset (the sole 8m source).
 DEFAULT_PRINT_TIMEOUT = "8m"
 
 # Grace margin (seconds) added on top of --print-timeout for teardown so the
@@ -183,20 +183,18 @@ class AgyProvider(Provider):
         return (False, "agy not found on PATH")
 
     def _resolved_model(self, model: str | None) -> str:
-        # Precedence: explicit model (CLI) > .crew/config.toml [seats.agy].model >
-        # CREW_MA_AGY_MODEL env (legacy) > built-in Gemini default.
+        # Precedence: explicit model (CLI) > per-repo .crew/config.toml > global
+        # ~/.crew-config.toml ([seats.agy].model, both via config.seat_model) >
+        # built-in Gemini default.
         if model:
             return model
-        return config.seat_model("agy") or os.environ.get(
-            "CREW_MA_AGY_MODEL", "Gemini 3.1 Pro (High)"
-        )
+        return config.seat_model("agy") or "Gemini 3.1 Pro (High)"
 
     def _print_timeout(self) -> str:
-        # Precedence: .crew/config.toml [seats.agy].print_timeout >
-        # CREW_MA_AGY_PRINT_TIMEOUT env (legacy) > built-in 8m default.
-        return config.agy_print_timeout() or os.environ.get(
-            "CREW_MA_AGY_PRINT_TIMEOUT", DEFAULT_PRINT_TIMEOUT
-        )
+        # Precedence: per-repo .crew/config.toml > global ~/.crew-config.toml
+        # ([seats.agy].print_timeout, both via config.agy_print_timeout) >
+        # built-in 8m default.
+        return config.agy_print_timeout() or DEFAULT_PRINT_TIMEOUT
 
     def effective_timeout(self, timeout: int) -> float:
         """Wall-clock timeout >= --print-timeout (BLOCKING #1).

@@ -159,13 +159,13 @@ def _build_registry() -> dict:
     }
 
     # Each Cursor model is its own seat. The registry maps name -> ZERO-ARG
-    # factory (get_provider calls factory()), so bind each seat's config in a
+    # factory (get_provider calls factory()), so bind each seat's model in a
     # closure. Adding a model is a one-line edit to CURSOR_SEATS (cursor.py).
-    def _cursor_factory(seat: str, model: str, env: str):
-        return lambda: CursorProvider(seat, model, env)
+    def _cursor_factory(seat: str, model: str):
+        return lambda: CursorProvider(seat, model)
 
-    for seat, (model, env) in CURSOR_SEATS.items():
-        registry[seat] = _cursor_factory(seat, model, env)
+    for seat, model in CURSOR_SEATS.items():
+        registry[seat] = _cursor_factory(seat, model)
     return registry
 
 

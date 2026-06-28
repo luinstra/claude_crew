@@ -204,8 +204,7 @@ succeed, and only an all-seats-failed panel skips the verdict.
   back to the inherited model if 4.6 isn't on your org allowlist).
 
 Not every change needs the full panel — `lite` (the two Claude voices, no
-external CLI) or a single seat is plenty for routine work. (At the engine level,
-`CREW_MA_SEATS` still pins the default subprocess seats.)
+external CLI) or a single seat is plenty for routine work.
 
 #### Per-repo config
 
@@ -214,10 +213,10 @@ external CLI) or a single seat is plenty for routine work. (At the engine level,
 models (plus codex `reasoning_effort`, agy `print_timeout`) and the global
 per-seat `timeout`. When you name no panel, `default_panel` resolves from
 config, falling back to built-in `full`; the per-seat tuning knobs follow
-**CLI flag > config > `CREW_MA_*` env > built-in**. Needs Python 3.11+ (stdlib
-`tomllib`); on 3.10 the file is gracefully ignored — with a one-time stderr
-note, so a `default_panel = "lite"` set to save cost can't silently hand you the
-full panel.
+**CLI flag > per-repo config > global config > built-in**. Needs Python 3.11+
+(stdlib `tomllib`); on 3.10 the file is gracefully ignored — with a one-time
+stderr note, so a `default_panel = "lite"` set to save cost can't silently hand
+you the full panel.
 
 `/crew:debate` honors config too, with its own `[debate].panel` override so a
 repo can default its debates fuller than its reviews (debate's value is
@@ -241,6 +240,38 @@ print_timeout = "8m"
 [tuning]
 timeout = 600                     # global per-seat wall-clock seconds
 ```
+
+#### Global per-user config
+
+A second, optional file at `~/.crew-config.toml` (your home dir) carries the
+same knobs for **every** repo, plus two global-tier knobs: a `[panels]` **roster**
+(redefine a built-in preset or add a custom one) and per-seat `available`
+(opt-out for a provider you haven't authed on this machine). Resolution is
+**per-key**: a per-repo value wins over the global one, which wins over the
+built-in default (`CLI flag > per-repo .crew/config.toml > global
+~/.crew-config.toml > built-in`). For `[seats.<name>]` tables this is
+per-seat-per-key, so a seat tuned only in the global file still applies. Same
+TOML/`tomllib`/one-time-stderr-note posture as the per-repo file.
+
+```toml
+# ~/.crew-config.toml
+default_panel = "lite"            # your machine-wide default
+
+[panels]
+full  = ["codex", "opus", "sonnet"]   # redefine a built-in preset's roster
+quick = ["codex", "opus"]             # add a custom preset (use via --panel quick)
+
+[seats.cursor-glm]
+available = false                 # not authed here -> dropped from any panel;
+                                  # an explicit --seats cursor-glm is skipped
+                                  # with a one-time note (not an opaque failure)
+```
+
+A `[panels]` entry names known seats (registry subprocess seats, the Claude Task
+seats, or the `cursor` group token); an unknown name is dropped with a one-time
+note. An unavailable seat is filtered out of any resolved panel **after** panel
+resolution and **before** the run; if a filter would empty a panel entirely, crew
+warns once and runs the unfiltered panel rather than nothing.
 
 #### Ad-hoc single-provider runs
 
@@ -266,8 +297,8 @@ launcher run directly via its shebang + exec bit — no `python` prefix, no
 `cursor-gemini`, `cursor-glm`, `cursor-auto`, `cursor-composer`), plus `-m/--model`,
 `-s/--sandbox read-only|workspace-write`, `--timeout N`, and `--json` (emits the
 same six-field result). It reuses the exact provider classes the review panel
-uses, so ANSI-stripping, agy auth-banner detection, timeout floors, and the
-`CREW_MA_*` env all apply unchanged. On success it prints the cleaned output and
+uses, so ANSI-stripping, agy auth-banner detection, timeout floors, and config
+resolution all apply unchanged. On success it prints the cleaned output and
 exits 0; on failure it prints the error to stderr and exits nonzero (in `--json`
 mode it always exits 0 with the `ok` flag in the JSON). **Always use this wrapper
 for ad-hoc calls — never raw `agy -p` / `codex exec`.**

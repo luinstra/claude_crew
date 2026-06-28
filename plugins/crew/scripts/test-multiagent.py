@@ -103,6 +103,59 @@ def path_with(*dirs: Path) -> dict:
 
 
 # =============================================================================
+# Config helpers — point the layered loaders (per-repo + global) at temp files.
+# =============================================================================
+
+from contextlib import contextmanager  # noqa: E402
+
+
+@contextmanager
+def crew_config(*, project=None, glob=None):
+    """Point the per-repo (``CLAUDE_PROJECT_DIR``/.crew/config.toml) AND global
+    (``$HOME``/~/.crew-config.toml) loaders at FRESH temp dirs, reset the memoized
+    config on enter/exit, and yield the project ``Path``.
+
+    Either layer omitted = that file ABSENT (so the layer is empty, NOT the real
+    machine's file — ``$HOME`` is always neutralized to a temp dir so a developer's
+    real ~/.crew-config.toml can never leak into a test). ``Path.home()`` honors
+    ``$HOME`` on POSIX, so the global loader resolves into the temp home.
+    """
+    from multiagent import config
+    saved = {k: os.environ.get(k) for k in ("CLAUDE_PROJECT_DIR", "HOME")}
+    with tempfile.TemporaryDirectory() as proj, tempfile.TemporaryDirectory() as home:
+        if project is not None:
+            crew = Path(proj) / ".crew"
+            crew.mkdir(parents=True)
+            (crew / "config.toml").write_text(project)
+        if glob is not None:
+            (Path(home) / ".crew-config.toml").write_text(glob)
+        os.environ["CLAUDE_PROJECT_DIR"] = proj
+        os.environ["HOME"] = home
+        config._reset_cache_for_tests()
+        try:
+            yield Path(proj)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            config._reset_cache_for_tests()
+
+
+def project_config(toml_text, *, write_file=True):
+    """Per-repo config ctxmgr (global layer neutralized). ``write_file=False`` =
+    no per-repo file (missing-file posture)."""
+    return crew_config(project=toml_text if write_file else None)
+
+
+def global_home(toml_text, *, write_file=True):
+    """Global ~/.crew-config.toml ctxmgr (no per-repo file). ``write_file=False`` =
+    no global file."""
+    return crew_config(glob=toml_text if write_file else None)
+
+
+# =============================================================================
 # CodexProvider tests (mocked subprocess via a fake `codex` on PATH)
 # =============================================================================
 
@@ -273,20 +326,14 @@ def test_agy_helpers():
 def test_agy_timeout_floor():
     log_section("AgyProvider effective timeout >= --print-timeout (BLOCKING #1)")
     prov = AgyProvider()
-    old = os.environ.get("CREW_MA_AGY_PRINT_TIMEOUT")
-    os.environ["CREW_MA_AGY_PRINT_TIMEOUT"] = "8m"
-    try:
+    # No config print_timeout set -> the built-in 8m DEFAULT_PRINT_TIMEOUT applies.
+    with project_config("", write_file=False):
         eff = prov.effective_timeout(300)  # generic ABC default
         check("agy effective timeout not capped at 300 when print-timeout is 8m",
               eff >= 480.0, ">= 480", str(eff))
         eff2 = prov.effective_timeout(900)  # explicitly larger caller wins
         check("agy effective timeout honors larger caller timeout",
               eff2 == 900.0, "900.0", str(eff2))
-    finally:
-        if old is None:
-            os.environ.pop("CREW_MA_AGY_PRINT_TIMEOUT", None)
-        else:
-            os.environ["CREW_MA_AGY_PRINT_TIMEOUT"] = old
 
 
 def test_agy_oversized():
@@ -383,9 +430,10 @@ def test_agy_run():
     check("agy: stdin is DEVNULL (fake saw no stdin / empty)",
           cap["stdin"] in ("", "<no-stdin>"), "empty/no stdin", cap["stdin"])
 
-    # --model override
-    res, cap = _run_agy_with_fake(capture_args, env_extra={"CREW_MA_AGY_MODEL": "Gemini 3.5 Flash (High)"})
-    check("agy: --model overridable via CREW_MA_AGY_MODEL",
+    # config [seats.agy].model override (env retired)
+    with project_config('[seats.agy]\nmodel = "Gemini 3.5 Flash (High)"\n'):
+        res, cap = _run_agy_with_fake(capture_args)
+    check("agy: --model overridable via [seats.agy].model config",
           "Gemini 3.5 Flash (High)" in cap["args"], "override model present", str(cap["args"]))
 
     # empty output -> ok=False
@@ -411,14 +459,17 @@ def test_agy_run():
           res.ok is False and res.error and "auth" in res.error.lower(),
           "ok=False auth diag", f"ok={res.ok} error={res.error!r}")
 
-    # hang -> timeout kill + reap within deadline
+    # hang -> timeout kill + reap within deadline. config [seats.agy].print_timeout
+    # "1s" keeps the wall-clock floor low so the kill fires fast — without it the
+    # default 8m floor would make this hang (env retired).
     start = time.monotonic()
-    res, _ = _run_agy_with_fake("""
-    import sys, time
-    with open(CAPTURE, "w") as f:
-        f.write('{"args": [], "stdin": ""}')
-    time.sleep(30)
-    """, timeout=1, env_extra={"CREW_MA_AGY_PRINT_TIMEOUT": "1s"})
+    with project_config('[seats.agy]\nprint_timeout = "1s"\n'):
+        res, _ = _run_agy_with_fake("""
+        import sys, time
+        with open(CAPTURE, "w") as f:
+            f.write('{"args": [], "stdin": ""}')
+        time.sleep(30)
+        """, timeout=1)
     elapsed = time.monotonic() - start
     check("agy hang -> ok=False with timeout error",
           res.ok is False and res.error and "timed out" in res.error,
@@ -452,59 +503,62 @@ def test_agy_is_available():
 
 def test_default_seats():
     log_section("default subprocess seats")
-    from multiagent.cli import _default_subprocess_seats  # noqa: E402
-    saved = os.environ.get("CREW_MA_SEATS")
-    try:
-        os.environ.pop("CREW_MA_SEATS", None)
+    from multiagent.cli import _default_subprocess_seats, _resolve_seats  # noqa: E402
+    from multiagent.providers.cursor import CURSOR_SEATS  # noqa: E402
+    # The BUILTIN fallback (registry-filtered) — no config, no env (retired).
+    with project_config("", write_file=False):
         seats = _default_subprocess_seats()
-        check("default subprocess panel == codex + agy + cursor-auto/composer (cursor-gemini/glm/gpt opt-in)",
+        check("builtin subprocess fallback == codex + agy + cursor-auto/composer",
               seats == ["codex", "agy", "cursor-auto", "cursor-composer"],
               "['codex', 'agy', 'cursor-auto', 'cursor-composer']", str(seats))
-        # opus/sonnet (Task seats) AND unknown names in CREW_MA_SEATS are dropped;
-        # agy is registered, so it's honored as an opt-in seat.
-        os.environ["CREW_MA_SEATS"] = "codex,agy,opus,sonnet,bogus"
-        seats = _default_subprocess_seats()
-        check("CREW_MA_SEATS filters to registered subprocess seats only",
-              seats == ["codex", "agy"], "['codex', 'agy']", str(seats))
-        # The 'cursor' group token expands in the env-var path too (not just the
-        # CLI --seats path), so CREW_MA_SEATS=cursor behaves like --seats cursor.
-        from multiagent.providers.cursor import CURSOR_SEATS  # noqa: E402
-        os.environ["CREW_MA_SEATS"] = "cursor"
-        seats = _default_subprocess_seats()
-        check("CREW_MA_SEATS=cursor expands to all cursor-* seats",
+        # No --seats -> the CONFIGURED default panel (here: built-in full) drives
+        # _resolve_seats; opus/sonnet (Task seats) drop via the registry filter.
+        resolved = _resolve_seats(None)
+        check("_resolve_seats(None) -> builtin full's subprocess subset",
+              resolved == ["codex", "agy", "cursor-auto", "cursor-composer"],
+              "['codex', 'agy', 'cursor-auto', 'cursor-composer']", str(resolved))
+        # The 'cursor' group token expands on the --seats path (the env path is gone).
+        seats = _resolve_seats("cursor")
+        check("--seats cursor expands to all cursor-* seats",
               set(seats) == set(CURSOR_SEATS) and len(seats) == len(CURSOR_SEATS),
               "all cursor-* seats", str(seats))
-    finally:
-        if saved is None:
-            os.environ.pop("CREW_MA_SEATS", None)
-        else:
-            os.environ["CREW_MA_SEATS"] = saved
+    # config default_panel drives the no-flag default (consistency requirement).
+    with project_config('default_panel = "lite"\n'):
+        check("_resolve_seats(None) honors config default_panel=lite (no subprocess seats)",
+              _resolve_seats(None) == [], "[]", str(_resolve_seats(None)))
+    # A [panels] override of `full` changes the resolved default subprocess set.
+    with project_config('[panels]\nfull = ["codex", "opus"]\n'):
+        check("_resolve_seats(None) honors [panels].full override (codex only; opus is a Task seat)",
+              _resolve_seats(None) == ["codex"], "['codex']", str(_resolve_seats(None)))
 
 
 def test_resolve_timeout():
     log_section("default per-seat timeout")
     from multiagent.cli import _resolve_timeout  # noqa: E402
-    saved = os.environ.get("CREW_MA_TIMEOUT")
-    try:
-        os.environ.pop("CREW_MA_TIMEOUT", None)
+    with project_config("", write_file=False):
         # Generous default: reference mode + thorough seats need room; better
         # than silently dropping a default seat on a large review.
         check("default per-seat timeout is generous (>= 600s)",
               _resolve_timeout(None) >= 600, ">=600", str(_resolve_timeout(None)))
-        # explicit arg wins over the default and the env.
-        os.environ["CREW_MA_TIMEOUT"] = "120"
-        check("--timeout arg overrides default and env",
+        check("--timeout arg overrides the default",
               _resolve_timeout(45) == 45, "45", str(_resolve_timeout(45)))
-        check("CREW_MA_TIMEOUT overrides the default when no arg given",
+    # per-repo [tuning].timeout beats builtin; explicit arg beats config.
+    with project_config("[tuning]\ntimeout = 120\n"):
+        check("[tuning].timeout overrides the default when no arg given",
               _resolve_timeout(None) == 120, "120", str(_resolve_timeout(None)))
-        os.environ["CREW_MA_TIMEOUT"] = "not-an-int"
-        check("bad CREW_MA_TIMEOUT falls back to the default (no crash)",
+        check("--timeout arg beats config",
+              _resolve_timeout(45) == 45, "45", str(_resolve_timeout(45)))
+    # global config beats builtin; per-repo beats global.
+    with crew_config(glob="[tuning]\ntimeout = 222\n"):
+        check("global [tuning].timeout overrides builtin when no per-repo file",
+              _resolve_timeout(None) == 222, "222", str(_resolve_timeout(None)))
+    with crew_config(project="[tuning]\ntimeout = 333\n", glob="[tuning]\ntimeout = 222\n"):
+        check("per-repo [tuning].timeout beats global",
+              _resolve_timeout(None) == 333, "333", str(_resolve_timeout(None)))
+    # bad config value falls back to the builtin (no crash).
+    with project_config("[tuning]\ntimeout = \"not-an-int\"\n"):
+        check("bad [tuning].timeout falls back to the default (no crash)",
               _resolve_timeout(None) >= 600, ">=600", str(_resolve_timeout(None)))
-    finally:
-        if saved is None:
-            os.environ.pop("CREW_MA_TIMEOUT", None)
-        else:
-            os.environ["CREW_MA_TIMEOUT"] = saved
 
 
 def test_stage():
@@ -626,11 +680,10 @@ def test_registry():
     # Cursor model-seats are registered (one per CURSOR_SEATS entry).
     from multiagent.providers import known_seat_names
     from multiagent.providers.cursor import CursorProvider, CURSOR_SEATS
-    for seat_name, (model, env) in CURSOR_SEATS.items():
+    for seat_name, model in CURSOR_SEATS.items():
         check(f"get_provider('{seat_name}') -> CursorProvider pinned to {model}",
               isinstance(get_provider(seat_name), CursorProvider)
-              and get_provider(seat_name)._default_model == model
-              and get_provider(seat_name)._model_env_var == env,
+              and get_provider(seat_name)._default_model == model,
               f"CursorProvider({model})", repr(get_provider(seat_name).__dict__))
     check("each cursor seat is a DISTINCT model (no closure late-binding bug)",
           len({get_provider(s)._default_model for s in CURSOR_SEATS}) == len(CURSOR_SEATS),
@@ -1047,8 +1100,12 @@ def test_production_invocation_and_fanout():
         time.sleep(30)
         """)
 
+        # agy print_timeout via per-repo config (env retired); cwd=repo so the
+        # loader resolves repo/.crew/config.toml. Keeps the hung agy fake from
+        # waiting the 8m default and hanging the suite.
+        (repo / ".crew").mkdir(parents=True, exist_ok=True)
+        (repo / ".crew" / "config.toml").write_text('[seats.agy]\nprint_timeout = "1s"\n')
         env = path_with(bins)
-        env["CREW_MA_AGY_PRINT_TIMEOUT"] = "1s"
 
         # production path: bare-script cli.py, must not ModuleNotFoundError
         proc = _run_cli(
@@ -1120,8 +1177,10 @@ def test_production_invocation_and_fanout():
         sys.stderr.write("agy boom")
         sys.exit(1)
         """)
+        # agy print_timeout via per-repo config (env retired); cwd=repo resolves it.
+        (repo / ".crew").mkdir(parents=True, exist_ok=True)
+        (repo / ".crew" / "config.toml").write_text('[seats.agy]\nprint_timeout = "1s"\n')
         env = path_with(bins)
-        env["CREW_MA_AGY_PRINT_TIMEOUT"] = "1s"
         proc = _run_cli(
             ["review", "working-tree", "--seats", "codex,agy", "--json", "--timeout", "5"],
             env=env, cwd=str(repo), timeout=60,
@@ -1561,14 +1620,17 @@ def test_council_subcommand():
         sys.stdout.write("AGY COUNCIL TAKE")
         sys.exit(0)
         """)
+        # agy print_timeout via config; _run_cli has no cwd, so resolve the loader
+        # via CLAUDE_PROJECT_DIR (env retired — no 8m hang on the agy fake).
+        (Path(td) / ".crew").mkdir(parents=True, exist_ok=True)
+        (Path(td) / ".crew" / "config.toml").write_text('[seats.agy]\nprint_timeout = "1s"\n')
         env = path_with(bins)
-        env["CREW_MA_AGY_PRINT_TIMEOUT"] = "1s"
-        # Pin the two fake subprocess seats so this exercises the council fan-out
-        # deterministically, independent of the default panel (covered separately
-        # in test_default_seats, which is now codex + cursor-*).
-        env["CREW_MA_SEATS"] = "codex,agy"
+        env["CLAUDE_PROJECT_DIR"] = td
+        # Pin the two fake subprocess seats EXPLICITLY via --seats so this exercises
+        # the council fan-out deterministically, independent of the default panel
+        # (CREW_MA_SEATS is retired — the flag is now the only override).
         proc = _run_cli(
-            ["council", "Pick one.", "--json", "--timeout", "5"],
+            ["council", "Pick one.", "--seats", "codex,agy", "--json", "--timeout", "5"],
             env=env, timeout=60,
         )
         names = []
@@ -1590,8 +1652,11 @@ def test_council_subcommand():
         sys.stderr.write("agy boom")
         sys.exit(1)
         """)
+        # agy print_timeout via config (CLAUDE_PROJECT_DIR; env retired).
+        (Path(td) / ".crew").mkdir(parents=True, exist_ok=True)
+        (Path(td) / ".crew" / "config.toml").write_text('[seats.agy]\nprint_timeout = "1s"\n')
         env = path_with(bins)
-        env["CREW_MA_AGY_PRINT_TIMEOUT"] = "1s"
+        env["CLAUDE_PROJECT_DIR"] = td
         proc = _run_cli(
             ["council", "Q?", "--seats", "codex,agy", "--json", "--timeout", "5"],
             env=env, timeout=60,
@@ -1624,8 +1689,11 @@ def test_council_subcommand():
         sys.stderr.write("agy boom")
         sys.exit(1)
         """)
+        # agy print_timeout via config (CLAUDE_PROJECT_DIR; env retired).
+        (Path(td) / ".crew").mkdir(parents=True, exist_ok=True)
+        (Path(td) / ".crew" / "config.toml").write_text('[seats.agy]\nprint_timeout = "1s"\n')
         env = path_with(bins)
-        env["CREW_MA_AGY_PRINT_TIMEOUT"] = "1s"
+        env["CLAUDE_PROJECT_DIR"] = td
         proc = _run_cli(
             ["council", "Q?", "--seats", "codex,agy", "--json", "--timeout", "5"],
             env=env, timeout=60,
@@ -2216,7 +2284,7 @@ def test_cursor():
         os.environ["PATH"] = path_with(d)["PATH"]
         os.environ["CURSOR_CAPTURE"] = str(cap)
         try:
-            prov = CursorProvider("cursor-glm", "glm-5.2-max", "CREW_MA_GLM_MODEL")
+            prov = CursorProvider("cursor-glm", "glm-5.2-max")
             # THE critical probe: agent --version is a bare date-stamp, no "cursor".
             avail, diag = prov.is_available()
             check("cursor is_available accepts a bare date-stamp --version (no 'cursor')",
@@ -2242,20 +2310,18 @@ def test_cursor():
                   "--mode" not in argv_w and "plan" not in argv_w,
                   "no --mode plan", str(argv_w))
 
-            # env var overrides the pinned model.
-            os.environ["CREW_MA_GLM_MODEL"] = "glm-override"
-            r2 = prov.run("X", timeout=10)
-            check("CREW_MA_<seat>_MODEL overrides the pinned model",
+            # config [seats.<seat>].model overrides the pinned default (env retired).
+            with project_config('[seats.cursor-glm]\nmodel = "glm-override"\n'):
+                r2 = prov.run("X", timeout=10)
+            check("[seats.<seat>].model config overrides the pinned model",
                   r2.model == "glm-override", "glm-override", str(r2.model))
-            os.environ.pop("CREW_MA_GLM_MODEL", None)
 
-            # cursor-auto's CREW_MA_AUTO_MODEL override (mirrors the glm case).
-            prov_auto = CursorProvider("cursor-auto", "auto", "CREW_MA_AUTO_MODEL")
-            os.environ["CREW_MA_AUTO_MODEL"] = "auto-override"
-            r3 = prov_auto.run("X", timeout=10)
-            check("CREW_MA_AUTO_MODEL overrides cursor-auto's pinned model",
+            # cursor-auto's config model override (mirrors the glm case).
+            prov_auto = CursorProvider("cursor-auto", "auto")
+            with project_config('[seats.cursor-auto]\nmodel = "auto-override"\n'):
+                r3 = prov_auto.run("X", timeout=10)
+            check("[seats.cursor-auto].model config overrides cursor-auto's pinned model",
                   r3.model == "auto-override", "auto-override", str(r3.model))
-            os.environ.pop("CREW_MA_AUTO_MODEL", None)
         finally:
             os.environ["PATH"] = old_path
             os.environ.pop("CURSOR_CAPTURE", None)
@@ -2881,47 +2947,16 @@ def _write_plan(td: Path) -> Path:
 
 
 def test_config():
-    log_section(".crew/config.toml loader + typed getters (config.py)")
+    log_section("layered config loaders + typed getters (config.py)")
     import io  # noqa: E402
-    from contextlib import contextmanager, redirect_stderr  # noqa: E402
+    from contextlib import redirect_stderr  # noqa: E402
     from multiagent import config  # noqa: E402
     from multiagent.providers.cursor import CursorProvider  # noqa: E402
 
-    @contextmanager
-    def project(toml_text, *, write_file=True):
-        """Point CLAUDE_PROJECT_DIR at a temp repo holding .crew/config.toml,
-        reset the memoized config, and restore env + cache on exit."""
-        saved = os.environ.get("CLAUDE_PROJECT_DIR")
-        with tempfile.TemporaryDirectory() as td:
-            if write_file:
-                crew = Path(td) / ".crew"
-                crew.mkdir(parents=True)
-                (crew / "config.toml").write_text(toml_text)
-            os.environ["CLAUDE_PROJECT_DIR"] = td
-            config._reset_cache_for_tests()
-            try:
-                yield Path(td)
-            finally:
-                if saved is None:
-                    os.environ.pop("CLAUDE_PROJECT_DIR", None)
-                else:
-                    os.environ["CLAUDE_PROJECT_DIR"] = saved
-                config._reset_cache_for_tests()
-
-    @contextmanager
-    def env(**kv):
-        """Set CREW_MA_* env vars, restoring prior values on exit."""
-        saved = {k: os.environ.get(k) for k in kv}
-        for k, v in kv.items():
-            os.environ[k] = v
-        try:
-            yield
-        finally:
-            for k, v in saved.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
+    # `project` = the module-level per-repo ctxmgr (global layer neutralized so a
+    # developer's real ~/.crew-config.toml can't leak in). `global_home` /
+    # `crew_config` cover the new global tier + per-repo-beats-global precedence.
+    project = project_config
 
     VALID = textwrap.dedent("""
         default_panel = "lite"
@@ -3090,27 +3125,28 @@ def test_config():
             config.tomllib = saved_tomllib
             config._reset_cache_for_tests()
 
-    # ---- Precedence: config BEATS a SET CREW_MA_* (config > env) ----------------
+    # ---- Precedence: per-repo BEATS global BEATS built-in (env retired) ----------
     from multiagent.cli import _resolve_timeout, _codex_model  # noqa: E402
 
-    # 7a. [tuning].timeout beats CREW_MA_TIMEOUT; explicit arg beats config.
-    with project("[tuning]\ntimeout = 777\n"):
-        with env(CREW_MA_TIMEOUT="120"):
-            check("precedence: [tuning].timeout (777) BEATS CREW_MA_TIMEOUT (120)",
-                  _resolve_timeout(None) == 777, "777", str(_resolve_timeout(None)))
-            check("precedence: explicit --timeout arg beats BOTH config and env",
-                  _resolve_timeout(45) == 45, "45", str(_resolve_timeout(45)))
-    # 7b. No config -> env still honored (legacy fallback untouched).
-    with project("", write_file=False):
-        with env(CREW_MA_TIMEOUT="222"):
-            check("precedence: no config -> CREW_MA_TIMEOUT (222) still wins over builtin",
-                  _resolve_timeout(None) == 222, "222", str(_resolve_timeout(None)))
+    # 7a. per-repo [tuning].timeout beats global; explicit arg beats both layers.
+    with crew_config(project="[tuning]\ntimeout = 777\n", glob="[tuning]\ntimeout = 120\n"):
+        check("precedence: per-repo [tuning].timeout (777) BEATS global (120)",
+              _resolve_timeout(None) == 777, "777", str(_resolve_timeout(None)))
+        check("precedence: explicit --timeout arg beats BOTH config layers",
+              _resolve_timeout(45) == 45, "45", str(_resolve_timeout(45)))
+    # 7b. global-only [tuning].timeout wins over builtin (no per-repo file).
+    with crew_config(glob="[tuning]\ntimeout = 222\n"):
+        check("precedence: global [tuning].timeout (222) wins over builtin when no per-repo",
+              _resolve_timeout(None) == 222, "222", str(_resolve_timeout(None)))
 
-    # 7c. [seats.codex].model beats CREW_MA_CODEX_MODEL.
-    with project("[seats.codex]\nmodel = \"codex-from-config\"\n"):
-        with env(CREW_MA_CODEX_MODEL="codex-from-env"):
-            check("precedence: [seats.codex].model BEATS CREW_MA_CODEX_MODEL",
-                  _codex_model() == "codex-from-config", "codex-from-config", str(_codex_model()))
+    # 7c. per-repo [seats.codex].model beats global; global-only applies.
+    with crew_config(project="[seats.codex]\nmodel = \"codex-repo\"\n",
+                     glob="[seats.codex]\nmodel = \"codex-global\"\n"):
+        check("precedence: per-repo [seats.codex].model BEATS global",
+              _codex_model() == "codex-repo", "codex-repo", str(_codex_model()))
+    with crew_config(glob="[seats.codex]\nmodel = \"codex-global\"\n"):
+        check("precedence: global-only [seats.codex].model applies (no per-repo)",
+              _codex_model() == "codex-global", "codex-global", str(_codex_model()))
 
     # ---- Per-seat argv/resolution assertions (NO metered seat calls) ------------
     # 8. codex reasoning_effort from config flows into the -c argv; absent -> xhigh.
@@ -3167,7 +3203,7 @@ def test_config():
                   "model_reasoning_effort=xhigh" in argv, "xhigh in argv", str(argv))
 
     # 9. cursor seat model from config reaches CursorProvider.run()'s --model;
-    #    config BEATS the CREW_MA_*_MODEL env.
+    #    per-repo BEATS global (env retired).
     fake_agent = '''
     import sys, json, os
     if "--version" in sys.argv:
@@ -3179,29 +3215,30 @@ def test_config():
     sys.stdout.write("review body output")
     sys.exit(0)
     '''
-    with project("[seats.cursor-glm]\nmodel = \"glm-from-config\"\n"):
-        with tempfile.TemporaryDirectory() as bd:
-            d = Path(bd)
-            make_fake_bin(d, "agent", fake_agent)
-            cap = d / "argv.json"
-            old_path = os.environ["PATH"]
-            os.environ["PATH"] = str(d) + os.pathsep + old_path
-            os.environ["CURSOR_CAPTURE"] = str(cap)
-            try:
-                r = CursorProvider("cursor-glm", "glm-5.2-max", "CREW_MA_GLM_MODEL").run("P", timeout=10)
+    with tempfile.TemporaryDirectory() as bd:
+        d = Path(bd)
+        make_fake_bin(d, "agent", fake_agent)
+        cap = d / "argv.json"
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = str(d) + os.pathsep + old_path
+        os.environ["CURSOR_CAPTURE"] = str(cap)
+        try:
+            with project("[seats.cursor-glm]\nmodel = \"glm-from-config\"\n"):
+                r = CursorProvider("cursor-glm", "glm-5.2-max").run("P", timeout=10)
                 argv = json.loads(cap.read_text())
                 check("per-seat: config cursor model reaches run() --model argv",
                       "glm-from-config" in argv and r.model == "glm-from-config",
                       "glm-from-config", f"argv_model={'glm-from-config' in argv} r.model={r.model}")
-                with env(CREW_MA_GLM_MODEL="glm-from-env"):
-                    r2 = CursorProvider("cursor-glm", "glm-5.2-max", "CREW_MA_GLM_MODEL").run("P", timeout=10)
-                    check("per-seat: config cursor model BEATS CREW_MA_GLM_MODEL env",
-                          r2.model == "glm-from-config", "glm-from-config", str(r2.model))
-            finally:
-                os.environ["PATH"] = old_path
-                os.environ.pop("CURSOR_CAPTURE", None)
+            with crew_config(project="[seats.cursor-glm]\nmodel = \"glm-repo\"\n",
+                             glob="[seats.cursor-glm]\nmodel = \"glm-global\"\n"):
+                r2 = CursorProvider("cursor-glm", "glm-5.2-max").run("P", timeout=10)
+                check("per-seat: per-repo cursor model BEATS global ~/.crew-config.toml",
+                      r2.model == "glm-repo", "glm-repo", str(r2.model))
+        finally:
+            os.environ["PATH"] = old_path
+            os.environ.pop("CURSOR_CAPTURE", None)
 
-    # 10. agy model + print_timeout from config reach the argv; config BEATS env.
+    # 10. agy model + print_timeout from config reach the argv; per-repo BEATS global.
     with project("[seats.agy]\nmodel = \"Agy Config Model\"\nprint_timeout = \"4m\"\n"):
         res, cap = _run_agy_with_fake("""
         import sys, json
@@ -3212,17 +3249,18 @@ def test_config():
         check("per-seat: config agy model + print_timeout reach argv",
               cap is not None and "Agy Config Model" in cap and "4m" in cap,
               "model + 4m in argv", str(cap))
-        with env(CREW_MA_AGY_MODEL="Env Model", CREW_MA_AGY_PRINT_TIMEOUT="9m"):
-            res2, cap2 = _run_agy_with_fake("""
-            import sys, json
-            json.dump(sys.argv[1:], open(CAPTURE, "w"))
-            sys.stdout.write("review body")
-            sys.exit(0)
-            """)
-            check("per-seat: config agy model/print_timeout BEAT CREW_MA_AGY_* env",
-                  cap2 is not None and "Agy Config Model" in cap2 and "4m" in cap2
-                  and "Env Model" not in cap2 and "9m" not in cap2,
-                  "config wins over env", str(cap2))
+    with crew_config(project="[seats.agy]\nmodel = \"Agy Repo\"\nprint_timeout = \"4m\"\n",
+                     glob="[seats.agy]\nmodel = \"Agy Global\"\nprint_timeout = \"9m\"\n"):
+        res2, cap2 = _run_agy_with_fake("""
+        import sys, json
+        json.dump(sys.argv[1:], open(CAPTURE, "w"))
+        sys.stdout.write("review body")
+        sys.exit(0)
+        """)
+        check("per-seat: per-repo agy model/print_timeout BEAT the global file",
+              cap2 is not None and "Agy Repo" in cap2 and "4m" in cap2
+              and "Agy Global" not in cap2 and "9m" not in cap2,
+              "per-repo wins over global", str(cap2))
 
     # ---- review-prep default_panel wiring (subprocess BUILDS the panel) ---------
     # 11. config default_panel="lite" + NO flags -> BOTH branches fire for lite
@@ -3289,6 +3327,236 @@ def test_config():
               and obj["subprocess_seats"] == ["codex", "agy", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"],
               "full fallback on invalid", f"rc={proc.returncode} obj={obj}")
+
+
+def test_global_roster_availability():
+    log_section("global ~/.crew-config.toml + [panels] roster + seat availability (getters)")
+    import io  # noqa: E402
+    from contextlib import redirect_stderr  # noqa: E402
+    from multiagent import config  # noqa: E402
+
+    # --- Global-only value applies (no per-repo file) -------------------------
+    with global_home('default_panel = "lite"\n'):
+        check("global-only default_panel applies when no per-repo file",
+              config.default_panel() == "lite", "lite", str(config.default_panel()))
+    with global_home('[seats.agy]\nmodel = "Global Agy"\n'):
+        check("global-only [seats.agy].model applies",
+              config.seat_model("agy") == "Global Agy", "Global Agy", str(config.seat_model("agy")))
+
+    # --- panels() roster ------------------------------------------------------
+    # Override a built-in preset AND define a custom one.
+    with project_config('[panels]\nfull = ["codex", "opus"]\nquick = ["codex"]\n'):
+        p = config.panels()
+        check("panels(): override builtin full + custom quick",
+              p == {"full": ["codex", "opus"], "quick": ["codex"]},
+              "{'full': ['codex','opus'], 'quick': ['codex']}", str(p))
+        # default_panel="quick" is now ACCEPTED (validates vs PANEL_PRESETS ∪ panels()).
+    with project_config('default_panel = "quick"\n[panels]\nquick = ["codex"]\n'):
+        check("default_panel='quick' accepted (custom [panels] name)",
+              config.default_panel() == "quick", "quick", str(config.default_panel()))
+    # Unknown seat in a roster list is dropped (warn once); the entry survives.
+    with project_config('[panels]\nmix = ["codex", "nope"]\n'):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            p = config.panels()
+        check("panels(): unknown roster seat dropped (entry kept)",
+              p == {"mix": ["codex"]}, "{'mix': ['codex']}", str(p))
+        check("panels(): unknown roster seat warns to stderr",
+              "nope" in buf.getvalue(), "warn mentions 'nope'", repr(buf.getvalue()[:160]))
+    # An entry whose EVERY element drops is omitted; all-dropped -> None.
+    with project_config('[panels]\nbad = ["nope", "alsobad"]\n'):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            p = config.panels()
+        check("panels(): an entry with all-unknown seats is omitted -> None",
+              p is None, "None", str(p))
+    # Non-table [panels] -> None (+ warn).
+    with project_config('panels = "not a table"\n'):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            p = config.panels()
+        check("panels(): non-table -> None (+ warn)",
+              p is None and "panels" in buf.getvalue().lower(),
+              "None + warn", f"p={p} stderr={buf.getvalue()[:120]!r}")
+    # No [panels] anywhere -> None.
+    with project_config("", write_file=False):
+        check("panels(): absent -> None", config.panels() is None, "None", str(config.panels()))
+    # per-repo [panels] entry overrides global PER NAME; global-only names remain.
+    with crew_config(project='[panels]\nfull = ["codex"]\n',
+                     glob='[panels]\nfull = ["opus"]\nextra = ["sonnet"]\n'):
+        p = config.panels()
+        check("panels(): per-repo overrides global per name; global-only name remains",
+              p == {"full": ["codex"], "extra": ["sonnet"]},
+              "{'full': ['codex'], 'extra': ['sonnet']}", str(p))
+
+    # --- seat_available -------------------------------------------------------
+    with project_config("", write_file=False):
+        check("seat_available default True (no config)",
+              config.seat_available("cursor-glm") is True, "True", str(config.seat_available("cursor-glm")))
+    with project_config('[seats.cursor-glm]\navailable = false\n'):
+        check("seat_available explicit False",
+              config.seat_available("cursor-glm") is False, "False", str(config.seat_available("cursor-glm")))
+    # per-repo available overrides global.
+    with crew_config(project='[seats.cursor-glm]\navailable = true\n',
+                     glob='[seats.cursor-glm]\navailable = false\n'):
+        check("seat_available: per-repo True beats global False",
+              config.seat_available("cursor-glm") is True, "True", str(config.seat_available("cursor-glm")))
+    with crew_config(glob='[seats.cursor-glm]\navailable = false\n'):
+        check("seat_available: global-only False applies",
+              config.seat_available("cursor-glm") is False, "False", str(config.seat_available("cursor-glm")))
+    # Non-bool available -> treated as available (never silently HIDE a seat) + warn.
+    with project_config('[seats.cursor-glm]\navailable = "yes"\n'):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            avail = config.seat_available("cursor-glm")
+        check("seat_available: non-bool -> True (opt-out safety) + warn",
+              avail is True and "available" in buf.getvalue().lower(),
+              "True + warn", f"avail={avail} stderr={buf.getvalue()[:120]!r}")
+
+
+def _clean_env(proj: str) -> dict:
+    """Subprocess env for a dispatcher panel/availability test: CLAUDE_PROJECT_DIR
+    at the temp repo + HOME at an isolated empty dir (so a developer's real
+    ~/.crew-config.toml never leaks into the assertion)."""
+    env = dict(os.environ)
+    env["CLAUDE_PROJECT_DIR"] = proj
+    env["HOME"] = proj  # no ~/.crew-config.toml under the temp project dir
+    return env
+
+
+def test_panel_availability_consistency():
+    log_section("[panels] roster + availability consistency across commands (subprocess)")
+
+    def _write_cfg(proj: Path, toml: str) -> None:
+        (proj / ".crew").mkdir(parents=True, exist_ok=True)
+        (proj / ".crew" / "config.toml").write_text(toml)
+
+    # 1. [panels].full override changes the resolved full set in BOTH ad-hoc
+    #    `crew seats` (no --seats) AND review-prep.
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        _write_cfg(proj, '[panels]\nfull = ["codex", "opus"]\n')
+        _write_plan(proj)
+        env = _clean_env(td)
+        seats_p = _run_dispatcher(["seats"], cwd=td, env=env, timeout=30)
+        lines = [ln for ln in seats_p.stdout.splitlines() if ln.strip()]
+        check("ad-hoc `crew seats` honors [panels].full override (codex only; opus is a Task seat)",
+              seats_p.returncode == 0 and lines == ["codex"], "['codex']", str(lines))
+        rp = _run_dispatcher(["review-prep", "plan.md", "--session-id", "po"],
+                             cwd=td, env=env, timeout=30)
+        obj = json.loads(rp.stdout)
+        check("review-prep honors [panels].full override (subprocess [codex], task [opus])",
+              obj["subprocess_seats"] == ["codex"] and obj["task_seats"] == ["opus"],
+              "subprocess [codex], task [opus]", str(obj))
+
+    # 2. A custom [panels].quick resolves via --panel quick (choices removed) AND
+    #    via default_panel="quick".
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        _write_cfg(proj, '[panels]\nquick = ["codex", "opus"]\n')
+        _write_plan(proj)
+        env = _clean_env(td)
+        rp = _run_dispatcher(["review-prep", "plan.md", "--panel", "quick", "--session-id", "pq"],
+                             cwd=td, env=env, timeout=30)
+        obj = json.loads(rp.stdout) if rp.returncode == 0 else None
+        check("--panel quick resolves a custom [panels] preset (choices removed)",
+              rp.returncode == 0 and obj is not None
+              and obj["subprocess_seats"] == ["codex"] and obj["task_seats"] == ["opus"],
+              "subprocess [codex], task [opus]", f"rc={rp.returncode} obj={obj}")
+        # debate path: `crew seats --debate --panel quick` resolves it too.
+        ds = _run_dispatcher(["seats", "--debate", "--panel", "quick"],
+                             cwd=td, env=env, timeout=30)
+        dlines = [ln for ln in ds.stdout.splitlines() if ln.strip()]
+        check("`crew seats --debate --panel quick` resolves the custom preset (subprocess + task)",
+              ds.returncode == 0 and dlines == ["codex", "opus"], "['codex','opus']", str(dlines))
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        _write_cfg(proj, 'default_panel = "quick"\n[panels]\nquick = ["codex"]\n')
+        _write_plan(proj)
+        env = _clean_env(td)
+        rp = _run_dispatcher(["review-prep", "plan.md", "--session-id", "pdq"],
+                             cwd=td, env=env, timeout=30)
+        obj = json.loads(rp.stdout)
+        check("default_panel='quick' resolves with no flags",
+              obj["subprocess_seats"] == ["codex"] and obj["task_seats"] == [],
+              "subprocess [codex], task []", str(obj))
+
+    # 3. Unknown --panel name falls back to a CONFIGURED [panels].full (not builtin).
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        _write_cfg(proj, '[panels]\nfull = ["codex"]\n')
+        _write_plan(proj)
+        env = _clean_env(td)
+        rp = _run_dispatcher(["review-prep", "plan.md", "--panel", "bogus", "--session-id", "pb"],
+                             cwd=td, env=env, timeout=30)
+        obj = json.loads(rp.stdout)
+        check("unknown --panel name falls back to the CONFIGURED [panels].full",
+              obj["subprocess_seats"] == ["codex"] and obj["task_seats"] == [],
+              "configured full [codex]", str(obj))
+
+    # 4. Availability: available=false drops the seat from a DEFAULT panel silently
+    #    (ad-hoc `crew seats` + review-prep both).
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        _write_cfg(proj, '[seats.cursor-auto]\navailable = false\n')
+        _write_plan(proj)
+        env = _clean_env(td)
+        seats_p = _run_dispatcher(["seats"], cwd=td, env=env, timeout=30)
+        lines = [ln for ln in seats_p.stdout.splitlines() if ln.strip()]
+        check("ad-hoc `crew seats` drops an available=false seat from the default panel",
+              "cursor-auto" not in lines and "codex" in lines and "agy" in lines,
+              "no cursor-auto", str(lines))
+        rp = _run_dispatcher(["review-prep", "plan.md", "--session-id", "pa1"],
+                             cwd=td, env=env, timeout=30)
+        obj = json.loads(rp.stdout)
+        check("review-prep drops an available=false seat from the default panel",
+              "cursor-auto" not in obj["subprocess_seats"] and "codex" in obj["subprocess_seats"],
+              "no cursor-auto", str(obj["subprocess_seats"]))
+
+    # 5. Explicitly-named unavailable seat -> SKIPPED WITH a one-time stderr note.
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        _write_cfg(proj, '[seats.cursor-auto]\navailable = false\n')
+        env = _clean_env(td)
+        seats_p = _run_dispatcher(["seats", "--seats", "codex,cursor-auto"],
+                                  cwd=td, env=env, timeout=30)
+        lines = [ln for ln in seats_p.stdout.splitlines() if ln.strip()]
+        check("explicit --seats <unavailable> skipped, the rest run",
+              lines == ["codex"], "['codex']", str(lines))
+        check("explicit --seats <unavailable> emits a one-time stderr skip-note",
+              "unavailable" in seats_p.stderr.lower() and "cursor-auto" in seats_p.stderr,
+              "stderr skip-note", repr(seats_p.stderr[:160]))
+
+    # 6. Empty-after-filter -> warn + fall back to the UNFILTERED panel (run rather
+    #    than nothing). An explicitly-named lone unavailable seat still RUNS.
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        _write_cfg(proj, '[seats.cursor-auto]\navailable = false\n')
+        env = _clean_env(td)
+        seats_p = _run_dispatcher(["seats", "--seats", "cursor-auto"],
+                                  cwd=td, env=env, timeout=30)
+        lines = [ln for ln in seats_p.stdout.splitlines() if ln.strip()]
+        check("empty-after-filter falls back to the unfiltered panel (lone unavailable still runs)",
+              lines == ["cursor-auto"], "['cursor-auto']", str(lines))
+        check("empty-after-filter warns to stderr",
+              "unavailable" in seats_p.stderr.lower(), "stderr warn", repr(seats_p.stderr[:160]))
+
+    # 7. A --panel preset CONTAINING an unavailable seat skips it WITH a note
+    #    (preset members are explicit) — review-prep.
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        _write_cfg(proj, '[seats.cursor-auto]\navailable = false\n')
+        _write_plan(proj)
+        env = _clean_env(td)
+        rp = _run_dispatcher(["review-prep", "plan.md", "--panel", "full", "--session-id", "ppf"],
+                             cwd=td, env=env, timeout=30)
+        obj = json.loads(rp.stdout)
+        check("--panel full drops its unavailable member from subprocess_seats",
+              "cursor-auto" not in obj["subprocess_seats"] and "codex" in obj["subprocess_seats"],
+              "no cursor-auto", str(obj["subprocess_seats"]))
+        check("--panel full unavailable member -> one-time stderr skip-note",
+              "unavailable" in rp.stderr.lower() and "cursor-auto" in rp.stderr,
+              "stderr skip-note", repr(rp.stderr[:160]))
 
 
 def test_review_prep():
@@ -3902,6 +4170,8 @@ def main():
     test_from_dict_and_escaping()
     test_collect()
     test_config()
+    test_global_roster_availability()
+    test_panel_availability_consistency()
     test_review_prep()
     test_debate_panel_resolver()
     test_panel_catalog()

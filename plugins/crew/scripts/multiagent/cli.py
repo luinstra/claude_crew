@@ -74,34 +74,100 @@ from multiagent.providers import (
 # (Cursor's auto model routing) is defaulted in its place — auto bills from
 # Cursor's cheap/dedicated bucket (like composer), so no default crew panel touches
 # the premium allotment.
-# Override the whole list with CREW_MA_SEATS. Any name here must be a registered
-# subprocess seat (see providers/__init__._build_registry); unknown names dropped.
+# This tuple is the BUILTIN subprocess fallback. Any name here must be a
+# registered subprocess seat (see providers/__init__._build_registry); unknown
+# names are dropped. The configured default panel (config.default_panel() +
+# [panels]) is resolved in _resolve_seats — this is the floor when nothing is set.
 _DEFAULT_SUBPROCESS_PANEL = (
     "codex", "agy", "cursor-auto", "cursor-composer",
 )
 
 
 def _default_subprocess_seats() -> list[str]:
-    """Subprocess-seat default for the engine.
+    """The BUILTIN subprocess-seat fallback (registry-filtered).
 
     The engine only knows subprocess seats (codex/agy/cursor-*; opus/sonnet Task
     seats are owned by the orchestrator). The allowlist is REGISTRY-DERIVED:
     ``known_seat_names()`` returns every registered subprocess seat, so adding a
     seat to the registry makes it usable here automatically — no hardcoded list
-    to keep in sync. ``CREW_MA_SEATS`` overrides the default panel.
+    to keep in sync. The CONFIGURED default panel (``config.default_panel()`` +
+    ``[panels]``) routes through ``_resolve_seats`` / ``_panel_seat_list``; this
+    helper is just the built-in floor.
 
     Safe BECAUSE a failed seat NEVER sinks the panel: any seat failure (nonzero
     exit, hang/timeout, empty output, auth/error banner, unavailable) degrades to
     an ``ok=False`` result while the other seats still return (see ``cmd_review``).
     """
-    raw = os.environ.get("CREW_MA_SEATS", ",".join(_DEFAULT_SUBPROCESS_PANEL))
-    # Expand group tokens (e.g. `cursor`) BEFORE the known-seat filter, so
-    # CREW_MA_SEATS=cursor behaves like the CLI `--seats cursor` rather than
-    # silently dropping the unknown bare token and falling back to the default.
-    names = _expand_seat_groups([n.strip() for n in raw.split(",") if n.strip()])
     known = set(known_seat_names())
-    subprocess_only = [n for n in names if n in known]
-    return subprocess_only or [s for s in _DEFAULT_SUBPROCESS_PANEL if s in known]
+    return [s for s in _DEFAULT_SUBPROCESS_PANEL if s in known]
+
+
+# One-time stderr notes for panel/availability resolution (mirrors config.py's
+# memoized-warn posture; keyed so each distinct note fires at most once/process).
+_warned: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    if key in _warned:
+        return
+    _warned.add(key)
+    print(message, file=sys.stderr)
+
+
+def _panel_seat_list(name: str) -> list[str]:
+    """Resolve a panel NAME to its RAW seat-name list — the SINGLE shared roster
+    resolution point every panel-consuming path routes through.
+
+    Resolution: ``config.panels()`` (per-repo → global merged) → built-in
+    ``seats.PANEL_PRESETS`` → unknown name: a configured ``[panels].full`` if one
+    exists, else the built-in ``full`` (one-time warn). Returns the raw list
+    (group tokens like ``cursor`` left VERBATIM — callers expand via
+    ``_expand_seat_groups``). NEVER raises ``KeyError``.
+    """
+    roster = config.panels() or {}
+    if name in roster:
+        return list(roster[name])
+    if name in seats.PANEL_PRESETS:
+        return list(seats.PANEL_PRESETS[name])
+    _warn_once(
+        f"unknown-panel:{name}",
+        f"crew config: panel {name!r} is not a known preset or [panels] entry; "
+        "falling back to 'full'",
+    )
+    # Unknown-name fallback resolves a CONFIGURED [panels].full if present, NOT a
+    # bypass to the built-in full.
+    if "full" in roster:
+        return list(roster["full"])
+    return list(seats.PANEL_PRESETS["full"])
+
+
+def _filter_available(names: list[str], explicit: set[str]) -> list[str]:
+    """Drop seats marked ``available = false`` — applied AFTER panel/roster
+    resolution, BEFORE the subprocess/task split.
+
+    A dropped seat that was EXPLICITLY named (via ``--seats`` or a named
+    ``--panel`` preset member) emits a one-time stderr skip-note rather than a
+    silent drop. If filtering empties the list, emit a one-time warn and return
+    the UNFILTERED list — a misconfiguration must never silently produce an empty
+    review/run.
+    """
+    kept: list[str] = []
+    for n in names:
+        if config.seat_available(n):
+            kept.append(n)
+        elif n in explicit:
+            _warn_once(
+                f"seat-skip:{n}",
+                f"crew config: seat {n!r} is marked unavailable; skipping it",
+            )
+    if names and not kept:
+        _warn_once(
+            "all-unavailable",
+            "crew config: all seats in the resolved panel are marked unavailable; "
+            "using the unfiltered panel instead of running nothing",
+        )
+        return names
+    return kept
 
 
 def _resolve_timeout(arg: int | None) -> int:
@@ -112,29 +178,24 @@ def _resolve_timeout(arg: int | None) -> int:
     # silently drop a default seat to a too-short timeout, so the floor is
     # generous (10 min). The reference prompt keeps the seat SCOPED to the diff
     # so normal reviews finish well under this; genuinely large reviews still
-    # get the headroom. Override with --timeout or CREW_MA_TIMEOUT (either
-    # direction) for faster interactive loops or bigger jobs.
+    # get the headroom. Override with --timeout (faster interactive loops or
+    # bigger jobs) or the config [tuning].timeout knob.
     if arg is not None:
         return arg
-    # Precedence: --timeout arg (above) > .crew/config.toml [tuning].timeout >
-    # CREW_MA_TIMEOUT env (legacy) > built-in 600s floor.
+    # Precedence: --timeout arg (above) > per-repo .crew/config.toml > global
+    # ~/.crew-config.toml ([tuning].timeout, both via config.default_timeout())
+    # > built-in 600s floor.
     cfg = config.default_timeout()
     if cfg is not None:
         return cfg
-    env = os.environ.get("CREW_MA_TIMEOUT")
-    if env:
-        try:
-            return int(env)
-        except ValueError:
-            pass
     return 600
 
 
 def _codex_model() -> str | None:
-    # Precedence: .crew/config.toml [seats.codex].model > CREW_MA_CODEX_MODEL env
-    # (legacy) > None (codex's own default). An explicit CLI --model is applied
-    # ABOVE this at the call sites (cmd_run).
-    return config.seat_model("codex") or os.environ.get("CREW_MA_CODEX_MODEL") or None
+    # Precedence: per-repo .crew/config.toml > global ~/.crew-config.toml
+    # ([seats.codex].model, both via config.seat_model) > None (codex's own
+    # default). An explicit CLI --model is applied ABOVE this at the call sites.
+    return config.seat_model("codex") or None
 
 
 def _run_seat(name: str, prompt: str, timeout: int) -> ProviderResult:
@@ -172,19 +233,25 @@ def _resolve_seats(seats_arg: str | None) -> list[str]:
 
     Accepts the ``cursor`` group token (expands to all cursor-* seats), so
     ``--seats cursor`` runs the whole Cursor panel and ``--seats cursor,codex``
-    adds codex.
+    adds codex. When no ``--seats`` is given, the CONFIGURED default panel
+    (``config.default_panel()`` + ``[panels]``) resolves through the single
+    shared ``_panel_seat_list`` point (→ built-in ``full``), so ad-hoc
+    ``crew review``/``council``/``seats`` honor the roster too. Availability
+    (``_filter_available``) is applied AFTER roster resolution.
     """
-    seats = (
-        [s.strip() for s in seats_arg.split(",") if s.strip()]
-        if seats_arg
-        else _default_subprocess_seats()
-    )
-    seats = _expand_seat_groups(seats)
+    if seats_arg:
+        raw = [s.strip() for s in seats_arg.split(",") if s.strip()]
+        explicit = set(_expand_seat_groups(raw))
+    else:
+        raw = _panel_seat_list(config.default_panel() or "full")
+        explicit = set()
+    names = _expand_seat_groups(raw)
     # Engine drives subprocess seats only — the allowlist is the registry.
     # Filter to known seats, de-duplicating while preserving order.
     known = set(known_seat_names())
     seen: set[str] = set()
-    return [s for s in seats if s in known and not (s in seen or seen.add(s))]
+    resolved = [s for s in names if s in known and not (s in seen or seen.add(s))]
+    return _filter_available(resolved, explicit)
 
 
 def _resolve_debate_panel_name(panel_arg: str | None) -> str:
@@ -196,9 +263,11 @@ def _resolve_debate_panel_name(panel_arg: str | None) -> str:
         > built-in ``full``
 
     ``config.debate_panel()`` reads ``[debate].panel`` and ``config.default_panel()``
-    reads ``default_panel`` — both validate against ``seats.PANEL_PRESETS`` and
-    return ``None`` on a missing/unknown value, so the returned name is ALWAYS a
-    known preset key (``PANEL_PRESETS[name]`` can never ``KeyError``).
+    reads ``default_panel`` — both validate against ``seats.PANEL_PRESETS`` ∪ the
+    configured ``[panels]`` keys and return ``None`` on a missing/unknown value.
+    The returned name is resolved to seats through ``_panel_seat_list`` (which
+    handles an unknown ``--panel`` name → ``full``), so no caller hits a raw
+    ``KeyError``.
     """
     if panel_arg is not None:
         return panel_arg
@@ -260,9 +329,14 @@ def _resolve_debate_seats(panel_arg: str | None, seats_arg: str | None) -> list[
                     file=sys.stderr,
                 )
                 raise _DebateSeatError(2)
+        explicit = set(names)
     else:
-        names = list(seats.PANEL_PRESETS[_resolve_debate_panel_name(panel_arg)])
-        names = _expand_seat_groups(names)
+        # Roster resolution through the single shared point (honors [panels]).
+        names = _expand_seat_groups(_panel_seat_list(_resolve_debate_panel_name(panel_arg)))
+        explicit = set()
+    # Availability filter (skip-note for an explicitly-named unavailable seat;
+    # empty-after-filter falls back to the unfiltered panel).
+    names = _filter_available(names, explicit)
     seen: set[str] = set()
     return [n for n in names if not (n in seen or seen.add(n))]
 
@@ -620,7 +694,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     ``cli.py run <seat> -f <prompt-file>`` (or a direct prompt string). The seat
     is dispatched through the SAME ``get_provider``/``Provider`` machinery as
     ``review`` so invocation shape, ANSI-strip, auth/error-banner detection,
-    timeout floor, ARG_MAX guard, and ``CREW_MA_*`` env all apply unchanged.
+    timeout floor, ARG_MAX guard, and config resolution all apply unchanged.
     Valid seats are whatever the registry holds (codex, agy, cursor-*).
 
     With a TRUTHY, non-blank ``--session-id <id>``, ``-f`` and ``-o`` are DERIVED
@@ -696,6 +770,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     else:
         prompt = args.prompt
 
+    # NOTE (config `available` interaction): `run <seat>` is an EXPLICIT single-seat
+    # call, so it does NOT apply config.seat_available() — the seat is always run.
+    # The panel-level availability filter lives upstream in _filter_available
+    # (review-prep / _resolve_seats / debate): a non-explicit unavailable seat is
+    # dropped THERE and never reaches this fan-out, while an EXPLICITLY-named
+    # unavailable seat survives via the empty-after-filter fallback (skip-note then
+    # run) and must execute here — re-filtering it would wrongly drop it. PATH-level
+    # is_available() (below) is a different check (the CLI isn't installed).
     provider = get_provider(seat)
     avail, diag = provider.is_available()
     if not avail:
@@ -705,7 +787,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
     else:
         # Same model resolution as the review path: --model overrides the
-        # CREW_MA_* default; agy resolves its own default internally.
+        # config/built-in default; agy resolves its own default internally.
         if args.model:
             model = args.model
         elif seat == "codex":
@@ -1185,67 +1267,83 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    # 2. --panel/--seats → unified source name list, then split into subprocess
-    #    vs task seats. Sentinel mechanics (--seats default is None, --panel
-    #    default is None/absent):
+    # 2. --panel/--seats → subprocess + task seats. --seats and --panel are
+    #    INDEPENDENT axes: --seats overrides the SUBPROCESS subset (and supplies
+    #    task names found within it); --panel supplies the TASK seats when --seats
+    #    names none. Sentinel mechanics (--seats default None, --panel default None):
     #      * --seats <given> (incl. "")  -> seats_given; classify ITS names
-    #      * --seats omitted + --panel P -> classify the PANEL_PRESETS[P] names
-    #      * BOTH omitted                -> the per-repo config's default_panel
-    #                                       (.crew/config.toml) → built-in "full"
-    #                                       (see the default-panel fallback below)
-    #    A name classifies as exactly one of: a registry subprocess seat
-    #    (-> subprocess_seats, via _resolve_seats), a seats.TASK_SEAT_NAMES member
-    #    (-> task_seats), or NEITHER (silently DROPPED — matching _resolve_seats's
-    #    existing drop behavior; never loud-error).
+    #      * --panel P (named)           -> preset_names = _panel_seat_list(P)
+    #      * BOTH omitted                -> preset_names = _panel_seat_list(
+    #                                       default_panel → "full"; per-repo → global
+    #                                       → built-in)
+    #    preset_names is the SINGLE panel-resolved backing list feeding BOTH the
+    #    subprocess (2a) and task (2b) splits (refinement 5). Panel-name resolution
+    #    goes through the shared _panel_seat_list (consults [panels] before
+    #    PANEL_PRESETS; unknown name → 'full', never a raw KeyError). Availability
+    #    (_filter_available) is applied to EACH split AFTER roster resolution. A name
+    #    classifies as exactly one of: a registry subprocess seat (-> subprocess_seats),
+    #    a seats.TASK_SEAT_NAMES member (-> task_seats), or NEITHER (silently DROPPED;
+    #    never loud-error). A NAMED --panel's members are EXPLICIT (an unavailable one
+    #    is skipped WITH a note); a default_panel's are silent drops (refinement 3).
     seats_given = args.seats is not None
     source_names = (
         [s.strip() for s in args.seats.split(",") if s.strip()]
         if seats_given else []
     )
-    preset_names = (
-        seats.PANEL_PRESETS[args.panel] if args.panel is not None else None
+    panel_named = args.panel is not None
+    if panel_named:
+        preset_names: list[str] | None = _panel_seat_list(args.panel)
+    elif not seats_given:
+        preset_names = _panel_seat_list(config.default_panel() or "full")
+    else:
+        preset_names = None
+
+    known = set(known_seat_names())
+
+    def _dedup(xs: list[str]) -> list[str]:
+        seen: set[str] = set()
+        return [x for x in xs if not (x in seen or seen.add(x))]
+
+    # 2a. Subprocess seats: registry filter + availability, dedup, order preserved.
+    #     An explicit-empty/omitted --seats yields [].
+    if seats_given:
+        sub_expanded = _expand_seat_groups(source_names)
+        sub_explicit = set(sub_expanded)                       # --seats names explicit
+    elif preset_names is not None:
+        sub_expanded = _expand_seat_groups(preset_names)
+        sub_explicit = set(sub_expanded) if panel_named else set()  # default: silent
+    else:
+        sub_expanded = []
+        sub_explicit = set()
+    subprocess_seats = _dedup(
+        _filter_available([s for s in sub_expanded if s in known], sub_explicit)
     )
 
-    # Default-panel fallback: when the user named NEITHER a panel NOR seats, seed
-    # the EFFECTIVE preset from .crew/config.toml's default_panel (→ "full" if
-    # unset/invalid). This drives BOTH both-omitted branches below — the
-    # subprocess split (2a) AND the task split (2b) — via the same `preset_names`
-    # the explicit --panel path uses, so the default review keeps its opus/sonnet
-    # Claude voices, not just its codex/agy subprocess seats. (An explicit
-    # --seats "" or --panel still wins; this only fills the truly-omitted case.)
-    if args.panel is None and args.seats is None:
-        default_name = config.default_panel() or "full"
-        preset_names = seats.PANEL_PRESETS[default_name]
-
-    # 2a. Subprocess seats WITH the empty-guard (the lite/solo fix): _resolve_seats
-    #     ("") returns the DEFAULT panel, so an explicit-empty/omitted source MUST
-    #     short-circuit to []. Only a non-empty source is resolved through the
-    #     registry (reusing _expand_seat_groups / known_seat_names, so the `cursor`
-    #     group token + registry filter behave exactly as `crew seats`). SUBPROCESS
-    #     SEATS ONLY — task names + unknowns are dropped by the registry filter.
-    if seats_given:
-        subprocess_seats = _resolve_seats(",".join(source_names)) if source_names else []
-    elif preset_names is not None:
-        subprocess_seats = _resolve_seats(",".join(preset_names))
-    else:
-        subprocess_seats = []
-
-    # 2b. Task seats. Precedence: explicit --task-seats override > task names in an
-    #     explicit --seats > the --panel preset's task names > []. NEVER resolved
-    #     through the subprocess registry, NEVER spawned/run (opaque-echo contract).
+    # 2b. Task seats. Precedence: explicit --task-seats override (OPAQUE echo, never
+    #     resolved/availability-filtered) > task names in an explicit --seats > the
+    #     --panel/default preset's task names > []. NEVER resolved through the
+    #     subprocess registry, NEVER spawned/run.
     explicit_task_seats = [
         s.strip() for s in (args.task_seats or "").split(",") if s.strip()
     ]
     if explicit_task_seats:
         task_seats = explicit_task_seats
     else:
-        seats_task_names = [n for n in source_names if n in seats.TASK_SEAT_NAMES]
+        seats_task_names = (
+            [n for n in _expand_seat_groups(source_names) if n in seats.TASK_SEAT_NAMES]
+            if seats_given else []
+        )
         if seats_given and seats_task_names:
-            task_seats = seats_task_names
+            task_src = seats_task_names
+            task_explicit = set(_expand_seat_groups(source_names))
         elif preset_names is not None:
-            task_seats = [n for n in preset_names if n in seats.TASK_SEAT_NAMES]
+            preset_expanded = _expand_seat_groups(preset_names)
+            task_src = [n for n in preset_expanded if n in seats.TASK_SEAT_NAMES]
+            task_explicit = set(preset_expanded) if panel_named else set()
         else:
-            task_seats = []
+            task_src = []
+            task_explicit = set()
+        task_seats = _dedup(_filter_available(task_src, task_explicit))
 
     # 2c. task_seat_models: the per-seat model pin for each Task seat. MODEL_OVERRIDES
     #     is the SINGLE source — a seat not in the map pins its own name. The
@@ -1408,9 +1506,11 @@ def build_parser() -> argparse.ArgumentParser:
              "path-unsafe/unknown names are rejected.",
     )
     seats_p.add_argument(
-        "--panel", default=None, choices=["full", "lite", "solo", "cursor"],
-        help="named preset (only used with --debate): resolved via "
-             "seats.PANEL_PRESETS into the full debate seat list",
+        "--panel", default=None,
+        help="named preset (only used with --debate): resolved via the configured "
+             "[panels] roster then seats.PANEL_PRESETS (e.g. full/lite/solo/cursor "
+             "or a custom [panels] name) into the full debate seat list; an unknown "
+             "name falls back to 'full'",
     )
     seats_p.add_argument(
         "--debate", action="store_true",
@@ -1462,12 +1562,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="base ref for branch/auto diffs (default: main)")
     rp.add_argument(
         "--panel", dest="panel", default=None,
-        choices=["full", "lite", "solo", "cursor"],
-        help="named preset resolved via seats.PANEL_PRESETS into BOTH subprocess "
-             "and task seats. Default absent (None): with no --seats either, "
-             "review-prep resolves the per-repo config's default_panel "
-             "(.crew/config.toml), falling back to the built-in `full`. --seats "
-             "overrides the subprocess subset; --task-seats overrides the task subset.",
+        help="named preset resolved via the configured [panels] roster then "
+             "seats.PANEL_PRESETS (e.g. full/lite/solo/cursor or a custom [panels] "
+             "name; unknown → 'full') into BOTH subprocess and task seats. Default "
+             "absent (None): with no --seats either, review-prep resolves the "
+             "default_panel (per-repo .crew/config.toml → global ~/.crew-config.toml), "
+             "falling back to the built-in `full`. --seats overrides the subprocess "
+             "subset; --task-seats overrides the task subset.",
     )
     rp.add_argument(
         "--seats", dest="seats", default=None,

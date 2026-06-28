@@ -81,13 +81,18 @@ opus + sonnet), `--panel lite` (opus + sonnet), `--panel solo` (opus),
 `/crew:build --panel lite "fix the bug"`.
 
 `full` is the **built-in** default. An optional per-repo `.crew/config.toml`
-`default_panel` overrides it when you name no panel (resolves config →
-built-in `full` — the panel name has no `CREW_MA_*` tier; the per-seat tuning
-knobs add the full CLI flag > config > `CREW_MA_*` env > built-in chain).
-`/crew:debate` honors config too, with its own `[debate].panel` override
-(precedence `--panel`/`--seats` > `[debate].panel` > `default_panel` > built-in
-`full`) — so debates can default fuller than reviews. Needs Python 3.11+; on
-3.10 the file is gracefully ignored with a one-time stderr note.
+`default_panel` overrides it when you name no panel; a global
+`~/.crew-config.toml` adds a machine-wide tier below it. Resolution is per-key:
+**CLI flag > per-repo config > global config > built-in** (no environment-variable
+tier). The global file also carries a `[panels]`
+**roster** (redefine a built-in preset or add a custom one, usable via
+`--panel <name>`) and per-seat `available = false` (drops an un-authed seat from
+any panel; an explicitly-named unavailable seat is skipped with a one-time note,
+and an all-unavailable panel falls back to the unfiltered set). `/crew:debate`
+honors config too, with its own `[debate].panel` override (precedence
+`--panel`/`--seats` > `[debate].panel` > `default_panel` > built-in `full`) — so
+debates can default fuller than reviews. Needs Python 3.11+; on 3.10 the files
+are gracefully ignored with a one-time stderr note.
 
 ### Utilities
 
