@@ -19,7 +19,8 @@ $ARGUMENTS
 > **`allowed-tools` scopes THIS orchestrator only.** It grants nothing to the
 > dispatched seat — the seat's write access is governed by the engine's
 > `workspace-write` sandbox flag, not by this frontmatter. `Write` is listed here
-> because step 3 may spill a large/multiline task to a file for the engine's `-f`.
+> because step 3 ALWAYS spills the task to a file for the engine's `-f` (shell-safe;
+> the task text never reaches the shell).
 
 > **Seat resolution is ENGINE-OWNED.** This command NEVER reads config and NEVER
 > hardcodes a seat. It passes `--seat` to the engine ONLY when you explicitly
