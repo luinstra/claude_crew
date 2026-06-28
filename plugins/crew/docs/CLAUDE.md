@@ -94,7 +94,10 @@ and an all-unavailable panel falls back to the unfiltered set) — set them in
 per-repo value wins. `/crew:debate`
 honors config too, with its own `[debate].panel` override (precedence
 `--panel`/`--seats` > `[debate].panel` > `default_panel` > built-in `full`) — so
-debates can default fuller than reviews. Needs Python 3.11+; on 3.10 the files
+debates can default fuller than reviews. `/crew:dispatch` reads `[dispatch].seat`
+for its default seat (validated against the known seats — a panel name or group
+token like `cursor` is rejected; falls back to the built-in `codex`, and an
+explicit `--seat` overrides). Needs Python 3.11+; on 3.10 the files
 are gracefully ignored with a one-time stderr note.
 
 ### Utilities

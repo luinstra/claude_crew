@@ -862,6 +862,12 @@ def cmd_run(args: argparse.Namespace) -> int:
 # unborn->sha FIRST commit fires head_moved=true (not masked to false).
 _UNBORN = "<unborn>"
 
+# A sentinel distinct from any branch name and from None: a valid git work tree
+# whose HEAD is DETACHED (no symbolic ref). Serializes as a self-describing JSON
+# string so a `git checkout <sha>` (main -> detached) fires branch_changed=true
+# (not masked to false the way a bare None would).
+_DETACHED = "<detached>"
+
 
 def _git_head(repo_dir: str) -> str | None:
     """TRI-STATE HEAD probe in ``repo_dir`` (BLOCKING-2):
@@ -895,38 +901,51 @@ def _git_head(repo_dir: str) -> str | None:
     return None
 
 
-def _git_staged(repo_dir: str) -> bool | None:
-    """Three-way staged-index probe in ``repo_dir`` — NOT ``returncode != 0``:
+def _git_staged(repo_dir: str) -> str | None:
+    """Index-tree-hash snapshot in ``repo_dir`` (BLOCKING-2) — the index's
+    CONTENT, not a clean/dirty boolean:
 
-    ``git diff --cached --quiet`` exits ``0`` (clean -> ``False``), ``1``
-    (staged -> ``True``), or anything else / not-a-repo / git missing
-    (``None``). The explicit mapping stops an exit-2 (not-a-repo) being misread
-    as "staged".
+    ``git write-tree`` serializes the current index to a tree object and prints
+    the tree SHA WITHOUT touching the index, HEAD, refs, or the working tree, so
+    it is safe for a guard. Returns the tree SHA string on success (exit 0), or
+    ``None`` on failure / not-a-repo / git error.
+
+    Comparing the before/after tree SHA catches BOTH ``clean -> staged`` AND an
+    already-staged index that the seat stages MORE into (``staged -> more
+    staged``, where a clean/dirty boolean would read ``True -> True`` and miss
+    it). Dispatch explicitly runs on dirty trees, so the already-staged case is
+    real.
     """
     try:
         proc = subprocess.run(
-            ["git", "diff", "--cached", "--quiet"],
+            ["git", "write-tree"],
             cwd=repo_dir, capture_output=True, text=True,
         )
     except OSError:
         return None
-    if proc.returncode == 0:
-        return False
-    if proc.returncode == 1:
-        return True
-    return None
+    if proc.returncode != 0:
+        return None
+    tree = (proc.stdout or "").strip()
+    return tree or None
 
 
 def _git_branch(repo_dir: str) -> str | None:
-    """Current branch name in ``repo_dir`` via the SINGLE command
-    ``git symbolic-ref --quiet --short HEAD``, or ``None``.
+    """TRI-STATE branch probe in ``repo_dir`` (mirrors ``_git_head``'s structure):
+
+    * the **branch name** — ``git symbolic-ref --quiet --short HEAD`` succeeds
+      (HEAD points symbolically at refs/heads/<branch>; also true in an unborn
+      repo before the first commit);
+    * the sentinel ``"<detached>"`` — symbolic-ref FAILS but the repo is a valid
+      work tree with a DETACHED HEAD (``rev-parse --is-inside-work-tree``
+      succeeds). Distinct from any branch name and from ``None`` so a
+      ``git checkout <sha>`` (main -> detached) fires ``branch_changed=true``
+      instead of being silently masked to false;
+    * ``None`` — not-a-repo / git error (neither succeeds).
 
     ``symbolic-ref`` (NOT ``rev-parse --abbrev-ref HEAD``) is load-bearing: on a
-    detached HEAD it exits nonzero so this returns ``None`` (the null-safe
-    behavior the guard wants), whereas ``rev-parse --abbrev-ref`` returns the
-    literal string ``"HEAD"`` which would defeat null-safety. It still returns
-    the branch name in an unborn repo (HEAD points symbolically at
-    refs/heads/<branch> before the first commit).
+    detached HEAD it exits nonzero (so we fall through to the work-tree probe),
+    whereas ``rev-parse --abbrev-ref`` returns the literal string ``"HEAD"``
+    which would defeat null-safety AND blur detached vs. a branch named HEAD.
     """
     try:
         proc = subprocess.run(
@@ -935,10 +954,22 @@ def _git_branch(repo_dir: str) -> str | None:
         )
     except OSError:
         return None
-    if proc.returncode != 0:
+    if proc.returncode == 0:
+        name = (proc.stdout or "").strip()
+        if name:
+            return name
+        # symbolic-ref succeeded but printed nothing — fall through to probe.
+    # symbolic-ref failed — distinguish a detached HEAD from a non-repo.
+    try:
+        inside = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=repo_dir, capture_output=True, text=True,
+        )
+    except OSError:
         return None
-    name = (proc.stdout or "").strip()
-    return name or None
+    if inside.returncode == 0 and (inside.stdout or "").strip() == "true":
+        return _DETACHED
+    return None
 
 
 def cmd_dispatch(args: argparse.Namespace) -> int:
@@ -1068,7 +1099,10 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         head_before is not None and head_after is not None
         and head_before != head_after
     )
-    staged_changed = staged_before is False and staged_after is True
+    staged_changed = (
+        staged_before is not None and staged_after is not None
+        and staged_before != staged_after
+    )
     branch_changed = (
         branch_before is not None and branch_after is not None
         and branch_before != branch_after
@@ -1081,12 +1115,17 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         "output": result.output,
         "error": result.error,
         "elapsed": result.elapsed,
+        # head_before/after: a commit sha, the "<unborn>" sentinel, or null.
         "head_before": head_before,
         "head_after": head_after,
         "head_moved": head_moved,
+        # staged_before/after: the index tree hash (git write-tree) or null —
+        # NOT a bool; its CHANGE (incl. already-staged -> more-staged) drives
+        # staged_changed.
         "staged_before": staged_before,
         "staged_after": staged_after,
         "staged_changed": staged_changed,
+        # branch_before/after: a branch name, the "<detached>" sentinel, or null.
         "branch_before": branch_before,
         "branch_after": branch_after,
         "branch_changed": branch_changed,
@@ -1102,7 +1141,14 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
 
     # Human (non-JSON) output: header + seat output + warnings LAST in fixed order.
     if not result.ok:
-        print(result.error or "unknown error", file=sys.stderr)
+        err = result.error or "unknown error"
+        # Parity with the JSON path (which always writes + prints the path): when
+        # -o is set, still WRITE the envelope file on failure so the caller has a
+        # file to read regardless of ok. The diagnostic still goes to stderr and
+        # the exit stays 1.
+        if args.out:
+            _emit(json.dumps(envelope, ensure_ascii=False), args.out)
+        print(err, file=sys.stderr)
         return 1
     header = f"dispatch: {seat}" + (f" ({result.model})" if result.model else "")
     lines = [header, "", result.output]

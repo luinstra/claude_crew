@@ -228,6 +228,9 @@ you the full panel.
 repo can default its debates fuller than its reviews (debate's value is
 cross-model diversity). Debate precedence is **`--panel`/`--seats` (explicit) >
 `[debate].panel` > `default_panel` > built-in `full`**.
+`/crew:dispatch` picks its default seat from `[dispatch].seat` (validated
+against the known seats — a panel name or group token like `cursor` is
+rejected), falling back to the built-in `codex`; an explicit `--seat` overrides.
 
 ```toml
 # .crew/config.toml
@@ -235,6 +238,9 @@ default_panel = "lite"            # default panel when you name none
 
 [debate]
 panel = "full"                    # /crew:debate-only default; falls back to default_panel, then full
+
+[dispatch]
+seat = "codex"                    # default seat for /crew:dispatch; validated vs known seats, falls back to built-in codex
 
 [seats.codex]
 model = "gpt-5.5"

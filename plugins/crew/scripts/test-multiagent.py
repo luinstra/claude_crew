@@ -4475,16 +4475,32 @@ def test_dispatch():
               cli._git_head(str(unborn)) == "<unborn>", "<unborn>", repr(cli._git_head(str(unborn))))
         check("_git_head not-a-repo -> None", cli._git_head(str(notrepo)) is None,
               "None", repr(cli._git_head(str(notrepo))))
-        check("_git_staged born clean -> False", cli._git_staged(str(born)) is False,
-              "False", repr(cli._git_staged(str(born))))
+        # _git_staged is now an index-TREE-HASH snapshot (git write-tree), not a
+        # clean/dirty bool: a 40-hex tree sha for a repo, None for a non-repo,
+        # and the sha CHANGES when the index content changes (the True->True
+        # already-staged case a bool would miss).
+        s_clean = cli._git_staged(str(born))
+        check("_git_staged born repo -> a 40-hex index tree sha (not a bool)",
+              isinstance(s_clean, str) and len(s_clean) == 40 and s_clean not in (None, "<unborn>"),
+              "40-hex tree sha", repr(s_clean))
+        (born / "staged_me.txt").write_text("x\n")
+        _git(["add", "staged_me.txt"], str(born))
+        s_staged = cli._git_staged(str(born))
+        check("_git_staged tree sha CHANGES when the index gains a staged file (True->True caught)",
+              isinstance(s_staged, str) and s_staged != s_clean,
+              "different tree sha", f"{s_clean} -> {s_staged}")
+        _git(["reset", "-q"], str(born))  # restore a clean index for later checks
         check("_git_staged not-a-repo -> None", cli._git_staged(str(notrepo)) is None,
               "None", repr(cli._git_staged(str(notrepo))))
         check("_git_branch born -> 'main'", cli._git_branch(str(born)) == "main",
               "main", repr(cli._git_branch(str(born))))
-        # detached HEAD -> branch None (NOT 'HEAD')
+        check("_git_branch not-a-repo -> None", cli._git_branch(str(notrepo)) is None,
+              "None", repr(cli._git_branch(str(notrepo))))
+        # detached HEAD -> '<detached>' sentinel (NOT 'HEAD', NOT None) so a
+        # checkout <sha> fires branch_changed=true.
         _git(["checkout", "-q", "--detach", "HEAD"], str(born))
-        check("_git_branch detached HEAD -> None (not 'HEAD')",
-              cli._git_branch(str(born)) is None, "None", repr(cli._git_branch(str(born))))
+        check("_git_branch detached HEAD -> '<detached>' sentinel (not 'HEAD', not None)",
+              cli._git_branch(str(born)) == "<detached>", "<detached>", repr(cli._git_branch(str(born))))
 
     # Full-scenario integration via subprocess dispatch with a fake codex.
     with tempfile.TemporaryDirectory() as td:
@@ -4510,6 +4526,10 @@ def test_dispatch():
               "15 fields", str(sorted(env.keys()) if env else None))
 
         # (2) COMMIT -> head_moved=true with both shas, exit STILL 0 (advisory).
+        # Staging-then-committing also changes the index TREE (it now reflects the
+        # new commit's tree), so the tree-hash guard ALSO trips staged_changed=true
+        # here — redundant-but-not-wrong noise alongside the load-bearing
+        # head_moved warning (a pure commit still violates "leave uncommitted").
         make_fake_bin(bins, "codex", _fake_codex(
             "open('seat.txt','w').write('x')\n"
             "subprocess.run(['git','add','.'])\n"
@@ -4518,8 +4538,7 @@ def test_dispatch():
         proc, env = _run_dispatch(repo, bins, ["do it"])
         check("dispatch seat COMMIT -> head_moved=true (both shas), exit 0 (advisory)",
               proc.returncode == 0 and env and env["head_moved"] is True
-              and env["head_before"] != env["head_after"]
-              and env["staged_changed"] is False,
+              and env["head_before"] != env["head_after"],
               "head_moved=true exit0", f"{proc.returncode}: {env}")
 
         # (3) STAGE (git add, no commit) -> staged_changed=true, head_moved=false.
@@ -4607,6 +4626,44 @@ def test_dispatch():
         proc, env = _run_dispatch(repo, bins, ["x"], project_dir=proj, home=str(home))
         check("dispatch [dispatch].seat=agy routes (no --seat) -> envelope seat=agy",
               env and env["seat"] == "agy", "seat=agy", str(env))
+
+        # (10) DETACH (checkout <sha>, same commit) -> branch_changed=true via the
+        #      '<detached>' sentinel, head_moved=false (BLOCKING-1: a None branch
+        #      would have masked this to false).
+        make_fake_bin(bins, "codex", _fake_codex(
+            "subprocess.run(['git','checkout','-q','--detach','HEAD'])\n"))
+        repo = Path(td) / "r10"; repo.mkdir(); _init_repo(str(repo))
+        proc, env = _run_dispatch(repo, bins, ["do it"])
+        check("dispatch seat DETACH (main -> checkout sha) -> branch_changed=true, head_moved=false",
+              env and env["branch_changed"] is True and env["head_moved"] is False
+              and env["branch_before"] == "main" and env["branch_after"] == "<detached>",
+              "branch_changed=true head_moved=false main->'<detached>'", str(env))
+
+        # (11) RE-ATTACH from a pre-detached HEAD (checkout main) -> branch_changed=true.
+        make_fake_bin(bins, "codex", _fake_codex(
+            "subprocess.run(['git','checkout','-q','main'])\n"))
+        repo = Path(td) / "r11"; repo.mkdir(); _init_repo(str(repo))
+        _git(["checkout", "-q", "--detach", "HEAD"], str(repo))  # detached BEFORE dispatch
+        proc, env = _run_dispatch(repo, bins, ["do it"])
+        check("dispatch seat RE-ATTACH ('<detached>' -> main) -> branch_changed=true, head_moved=false",
+              env and env["branch_changed"] is True and env["head_moved"] is False
+              and env["branch_before"] == "<detached>" and env["branch_after"] == "main",
+              "branch_changed=true '<detached>'->main", str(env))
+
+        # (12) ALREADY-STAGED index, seat stages MORE (True->True case a bool
+        #      would miss) -> staged_changed=true via the index-tree-hash compare.
+        make_fake_bin(bins, "codex", _fake_codex(
+            "open('seat_more.txt','w').write('y')\n"
+            "subprocess.run(['git','add','seat_more.txt'])\n"))
+        repo = Path(td) / "r12"; repo.mkdir(); _init_repo(str(repo))
+        (repo / "pre_staged.txt").write_text("z\n")
+        _git(["add", "pre_staged.txt"], str(repo))  # index ALREADY dirty BEFORE dispatch
+        proc, env = _run_dispatch(repo, bins, ["do it"])
+        check("dispatch already-staged -> seat stages MORE -> staged_changed=true (True->True caught)",
+              env and env["staged_changed"] is True and env["head_moved"] is False
+              and env["staged_before"] != env["staged_after"]
+              and isinstance(env["staged_before"], str) and isinstance(env["staged_after"], str),
+              "staged_changed=true, tree sha differs", str(env))
 
     # --- pre-run rejections (exit 2, NO envelope, NO path) ---
     log_section("dispatch — pre-run rejections + arg XOR + exit/advisory")
@@ -4718,6 +4775,58 @@ def test_dispatch():
             head = out.getvalue().splitlines()[0]
             check("dispatch human header with model -> 'dispatch: codex (gpt-x)'",
                   head == "dispatch: codex (gpt-x)", "dispatch: codex (gpt-x)", repr(head))
+
+            # MINOR-3: human-mode warnings appear LAST and in the fixed D4 order
+            # HEAD -> staged -> branch. Drive all three guards true by scripting
+            # the six git-helper calls (before x3, after x3) with distinct values.
+            class _OkBody(Provider):
+                name = "codex"
+                supports_workspace_write = True
+                def is_available(self): return (True, "")
+                def run(self, *a, **k):
+                    return ProviderResult(name="codex", model=None, ok=True,
+                                          output="BODY", error=None, elapsed=0.1)
+            out = io.StringIO()
+            with mock.patch("multiagent.cli.get_provider", return_value=_OkBody()), \
+                 mock.patch("multiagent.cli._git_head", side_effect=["AAA", "BBB"]), \
+                 mock.patch("multiagent.cli._git_staged", side_effect=["s1", "s2"]), \
+                 mock.patch("multiagent.cli._git_branch", side_effect=["main", "tmp"]):
+                with contextlib.redirect_stdout(out):
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+            wlines = out.getvalue().splitlines()
+            warn_idx = [i for i, l in enumerate(wlines) if l.startswith("WARNING:")]
+            body_idx = next(i for i, l in enumerate(wlines) if l == "BODY")
+            order = [
+                "moved HEAD" in wlines[warn_idx[0]] if len(warn_idx) > 0 else False,
+                "STAGED changes" in wlines[warn_idx[1]] if len(warn_idx) > 1 else False,
+                "changed branch" in wlines[warn_idx[2]] if len(warn_idx) > 2 else False,
+            ]
+            check("dispatch human warnings appear LAST, in fixed D4 order (HEAD -> staged -> branch)",
+                  rc == 0 and len(warn_idx) == 3 and all(order)
+                  and warn_idx == [len(wlines) - 3, len(wlines) - 2, len(wlines) - 1]
+                  and min(warn_idx) > body_idx,
+                  "3 warnings last, HEAD->staged->branch", str(wlines))
+
+            # MINOR-2: human-mode failure with -o still WRITES the envelope file
+            # (parity with the JSON path) and keeps exit 1.
+            class _Fail(Provider):
+                name = "codex"
+                supports_workspace_write = True
+                def is_available(self): return (True, "")
+                def run(self, *a, **k):
+                    return ProviderResult(name="codex", model=None, ok=False,
+                                          output="", error="seat blew up", elapsed=0.1)
+            ofile = str(repo / "fail-envelope.json")
+            err = io.StringIO()
+            with mock.patch("multiagent.cli.get_provider", return_value=_Fail()):
+                with contextlib.redirect_stderr(err):
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False, out=ofile))
+            wrote = Path(ofile).exists()
+            envf = json.loads(Path(ofile).read_text()) if wrote else None
+            check("dispatch human-mode failure with -o WRITES the envelope file, exit 1 (MINOR-2 parity)",
+                  rc == 1 and wrote and envf and envf["ok"] is False
+                  and "seat blew up" in err.getvalue(),
+                  "exit1 + envelope file written", f"rc={rc} wrote={wrote} {envf}")
         finally:
             os.chdir(saved_cwd)
             if saved_wd is None:
