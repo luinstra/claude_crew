@@ -1,4 +1,4 @@
-<p align="center">
+<p align="left">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/claude_crew-logo-dark.svg">
     <img alt="claude_crew" src="assets/claude_crew-logo-light.svg" width="440">
