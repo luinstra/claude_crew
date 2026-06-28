@@ -84,11 +84,13 @@ opus + sonnet), `--panel lite` (opus + sonnet), `--panel solo` (opus),
 `default_panel` overrides it when you name no panel; a global
 `~/.crew-config.toml` adds a machine-wide tier below it. Resolution is per-key:
 **CLI flag > per-repo config > global config > built-in** (no environment-variable
-tier). The global file also carries a `[panels]`
+tier). Either config file can also carry a `[panels]`
 **roster** (redefine a built-in preset or add a custom one, usable via
 `--panel <name>`) and per-seat `available = false` (drops an un-authed seat from
 any panel; an explicitly-named unavailable seat is skipped with a one-time note,
-and an all-unavailable panel falls back to the unfiltered set). `/crew:debate`
+and an all-unavailable panel falls back to the unfiltered set) — set them in
+`~/.crew-config.toml` machine-wide or in `.crew/config.toml` per-repo, where the
+per-repo value wins. `/crew:debate`
 honors config too, with its own `[debate].panel` override (precedence
 `--panel`/`--seats` > `[debate].panel` > `default_panel` > built-in `full`) — so
 debates can default fuller than reviews. Needs Python 3.11+; on 3.10 the files

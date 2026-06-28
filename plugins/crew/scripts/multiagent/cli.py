@@ -1390,13 +1390,23 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     # 2d. Availability — WHOLE-PANEL. Drop unavailable seats per-split (skip-noting
     #     an explicitly-named one) with NO per-split fallback, then apply the
     #     unfiltered-panel fallback ONCE only if the ENTIRE resolved panel
-    #     (subprocess + task) is empty. This is the BLOCKING fix: disabling both
-    #     task seats in `full` yields task_seats == [] with the four subprocess
-    #     seats intact (no opus/sonnet restoration); disabling EVERY seat triggers
-    #     a single whole-panel fallback (one warn) restoring the unfiltered panel.
+    #     (subprocess + task + the opaque --task-seats override) is empty. This is
+    #     the BLOCKING fix: disabling both task seats in `full` yields task_seats ==
+    #     [] with the four subprocess seats intact (no opus/sonnet restoration);
+    #     disabling EVERY seat triggers a single whole-panel fallback (one warn)
+    #     restoring the unfiltered panel. The opaque --task-seats override
+    #     (explicit_task_seats; task_raw stays [] for it) counts toward the final
+    #     panel being NON-empty, so `--task-seats opus` with every subprocess seat
+    #     unavailable must NOT restore the disabled subprocess seats — the override
+    #     IS the (non-empty) panel.
     sub_kept = _drop_unavailable(sub_raw, sub_explicit)
     task_kept = _drop_unavailable(task_raw, task_explicit)
-    if (sub_raw or task_raw) and not sub_kept and not task_kept:
+    if (
+        (sub_raw or task_raw or explicit_task_seats)
+        and not sub_kept
+        and not task_kept
+        and not explicit_task_seats
+    ):
         _all_unavailable_warn()
         sub_kept, task_kept = sub_raw, task_raw
     subprocess_seats = _dedup(sub_kept)

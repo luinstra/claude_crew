@@ -244,14 +244,16 @@ timeout = 600                     # global per-seat wall-clock seconds
 #### Global per-user config
 
 A second, optional file at `~/.crew-config.toml` (your home dir) carries the
-same knobs for **every** repo, plus two global-tier knobs: a `[panels]` **roster**
-(redefine a built-in preset or add a custom one) and per-seat `available`
-(opt-out for a provider you haven't authed on this machine). Resolution is
-**per-key**: a per-repo value wins over the global one, which wins over the
-built-in default (`CLI flag > per-repo .crew/config.toml > global
-~/.crew-config.toml > built-in`). For `[seats.<name>]` tables this is
-per-seat-per-key, so a seat tuned only in the global file still applies. Same
-TOML/`tomllib`/one-time-stderr-note posture as the per-repo file.
+same knobs for **every** repo, including the `[panels]` **roster** (redefine a
+built-in preset or add a custom one) and per-seat `available` (opt-out for a
+provider you haven't authed on this machine). Both of those work in EITHER config
+file — set them globally in `~/.crew-config.toml` or per-repo in
+`.crew/config.toml`; the per-repo value wins. Resolution is **per-key**: a
+per-repo value wins over the global one, which wins over the built-in default
+(`CLI flag > per-repo .crew/config.toml > global ~/.crew-config.toml >
+built-in`). For `[seats.<name>]` tables this is per-seat-per-key, so a seat tuned
+only in the global file still applies. Same TOML/`tomllib`/one-time-stderr-note
+posture as the per-repo file.
 
 ```toml
 # ~/.crew-config.toml

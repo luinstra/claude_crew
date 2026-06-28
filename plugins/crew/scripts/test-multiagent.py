@@ -3629,6 +3629,35 @@ def test_panel_availability_consistency():
               "all seats in the resolved panel" in rp.stderr,
               "all-unavailable warn", repr(rp.stderr[:200]))
 
+    # 9b. BLOCKING regression: the opaque --task-seats override counts toward the
+    #     final panel being NON-empty. Disable ALL FOUR subprocess seats in `full`
+    #     AND pass `--task-seats opus` (which sets task_raw=[] and supplies the
+    #     panel via explicit_task_seats). The whole-panel emptiness check must see
+    #     the override as the (non-empty) task panel and NOT restore the disabled
+    #     subprocess seats. Expected: subprocess_seats == [], task_seats == [opus],
+    #     NO all-unavailable warn.
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        _write_cfg(proj,
+                   '[seats.codex]\navailable = false\n'
+                   '[seats.agy]\navailable = false\n'
+                   '[seats.cursor-auto]\navailable = false\n'
+                   '[seats.cursor-composer]\navailable = false\n')
+        _write_plan(proj)
+        env = _clean_env(td)
+        rp = _run_dispatcher(["review-prep", "plan.md", "--panel", "full",
+                              "--task-seats", "opus", "--session-id", "wp4"],
+                             cwd=td, env=env, timeout=30)
+        obj = json.loads(rp.stdout)
+        check("review-prep all-subprocess-unavailable + --task-seats opus -> subprocess [] NOT restored, task [opus]",
+              rp.returncode == 0
+              and obj["subprocess_seats"] == []
+              and obj["task_seats"] == ["opus"],
+              "subprocess [], task [opus]", str(obj))
+        check("review-prep --task-seats override keeps panel non-empty -> NO all-unavailable warn",
+              "all seats in the resolved panel" not in rp.stderr,
+              "no whole-panel fallback warn", repr(rp.stderr[:200]))
+
 
 def test_review_prep():
     log_section("crew review-prep subcommand (PREP only — resolves+stages, runs nothing)")

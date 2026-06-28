@@ -105,11 +105,16 @@ Key contracts (do NOT regress):
   CLI flag > per-repo config > global config > builtin (no env tier — the old
   env surface is retired). Panel-NAME resolution AND the `available` filter funnel through ONE
   shared point in `cli.py` (`_panel_seat_list` consults `config.panels()` before
-  `seats.PANEL_PRESETS`; `_filter_available` drops `available=false` seats,
-  skip-noting an explicitly-named one and falling back to the unfiltered panel
-  if it would empty), wired into ALL panel paths — `review-prep`, the debate
-  resolver, AND the ad-hoc `crew review`/`council`/`seats` chokepoint
-  (`_resolve_seats`) — so `[panels]` + availability behave identically everywhere.
+  `seats.PANEL_PRESETS`). Two availability shapes share the same `available=false`
+  drop + explicit-name skip-note: the single-list chokepoint `_resolve_seats`
+  (ad-hoc `crew review`/`council`/`seats` + the debate resolver) uses
+  `_filter_available`, which falls back to the unfiltered panel if the one list
+  would empty; `review-prep` uses the lower-level `_drop_unavailable` per split
+  (subprocess vs task) and applies a WHOLE-PANEL fallback ONCE — restoring the
+  unfiltered panel only if the ENTIRE resolved panel (subprocess + task + any
+  opaque `--task-seats` override) is empty, so disabling one seat-kind can't
+  resurrect the other and an override keeps the panel non-empty. Wired into ALL
+  panel paths so `[panels]` + availability behave identically everywhere.
   `/crew:debate` honors config via a separate resolver: it cannot call
   `review-prep` (it resolves its panel in the command markdown), so `crew seats
   --debate` prints the FULL debate panel (subprocess AND Claude Task seats),
