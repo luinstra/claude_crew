@@ -117,7 +117,12 @@ that fired, surface a LOUD warning:
 - `envelope.staged_changed` is true → "the dispatched seat STAGED changes against
   instruction — unstage with `git reset`".
 - `envelope.branch_changed` is true → "the dispatched seat changed branch against
-  instruction — return with `git checkout <envelope.branch_before>`".
+  instruction". For the recovery hint, branch on `envelope.branch_before`: when it
+  is a real branch name, "return with `git checkout <envelope.branch_before>`";
+  when it is the detached sentinel `<detached HEAD>` (dispatch STARTED on a detached
+  HEAD), `git checkout <sentinel>` is nonsense — instead return to the original
+  detached state with `git checkout --detach <envelope.head_before>` (the original
+  commit SHA).
 
 ## Step 6 — Show the working-tree changes (READ-ONLY git only)
 

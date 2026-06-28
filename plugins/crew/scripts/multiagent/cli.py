@@ -865,8 +865,12 @@ _UNBORN = "<unborn>"
 # A sentinel distinct from any branch name and from None: a valid git work tree
 # whose HEAD is DETACHED (no symbolic ref). Serializes as a self-describing JSON
 # string so a `git checkout <sha>` (main -> detached) fires branch_changed=true
-# (not masked to false the way a bare None would).
-_DETACHED = "<detached>"
+# (not masked to false the way a bare None would). The SPACE makes it an
+# IMPOSSIBLE refname (git refnames cannot contain a space —
+# `git check-ref-format --branch '<detached HEAD>'` exits nonzero), so NO real
+# branch can ever equal it and mask a branch change (BLOCKING-1: the old
+# `<detached>` spelling IS a valid branch name and would collide).
+_DETACHED = "<detached HEAD>"
 
 
 def _git_head(repo_dir: str) -> str | None:
@@ -935,9 +939,10 @@ def _git_branch(repo_dir: str) -> str | None:
     * the **branch name** — ``git symbolic-ref --quiet --short HEAD`` succeeds
       (HEAD points symbolically at refs/heads/<branch>; also true in an unborn
       repo before the first commit);
-    * the sentinel ``"<detached>"`` — symbolic-ref FAILS but the repo is a valid
-      work tree with a DETACHED HEAD (``rev-parse --is-inside-work-tree``
-      succeeds). Distinct from any branch name and from ``None`` so a
+    * the sentinel ``"<detached HEAD>"`` — symbolic-ref FAILS but the repo is a
+      valid work tree with a DETACHED HEAD (``rev-parse --is-inside-work-tree``
+      succeeds). An IMPOSSIBLE refname (the space) so no real branch can equal
+      it; distinct from any branch name and from ``None`` so a
       ``git checkout <sha>`` (main -> detached) fires ``branch_changed=true``
       instead of being silently masked to false;
     * ``None`` — not-a-repo / git error (neither succeeds).
@@ -1125,7 +1130,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         "staged_before": staged_before,
         "staged_after": staged_after,
         "staged_changed": staged_changed,
-        # branch_before/after: a branch name, the "<detached>" sentinel, or null.
+        # branch_before/after: a branch name, the "<detached HEAD>" sentinel, or null.
         "branch_before": branch_before,
         "branch_after": branch_after,
         "branch_changed": branch_changed,
@@ -1142,10 +1147,10 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     # Human (non-JSON) output: header + seat output + warnings LAST in fixed order.
     if not result.ok:
         err = result.error or "unknown error"
-        # Parity with the JSON path (which always writes + prints the path): when
-        # -o is set, still WRITE the envelope file on failure so the caller has a
-        # file to read regardless of ok. The diagnostic still goes to stderr and
-        # the exit stays 1.
+        # When -o is set, still WRITE the envelope file on failure so the caller
+        # has a file to read regardless of ok. Human mode WRITES the envelope but
+        # does NOT print the path (unlike the JSON path, which writes AND prints).
+        # The diagnostic still goes to stderr and the exit stays 1.
         if args.out:
             _emit(json.dumps(envelope, ensure_ascii=False), args.out)
         print(err, file=sys.stderr)
@@ -1165,16 +1170,32 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
                 f"{head_after} (it committed against instruction; undo with: "
                 f"git reset --soft HEAD@{{1}})"
             )
-    if staged_changed:
+    # MINOR-1: only emit the standalone staged "unstage with git reset" remedy
+    # when it's an INDEPENDENT staging violation. On a pure commit, write-tree
+    # before (old HEAD tree) != after (new HEAD tree) so staged_changed fires too,
+    # but the index is clean vs the NEW HEAD — the "git reset" remedy is a no-op
+    # and factually wrong. The head_moved warning above is the real violation, so
+    # suppress this consequential line when head_moved. (The JSON envelope's
+    # staged_changed field stays computed faithfully — only the HUMAN remedy is
+    # gated.)
+    if staged_changed and not head_moved:
         lines.append(
             "WARNING: the dispatched seat STAGED changes against instruction "
             "(unstage with: git reset)"
         )
     if branch_changed:
+        # BLOCKING-2: pick the recovery target for branch_before. When dispatch
+        # STARTED on a detached HEAD, branch_before is the (impossible-refname)
+        # sentinel — `git checkout <sentinel>` is nonsense; the way back to the
+        # original detached state is `git checkout --detach <head_before>` (the
+        # ORIGINAL commit sha). A real branch name uses a plain `git checkout`.
+        if branch_before == _DETACHED:
+            recover = f"git checkout --detach {head_before}"
+        else:
+            recover = f"git checkout {branch_before}"
         lines.append(
             f"WARNING: the dispatched seat changed branch {branch_before} -> "
-            f"{branch_after} against instruction (return with: git checkout "
-            f"{branch_before})"
+            f"{branch_after} against instruction (return with: {recover})"
         )
     _emit("\n".join(lines), args.out)
     if args.out:

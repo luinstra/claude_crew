@@ -4496,11 +4496,41 @@ def test_dispatch():
               "main", repr(cli._git_branch(str(born))))
         check("_git_branch not-a-repo -> None", cli._git_branch(str(notrepo)) is None,
               "None", repr(cli._git_branch(str(notrepo))))
-        # detached HEAD -> '<detached>' sentinel (NOT 'HEAD', NOT None) so a
+        # detached HEAD -> '<detached HEAD>' sentinel (NOT 'HEAD', NOT None) so a
         # checkout <sha> fires branch_changed=true.
         _git(["checkout", "-q", "--detach", "HEAD"], str(born))
-        check("_git_branch detached HEAD -> '<detached>' sentinel (not 'HEAD', not None)",
+        check("_git_branch detached HEAD -> '<detached HEAD>' sentinel (not 'HEAD', not None)",
+              cli._git_branch(str(born)) == "<detached HEAD>", "<detached HEAD>",
+              repr(cli._git_branch(str(born))))
+        # BLOCKING-1: the sentinel must be an IMPOSSIBLE refname so no real branch
+        # can ever equal it. The OLD spelling '<detached>' IS a valid branch name —
+        # a repo on a branch literally named '<detached>' must compare as ITSELF
+        # (NOT collide with / get masked by the detached sentinel), and an actual
+        # detach must still be caught as the sentinel.
+        _git(["checkout", "-q", "main"], str(born))  # re-attach
+        _git(["checkout", "-q", "-b", "<detached>"], str(born))  # a branch named like the OLD sentinel
+        check("_git_branch on a branch literally named '<detached>' returns its OWN name (no collision)",
               cli._git_branch(str(born)) == "<detached>", "<detached>", repr(cli._git_branch(str(born))))
+        check("BLOCKING-1: branch named '<detached>' != the detached sentinel (no masking)",
+              cli._git_branch(str(born)) != cli._DETACHED, "distinct from _DETACHED",
+              f"branch={cli._git_branch(str(born))!r} sentinel={cli._DETACHED!r}")
+        _git(["checkout", "-q", "--detach", "HEAD"], str(born))  # actual detach still caught
+        check("BLOCKING-1: an actual detach still resolves to the sentinel (still caught)",
+              cli._git_branch(str(born)) == cli._DETACHED, repr(cli._DETACHED),
+              repr(cli._git_branch(str(born))))
+        # The sentinel itself is an IMPOSSIBLE branch name (the space): git
+        # check-ref-format --branch rejects it, proving no real branch can equal it.
+        crf = subprocess.run(["git", "check-ref-format", "--branch", cli._DETACHED],
+                             capture_output=True, text=True)
+        check("BLOCKING-1: _DETACHED is an impossible refname (check-ref-format exits nonzero)",
+              crf.returncode != 0, "nonzero exit", f"rc={crf.returncode}")
+        # MINOR-3: _git_staged on an UNBORN repo returns the well-known empty-tree
+        # SHA (git write-tree on an empty index), NOT None — so an unborn-repo
+        # stage is still detectable by the before/after compare.
+        s_unborn = cli._git_staged(str(unborn))
+        check("_git_staged unborn repo -> empty-tree SHA (real SHA, not None — unborn stage detectable)",
+              s_unborn == "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+              "4b825dc642cb6eb9a060e54bf8d69288fbee4904", repr(s_unborn))
 
     # Full-scenario integration via subprocess dispatch with a fake codex.
     with tempfile.TemporaryDirectory() as td:
@@ -4636,8 +4666,8 @@ def test_dispatch():
         proc, env = _run_dispatch(repo, bins, ["do it"])
         check("dispatch seat DETACH (main -> checkout sha) -> branch_changed=true, head_moved=false",
               env and env["branch_changed"] is True and env["head_moved"] is False
-              and env["branch_before"] == "main" and env["branch_after"] == "<detached>",
-              "branch_changed=true head_moved=false main->'<detached>'", str(env))
+              and env["branch_before"] == "main" and env["branch_after"] == "<detached HEAD>",
+              "branch_changed=true head_moved=false main->'<detached HEAD>'", str(env))
 
         # (11) RE-ATTACH from a pre-detached HEAD (checkout main) -> branch_changed=true.
         make_fake_bin(bins, "codex", _fake_codex(
@@ -4645,10 +4675,10 @@ def test_dispatch():
         repo = Path(td) / "r11"; repo.mkdir(); _init_repo(str(repo))
         _git(["checkout", "-q", "--detach", "HEAD"], str(repo))  # detached BEFORE dispatch
         proc, env = _run_dispatch(repo, bins, ["do it"])
-        check("dispatch seat RE-ATTACH ('<detached>' -> main) -> branch_changed=true, head_moved=false",
+        check("dispatch seat RE-ATTACH ('<detached HEAD>' -> main) -> branch_changed=true, head_moved=false",
               env and env["branch_changed"] is True and env["head_moved"] is False
-              and env["branch_before"] == "<detached>" and env["branch_after"] == "main",
-              "branch_changed=true '<detached>'->main", str(env))
+              and env["branch_before"] == "<detached HEAD>" and env["branch_after"] == "main",
+              "branch_changed=true '<detached HEAD>'->main", str(env))
 
         # (12) ALREADY-STAGED index, seat stages MORE (True->True case a bool
         #      would miss) -> staged_changed=true via the index-tree-hash compare.
@@ -4776,9 +4806,12 @@ def test_dispatch():
             check("dispatch human header with model -> 'dispatch: codex (gpt-x)'",
                   head == "dispatch: codex (gpt-x)", "dispatch: codex (gpt-x)", repr(head))
 
-            # MINOR-3: human-mode warnings appear LAST and in the fixed D4 order
-            # HEAD -> staged -> branch. Drive all three guards true by scripting
-            # the six git-helper calls (before x3, after x3) with distinct values.
+            # MINOR-3 / MINOR-1: human-mode warnings appear LAST and in the fixed
+            # D4 relative order HEAD -> staged -> branch. Because MINOR-1 SUPPRESSES
+            # the standalone staged-remedy line when head_moved is true (a pure
+            # commit's index change is a consequence, not an independent stage), the
+            # three guards can never all warn at once. Test the relative order in
+            # two natural slices.
             class _OkBody(Provider):
                 name = "codex"
                 supports_workspace_write = True
@@ -4786,6 +4819,9 @@ def test_dispatch():
                 def run(self, *a, **k):
                     return ProviderResult(name="codex", model=None, ok=True,
                                           output="BODY", error=None, elapsed=0.1)
+            # Slice A: head_moved + branch_changed, staged ALSO changed at the data
+            # level (s1->s2) -> staged warning SUPPRESSED (MINOR-1); only HEAD then
+            # branch warn, in that order, last, after the body.
             out = io.StringIO()
             with mock.patch("multiagent.cli.get_provider", return_value=_OkBody()), \
                  mock.patch("multiagent.cli._git_head", side_effect=["AAA", "BBB"]), \
@@ -4796,16 +4832,61 @@ def test_dispatch():
             wlines = out.getvalue().splitlines()
             warn_idx = [i for i, l in enumerate(wlines) if l.startswith("WARNING:")]
             body_idx = next(i for i, l in enumerate(wlines) if l == "BODY")
-            order = [
-                "moved HEAD" in wlines[warn_idx[0]] if len(warn_idx) > 0 else False,
-                "STAGED changes" in wlines[warn_idx[1]] if len(warn_idx) > 1 else False,
-                "changed branch" in wlines[warn_idx[2]] if len(warn_idx) > 2 else False,
-            ]
-            check("dispatch human warnings appear LAST, in fixed D4 order (HEAD -> staged -> branch)",
-                  rc == 0 and len(warn_idx) == 3 and all(order)
-                  and warn_idx == [len(wlines) - 3, len(wlines) - 2, len(wlines) - 1]
+            check("dispatch human warnings: head_moved SUPPRESSES staged remedy, HEAD->branch last (MINOR-1)",
+                  rc == 0 and len(warn_idx) == 2
+                  and "moved HEAD" in wlines[warn_idx[0]]
+                  and "changed branch" in wlines[warn_idx[1]]
+                  and not any("STAGED changes" in l for l in wlines)
+                  and warn_idx == [len(wlines) - 2, len(wlines) - 1]
                   and min(warn_idx) > body_idx,
-                  "3 warnings last, HEAD->staged->branch", str(wlines))
+                  "2 warnings (HEAD->branch), staged suppressed, last", str(wlines))
+            # Slice B: independent STAGE-only (head NOT moved) + branch_changed ->
+            # staged warning DOES fire, in the fixed staged->branch order.
+            out = io.StringIO()
+            with mock.patch("multiagent.cli.get_provider", return_value=_OkBody()), \
+                 mock.patch("multiagent.cli._git_head", side_effect=["AAA", "AAA"]), \
+                 mock.patch("multiagent.cli._git_staged", side_effect=["s1", "s2"]), \
+                 mock.patch("multiagent.cli._git_branch", side_effect=["main", "tmp"]):
+                with contextlib.redirect_stdout(out):
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+            wlines = out.getvalue().splitlines()
+            warn_idx = [i for i, l in enumerate(wlines) if l.startswith("WARNING:")]
+            check("dispatch human warnings: independent stage-only DOES warn, staged->branch order (MINOR-1)",
+                  rc == 0 and len(warn_idx) == 2
+                  and "STAGED changes" in wlines[warn_idx[0]]
+                  and "changed branch" in wlines[warn_idx[1]],
+                  "2 warnings (staged->branch)", str(wlines))
+            # MINOR-1 focused: a pure COMMIT (head_moved + staged consequence) emits
+            # the HEAD warning but NOT the standalone staged-remedy line.
+            out = io.StringIO()
+            with mock.patch("multiagent.cli.get_provider", return_value=_OkBody()), \
+                 mock.patch("multiagent.cli._git_head", side_effect=["AAA", "BBB"]), \
+                 mock.patch("multiagent.cli._git_staged", side_effect=["s1", "s2"]), \
+                 mock.patch("multiagent.cli._git_branch", side_effect=["main", "main"]):
+                with contextlib.redirect_stdout(out):
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+            wlines = out.getvalue().splitlines()
+            check("dispatch human: pure commit warns HEAD, SUPPRESSES staged-remedy line (MINOR-1)",
+                  rc == 0 and any("moved HEAD" in l for l in wlines)
+                  and not any("STAGED changes" in l for l in wlines),
+                  "HEAD warning, no staged-remedy", str(wlines))
+            # BLOCKING-2: dispatch STARTED detached (branch_before == sentinel) and
+            # the seat re-attached to a branch -> recovery hint references
+            # head_before via `git checkout --detach <head_before>`, NOT the
+            # nonsense `git checkout <sentinel>`.
+            out = io.StringIO()
+            with mock.patch("multiagent.cli.get_provider", return_value=_OkBody()), \
+                 mock.patch("multiagent.cli._git_head", side_effect=["origsha", "origsha"]), \
+                 mock.patch("multiagent.cli._git_staged", side_effect=["s1", "s1"]), \
+                 mock.patch("multiagent.cli._git_branch", side_effect=[cli._DETACHED, "main"]):
+                with contextlib.redirect_stdout(out):
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+            wlines = out.getvalue().splitlines()
+            bwarn = next((l for l in wlines if "changed branch" in l), "")
+            check("dispatch human: detached-before recovery uses 'git checkout --detach <head_before>' (BLOCKING-2)",
+                  rc == 0 and "git checkout --detach origsha" in bwarn
+                  and f"git checkout {cli._DETACHED}" not in bwarn,
+                  "git checkout --detach origsha (not the sentinel)", repr(bwarn))
 
             # MINOR-2: human-mode failure with -o still WRITES the envelope file
             # (parity with the JSON path) and keeps exit 1.
