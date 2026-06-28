@@ -1042,7 +1042,11 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     if args.file:
         try:
             task = Path(args.file).read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
+            # MINOR-2: a non-UTF-8 task file raises UnicodeDecodeError (a
+            # ValueError, NOT an OSError) — catch it alongside OSError so a bad
+            # task file prints the graceful error + exits cleanly instead of
+            # crashing with a traceback.
             print(f"error: cannot read task file {args.file!r}: {exc}", file=sys.stderr)
             return 2
     else:
@@ -1170,18 +1174,24 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
                 f"{head_after} (it committed against instruction; undo with: "
                 f"git reset --soft HEAD@{{1}})"
             )
-    # MINOR-1: only emit the standalone staged "unstage with git reset" remedy
-    # when it's an INDEPENDENT staging violation. On a pure commit, write-tree
-    # before (old HEAD tree) != after (new HEAD tree) so staged_changed fires too,
-    # but the index is clean vs the NEW HEAD — the "git reset" remedy is a no-op
-    # and factually wrong. The head_moved warning above is the real violation, so
-    # suppress this consequential line when head_moved. (The JSON envelope's
-    # staged_changed field stays computed faithfully — only the HUMAN remedy is
-    # gated.)
-    if staged_changed and not head_moved:
+    # BLOCKING-1: ALWAYS surface a staged change when staged_changed fires — a
+    # safety guard must never silently drop a real staged violation. The earlier
+    # `not head_moved` suppression was too coarse: a seat that COMMITS and then
+    # STAGES additional changes has REAL staged content with head_moved=true, and
+    # suppressing the staged line would hide it (the HEAD remedy `git reset --soft
+    # HEAD@{1}` leaves those extra staged changes behind). Over-warning is safe for
+    # a guard; under-warning is not. To stay non-misleading in BOTH cases — a pure
+    # commit (where the index is clean vs the NEW HEAD and `git reset` would be a
+    # no-op) AND a real independent stage — the line is DESCRIPTIVE: it reports
+    # that the index content changed and points at `git status` to inspect, rather
+    # than asserting `git reset` is THE fix (which would be a false no-op promise
+    # on a pure commit). The JSON envelope's staged_changed stays computed
+    # faithfully.
+    if staged_changed:
         lines.append(
-            "WARNING: the dispatched seat STAGED changes against instruction "
-            "(unstage with: git reset)"
+            "WARNING: staged/index content changed since before the run — "
+            "inspect with `git status`; unstage any unintended changes with "
+            "`git reset`"
         )
     if branch_changed:
         # BLOCKING-2: pick the recovery target for branch_before. When dispatch
@@ -1189,8 +1199,16 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         # sentinel — `git checkout <sentinel>` is nonsense; the way back to the
         # original detached state is `git checkout --detach <head_before>` (the
         # ORIGINAL commit sha). A real branch name uses a plain `git checkout`.
+        # MINOR-1: null-guard head_before — if the original HEAD probe returned
+        # None (a detached HEAD whose _git_head errored while _git_branch
+        # succeeded — extremely unlikely but unguarded), fall back to a safe
+        # generic hint rather than emitting the literal `--detach None`.
         if branch_before == _DETACHED:
-            recover = f"git checkout --detach {head_before}"
+            recover = (
+                f"git checkout --detach {head_before}"
+                if head_before is not None
+                else "re-detach to your original commit"
+            )
         else:
             recover = f"git checkout {branch_before}"
         lines.append(

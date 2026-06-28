@@ -4732,6 +4732,16 @@ def test_dispatch():
               proc.returncode == 2 and "no task" in proc.stderr,
               "exit2 no task", f"{proc.returncode}: {proc.stderr!r}")
 
+        # MINOR-2: a non-UTF-8 -f task file raises UnicodeDecodeError (a ValueError,
+        # NOT an OSError) — it must be caught so dispatch prints the graceful error +
+        # exits 2 cleanly, never a traceback.
+        bad = Path(td) / "bad-task.bin"; bad.write_bytes(b"\xff\xfe\x00bad")
+        proc = _run_cli(["dispatch", "-f", str(bad), "--json"], env=env_d, cwd=str(repo), timeout=30)
+        check("dispatch -f non-UTF-8 file -> exit 2 graceful 'cannot read task file' (no traceback) (MINOR-2)",
+              proc.returncode == 2 and "cannot read task file" in proc.stderr
+              and "Traceback" not in proc.stderr,
+              "exit2 graceful, no traceback", f"{proc.returncode}: {proc.stderr!r}")
+
     # --- in-process: unavailable-seat skip, non-writable fail-fast, null model header ---
     log_section("dispatch — unavailable skip / non-writable fail-fast / null-model header")
     with tempfile.TemporaryDirectory() as td:
@@ -4806,12 +4816,13 @@ def test_dispatch():
             check("dispatch human header with model -> 'dispatch: codex (gpt-x)'",
                   head == "dispatch: codex (gpt-x)", "dispatch: codex (gpt-x)", repr(head))
 
-            # MINOR-3 / MINOR-1: human-mode warnings appear LAST and in the fixed
-            # D4 relative order HEAD -> staged -> branch. Because MINOR-1 SUPPRESSES
-            # the standalone staged-remedy line when head_moved is true (a pure
-            # commit's index change is a consequence, not an independent stage), the
-            # three guards can never all warn at once. Test the relative order in
-            # two natural slices.
+            # BLOCKING-1: human-mode warnings appear LAST and in the fixed D4
+            # relative order HEAD -> staged -> branch. The staged warning ALWAYS
+            # fires when staged_changed is true (a guard must never silently drop a
+            # real staged violation — incl. the commit-then-additional-`git add`
+            # case), worded DESCRIPTIVELY ("staged/index content changed … inspect
+            # with git status") so it is non-misleading on a pure commit too.
+            STAGED_MARK = "staged/index content changed"
             class _OkBody(Provider):
                 name = "codex"
                 supports_workspace_write = True
@@ -4819,9 +4830,9 @@ def test_dispatch():
                 def run(self, *a, **k):
                     return ProviderResult(name="codex", model=None, ok=True,
                                           output="BODY", error=None, elapsed=0.1)
-            # Slice A: head_moved + branch_changed, staged ALSO changed at the data
-            # level (s1->s2) -> staged warning SUPPRESSED (MINOR-1); only HEAD then
-            # branch warn, in that order, last, after the body.
+            # Slice A: head_moved + staged + branch ALL change (the
+            # commit-then-additional-stage shape) -> ALL THREE warn, in the fixed
+            # HEAD -> staged -> branch order, last, after the body.
             out = io.StringIO()
             with mock.patch("multiagent.cli.get_provider", return_value=_OkBody()), \
                  mock.patch("multiagent.cli._git_head", side_effect=["AAA", "BBB"]), \
@@ -4832,16 +4843,16 @@ def test_dispatch():
             wlines = out.getvalue().splitlines()
             warn_idx = [i for i, l in enumerate(wlines) if l.startswith("WARNING:")]
             body_idx = next(i for i, l in enumerate(wlines) if l == "BODY")
-            check("dispatch human warnings: head_moved SUPPRESSES staged remedy, HEAD->branch last (MINOR-1)",
-                  rc == 0 and len(warn_idx) == 2
+            check("dispatch human warnings: head+staged+branch ALL warn, HEAD->staged->branch last (BLOCKING-1)",
+                  rc == 0 and len(warn_idx) == 3
                   and "moved HEAD" in wlines[warn_idx[0]]
-                  and "changed branch" in wlines[warn_idx[1]]
-                  and not any("STAGED changes" in l for l in wlines)
-                  and warn_idx == [len(wlines) - 2, len(wlines) - 1]
+                  and STAGED_MARK in wlines[warn_idx[1]]
+                  and "changed branch" in wlines[warn_idx[2]]
+                  and warn_idx == [len(wlines) - 3, len(wlines) - 2, len(wlines) - 1]
                   and min(warn_idx) > body_idx,
-                  "2 warnings (HEAD->branch), staged suppressed, last", str(wlines))
+                  "3 warnings (HEAD->staged->branch), last", str(wlines))
             # Slice B: independent STAGE-only (head NOT moved) + branch_changed ->
-            # staged warning DOES fire, in the fixed staged->branch order.
+            # staged warning fires, in the fixed staged->branch order.
             out = io.StringIO()
             with mock.patch("multiagent.cli.get_provider", return_value=_OkBody()), \
                  mock.patch("multiagent.cli._git_head", side_effect=["AAA", "AAA"]), \
@@ -4851,13 +4862,15 @@ def test_dispatch():
                     rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
             wlines = out.getvalue().splitlines()
             warn_idx = [i for i, l in enumerate(wlines) if l.startswith("WARNING:")]
-            check("dispatch human warnings: independent stage-only DOES warn, staged->branch order (MINOR-1)",
+            check("dispatch human warnings: independent stage-only DOES warn, staged->branch order",
                   rc == 0 and len(warn_idx) == 2
-                  and "STAGED changes" in wlines[warn_idx[0]]
+                  and STAGED_MARK in wlines[warn_idx[0]]
                   and "changed branch" in wlines[warn_idx[1]],
                   "2 warnings (staged->branch)", str(wlines))
-            # MINOR-1 focused: a pure COMMIT (head_moved + staged consequence) emits
-            # the HEAD warning but NOT the standalone staged-remedy line.
+            # BLOCKING-1 (a): a pure COMMIT (head_moved + staged consequence, same
+            # branch) STILL surfaces the staged warning — but worded
+            # non-misleadingly (descriptive "staged/index content changed", NOT a
+            # "this is the fix / git reset unstages it" no-op promise).
             out = io.StringIO()
             with mock.patch("multiagent.cli.get_provider", return_value=_OkBody()), \
                  mock.patch("multiagent.cli._git_head", side_effect=["AAA", "BBB"]), \
@@ -4866,10 +4879,30 @@ def test_dispatch():
                 with contextlib.redirect_stdout(out):
                     rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
             wlines = out.getvalue().splitlines()
-            check("dispatch human: pure commit warns HEAD, SUPPRESSES staged-remedy line (MINOR-1)",
+            staged_line = next((l for l in wlines if STAGED_MARK in l), "")
+            check("dispatch human: pure commit warns HEAD AND surfaces staged (worded non-misleadingly) (BLOCKING-1a)",
                   rc == 0 and any("moved HEAD" in l for l in wlines)
-                  and not any("STAGED changes" in l for l in wlines),
-                  "HEAD warning, no staged-remedy", str(wlines))
+                  and bool(staged_line)
+                  and "inspect with `git status`" in staged_line
+                  and "STAGED changes against instruction" not in staged_line,
+                  "HEAD warning + descriptive staged line", str(wlines))
+            # BLOCKING-1 (b): commit-then-additional-`git add` — at the guard-data
+            # level this is head_moved=true AND staged_changed=true (same shape as a
+            # pure commit; the guard CANNOT distinguish extra staged content from
+            # the commit's own tree, which is exactly WHY it must always warn). The
+            # staged warning MUST be present so the codex-flagged case is not hidden.
+            out = io.StringIO()
+            with mock.patch("multiagent.cli.get_provider", return_value=_OkBody()), \
+                 mock.patch("multiagent.cli._git_head", side_effect=["AAA", "BBB"]), \
+                 mock.patch("multiagent.cli._git_staged", side_effect=["s1", "s3"]), \
+                 mock.patch("multiagent.cli._git_branch", side_effect=["main", "main"]):
+                with contextlib.redirect_stdout(out):
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+            wlines = out.getvalue().splitlines()
+            check("dispatch human: commit-then-extra-stage surfaces the staged warning (BLOCKING-1b)",
+                  rc == 0 and any("moved HEAD" in l for l in wlines)
+                  and any(STAGED_MARK in l for l in wlines),
+                  "HEAD warning + staged warning both present", str(wlines))
             # BLOCKING-2: dispatch STARTED detached (branch_before == sentinel) and
             # the seat re-attached to a branch -> recovery hint references
             # head_before via `git checkout --detach <head_before>`, NOT the
@@ -4887,6 +4920,24 @@ def test_dispatch():
                   rc == 0 and "git checkout --detach origsha" in bwarn
                   and f"git checkout {cli._DETACHED}" not in bwarn,
                   "git checkout --detach origsha (not the sentinel)", repr(bwarn))
+
+            # MINOR-1: detached-before recovery with head_before=None (the _git_head
+            # probe errored while _git_branch returned the detached sentinel) must
+            # NOT emit the literal `--detach None` — it falls back to a safe generic
+            # hint instead.
+            out = io.StringIO()
+            with mock.patch("multiagent.cli.get_provider", return_value=_OkBody()), \
+                 mock.patch("multiagent.cli._git_head", side_effect=[None, None]), \
+                 mock.patch("multiagent.cli._git_staged", side_effect=["s1", "s1"]), \
+                 mock.patch("multiagent.cli._git_branch", side_effect=[cli._DETACHED, "main"]):
+                with contextlib.redirect_stdout(out):
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+            wlines = out.getvalue().splitlines()
+            bwarn = next((l for l in wlines if "changed branch" in l), "")
+            check("dispatch human: detached-before recovery null-guards head_before (no literal '--detach None') (MINOR-1)",
+                  rc == 0 and "--detach None" not in bwarn
+                  and "re-detach to your original commit" in bwarn,
+                  "safe generic hint, never '--detach None'", repr(bwarn))
 
             # MINOR-2: human-mode failure with -o still WRITES the envelope file
             # (parity with the JSON path) and keeps exit 1.
@@ -4959,6 +5010,19 @@ def test_dispatch():
     check("dispatch.md: engine reached via the bare crew dispatcher (dispatch subcommand)",
           '"${CLAUDE_PLUGIN_ROOT}/crew" dispatch' in joined,
           "bare crew dispatch invocation", joined)
+    # BLOCKING-2: the task is ALWAYS spilled to a -f file (Write tool writes exact
+    # bytes, no shell), NEVER passed positionally — a positional task with $(…)/
+    # $VAR/backticks/" would be expanded or mangled by the Bash-tool shell.
+    dispatch_cmd_lines = [
+        l for l in fence_lines if '"${CLAUDE_PLUGIN_ROOT}/crew" dispatch' in l
+    ]
+    check("dispatch.md: every crew dispatch invocation passes -f, never a positional task (BLOCKING-2)",
+          bool(dispatch_cmd_lines)
+          and all("-f" in l.split() for l in dispatch_cmd_lines),
+          "every dispatch line carries -f", str(dispatch_cmd_lines))
+    check("dispatch.md: no crew dispatch invocation passes a positional \"<TASK>\"/\"$ARGUMENTS\" (BLOCKING-2)",
+          all('"<TASK>"' not in l and '"$ARGUMENTS"' not in l for l in dispatch_cmd_lines),
+          "no positional task token in any dispatch line", str(dispatch_cmd_lines))
     # /crew: prefix on command references. Only flag a SLASH-COMMAND token
     # (preceded by whitespace or a backtick) — NOT a path component like
     # `.crew/dispatch/` or a slash-joined word pair like `review/debate`.

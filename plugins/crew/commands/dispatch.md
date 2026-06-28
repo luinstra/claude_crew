@@ -59,12 +59,15 @@ re-announces the exact path it writes, so this is hygiene, not load-bearing):
 rm -f .crew/reviews/<session-id>/dispatch-*.json
 ```
 
-**Spill the task to a file when (DETERMINISTIC rule):** the task contains a newline
-OR exceeds **4096 bytes**. In that case write it to `.crew/dispatch/<session-id>-task.txt`
-with the **Write tool** (which creates the `.crew/dispatch/` parent dir
-automatically) and pass `-f <file>` to the engine instead of the positional task —
-this dodges ARG_MAX and shell-quoting foot-guns. Otherwise pass the task
-positionally. Exactly ONE task source.
+**ALWAYS spill the task to a file and pass `-f` — NEVER positional.** Write the raw
+task text to `.crew/dispatch/<session-id>-task.txt` with the **Write tool** (which
+writes the exact bytes — no shell is involved — and creates the `.crew/dispatch/`
+parent dir automatically), then pass `-f <file>` to the engine. This is
+UNCONDITIONAL (not gated on a newline/byte-size trigger): a positional task
+containing `$(…)`, `$VAR`, backticks, or `"` would be expanded or mangled by the
+shell when the Bash tool runs the command, so the task NEVER goes on the command
+line. The `-f` file fully dodges shell quoting/expansion AND ARG_MAX. Exactly ONE
+task source (`-f`).
 
 Then invoke the bare `crew` dispatcher. Substitute your actual session id (the
 `[Session ID: …]` value) for `<session-id>` — pass it as a literal `--session-id`
@@ -74,11 +77,10 @@ when the user explicitly provided one** (omit it otherwise so the engine resolve
 the seat itself):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" dispatch "<TASK>" --session-id <session-id> --json
+"${CLAUDE_PLUGIN_ROOT}/crew" dispatch -f .crew/dispatch/<session-id>-task.txt --session-id <session-id> --json
 ```
 
-(When the user named a seat, add `--seat <seat>` after the task; when the task was
-spilled, replace `"<TASK>"` with `-f .crew/dispatch/<session-id>-task.txt`.)
+(When the user named a seat, add `--seat <seat>` to the command.)
 
 ## Step 4 — Check exit status, then read the envelope
 
@@ -114,8 +116,11 @@ that fired, surface a LOUD warning:
   instruction — inspect with `git log -1`; undo with `git reset --soft HEAD@{1}`"
   (or, when `envelope.head_before` is `<unborn>`, the seat made the repo's FIRST
   commit — "undo with `git update-ref -d HEAD`").
-- `envelope.staged_changed` is true → "the dispatched seat STAGED changes against
-  instruction — unstage with `git reset`".
+- `envelope.staged_changed` is true → "staged/index content changed since before the
+  run — inspect with `git status`; unstage any unintended changes with `git reset`".
+  (Phrase it descriptively — do NOT assert `git reset` is THE fix: on a pure commit
+  the index is clean vs the new HEAD and `git reset` is a no-op, so the accurate
+  message is "inspect, then unstage anything unintended", not "this is staged dirt".)
 - `envelope.branch_changed` is true → "the dispatched seat changed branch against
   instruction". For the recovery hint, branch on `envelope.branch_before`: when it
   is a real branch name, "return with `git checkout <envelope.branch_before>`";
