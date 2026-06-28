@@ -237,6 +237,44 @@ strongest objection and the real tradeoffs.
 """
 
 
+def dispatch(task: str, *, seat_role: str | None = None) -> str:
+    """Build the DISPATCH (write-mode WORK) prompt for one subprocess seat.
+
+    The execution complement to ``council``/``build_prompt``: instead of asking a
+    seat to REVIEW a target read-only, it tells a single seat to DO a task by
+    editing files in place in the live working tree. The load-bearing safety
+    layer is the no-commit/no-stage/no-branch/no-push instruction — kept HERE (the
+    one prompt source) so a unit test can assert every dispatch prompt always
+    carries it, rather than scattering it as an untested convention in the command
+    markdown (D1).
+
+    The task body is wrapped as DATA between the literal ``BEGIN TASK`` / ``END
+    TASK`` marker lines (the SAME injection-guard shape ``council`` uses for its
+    QUESTION block) so an instruction embedded in the task can't hijack the
+    framing. ``seat_role`` exists only for ``council``-shape parity; dispatch's
+    only caller passes ``None`` (single seat, no per-seat label).
+    """
+    role = _seat_role_preamble(seat_role)
+    return f"""{role}You are an autonomous engineer working DIRECTLY in this git \
+repository. DO the task below by editing files in place. You have write access to \
+the working tree.
+
+Leave ALL of your changes UNCOMMITTED and UNSTAGED, and stay on the SAME branch:
+- Do NOT run `git commit` (do not commit your work).
+- Do NOT run `git add` or otherwise stage changes (leave everything unstaged).
+- Do NOT run `git push`.
+- Do NOT create or switch branches.
+The human will review the dirty working tree and decide what to do with it.
+
+When you are done, SUMMARIZE what you changed and why — list the files you touched \
+and the key decisions you made.
+
+BEGIN TASK
+{task}
+END TASK
+"""
+
+
 def _discuss_material(target, inline: bool) -> str:
     """Render a target as DISCUSS material: a reference pointer or inlined body."""
     if inline:

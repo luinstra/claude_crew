@@ -240,6 +240,49 @@ def debate_panel() -> str | None:
     )
 
 
+# --- dispatch seat ------------------------------------------------------------
+
+def _extract_dispatch_seat(data: dict, layer: str) -> str | None:
+    """Validate one layer's ``[dispatch].seat`` against the SEAT registry.
+
+    ⚠ Mirrors ``_extract_debate_panel``'s SHAPE but NOT its validation TARGET:
+    dispatch resolves to ONE concrete registered subprocess seat, so the value is
+    checked against ``known_seat_names()`` (the seat registry) — NOT
+    ``_known_panel_names()``. A panel name or a group token like ``"cursor"`` is
+    therefore INVALID here (warn once + ``None``), since dispatch is single-seat
+    and a group token names no concrete seat.
+    """
+    dispatch_tbl = data.get("dispatch")
+    if not isinstance(dispatch_tbl, dict):
+        return None
+    val = dispatch_tbl.get("seat")
+    if val is None:
+        return None
+    # Lazy import (call-time) keeps this module a pure leaf at load (same pattern
+    # as _known_panel_names).
+    from multiagent.providers import known_seat_names
+
+    if not isinstance(val, str) or val not in known_seat_names():
+        _warn_once(
+            f"dispatch_seat:{layer}",
+            f"[dispatch].seat={val!r} is not a known subprocess seat "
+            f"({', '.join(known_seat_names())}); ignoring",
+        )
+        return None
+    return val
+
+
+def dispatch_seat() -> str | None:
+    """The configured ``/crew:dispatch`` default seat (``[dispatch].seat``),
+    validated against ``known_seat_names()`` (per-repo wins). ``None`` when
+    unset/invalid in BOTH layers so the caller falls back to the built-in
+    ``codex``."""
+    return _first(
+        _extract_dispatch_seat(_load(), "repo"),
+        _extract_dispatch_seat(_global_load(), "global"),
+    )
+
+
 # --- per-seat model -----------------------------------------------------------
 
 def _extract_seat_model(data: dict, layer: str, seat: str) -> str | None:

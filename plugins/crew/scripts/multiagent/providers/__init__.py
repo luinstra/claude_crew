@@ -116,6 +116,18 @@ class Provider(ABC):
 
     name: str = ""
 
+    # Capability flag for /crew:dispatch (write-mode WORK seat). FAIL-CLOSED /
+    # opt-in: the ABC default is ``False`` so a NEW provider is NOT
+    # write-dispatchable until it DELIBERATELY sets this ``True`` on its class.
+    # cmd_dispatch fails fast (exit 2) when a resolved seat's provider leaves this
+    # ``False``. A fail-OPEN default (silently treating a brand-new provider as
+    # write-capable) is exactly the kind of silent behavior that bites later, so
+    # the safe default is the conservative one. The three shipping providers
+    # (codex/cursor/agy) each set it ``= True`` EXPLICITLY (decision visible per
+    # class). It does NOT change ``run()``'s signature — the actual read-only vs
+    # workspace-write split is the existing ``sandbox`` arg.
+    supports_workspace_write: bool = False
+
     @abstractmethod
     def is_available(self) -> tuple[bool, str]:
         """PATH check only — no auth probe, no network, no spawning the CLI.

@@ -37,14 +37,14 @@ their results into the same six-field shape the engine returns.
 
 ```
 multiagent/
-├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `render` (incl. `--stage-all`) | `seats` (incl. `--debate`: config-aware full debate panel) | `collect` | `review-prep` subcommands (reached via the bare `../crew` dispatcher)
+├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `dispatch` (write-mode single-seat WORK delegation) | `render` (incl. `--stage-all`) | `seats` (incl. `--debate`: config-aware full debate panel) | `collect` | `review-prep` subcommands (reached via the bare `../crew` dispatcher)
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
-├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel + debate_panel ([debate].panel) + per-seat tuning + [panels] roster + seat `available`; per-repo>global>builtin; pure leaf, no cli/providers import; Python 3.11+ tomllib, else gracefully ignored)
+├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel + debate_panel ([debate].panel) + dispatch_seat ([dispatch].seat, validated vs known_seat_names()) + per-seat tuning + [panels] roster + seat `available`; per-repo>global>builtin; pure leaf, no cli/providers import; Python 3.11+ tomllib, else gracefully ignored)
 ├── render.py            # side-by-side panel + --json rendering
 └── providers/
-    ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC (executor: run()), registry + known_seat_names()
+    ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC (executor: run() + supports_workspace_write capability, fail-CLOSED/opt-in for /crew:dispatch), registry + known_seat_names()
     ├── codex.py         # CodexProvider — `codex exec - --sandbox read-only -o <tmp>`, prompt via stdin
     ├── cursor.py        # CursorProvider — the live `cursor-gpt`/`cursor-gemini`/`cursor-glm`/`cursor-auto`/`cursor-composer` seats; CURSOR_SEATS is the one-line-to-extend source of truth
     └── agy.py           # AgyProvider (default panel) — `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions)
@@ -202,6 +202,30 @@ Key contracts (do NOT regress):
   it. (`/crew:debate` fans out per-seat in BOTH paths now — its multi-round path
   always did, and the single-round path scaffolds via `debate --seats none` then
   runs each subprocess seat with `run <seat>`, same as the commands above.)
+- **`dispatch` (write-mode single-seat WORK delegation).** The EXECUTION
+  complement to read-only review/debate: `crew dispatch "<task>" [--seat <name>]`
+  sends ONE subprocess seat (default `codex`; resolution `--seat` >
+  `config.dispatch_seat()` (`[dispatch].seat`) > builtin) at the working tree in
+  `sandbox="workspace-write"` — it OPTS INTO the existing `run -s workspace-write`
+  plumbing, so review/debate (which never pass `-s`) stay `read-only` and
+  byte-for-byte unchanged. `prompts.dispatch()` (mirrors `council`) frames the
+  task between literal `BEGIN TASK`/`END TASK` markers and instructs the seat to
+  leave changes UNCOMMITTED + UNSTAGED + on the same branch. `cmd_dispatch`
+  captures a HEAD/staged/branch guard BEFORE and AFTER the run, PINNED to one
+  `repo_dir = CLAUDE_WORKING_DIRECTORY or getcwd()` (the SAME tree the seat edits:
+  codex/agy pin their subprocess `cwd` to `repo_dir` in workspace-write mode,
+  cursor already pins its own). `_git_head` is TRI-STATE (sha / `"<unborn>"` /
+  `None`) so an unborn-repo FIRST commit is caught; all three guards are NULL-SAFE
+  typed booleans (`head_moved`/`staged_changed`/`branch_changed`, never `null`).
+  Dispatch emits its OWN 15-field JSON envelope (NOT a polluted `ProviderResult`),
+  DERIVES `dispatch-<seat>.json` from `--session-id` like `run`, AND prints the
+  resolved path on stdout (`collect`-style) so the command markdown reads it back
+  without constructing the filename. An unavailable-CLI seat writes a skipped
+  `ok=false` envelope (exit 0) like `run`; unknown/Task/non-writable seats exit 2
+  with no envelope. codex additionally OMITS `--ignore-user-config` in
+  workspace-write mode so the WORK seat loads project context (`AGENTS.md` /
+  skills), while read-only review stays hermetic (the `-c model_reasoning_effort`
+  pin is unconditional).
 - **`crew state …` routes crew-state through the dispatcher.** Loop state
   management is invoked as `"${CLAUDE_PLUGIN_ROOT}/crew" state <sub> …`, NOT the
   bare `scripts/crew-state.py` path, so ONE allowlist rule covers both engine and
@@ -226,7 +250,9 @@ Key contracts (do NOT regress):
   (they're pure fan-out; the orchestrator skips them).
 - Two-tier config (env retired): tuning lives in TWO TOML files — per-repo
   `.crew/config.toml` and global `~/.crew-config.toml` (`config.py`, two memoized
-  loaders). Knobs: `default_panel`, `[debate].panel`, `[seats.<name>]`
+  loaders). Knobs: `default_panel`, `[debate].panel`, `[dispatch].seat`
+  (the `/crew:dispatch` default seat, validated against `known_seat_names()` —
+  a panel name / group token like `cursor` is rejected), `[seats.<name>]`
   (`model`/`reasoning_effort`/`print_timeout`/`available`), `[tuning].timeout`,
   and the global-tier `[panels]` roster. Resolution is PER-KEY (per-seat-per-key
   for `[seats.<name>]`): CLI flag > per-repo > global > builtin. The old tuning

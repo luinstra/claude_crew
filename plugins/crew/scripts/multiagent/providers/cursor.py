@@ -115,6 +115,13 @@ class CursorProvider(Provider):
     registered but opt-in (via ``--seats`` / ``--panel cursor``).
     """
 
+    # EXPLICIT opt-in (fail-CLOSED ABC default is False): cursor honors
+    # workspace-write by DROPPING --mode plan so edits apply (--sandbox enabled
+    # still blocks network + out-of-workspace). A valid /crew:dispatch write seat.
+    # cursor already pins its own cwd + --workspace to CLAUDE_WORKING_DIRECTORY,
+    # so it needs no separate workspace-write cwd pin.
+    supports_workspace_write = True
+
     def __init__(
         self,
         name: str = "cursor",

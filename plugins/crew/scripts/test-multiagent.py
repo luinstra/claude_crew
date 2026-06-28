@@ -4274,6 +4274,510 @@ def test_no_dotkept_staged_filename():
           "; ".join(offenders) if offenders else "zero matches")
 
 
+# =============================================================================
+# /crew:dispatch — write-mode single-seat delegation
+# =============================================================================
+
+def _fake_codex(action_lines: str = "") -> str:
+    """A fake `codex` bin: read the -o file from argv, optionally run a git
+    ACTION in its (provider-pinned) cwd, then write a non-empty seat output to -o.
+
+    ``action_lines`` is Python source executed AFTER stdin is read and BEFORE the
+    -o file is written, with the subprocess cwd already pinned by the provider.
+    """
+    return (
+        "import sys, os, json, subprocess\n"
+        "a = sys.argv[1:]\n"
+        "out = None\n"
+        "for i, x in enumerate(a):\n"
+        "    if x == '-o':\n"
+        "        out = a[i + 1]\n"
+        "sys.stdin.read()\n"
+        + action_lines +
+        "open(out, 'w').write('CODEX DID WORK')\n"
+        "sys.exit(0)\n"
+    )
+
+
+def _run_dispatch(repo, bins, extra_args, *, session=None, project_dir=None,
+                  home=None, timeout=30):
+    """Run `cli.py dispatch …` as a subprocess and return (proc, envelope|None).
+
+    With no session the envelope JSON is the whole stdout; with a session it is
+    written to the derived file and stdout's last clean line is the path.
+    """
+    env = path_with(bins)
+    env["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+    if project_dir is not None:
+        env["CLAUDE_PROJECT_DIR"] = str(project_dir)
+    if home is not None:
+        env["HOME"] = home
+    args = ["dispatch", *extra_args, "--json"]
+    if session:
+        args += ["--session-id", session]
+    proc = _run_cli(args, env=env, cwd=str(repo), timeout=timeout)
+    env_obj = None
+    if proc.returncode == 0:
+        try:
+            if session:
+                last = [l for l in proc.stdout.splitlines() if l.strip()][-1]
+                env_obj = json.loads((Path(repo) / last).read_text())
+            else:
+                env_obj = json.loads(proc.stdout)
+        except Exception:
+            env_obj = None
+    return proc, env_obj
+
+
+def _dispatch_ns(**kw):
+    import argparse as _ap
+    base = dict(seat=None, task=None, file=None, model=None, timeout=None,
+                json=False, out=None, session_id=None)
+    base.update(kw)
+    return _ap.Namespace(**base)
+
+
+def test_dispatch():
+    log_section("dispatch — prompt builder + capability")
+    from multiagent import cli, config
+    from multiagent.providers import Provider
+    import io, contextlib
+    import unittest.mock as mock
+
+    # --- Task 1: prompts.dispatch framing + BEGIN/END markers ---
+    dp = prompts.dispatch("MAKE A WIDGET")
+    check("dispatch prompt wraps task between literal BEGIN TASK / END TASK lines",
+          "BEGIN TASK\nMAKE A WIDGET\nEND TASK" in dp,
+          "BEGIN TASK\\n<task>\\nEND TASK", dp)
+    low = dp.lower()
+    check("dispatch prompt forbids commit / git add (stage) / push / branch",
+          "do not run `git commit`" in low and "do not run `git add`" in low
+          and "do not run `git push`" in low and "do not create or switch branches" in low,
+          "no-commit/no-stage/no-push/no-branch clauses", dp)
+    check("dispatch prompt is distinct from council/build_prompt",
+          dp != prompts.council("MAKE A WIDGET")
+          and "multi-model council" not in dp and "review panel" not in dp,
+          "distinct from council/review", dp[:120])
+
+    # --- Task 2: supports_workspace_write fail-closed default + explicit True ---
+    check("Provider ABC default supports_workspace_write is False (fail-CLOSED)",
+          Provider.supports_workspace_write is False, "False", str(Provider.supports_workspace_write))
+    for s in ("codex", "agy", "cursor-auto"):
+        check(f"{s} provider opts into supports_workspace_write=True",
+              get_provider(s).supports_workspace_write is True,
+              "True", str(get_provider(s).supports_workspace_write))
+
+    # --- Task 2: codex --ignore-user-config conditional on sandbox ---
+    log_section("dispatch — codex argv (--ignore-user-config gating) + cwd pin")
+    from multiagent.providers.codex import CodexProvider
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        cap = d / "cap.json"
+        make_fake_bin(d, "codex",
+            f"import sys, os, json\n"
+            f"a = sys.argv[1:]\n"
+            f"out = None\n"
+            f"for i, x in enumerate(a):\n"
+            f"    if x == '-o':\n"
+            f"        out = a[i + 1]\n"
+            f"sys.stdin.read()\n"
+            f"json.dump({{'args': a, 'cwd': os.getcwd()}}, open({str(cap)!r}, 'w'))\n"
+            f"open(out, 'w').write('OK')\n")
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = str(d) + os.pathsep + old_path
+        try:
+            CodexProvider().run("p", sandbox="read-only", timeout=30)
+            ro = json.loads(cap.read_text())
+            CodexProvider().run("p", sandbox="workspace-write", timeout=30)
+            ww = json.loads(cap.read_text())
+        finally:
+            os.environ["PATH"] = old_path
+        check("codex read-only argv CONTAINS --ignore-user-config (review hermetic, unchanged)",
+              "--ignore-user-config" in ro["args"]
+              and any(x.startswith("model_reasoning_effort=") for x in ro["args"]),
+              "--ignore-user-config present + effort pin", str(ro["args"]))
+        check("codex workspace-write argv OMITS --ignore-user-config (project context loads)",
+              "--ignore-user-config" not in ww["args"]
+              and any(x.startswith("model_reasoning_effort=") for x in ww["args"]),
+              "no --ignore-user-config + effort pin still present", str(ww["args"]))
+
+    # --- Task 2: cwd pin — codex/agy pin cwd to CLAUDE_WORKING_DIRECTORY in WW only ---
+    for binname, prov_factory in (("codex", lambda: CodexProvider()),
+                                   ("agy", lambda: __import__(
+                                       "multiagent.providers.agy", fromlist=["AgyProvider"]
+                                   ).AgyProvider())):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cwdt:
+            d = Path(td)
+            wdir = Path(cwdt)  # the CLAUDE_WORKING_DIRECTORY, distinct from process cwd
+            cap = d / f"cap_{binname}.json"
+            if binname == "codex":
+                make_fake_bin(d, "codex",
+                    f"import sys, os, json\n"
+                    f"a = sys.argv[1:]\n"
+                    f"out = None\n"
+                    f"for i, x in enumerate(a):\n"
+                    f"    if x == '-o':\n"
+                    f"        out = a[i + 1]\n"
+                    f"sys.stdin.read()\n"
+                    f"json.dump({{'cwd': os.getcwd()}}, open({str(cap)!r}, 'w'))\n"
+                    f"open(out, 'w').write('OK')\n")
+            else:
+                make_fake_bin(d, "agy",
+                    f"import sys, os, json\n"
+                    f"json.dump({{'cwd': os.getcwd()}}, open({str(cap)!r}, 'w'))\n"
+                    f"print('AGY OK')\n")
+            old_path = os.environ["PATH"]
+            os.environ["PATH"] = str(d) + os.pathsep + old_path
+            saved_wd = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+            os.environ["CLAUDE_WORKING_DIRECTORY"] = str(wdir)
+            try:
+                prov_factory().run("p", sandbox="workspace-write", timeout=30)
+                ww_cwd = json.loads(cap.read_text())["cwd"]
+                prov_factory().run("p", sandbox="read-only", timeout=30)
+                ro_cwd = json.loads(cap.read_text())["cwd"]
+            finally:
+                os.environ["PATH"] = old_path
+                if saved_wd is None:
+                    os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+                else:
+                    os.environ["CLAUDE_WORKING_DIRECTORY"] = saved_wd
+            check(f"{binname} workspace-write pins subprocess cwd to CLAUDE_WORKING_DIRECTORY",
+                  Path(ww_cwd).resolve() == wdir.resolve(),
+                  str(wdir.resolve()), ww_cwd)
+            check(f"{binname} read-only sets NO cwd override (inherits process cwd, review unchanged)",
+                  Path(ro_cwd).resolve() == Path(os.getcwd()).resolve(),
+                  str(Path(os.getcwd()).resolve()), ro_cwd)
+
+    # --- Task 3: config.dispatch_seat validation ---
+    log_section("dispatch — config.dispatch_seat() validation")
+    with project_config('[dispatch]\nseat = "agy"\n'):
+        check("[dispatch].seat=agy -> 'agy'", config.dispatch_seat() == "agy",
+              "agy", repr(config.dispatch_seat()))
+    for bad in ("opus", "bogus", "cursor"):
+        with project_config(f'[dispatch]\nseat = "{bad}"\n'):
+            check(f"[dispatch].seat={bad} (task/unknown/group) -> None (warn once)",
+                  config.dispatch_seat() is None, "None", repr(config.dispatch_seat()))
+    with crew_config(project='[dispatch]\nseat = "agy"\n', glob='[dispatch]\nseat = "codex"\n'):
+        check("[dispatch].seat per-repo (agy) wins over global (codex)",
+              config.dispatch_seat() == "agy", "agy", repr(config.dispatch_seat()))
+
+    # --- Task 4: git tri-state helpers + full envelope scenarios ---
+    log_section("dispatch — git guard helpers + envelope scenarios")
+    # _git_head tri-state direct
+    with tempfile.TemporaryDirectory() as td:
+        born = Path(td) / "born"; born.mkdir(); _init_repo(str(born), with_commit=True)
+        unborn = Path(td) / "unborn"; unborn.mkdir(); _init_repo(str(unborn), with_commit=False)
+        notrepo = Path(td) / "plain"; notrepo.mkdir()
+        h_born = cli._git_head(str(born))
+        check("_git_head born repo -> a sha", bool(h_born) and h_born not in (None, "<unborn>")
+              and len(h_born) >= 7, "40-hex sha", repr(h_born))
+        check("_git_head unborn repo -> '<unborn>' sentinel",
+              cli._git_head(str(unborn)) == "<unborn>", "<unborn>", repr(cli._git_head(str(unborn))))
+        check("_git_head not-a-repo -> None", cli._git_head(str(notrepo)) is None,
+              "None", repr(cli._git_head(str(notrepo))))
+        check("_git_staged born clean -> False", cli._git_staged(str(born)) is False,
+              "False", repr(cli._git_staged(str(born))))
+        check("_git_staged not-a-repo -> None", cli._git_staged(str(notrepo)) is None,
+              "None", repr(cli._git_staged(str(notrepo))))
+        check("_git_branch born -> 'main'", cli._git_branch(str(born)) == "main",
+              "main", repr(cli._git_branch(str(born))))
+        # detached HEAD -> branch None (NOT 'HEAD')
+        _git(["checkout", "-q", "--detach", "HEAD"], str(born))
+        check("_git_branch detached HEAD -> None (not 'HEAD')",
+              cli._git_branch(str(born)) is None, "None", repr(cli._git_branch(str(born))))
+
+    # Full-scenario integration via subprocess dispatch with a fake codex.
+    with tempfile.TemporaryDirectory() as td:
+        bins = Path(td) / "bin"; bins.mkdir()
+
+        # (1) NOOP success: no git change -> all guards false, ok=true.
+        make_fake_bin(bins, "codex", _fake_codex())
+        repo = Path(td) / "r1"; repo.mkdir(); _init_repo(str(repo))
+        proc, env = _run_dispatch(repo, bins, ["make a file"])
+        check("dispatch noop: exit 0, ok=true, seat=codex, all *_changed typed false",
+              proc.returncode == 0 and env and env["ok"] is True and env["seat"] == "codex"
+              and env["head_moved"] is False and env["staged_changed"] is False
+              and env["branch_changed"] is False
+              and isinstance(env["head_moved"], bool) and isinstance(env["staged_changed"], bool)
+              and isinstance(env["branch_changed"], bool),
+              "exit0 ok=true all-false typed", f"{proc.returncode}: {env}")
+        check("dispatch envelope has the 15 fields",
+              env and set(env.keys()) == {
+                  "seat", "model", "ok", "output", "error", "elapsed",
+                  "head_before", "head_after", "head_moved",
+                  "staged_before", "staged_after", "staged_changed",
+                  "branch_before", "branch_after", "branch_changed"},
+              "15 fields", str(sorted(env.keys()) if env else None))
+
+        # (2) COMMIT -> head_moved=true with both shas, exit STILL 0 (advisory).
+        make_fake_bin(bins, "codex", _fake_codex(
+            "open('seat.txt','w').write('x')\n"
+            "subprocess.run(['git','add','.'])\n"
+            "subprocess.run(['git','commit','-q','-m','seat commit'])\n"))
+        repo = Path(td) / "r2"; repo.mkdir(); _init_repo(str(repo))
+        proc, env = _run_dispatch(repo, bins, ["do it"])
+        check("dispatch seat COMMIT -> head_moved=true (both shas), exit 0 (advisory)",
+              proc.returncode == 0 and env and env["head_moved"] is True
+              and env["head_before"] != env["head_after"]
+              and env["staged_changed"] is False,
+              "head_moved=true exit0", f"{proc.returncode}: {env}")
+
+        # (3) STAGE (git add, no commit) -> staged_changed=true, head_moved=false.
+        make_fake_bin(bins, "codex", _fake_codex(
+            "open('seat.txt','w').write('x')\n"
+            "subprocess.run(['git','add','.'])\n"))
+        repo = Path(td) / "r3"; repo.mkdir(); _init_repo(str(repo))
+        proc, env = _run_dispatch(repo, bins, ["do it"])
+        check("dispatch seat STAGE -> staged_changed=true, head_moved=false",
+              env and env["staged_changed"] is True and env["head_moved"] is False,
+              "staged_changed=true head_moved=false", str(env))
+
+        # (4) BRANCH (checkout -b tmp, same sha) -> branch_changed=true, head_moved=false.
+        make_fake_bin(bins, "codex", _fake_codex(
+            "subprocess.run(['git','checkout','-q','-b','tmp'])\n"))
+        repo = Path(td) / "r4"; repo.mkdir(); _init_repo(str(repo))
+        proc, env = _run_dispatch(repo, bins, ["do it"])
+        check("dispatch seat checkout -b tmp -> branch_changed=true, head_moved=false",
+              env and env["branch_changed"] is True and env["head_moved"] is False
+              and env["branch_before"] == "main" and env["branch_after"] == "tmp",
+              "branch_changed=true head_moved=false", str(env))
+
+        # (5) UNBORN first commit -> head_moved=true, head_before='<unborn>'.
+        make_fake_bin(bins, "codex", _fake_codex(
+            "open('seat.txt','w').write('x')\n"
+            "subprocess.run(['git','add','.'])\n"
+            "subprocess.run(['git','commit','-q','-m','first'])\n"))
+        repo = Path(td) / "r5"; repo.mkdir(); _init_repo(str(repo), with_commit=False)
+        proc, env = _run_dispatch(repo, bins, ["bootstrap"])
+        check("dispatch UNBORN first commit -> head_moved=true, head_before='<unborn>' (BLOCKING-2)",
+              env and env["head_moved"] is True and env["head_before"] == "<unborn>"
+              and env["head_after"] not in (None, "<unborn>"),
+              "head_moved=true head_before=<unborn>", str(env))
+
+        # (6) NOT-A-REPO -> all guards typed false, never null.
+        make_fake_bin(bins, "codex", _fake_codex())
+        plain = Path(td) / "plain"; plain.mkdir()
+        proc, env = _run_dispatch(plain, bins, ["do it"])
+        check("dispatch not-a-repo -> *_changed all typed false (never null)",
+              env and env["head_moved"] is False and env["staged_changed"] is False
+              and env["branch_changed"] is False and env["head_before"] is None,
+              "all typed false, head_before null", str(env))
+
+        # (7) Divergent CLAUDE_WORKING_DIRECTORY: a seat that commits in its OWN
+        #     cwd lands the commit in CLAUDE_WORKING_DIRECTORY (provider cwd pin)
+        #     AND the guard (pinned to repo_dir) detects head_moved=true.
+        make_fake_bin(bins, "codex", _fake_codex(
+            "open('seat.txt','w').write('x')\n"
+            "subprocess.run(['git','add','.'])\n"
+            "subprocess.run(['git','commit','-q','-m','seat'])\n"))
+        repo = Path(td) / "r7"; repo.mkdir(); _init_repo(str(repo))
+        before_sha = _git(["rev-parse", "HEAD"], str(repo)).stdout.strip()
+        # process cwd for cli.py is a DISTINCT empty dir, NOT the repo.
+        elsewhere = Path(td) / "elsewhere"; elsewhere.mkdir()
+        env_d = path_with(bins)
+        env_d["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+        proc = _run_cli(["dispatch", "do it", "--json"], env=env_d, cwd=str(elsewhere), timeout=30)
+        envv = json.loads(proc.stdout) if proc.returncode == 0 else None
+        after_sha = _git(["rev-parse", "HEAD"], str(repo)).stdout.strip()
+        check("dispatch divergent CWD: commit lands in CLAUDE_WORKING_DIRECTORY (provider cwd pin)",
+              after_sha != before_sha, "repo HEAD moved", f"{before_sha} -> {after_sha}")
+        check("dispatch divergent CWD: guard (pinned repo_dir) detects head_moved=true (BLOCKING-1/R13)",
+              envv and envv["head_moved"] is True, "head_moved=true", str(envv))
+
+        # (8) Engine-printed path == written file (with --session-id, no -o).
+        make_fake_bin(bins, "codex", _fake_codex())
+        repo = Path(td) / "r8"; repo.mkdir(); _init_repo(str(repo))
+        env_d = path_with(bins); env_d["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+        proc = _run_cli(["dispatch", "x", "--session-id", "sess1", "--json"],
+                        env=env_d, cwd=str(repo), timeout=30)
+        last = [l for l in proc.stdout.splitlines() if l.strip()][-1]
+        check("dispatch --session-id derives + PRINTS dispatch-<seat>.json path (== written file)",
+              proc.returncode == 0 and last.endswith("dispatch-codex.json")
+              and (repo / last).exists()
+              and json.loads((repo / last).read_text())["seat"] == "codex",
+              "printed path == written dispatch-codex.json", f"{proc.returncode}: {last!r}")
+
+        # (9) Default-seat routing via [dispatch].seat config -> agy.
+        make_fake_bin(bins, "agy",
+            "import sys\nsys.stdin.read() if False else None\nprint('AGY OK WORK')\n")
+        repo = Path(td) / "r9"; repo.mkdir(); _init_repo(str(repo))
+        proj = Path(td) / "proj"; (proj / ".crew").mkdir(parents=True)
+        (proj / ".crew" / "config.toml").write_text('[dispatch]\nseat = "agy"\n')
+        home = Path(td) / "home"; home.mkdir()
+        proc, env = _run_dispatch(repo, bins, ["x"], project_dir=proj, home=str(home))
+        check("dispatch [dispatch].seat=agy routes (no --seat) -> envelope seat=agy",
+              env and env["seat"] == "agy", "seat=agy", str(env))
+
+    # --- pre-run rejections (exit 2, NO envelope, NO path) ---
+    log_section("dispatch — pre-run rejections + arg XOR + exit/advisory")
+    with tempfile.TemporaryDirectory() as td:
+        bins = Path(td) / "bin"; bins.mkdir()
+        make_fake_bin(bins, "codex", _fake_codex())
+        repo = Path(td) / "r"; repo.mkdir(); _init_repo(str(repo))
+        env_d = path_with(bins); env_d["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+
+        proc = _run_cli(["dispatch", "x", "--seat", "opus", "--json"], env=env_d, cwd=str(repo), timeout=30)
+        check("dispatch --seat opus (Task) -> exit 2, no path printed",
+              proc.returncode == 2 and "Task seat" in proc.stderr and not proc.stdout.strip(),
+              "exit2 Task seat, empty stdout", f"{proc.returncode}: {proc.stdout!r} {proc.stderr!r}")
+
+        proc = _run_cli(["dispatch", "x", "--seat", "bogus", "--json"], env=env_d, cwd=str(repo), timeout=30)
+        check("dispatch --seat bogus (unknown) -> exit 2, no path printed",
+              proc.returncode == 2 and "subprocess seat" in proc.stderr and not proc.stdout.strip(),
+              "exit2 unknown, empty stdout", f"{proc.returncode}: {proc.stdout!r} {proc.stderr!r}")
+
+        proc = _run_cli(["dispatch", "x", "--session-id", "<SID>", "--json"], env=env_d, cwd=str(repo), timeout=30)
+        check("dispatch unsubstituted <…> session-id placeholder -> exit 2, no path",
+              proc.returncode == 2 and "placeholder" in proc.stderr and not proc.stdout.strip(),
+              "exit2 placeholder, empty stdout", f"{proc.returncode}: {proc.stdout!r} {proc.stderr!r}")
+
+        # -f XOR positional
+        tf = Path(td) / "task.txt"; tf.write_text("FROM FILE TASK")
+        proc, env = _run_dispatch(repo, bins, ["-f", str(tf)])
+        check("dispatch -f reads task file and runs (ok=true)",
+              env and env["ok"] is True, "ok=true via -f", str(env))
+        proc = _run_cli(["dispatch", "x", "-f", str(tf), "--json"], env=env_d, cwd=str(repo), timeout=30)
+        check("dispatch BOTH -f and positional -> exit 2 'not both'",
+              proc.returncode == 2 and "not both" in proc.stderr,
+              "exit2 not both", f"{proc.returncode}: {proc.stderr!r}")
+        proc = _run_cli(["dispatch", "--json"], env=env_d, cwd=str(repo), timeout=30)
+        check("dispatch NEITHER -f nor positional -> exit 2 'no task'",
+              proc.returncode == 2 and "no task" in proc.stderr,
+              "exit2 no task", f"{proc.returncode}: {proc.stderr!r}")
+
+    # --- in-process: unavailable-seat skip, non-writable fail-fast, null model header ---
+    log_section("dispatch — unavailable skip / non-writable fail-fast / null-model header")
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td) / "r"; repo.mkdir(); _init_repo(str(repo))
+        saved_wd = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+        os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+        # cmd_dispatch derives a RELATIVE -o path (.crew/reviews/<sid>/…) written
+        # by _emit relative to the process cwd — chdir into repo so it lands there
+        # (NOT in the real project repo running the test).
+        saved_cwd = os.getcwd()
+        os.chdir(str(repo))
+        try:
+            # Unavailable-but-known-writable seat -> skipped ok=false envelope, exit 0, path printed.
+            class _Unavail(Provider):
+                name = "codex"
+                supports_workspace_write = True
+                def is_available(self): return (False, "codex not found on PATH")
+                def run(self, *a, **k): raise AssertionError("seat ran despite unavailable")
+            out = io.StringIO()
+            with mock.patch("multiagent.cli.get_provider", return_value=_Unavail()):
+                with contextlib.redirect_stdout(out):
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=True,
+                                                        session_id="usess"))
+            lines = [l for l in out.getvalue().splitlines() if l.strip()]
+            envj = json.loads(Path(lines[-1]).read_text())
+            check("dispatch unavailable seat -> exit 0, ok=false skipped envelope, path printed",
+                  rc == 0 and envj["ok"] is False and "skipped" in (envj["error"] or "")
+                  and envj["head_moved"] is False and envj["staged_changed"] is False
+                  and envj["branch_changed"] is False
+                  and lines[-1].endswith("dispatch-codex.json"),
+                  "exit0 ok=false skipped path-printed", f"rc={rc} {envj}")
+
+            # Non-writable provider -> fail fast exit 2, seat never probed/run.
+            class _NoWrite(Provider):
+                name = "codex"
+                supports_workspace_write = False
+                def is_available(self): raise AssertionError("is_available probed on non-writable seat")
+                def run(self, *a, **k): raise AssertionError("non-writable seat ran")
+            err = io.StringIO()
+            with mock.patch("multiagent.cli.get_provider", return_value=_NoWrite()):
+                with contextlib.redirect_stderr(err):
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=True))
+            check("dispatch non-writable seat -> exit 2, fails fast (no is_available/run)",
+                  rc == 2 and "workspace-write" in err.getvalue(),
+                  "exit2 fail-fast", f"rc={rc} {err.getvalue()!r}")
+
+            # Null-model human header omits the (…) parens.
+            class _OkNullModel(Provider):
+                name = "codex"
+                supports_workspace_write = True
+                def is_available(self): return (True, "")
+                def run(self, *a, **k):
+                    return ProviderResult(name="codex", model=None, ok=True,
+                                          output="BODY", error=None, elapsed=0.1)
+            out = io.StringIO()
+            with mock.patch("multiagent.cli.get_provider", return_value=_OkNullModel()):
+                with contextlib.redirect_stdout(out):
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+            head = out.getvalue().splitlines()[0]
+            check("dispatch human header null model -> 'dispatch: codex' (no parens)",
+                  rc == 0 and head == "dispatch: codex", "dispatch: codex", repr(head))
+
+            class _OkModel(_OkNullModel):
+                def run(self, *a, **k):
+                    return ProviderResult(name="codex", model="gpt-x", ok=True,
+                                          output="BODY", error=None, elapsed=0.1)
+            out = io.StringIO()
+            with mock.patch("multiagent.cli.get_provider", return_value=_OkModel()):
+                with contextlib.redirect_stdout(out):
+                    cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+            head = out.getvalue().splitlines()[0]
+            check("dispatch human header with model -> 'dispatch: codex (gpt-x)'",
+                  head == "dispatch: codex (gpt-x)", "dispatch: codex (gpt-x)", repr(head))
+        finally:
+            os.chdir(saved_cwd)
+            if saved_wd is None:
+                os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+            else:
+                os.environ["CLAUDE_WORKING_DIRECTORY"] = saved_wd
+
+    # --- §10 dispatch.md static fence check ---
+    log_section("dispatch.md static fence check (§10)")
+    import re as _re
+    md_path = SCRIPT_DIR.parent / "commands" / "dispatch.md"
+    text = md_path.read_text(encoding="utf-8")
+    # Frontmatter allowed-tools includes Write.
+    fm = text.split("---", 2)
+    front = fm[1] if len(fm) >= 3 else ""
+    at_line = next((l for l in front.splitlines() if l.strip().startswith("allowed-tools")), "")
+    check("dispatch.md allowed-tools includes Write (spill mechanism)",
+          "Write" in at_line, "Write in allowed-tools", at_line)
+    # Extract bash code-fence command lines only (NOT prose): collect lines
+    # between a ```bash fence open and the next ``` close.
+    fence_lines = []
+    collecting = False
+    for line in text.splitlines():
+        st = line.strip()
+        if st.startswith("```bash"):
+            collecting = True
+            continue
+        if st.startswith("```"):
+            collecting = False
+            continue
+        if collecting and st and not st.startswith("#"):
+            fence_lines.append(st)
+    joined = "\n".join(fence_lines)
+    tokens_per_line = [l.split() for l in fence_lines]
+    check("dispatch.md: no executed line carries -o/--out (engine derives + prints the path)",
+          all("-o" not in t and "--out" not in t for t in tokens_per_line),
+          "no -o/--out in command lines", joined)
+    check("dispatch.md: no executed git add/commit/push/checkout -b",
+          not _re.search(r"\bgit\s+add\b", joined)
+          and not _re.search(r"\bgit\s+commit\b", joined)
+          and not _re.search(r"\bgit\s+push\b", joined)
+          and not _re.search(r"\bgit\s+checkout\s+-b\b", joined),
+          "no index/commit/push/branch mutation in fences", joined)
+    check("dispatch.md: --seat appears in NO executed command line (passed only when user names one)",
+          "--seat" not in joined, "no --seat in fences", joined)
+    check("dispatch.md: no executed line constructs a literal dispatch-<seat>.json (only the glob)",
+          all(("dispatch-" not in l) or ("dispatch-*.json" in l) for l in fence_lines),
+          "only dispatch-*.json glob, never dispatch-<seat>.json", joined)
+    check("dispatch.md: engine reached via the bare crew dispatcher (dispatch subcommand)",
+          '"${CLAUDE_PLUGIN_ROOT}/crew" dispatch' in joined,
+          "bare crew dispatch invocation", joined)
+    # /crew: prefix on command references. Only flag a SLASH-COMMAND token
+    # (preceded by whitespace or a backtick) — NOT a path component like
+    # `.crew/dispatch/` or a slash-joined word pair like `review/debate`.
+    bare = _re.findall(
+        r"(?<=[\s`])/(review|debate|dispatch|execute|build|measure-twice)\b", text)
+    check("dispatch.md: all command references use the /crew: prefix",
+          not bare and "/crew:" in text, "no bare /command refs", str(bare))
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -4294,6 +4798,7 @@ def main():
     test_targets()
     test_production_invocation_and_fanout()
     test_run_subcommand()
+    test_dispatch()
     test_council_subcommand()
     test_debate_subcommand()
     test_rounds()

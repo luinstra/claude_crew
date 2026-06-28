@@ -33,6 +33,10 @@ from . import Provider, ProviderResult
 
 class CodexProvider(Provider):
     name = "codex"
+    # EXPLICIT opt-in (fail-CLOSED ABC default is False): codex honors
+    # workspace-write natively via its --sandbox arg, so it is a valid
+    # /crew:dispatch write seat.
+    supports_workspace_write = True
 
     def is_available(self) -> tuple[bool, str]:
         # PATH only — no auth probe, no spawning codex.
@@ -64,15 +68,36 @@ class CodexProvider(Provider):
         # config.codex_reasoning_effort), else the built-in xhigh default
         # (re-pinned because --ignore-user-config drops the config's own value).
         effort = config.codex_reasoning_effort() or "xhigh"
-        argv = [
-            "codex", "exec", "-",
-            "--ignore-user-config",
+        argv = ["codex", "exec", "-"]
+        # --ignore-user-config makes a READ-ONLY review seat hermetic (skips
+        # ~/.codex/config.toml + AGENTS.md + project conventions/skills, ~40k
+        # startup tokens, reproducible). A WORK seat (/crew:dispatch,
+        # sandbox=="workspace-write") WANTS that project context so its edits
+        # match house style, so we OMIT the flag in write mode (RATIFIED
+        # decision). The -c model_reasoning_effort pin stays UNCONDITIONAL so
+        # dispatch keeps a deterministic effort even with user config loaded
+        # (explicit -c wins). Read-only review/debate is byte-for-byte unchanged.
+        if sandbox != "workspace-write":
+            argv += ["--ignore-user-config"]
+        argv += [
             "-c", f"model_reasoning_effort={effort}",
             "--sandbox", sandbox,
         ]
         if model:
             argv += ["--model", model]
         argv += ["--skip-git-repo-check", "-o", out_path]
+
+        # Workspace-write cwd pin (closes R13): codex inherits the engine process
+        # cwd by default, which can diverge from the guard's repo_dir. In write
+        # mode pin the subprocess cwd to CLAUDE_WORKING_DIRECTORY (the SAME
+        # expression cmd_dispatch uses for repo_dir) so the seat edits the tree
+        # the dispatch guard inspects. Read-only passes NO cwd (None) — the
+        # review path is byte-for-byte unchanged.
+        run_cwd = (
+            (os.environ.get("CLAUDE_WORKING_DIRECTORY") or os.getcwd())
+            if sandbox == "workspace-write"
+            else None
+        )
 
         try:
             try:
@@ -82,6 +107,7 @@ class CodexProvider(Provider):
                     capture_output=True,
                     text=True,
                     timeout=timeout,
+                    cwd=run_cwd,
                 )
             except subprocess.TimeoutExpired:
                 elapsed = time.monotonic() - start

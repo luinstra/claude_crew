@@ -52,6 +52,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 
 from multiagent import config, prompts, render, rounds, seats, targets
 from multiagent.providers import (
@@ -840,6 +841,298 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(result.error or "unknown error", file=sys.stderr)
         return 1
     _emit(result.output, args.out)
+    return 0
+
+
+# =============================================================================
+# /crew:dispatch — send ONE subprocess seat at the working tree in write mode
+# =============================================================================
+#
+# The execution complement to read-only review/debate: ONE chosen seat (default
+# codex) runs in ``sandbox="workspace-write"`` and may edit files, but is
+# instructed to leave everything UNCOMMITTED and UNSTAGED and on the same branch
+# (prompts.dispatch). A Python guard captures HEAD + staged-index + branch state
+# BEFORE and AFTER the seat runs — pinned to the SAME tree the seat edits — so a
+# commit / stage / branch-flip against instruction is LOUD and recoverable
+# (detect-not-prevent). dispatch emits its OWN 15-field JSON envelope (never a
+# polluted six-field ProviderResult).
+
+# A sentinel distinct from any 40-hex sha and from None: a valid git work tree
+# with NO commit yet. Serializes as a self-describing JSON string so an
+# unborn->sha FIRST commit fires head_moved=true (not masked to false).
+_UNBORN = "<unborn>"
+
+
+def _git_head(repo_dir: str) -> str | None:
+    """TRI-STATE HEAD probe in ``repo_dir`` (BLOCKING-2):
+
+    * a real **sha** — a born repo (incl. detached HEAD: ``rev-parse HEAD``
+      resolves the checked-out commit);
+    * the sentinel ``"<unborn>"`` — a valid work tree with zero commits
+      (``rev-parse HEAD`` fails BUT ``rev-parse --is-inside-work-tree`` succeeds);
+    * ``None`` — not-a-repo / git error (neither succeeds).
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_dir, capture_output=True, text=True,
+        )
+    except OSError:
+        return None
+    if proc.returncode == 0:
+        sha = (proc.stdout or "").strip()
+        return sha or None
+    # rev-parse HEAD failed — distinguish an unborn repo from a non-repo.
+    try:
+        inside = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=repo_dir, capture_output=True, text=True,
+        )
+    except OSError:
+        return None
+    if inside.returncode == 0 and (inside.stdout or "").strip() == "true":
+        return _UNBORN
+    return None
+
+
+def _git_staged(repo_dir: str) -> bool | None:
+    """Three-way staged-index probe in ``repo_dir`` — NOT ``returncode != 0``:
+
+    ``git diff --cached --quiet`` exits ``0`` (clean -> ``False``), ``1``
+    (staged -> ``True``), or anything else / not-a-repo / git missing
+    (``None``). The explicit mapping stops an exit-2 (not-a-repo) being misread
+    as "staged".
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=repo_dir, capture_output=True, text=True,
+        )
+    except OSError:
+        return None
+    if proc.returncode == 0:
+        return False
+    if proc.returncode == 1:
+        return True
+    return None
+
+
+def _git_branch(repo_dir: str) -> str | None:
+    """Current branch name in ``repo_dir`` via the SINGLE command
+    ``git symbolic-ref --quiet --short HEAD``, or ``None``.
+
+    ``symbolic-ref`` (NOT ``rev-parse --abbrev-ref HEAD``) is load-bearing: on a
+    detached HEAD it exits nonzero so this returns ``None`` (the null-safe
+    behavior the guard wants), whereas ``rev-parse --abbrev-ref`` returns the
+    literal string ``"HEAD"`` which would defeat null-safety. It still returns
+    the branch name in an unborn repo (HEAD points symbolically at
+    refs/heads/<branch> before the first commit).
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+            cwd=repo_dir, capture_output=True, text=True,
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    name = (proc.stdout or "").strip()
+    return name or None
+
+
+def cmd_dispatch(args: argparse.Namespace) -> int:
+    """Send ONE subprocess seat at the working tree in WRITE mode (/crew:dispatch).
+
+    Steps run in the SAME canonical order as ``cmd_run`` (derive the session
+    output path BEFORE the availability check), with the HEAD/staged/branch guard
+    wrapped around the seat run and a 15-field JSON envelope emitted.
+    """
+    # (a) Resolve the seat: --seat > [dispatch].seat > built-in codex. Compute the
+    # pinned guard tree ONCE — every _git_* helper runs with cwd=repo_dir, the
+    # SAME tree the codex/agy workspace-write cwd pin (and cursor's own pin) edit.
+    seat = args.seat or config.dispatch_seat() or "codex"
+    repo_dir = os.environ.get("CLAUDE_WORKING_DIRECTORY") or os.getcwd()
+
+    # (b) Seat-name guards — pre-run, exit 2, NO envelope (parity with cmd_run).
+    if seat in seats.TASK_SEAT_NAMES:
+        print(
+            f"error: '{seat}' is a Task seat — owned by the orchestrator, not "
+            f"runnable by the engine (engine runs subprocess seats only: "
+            f"{', '.join(known_seat_names())})",
+            file=sys.stderr,
+        )
+        return 2
+    if seat not in known_seat_names():
+        known = ", ".join(known_seat_names())
+        print(
+            f"error: unknown or non-subprocess seat {seat!r}; "
+            f"valid subprocess seats: {known}",
+            file=sys.stderr,
+        )
+        return 2
+    # An EXPLICIT --seat / configured [dispatch].seat BYPASSES config.seat_available()
+    # (parity with cmd_run's explicit single-seat path) — a config-disabled seat
+    # still runs when named directly. is_available() (step e) is the distinct
+    # "is the CLI installed" check.
+    provider = get_provider(seat)
+    if not provider.supports_workspace_write:
+        # Fail-CLOSED capability guard (D6): a seat that has not opted into
+        # workspace-write must not be silently run read-only.
+        print(
+            f"error: seat {seat!r} does not support workspace-write "
+            f"(cannot honor /crew:dispatch's write mode); refusing to run it "
+            f"read-only",
+            file=sys.stderr,
+        )
+        return 2
+
+    # (c) Resolve the task source + derive the output path — BEFORE is_available()
+    # (matching cmd_run). Deriving the path here is what lets the unavailable-seat
+    # skip envelope in (e) be written to a real path.
+    if args.file and args.task is not None:
+        print(
+            "error: provide either -f <task-file> OR a positional <task>, "
+            "not both",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.file and args.task is None:
+        print(
+            "error: no task given; provide -f <task-file> or a positional <task>",
+            file=sys.stderr,
+        )
+        return 2
+    if args.file:
+        try:
+            task = Path(args.file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot read task file {args.file!r}: {exc}", file=sys.stderr)
+            return 2
+    else:
+        task = args.task
+
+    # Derive -o to dispatch-<seat>.json from --session-id (run's derive block +
+    # placeholder guard). An explicit -o overrides; no session + no -o -> stdout.
+    if args.session_id and args.session_id.strip():
+        sid = _resolve_session_id(args.session_id)
+        if "<" in sid or ">" in sid:
+            print(
+                f"error: session id looks like an unsubstituted placeholder "
+                f"({sid!r}); pass your actual session id (the "
+                "[Session ID: …] value), not the literal template",
+                file=sys.stderr,
+            )
+            return 2
+        if args.out is None:
+            args.out = str(_reviews_subdir(sid) / f"dispatch-{seat}.json")
+
+    prompt = prompts.dispatch(task)
+
+    # (d) Capture git BEFORE-state (all in repo_dir).
+    head_before = _git_head(repo_dir)
+    staged_before = _git_staged(repo_dir)
+    branch_before = _git_branch(repo_dir)
+
+    # (e) Availability — unavailable-seat skip (mirrors cmd_run EXACTLY): build a
+    # SKIPPED ok=false envelope, the seat NEVER runs (after==before, all guards
+    # false), write + print the path, exit 0 under --json. DISTINCT from the
+    # exit-2 pre-run rejections in (b).
+    avail, diag = provider.is_available()
+    if not avail:
+        result = ProviderResult(
+            name=seat, model=None, ok=False, output="",
+            error=f"skipped: {diag}", elapsed=0.0,
+        )
+        head_after, staged_after, branch_after = head_before, staged_before, branch_before
+    else:
+        # (f) Run the seat in workspace-write. Model precedence mirrors cmd_run.
+        if args.model:
+            model = args.model
+        elif seat == "codex":
+            model = _codex_model()
+        else:
+            model = None
+        timeout = _resolve_timeout(args.timeout)
+        result = provider.run(
+            prompt, sandbox="workspace-write", model=model, timeout=timeout,
+        )
+        # (g) Capture git AFTER-state (all in repo_dir).
+        head_after = _git_head(repo_dir)
+        staged_after = _git_staged(repo_dir)
+        branch_after = _git_branch(repo_dir)
+
+    # (h) Compute the three guards NULL-SAFE (typed booleans, never null) on the
+    # internal tri-state values, then build + emit the 15-field envelope.
+    head_moved = (
+        head_before is not None and head_after is not None
+        and head_before != head_after
+    )
+    staged_changed = staged_before is False and staged_after is True
+    branch_changed = (
+        branch_before is not None and branch_after is not None
+        and branch_before != branch_after
+    )
+
+    envelope = {
+        "seat": seat,
+        "model": result.model,
+        "ok": result.ok,
+        "output": result.output,
+        "error": result.error,
+        "elapsed": result.elapsed,
+        "head_before": head_before,
+        "head_after": head_after,
+        "head_moved": head_moved,
+        "staged_before": staged_before,
+        "staged_after": staged_after,
+        "staged_changed": staged_changed,
+        "branch_before": branch_before,
+        "branch_after": branch_after,
+        "branch_changed": branch_changed,
+    }
+
+    if args.json:
+        _emit(json.dumps(envelope, ensure_ascii=False), args.out)
+        # collect-style: announce the resolved envelope path as the LAST clean
+        # stdout line so dispatch.md reads it back without constructing the name.
+        if args.out:
+            print(args.out)
+        return 0
+
+    # Human (non-JSON) output: header + seat output + warnings LAST in fixed order.
+    if not result.ok:
+        print(result.error or "unknown error", file=sys.stderr)
+        return 1
+    header = f"dispatch: {seat}" + (f" ({result.model})" if result.model else "")
+    lines = [header, "", result.output]
+    if head_moved:
+        if head_before == _UNBORN:
+            lines.append(
+                f"WARNING: the dispatched seat moved HEAD {head_before} -> "
+                f"{head_after} (it made the repo's FIRST commit against "
+                f"instruction; undo with: git update-ref -d HEAD)"
+            )
+        else:
+            lines.append(
+                f"WARNING: the dispatched seat moved HEAD {head_before} -> "
+                f"{head_after} (it committed against instruction; undo with: "
+                f"git reset --soft HEAD@{{1}})"
+            )
+    if staged_changed:
+        lines.append(
+            "WARNING: the dispatched seat STAGED changes against instruction "
+            "(unstage with: git reset)"
+        )
+    if branch_changed:
+        lines.append(
+            f"WARNING: the dispatched seat changed branch {branch_before} -> "
+            f"{branch_after} against instruction (return with: git checkout "
+            f"{branch_before})"
+        )
+    _emit("\n".join(lines), args.out)
+    if args.out:
+        print(args.out)
     return 0
 
 
@@ -1708,6 +2001,51 @@ def build_parser() -> argparse.ArgumentParser:
              "Explicit -f/-o override independently.",
     )
     run.set_defaults(func=cmd_run)
+
+    disp = sub.add_parser(
+        "dispatch",
+        help="Send ONE subprocess seat (default codex) at the working tree in "
+             "WRITE mode (workspace-write): it edits files in place and leaves "
+             "changes UNCOMMITTED + UNSTAGED. Emits a 15-field JSON envelope "
+             "(seat output + HEAD/staged/branch guards) and prints the resolved "
+             "envelope path.",
+    )
+    disp.add_argument(
+        "task",
+        nargs="?",
+        default=None,
+        help="the task to perform (the RAW task, framed internally; omit when "
+             "using -f). Exactly one of task or -f.",
+    )
+    disp.add_argument(
+        "-f", "--file",
+        default=None,
+        help="read the RAW task from this file instead of the positional string "
+             "(for multiline/large tasks; avoids ARG_MAX + quoting). XOR positional.",
+    )
+    disp.add_argument(
+        "--seat", dest="seat", default=None,
+        help="the subprocess seat to dispatch (default: [dispatch].seat config, "
+             "else codex). An explicit --seat bypasses the config availability "
+             "filter (the named seat always runs).",
+    )
+    disp.add_argument("--model", dest="model", default=None, help="override the seat's model")
+    disp.add_argument("--timeout", type=int, default=None, help="wall-clock timeout (s)")
+    disp.add_argument(
+        "--json", action="store_true",
+        help="emit the 15-field envelope as JSON (exit 0 even when ok=false)",
+    )
+    disp.add_argument(
+        "-o", "--out", default=None,
+        help="write the envelope to this file (else derived from --session-id, "
+             "else stdout). Normally OMITTED — the engine derives + prints it.",
+    )
+    disp.add_argument(
+        "--session-id", dest="session_id", default=None,
+        help="derive -o to .crew/reviews/<session-id>/dispatch-<seat>.json when "
+             "-o is omitted. Pass the literal id; the engine resolves it.",
+    )
+    disp.set_defaults(func=cmd_dispatch)
 
     rndr = sub.add_parser(
         "render",

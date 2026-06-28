@@ -149,6 +149,7 @@ For work requiring verification before declaring "done," use `/crew:build` inste
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (keeps main context clean) |
 | `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (natural-language dispatch) → `APPROVED`/`REVISE` verdict |
 | `/crew:debate "question"` | Crew-native council — single-round multi-model take on a question (codex + agy + cursor-auto + cursor-composer + opus + sonnet), synthesized into agreement/disagreement/recommendation |
+| `/crew:dispatch "[--seat <name>] <task>"` | Delegate a WORK task to ONE non-Claude seat (default `codex`) in write mode — it edits the working tree and leaves changes UNCOMMITTED + UNSTAGED for you to review (keep / revert / pipe into `/crew:review`) |
 | `/crew:build "task"` | Start a persistence loop — Claude won't stop until task is verified complete |
 | `/crew:cancel-build` | Exit an active build loop early |
 | `/crew:measure-twice "task"` | Start a self-refining plan loop — generates plan, reviews, revises until approved |

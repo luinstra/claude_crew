@@ -70,6 +70,7 @@ Skills provide specialized guidance that activates automatically based on contex
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (saves context) |
 | `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (codex + agy + cursor-auto + cursor-composer + opus + sonnet) → `APPROVED`/`REVISE` verdict |
 | `/crew:debate "question"` | Crew-native multi-model debate (codex + agy + cursor-auto + cursor-composer + opus + sonnet) — single-round council by default, or `--rounds N` for a multi-round debate with rebuttals; synthesized into agreement/disagreement/recommendation (self-contained, no external plugin) |
+| `/crew:dispatch "[--seat <name>] <task>"` | Delegate a WORK task to ONE non-Claude seat (default `codex`; override with a leading `--seat`) in WRITE mode — the seat edits the working tree and leaves changes UNCOMMITTED + UNSTAGED on the same branch for you to review (keep / revert / pipe into `/crew:review`). A HEAD/staged/branch guard surfaces any commit/stage/branch made against instruction |
 
 **Panel size (build / measure-twice / review / debate):** start the argument with
 `--panel full` (default — codex + agy + cursor-auto + cursor-composer +

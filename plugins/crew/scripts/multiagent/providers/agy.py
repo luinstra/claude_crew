@@ -176,6 +176,13 @@ def detect_auth_or_error(cleaned: str) -> str | None:
 
 class AgyProvider(Provider):
     name = "agy"
+    # EXPLICIT opt-in (fail-CLOSED ABC default is False): agy is a valid
+    # /crew:dispatch write seat. NUANCE — agy has a SINGLE confined --sandbox
+    # mode (it cannot express codex's read-only vs workspace-write split), so the
+    # ``sandbox`` arg is a no-op for the CLI: agy ALWAYS allows in-workspace
+    # writes and ALWAYS blocks out-of-workspace. It honors workspace-write in the
+    # only way it can. The cwd pin below still applies in write mode.
+    supports_workspace_write = True
 
     def is_available(self) -> tuple[bool, str]:
         if shutil.which("agy"):
@@ -257,6 +264,18 @@ class AgyProvider(Provider):
 
         wall_clock = self.effective_timeout(timeout)
 
+        # Workspace-write cwd pin (closes R13): agy inherits the engine process
+        # cwd by default, which can diverge from the dispatch guard's repo_dir. In
+        # write mode pin the subprocess cwd to CLAUDE_WORKING_DIRECTORY (the SAME
+        # expression cmd_dispatch uses for repo_dir) so the seat edits the tree
+        # the guard inspects. Read-only passes NO cwd (None) — review/debate is
+        # byte-for-byte unchanged.
+        run_cwd = (
+            (os.environ.get("CLAUDE_WORKING_DIRECTORY") or os.getcwd())
+            if sandbox == "workspace-write"
+            else None
+        )
+
         proc = subprocess.Popen(
             argv,
             stdin=subprocess.DEVNULL,
@@ -264,6 +283,7 @@ class AgyProvider(Provider):
             stderr=subprocess.PIPE,
             text=True,
             start_new_session=True,  # own process group, so we can reap children
+            cwd=run_cwd,
         )
 
         try:
