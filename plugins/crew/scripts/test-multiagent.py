@@ -5429,6 +5429,124 @@ def test_scaffold_config():
         check("D3 idempotency: identical inputs -> byte-identical output",
               out1 == out2, "byte-identical", "differs")
 
+    # --- header-recognition: commented / quoted / whitespace headers ----------
+    # A loader probe through the REAL config code path (not just _toml.loads).
+    def loads_clean(text):
+        """True iff `text` parses via the real loader's _load_uncached with NO
+        TOMLDecodeError surfaced (config._load_uncached swallows malformed into
+        {} + a warning, so probe tomllib directly for the hard assert too)."""
+        config._reset_cache_for_tests()
+        config.global_config_path().write_text(text)
+        loaded = config._load_uncached(config.global_config_path())
+        _toml.loads(text)  # hard assert: must NOT raise TOMLDecodeError
+        return loaded
+
+    # codex's exact repro: trailing inline comment on the header.
+    commented_header_global = (
+        'default_panel = "full"\n\n'
+        '[seats.codex] # my note\n'
+        'model = "gpt-x"\n'
+    )
+    with crew_config(glob=commented_header_global) as proj:
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "codex"])
+        check("header-recog: '[seats.codex] # note' -> NO duplicate [seats.codex]",
+              out.count("[seats.codex]") == 1, "1 header", str(out.count("[seats.codex]")))
+        loaded = loads_clean(out)
+        check("header-recog: commented-header output LOADS (no TOMLDecodeError)",
+              loaded.get("seats", {}).get("codex", {}).get("available") is False
+              and loaded["seats"]["codex"].get("model") == "gpt-x",
+              "in-place disable + model kept", str(loaded.get("seats", {}).get("codex")))
+
+    # quoted dotted component: [seats."cursor-glm"].
+    quoted_header_global = (
+        'default_panel = "full"\n\n'
+        '[seats."cursor-glm"]\n'
+        'model = "glm-5.2-max"\n'
+    )
+    with crew_config(glob=quoted_header_global) as proj:
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--add-seat", "cursor-glm"])
+        check("header-recog: '[seats.\"cursor-glm\"]' recognized -> no duplicate header",
+              out.count("[seats.") == 1, "1 seats header", str(out.count("[seats.")))
+        loaded = loads_clean(out)
+        check("header-recog: quoted-header output LOADS + available inserted in place",
+              loaded["seats"]["cursor-glm"].get("available") is True
+              and loaded["seats"]["cursor-glm"].get("model") == "glm-5.2-max",
+              "glm true + model kept", str(loaded["seats"].get("cursor-glm")))
+
+    # internal-whitespace header: [ seats.agy ].
+    ws_header_global = (
+        'default_panel = "full"\n\n'
+        '[ seats.agy ]\n'
+        'model = "Gemini 3.1 Pro (High)"\n'
+    )
+    with crew_config(glob=ws_header_global) as proj:
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "agy"])
+        check("header-recog: '[ seats.agy ]' internal-whitespace header recognized",
+              out.count("seats.agy") == 1, "1 occurrence", str(out.count("seats.agy")))
+        loaded = loads_clean(out)
+        check("header-recog: whitespace-header output LOADS + disable applied in place",
+              loaded["seats"]["agy"].get("available") is False
+              and loaded["seats"]["agy"].get("model") == "Gemini 3.1 Pro (High)",
+              "agy false + model kept", str(loaded["seats"].get("agy")))
+
+    # --- parse-guard BACKSTOP: an edit that would break the base is discarded --
+    # Monkeypatch the recognizer to MISS a header (simulating any form the regex
+    # still slips) so a disable would APPEND a duplicate [seats.codex] -> invalid.
+    # The backstop must catch it and hand back the VERBATIM base + a note.
+    guard_global = (
+        'default_panel = "full"\n\n'
+        '[seats.codex]\n'
+        'model = "gpt-x"\n'
+    )
+    with crew_config(glob=guard_global) as proj:
+        orig_header_name = cli._header_name
+        cli._header_name = lambda line: None  # blind the recognizer entirely
+        try:
+            rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "codex"])
+        finally:
+            cli._header_name = orig_header_name
+        check("parse-guard: blinded recognizer would dup -> output FALLS BACK to verbatim base",
+              out.rstrip("\n") == guard_global.rstrip("\n")
+              and "left it unchanged" in err,
+              "verbatim + note", f"changed={out.rstrip()!=guard_global.rstrip()} err={err[:60]}")
+        loaded = loads_clean(out)  # the verbatim fallback ALWAYS loads
+        check("parse-guard: fallback output LOADS (no TOMLDecodeError)",
+              "codex" in loaded.get("seats", {}), "loads", str(loaded.get("seats")))
+
+    # --- MINOR: contradictory --add-seat X --disable-seat X -> validation error
+    with crew_config() as proj:
+        target = Path(proj) / "c.toml"
+        rc, out, err = run(["scaffold-config", "--out", str(target),
+                            "--add-seat", "codex", "--disable-seat", "codex"])
+        check("contradictory --add-seat/--disable-seat codex -> nonzero + stderr, no file",
+              rc != 0 and "codex" in err and not target.exists(),
+              "nonzero, stderr, no file", f"rc={rc} err={err[:60]} exists={target.exists()}")
+
+    # --- MINOR: --repo + existing global + NO --detection -> skipped note ------
+    with crew_config(glob=multi_global) as proj:
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--default-panel", "full"])
+        check("--repo + existing global + no --detection: 'detection skipped' note on stderr",
+              "detection skipped" in err and "detection skipped" not in out,
+              "note on stderr", f"err={err[:80]}")
+        check("--repo + existing global + no --detection: NO 'available' lines auto-emitted",
+              "available" not in out, "no available", out[:120])
+
+    # --- MINOR: --repo + global + VALID --detection -> parsed, NOT auto-applied
+    with crew_config(glob=multi_global) as proj:
+        det = Path(proj) / "doctor.json"
+        write_det(det, absent=["agy"], present=["codex"])
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--detection", str(det),
+                            "--disable-seat", "codex"])
+        parsed = _toml.loads(out)  # loads clean
+        check("--repo + global + valid --detection: detected-absent agy NOT auto-applied",
+              "available" not in parsed.get("seats", {}).get("agy", {"available": "x"}),
+              "agy untouched by detection", str(parsed.get("seats", {}).get("agy")))
+        check("--repo + global + valid --detection: only explicit --disable-seat codex lands",
+              parsed["seats"]["codex"].get("available") is False,
+              "codex false (explicit)", str(parsed["seats"].get("codex")))
+        check("--repo + global + valid --detection: no 'detection skipped' note (flag present)",
+              "detection skipped" not in err, "no skip note", err[:80])
+
 
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")

@@ -2101,16 +2101,75 @@ def _override_note(label: str) -> str:
     )
 
 
+# A TOML table header: ``[name]`` tolerating an optional trailing inline comment
+# (``[seats.codex] # note``). The captured name is then NORMALIZED before any
+# comparison so quoted components / internal whitespace also resolve.
+_HEADER_RE = re.compile(r"\s*\[([^\]]+)\]\s*(#.*)?$")
+
+
+def _normalize_section(raw: str) -> str | None:
+    """Normalize a TOML table-header name to its bare dotted form for comparison.
+
+    Splits the dotted key into segments (a ``.`` inside a quoted segment does NOT
+    separate), strips surrounding whitespace per segment, and strips matching
+    quotes from a quoted segment — so ``seats."cursor-glm"``, ``[ seats.codex ]``
+    and ``seats.'agy'`` compare equal to the bare ``seats.cursor-glm`` /
+    ``seats.codex`` / ``seats.agy`` targets. Returns ``None`` for a header the
+    parser cannot make sense of (empty / unterminated quote / stray char), so the
+    caller treats it as UNRECOGNIZED rather than guessing."""
+    s = raw.strip()
+    segs: list[str] = []
+    i, n = 0, len(s)
+    while True:
+        while i < n and s[i] in " \t":
+            i += 1
+        if i >= n:
+            return None  # empty header or trailing dot
+        if s[i] in ("\"", "'"):
+            quote = s[i]
+            i += 1
+            start = i
+            while i < n and s[i] != quote:
+                i += 1
+            if i >= n:
+                return None  # unterminated quote
+            segs.append(s[start:i])
+            i += 1  # consume closing quote
+        else:
+            start = i
+            while i < n and s[i] not in " \t.":
+                i += 1
+            segs.append(s[start:i])
+        while i < n and s[i] in " \t":
+            i += 1
+        if i >= n:
+            break
+        if s[i] != ".":
+            return None  # stray char after a segment
+        i += 1
+    return ".".join(segs)
+
+
+def _header_name(line: str) -> str | None:
+    """The NORMALIZED section name of ``line`` if it is a live table header, else
+    None. (Commented lines must be filtered by the caller.)"""
+    m = _HEADER_RE.match(line)
+    if not m:
+        return None
+    return _normalize_section(m.group(1))
+
+
 def _live_sections(lines: list[str]) -> list[str | None]:
     """For each line index, the CURRENT live ``[table]`` section (or None for the
-    top level). Commented lines (``^\\s*#``) never change the section."""
+    top level). Commented lines (``^\\s*#``) never change the section. Recognizes
+    commented-trailing / quoted / whitespace header forms (normalized name)."""
     cur: str | None = None
     out: list[str | None] = []
     for line in lines:
         if not line.lstrip().startswith("#"):
-            m = re.match(r"\s*\[([^\]]+)\]\s*$", line)
-            if m:
-                cur = m.group(1).strip()
+            name = _header_name(line)
+            if name is not None:
+                cur = name
         out.append(cur)
     return out
 
@@ -2119,8 +2178,7 @@ def _find_live_header(lines: list[str], section: str) -> int | None:
     for i, line in enumerate(lines):
         if line.lstrip().startswith("#"):
             continue
-        m = re.match(r"\s*\[([^\]]+)\]\s*$", line)
-        if m and m.group(1).strip() == section:
+        if _header_name(line) == section:
             return i
     return None
 
@@ -2285,7 +2343,22 @@ def _apply_repo_overrides(
     for seat, val in seat_avail.items():
         lines, n = _apply_seat_available(lines, seat, "true" if val else "false", seat)
         notes += n
-    return "\n".join(lines), notes
+    result = "\n".join(lines)
+    # Parse-guard BACKSTOP: the base is known to parse (validated by the caller).
+    # If our line-edits somehow produced an UNLOADABLE result (a header form the
+    # recognizer still misses → a duplicate table, etc.), DISCARD the edit and
+    # leave the base verbatim — never hand back a config that won't load. On
+    # Python <3.11 tomllib is None and the guard can't run (the documented
+    # best-effort limitation); the broadened recognizer above still applies.
+    if config.tomllib is not None:
+        try:
+            config.tomllib.loads(result)
+        except (config.tomllib.TOMLDecodeError, UnicodeDecodeError):
+            return base, [
+                "could not safely apply overrides to your global — left it "
+                "unchanged; edit .crew/config.toml by hand"
+            ]
+    return result, notes
 
 
 # --- scaffold-config: command -------------------------------------------------
@@ -2347,6 +2420,14 @@ def cmd_scaffold_config(args: argparse.Namespace) -> int:
             )
             return 2
         disabled.add(s)
+    contradictory = sorted(opted_in & disabled)
+    if contradictory:
+        print(
+            f"error: seat(s) {', '.join(contradictory)} passed to BOTH --add-seat and "
+            "--disable-seat — a seat cannot be enabled and disabled at once",
+            file=sys.stderr,
+        )
+        return 2
 
     # 2. Detection handling — ABSENT flag (omit available) vs BAD file (error).
     detection: dict | None = None
@@ -2400,6 +2481,12 @@ def cmd_scaffold_config(args: argparse.Namespace) -> int:
                 seat_avail=seat_avail,
             )
             notes += onotes
+            if detection is None:
+                notes.append(
+                    "detection skipped (no --detection flag) — no per-seat 'available' "
+                    "lines auto-emitted; only explicit --add-seat/--disable-seat "
+                    "corrections were applied"
+                )
         else:
             content = _render_config_template(
                 detection, scope="repo", default_panel=default_panel,
