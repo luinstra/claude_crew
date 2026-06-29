@@ -1837,6 +1837,631 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     return 0
 
 
+# =============================================================================
+# /crew:init support — `doctor` (probe) + `scaffold-config` (template generator)
+# =============================================================================
+#
+# Both are registry-derived and NON-BILLABLE: doctor calls each provider's
+# is_available() (codex/agy = pure shutil.which; cursor = its single local
+# `agent --version` identity probe, run ONCE and fanned to every cursor-* seat).
+# scaffold-config performs NO probe at all — it consumes doctor's JSON via
+# --detection. The stdout/stderr discipline is load-bearing: stdout carries ONLY
+# the machine payload (doctor JSON / {target,wrote,diverted} envelope / `--out -`
+# TOML); EVERY note/error goes to stderr (init.md parses stdout).
+
+# Premium-bucket / opt-in cursor seats — emitted available=false (unless the user
+# opts one back in) so no default crew panel touches the premium allotment.
+_PREMIUM_OFF_SEATS = ("cursor-glm", "cursor-gpt", "cursor-gemini")
+
+# Honest task-seat diagnostics (subscription-backed; not CLI-detectable).
+_TASK_SEAT_DIAGS = {
+    "opus": "Claude subscription (in-session); not CLI-detectable",
+    "sonnet": "Claude subscription (in-session); not CLI-detectable",
+    "opus-4.6": "Claude subscription (in-session); opt-in",
+}
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Probe per-seat provider availability and emit a JSON detection map (D1).
+
+    Iterates ``known_seat_names()`` → ``get_provider(n).is_available()`` into a
+    ``subprocess`` map, then adds a static ``task`` map (the subscription-backed
+    Claude seats, in ``sorted(TASK_SEAT_NAMES)`` order for deterministic JSON).
+
+    The ``agent`` binary is identical across every ``cursor-*`` seat, so the
+    cursor identity probe runs EXACTLY ONCE — the single result is fanned to all
+    cursor seats (calling each one's ``is_available()`` would spawn
+    ``agent --version`` up to 5x). codex/agy keep their own pure-``which`` checks.
+
+    NON-BILLABLE: no metered/network call. stdout carries ONLY the JSON; every
+    diagnostic/error goes to stderr. File-write destination follows the D1 matrix
+    (``-o`` wins; else the session path; else no file) — the JSON is ALWAYS
+    printed to stdout regardless.
+    """
+    subprocess_map: dict[str, dict] = {}
+    cursor_result: tuple[bool, str] | None = None
+    for name in known_seat_names():
+        if name.startswith("cursor-"):
+            if cursor_result is None:
+                cursor_result = get_provider(name).is_available()
+            avail, diag = cursor_result
+        else:
+            avail, diag = get_provider(name).is_available()
+        subprocess_map[name] = {"available": bool(avail), "diag": diag}
+
+    task_map: dict[str, dict] = {}
+    for name in sorted(seats.TASK_SEAT_NAMES):
+        task_map[name] = {
+            "available": True,
+            "diag": _TASK_SEAT_DIAGS.get(name, "Claude subscription (in-session)"),
+        }
+
+    text = json.dumps(
+        {"subprocess": subprocess_map, "task": task_map},
+        ensure_ascii=False, indent=2,
+    )
+
+    # File-write destination matrix (D1): -o wins; else session path; else none.
+    out_path = args.out
+    if out_path:
+        out_path = os.path.expanduser(out_path)
+    else:
+        session_id = _resolve_session_id(args.session_id)
+        if "<" in session_id or ">" in session_id:
+            print(
+                f"error: session id looks like an unsubstituted placeholder "
+                f"({session_id!r}); pass your actual session id (the "
+                "[Session ID: …] value), not the literal template",
+                file=sys.stderr,
+            )
+            return 2
+        if session_id:
+            out_path = str(_reviews_subdir(session_id) / "doctor.json")
+
+    if out_path:
+        p = Path(out_path)
+        if p.parent and not p.parent.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text + "\n", encoding="utf-8")
+
+    # ALWAYS print the JSON to stdout (the machine payload).
+    print(text)
+    return 0
+
+
+# --- scaffold-config: template rendering -------------------------------------
+
+def _toml_str(s: str) -> str:
+    """A seat/panel name as a TOML string literal. Names are restricted to a
+    simple charset (validated upstream), so no escaping is needed."""
+    return '"' + s + '"'
+
+
+def _premium_comment(seat: str) -> str:
+    return {
+        "cursor-glm": "opt-in (draws Cursor's shared premium MAX allotment)",
+        "cursor-gpt": "opt-in (codex already covers the GPT lineage)",
+        "cursor-gemini": "opt-in (agy covers the Gemini lineage flat-rate)",
+    }.get(seat, "opt-in")
+
+
+def _det_lookup(detection: dict, seat: str) -> dict | None:
+    """The per-seat detection record from a doctor JSON payload, or None."""
+    sub = detection.get("subprocess")
+    if isinstance(sub, dict) and isinstance(sub.get(seat), dict):
+        return sub[seat]
+    tsk = detection.get("task")
+    if isinstance(tsk, dict) and isinstance(tsk.get(seat), dict):
+        return tsk[seat]
+    return None
+
+
+def _seat_avail(
+    seat: str, *, detection: dict | None, opted_in: set[str], disabled: set[str],
+) -> tuple[str, str | None] | None:
+    """Decide a seat's emitted ``available`` line for a FRESH template.
+
+    Returns ``(value, comment)`` to emit ``available = <value>`` (with an optional
+    trailing comment), or ``None`` to OMIT the line. Precedence (explicit
+    correction beats detection):
+      1. ``--disable-seat`` → ``false`` (always).
+      2. ``--add-seat``     → omit (the seat defaults to available).
+      3. detection PRESENT + seat detected absent → ``false  # not found on PATH``.
+      4. detection PRESENT + premium-off seat (not opted in) → ``false  # opt-in …``.
+      5. otherwise → omit.
+    When ``detection`` is None (no --detection flag) only an explicit
+    ``--disable-seat`` emits a line; every other seat is omitted (D4).
+    """
+    if seat in disabled:
+        return ("false", None)
+    if seat in opted_in:
+        return None
+    if detection is not None:
+        det = _det_lookup(detection, seat)
+        if det is not None and det.get("available") is False:
+            return ("false", "not found on PATH")
+        if seat in _PREMIUM_OFF_SEATS:
+            return ("false", _premium_comment(seat))
+    return None
+
+
+def _avail_line(av: tuple[str, str | None]) -> str:
+    value, comment = av
+    return f"available = {value}   # {comment}" if comment else f"available = {value}"
+
+
+def _render_config_template(
+    detection: dict | None, *, scope: str, default_panel: str, dispatch_seat: str,
+    opted_in: set[str], disabled: set[str],
+) -> str:
+    """Render the COMMENTED starter config (D4) — ONLY keys the loader reads.
+
+    ``reasoning_effort`` lives ONLY under ``[seats.codex]`` and ``print_timeout``
+    ONLY under ``[seats.agy]`` (where the getters read them). Per-seat ``available``
+    lines are decided by ``_seat_avail`` (cost-safe defaults; premium seats off).
+    """
+    today = datetime.date.today().isoformat()
+    if scope == "repo":
+        path_label = ".crew/config.toml"
+        tier_note = "per-repo overrides of the global ~/.crew-config.toml"
+    else:
+        path_label = "~/.crew-config.toml"
+        tier_note = "machine-wide defaults below per-repo .crew/config.toml"
+
+    def av(seat: str) -> tuple[str, str | None] | None:
+        return _seat_avail(seat, detection=detection, opted_in=opted_in, disabled=disabled)
+
+    L: list[str] = []
+    L.append(f"# {path_label} — generated by /crew:init on {today}")
+    L.append(f"# {tier_note}.")
+    L.append("# Resolution: CLI flag > per-repo .crew/config.toml > global ~/.crew-config.toml > built-in.")
+    L.append("# Every key below is OPTIONAL; delete what you don't need. Python 3.11+ required to load.")
+    L.append("")
+    L.append("# Default panel when you name neither --panel nor --seats.")
+    L.append("# Cost-safe built-in full = codex + agy + cursor-auto + cursor-composer + opus + sonnet.")
+    L.append(f"default_panel = {_toml_str(default_panel)}")
+    L.append("")
+    L.append("# [debate].panel — /crew:debate's default panel (can default fuller than reviews).")
+    L.append("# [debate]")
+    L.append('# panel = "full"')
+    L.append("")
+    L.append("# [dispatch].seat — /crew:dispatch's default WRITE seat (must be ONE known subprocess")
+    L.append("# seat: codex/agy/cursor-*; a panel name or the 'cursor' group token is rejected).")
+    L.append("[dispatch]")
+    L.append(f"seat = {_toml_str(dispatch_seat)}")
+    L.append("")
+    L.append("# [panels] — redefine a built-in preset or add a custom one (usable via --panel <name>).")
+    L.append("# [panels]")
+    L.append('# quick = ["codex", "opus"]')
+    L.append("")
+    L.append("# ---- Per-seat tuning + availability -------------------------------------------------")
+    L.append("# available = false drops a seat from EVERY resolved panel. It is an opt-OUT: runtime")
+    L.append("# already skips a CLI that isn't installed, so these flags are mainly for DISCOVERABILITY,")
+    L.append("# a DELIBERATE opt-out, and capturing your confirmed preferences — NOT a requirement.")
+    L.append("")
+    L.append("[seats.codex]")
+    a = av("codex")
+    if a is not None:
+        L.append(_avail_line(a))
+    L.append('# model = "..."                  # override codex\'s model')
+    L.append('# reasoning_effort = "xhigh"     # codex-only knob (read only from [seats.codex])')
+    L.append("")
+    L.append("[seats.agy]")
+    a = av("agy")
+    if a is not None:
+        L.append(_avail_line(a))
+    L.append('# model = "Gemini 3.1 Pro (High)"')
+    L.append('# print_timeout = "8m"           # agy-only knob (read only from [seats.agy])')
+    L.append("")
+    for seat, default_model in (("cursor-auto", "auto"), ("cursor-composer", "composer")):
+        a = av(seat)
+        if a is not None:
+            L.append(f"[seats.{seat}]")
+            L.append(_avail_line(a))
+            L.append(f'# model = "{default_model}"')
+        else:
+            L.append(f"# [seats.{seat}]")
+            L.append(f'# model = "{default_model}"')
+        L.append("")
+    for seat in _PREMIUM_OFF_SEATS:
+        a = av(seat)
+        if a is not None:
+            L.append(f"[seats.{seat}]")
+            L.append(_avail_line(a))
+        else:
+            L.append(f"# [seats.{seat}]   # {_premium_comment(seat)}")
+        L.append("")
+    L.append("# [tuning].timeout — per-seat wall-clock default (positive integer seconds).")
+    L.append("# [tuning]")
+    L.append("# timeout = 600")
+
+    # Task seats: only an explicit --disable-seat (opt-out) emits a line.
+    task_blocks: list[str] = []
+    for seat in sorted(seats.TASK_SEAT_NAMES):
+        a = av(seat)
+        if a is not None:
+            task_blocks.append("")
+            task_blocks.append(f"[seats.{seat}]")
+            task_blocks.append(_avail_line(a))
+    if task_blocks:
+        L.append("")
+        L.append("# ---- Claude (subscription) seats — opt-out only -----------------------------------")
+        L.extend(task_blocks)
+
+    return "\n".join(L)
+
+
+# --- scaffold-config: conservative section-scoped --repo line overrides (D3) --
+
+def _override_note(label: str) -> str:
+    return (
+        f"could not safely apply override {label!r} — your global config defines it via "
+        "an inline table / dotted key / multi-line value, or defines it more than once; "
+        "left verbatim; edit .crew/config.toml by hand"
+    )
+
+
+def _live_sections(lines: list[str]) -> list[str | None]:
+    """For each line index, the CURRENT live ``[table]`` section (or None for the
+    top level). Commented lines (``^\\s*#``) never change the section."""
+    cur: str | None = None
+    out: list[str | None] = []
+    for line in lines:
+        if not line.lstrip().startswith("#"):
+            m = re.match(r"\s*\[([^\]]+)\]\s*$", line)
+            if m:
+                cur = m.group(1).strip()
+        out.append(cur)
+    return out
+
+
+def _find_live_header(lines: list[str], section: str) -> int | None:
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("#"):
+            continue
+        m = re.match(r"\s*\[([^\]]+)\]\s*$", line)
+        if m and m.group(1).strip() == section:
+            return i
+    return None
+
+
+def _leading_comment_end(lines: list[str]) -> int:
+    """Index of the first line that is NOT part of the leading ``#``/blank block
+    (i.e. where a top-level key may be inserted). 0 when the file starts directly
+    with a header / has no leading comment block (the position-0 edge)."""
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s == "" or s.startswith("#"):
+            continue
+        return i
+    return len(lines)
+
+
+def _apply_toplevel(
+    lines: list[str], key: str, value: str, label: str,
+) -> tuple[list[str], list[str]]:
+    sections = _live_sections(lines)
+    keyre = re.compile(r"^\s*" + re.escape(key) + r"\s*=")
+    hits = [
+        i for i, sec in enumerate(sections)
+        if sec is None and not lines[i].lstrip().startswith("#") and keyre.match(lines[i])
+    ]
+    if len(hits) == 1:
+        rhs = lines[hits[0]].split("=", 1)[1].strip()
+        if rhs.startswith("{"):
+            return lines, [_override_note(label)]
+        out = list(lines)
+        out[hits[0]] = f"{key} = {value}"
+        return out, []
+    if len(hits) > 1:
+        return lines, [_override_note(label)]
+    out = list(lines)
+    out.insert(_leading_comment_end(out), f"{key} = {value}")
+    return out, []
+
+
+def _toplevel_table_other_form(lines: list[str], table: str) -> bool:
+    """True when ``table`` is defined at the top level via an inline table
+    (``table = { … }``) or a dotted key (``table.x = …``) — shapes a header
+    append would duplicate."""
+    sections = _live_sections(lines)
+    inline = re.compile(r"^\s*" + re.escape(table) + r"\s*=\s*\{")
+    dotted = re.compile(r"^\s*" + re.escape(table) + r"\s*\.")
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("#"):
+            continue
+        if sections[i] is None and (inline.match(line) or dotted.match(line)):
+            return True
+    return False
+
+
+def _apply_single_table_key(
+    lines: list[str], table: str, key: str, value: str, label: str,
+) -> tuple[list[str], list[str]]:
+    """Section-scoped override for a simple top-level ``[table]`` (e.g. dispatch).
+    Case 1 (key present once) → replace; case 2 (header present, key absent) →
+    insert after header; case 3 (absent in every form) → append a new table;
+    inline/dotted/duplicate → leave verbatim + note (case 5)."""
+    sections = _live_sections(lines)
+    keyre = re.compile(r"^\s*" + re.escape(key) + r"\s*=")
+    hits = [
+        i for i, sec in enumerate(sections)
+        if sec == table and not lines[i].lstrip().startswith("#") and keyre.match(lines[i])
+    ]
+    if len(hits) == 1:
+        rhs = lines[hits[0]].split("=", 1)[1].strip()
+        if rhs.startswith("{"):
+            return lines, [_override_note(label)]
+        out = list(lines)
+        out[hits[0]] = f"{key} = {value}"
+        return out, []
+    if len(hits) > 1:
+        return lines, [_override_note(label)]
+    header_idx = _find_live_header(lines, table)
+    if header_idx is not None:
+        out = list(lines)
+        out.insert(header_idx + 1, f"{key} = {value}")
+        return out, []
+    if _toplevel_table_other_form(lines, table):
+        return lines, [_override_note(label)]
+    out = list(lines)
+    if out and out[-1].strip() != "":
+        out.append("")
+    out.append(f"[{table}]")
+    out.append(f"{key} = {value}")
+    return out, []
+
+
+def _seat_defined_other_form(lines: list[str], seat: str) -> bool:
+    """True when ``seats.<seat>`` is defined via a shape a ``[seats.<seat>]``
+    append would DUPLICATE: an inline ``<seat> = { … }`` under ``[seats]``, a
+    dotted ``seats.<seat>`` / ``<seat>.x`` key, or a whole inline ``seats = { … }``.
+    Skips commented lines (a commented-out form must not block a correction)."""
+    sections = _live_sections(lines)
+    inline_under_seats = re.compile(r"^\s*" + re.escape(seat) + r"\s*=\s*\{")
+    dotted_under_seats = re.compile(r"^\s*" + re.escape(seat) + r"\s*\.")
+    dotted_top = re.compile(r"^\s*seats\s*\.\s*" + re.escape(seat) + r"\b")
+    seats_inline_top = re.compile(r"^\s*seats\s*=\s*\{")
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("#"):
+            continue
+        sec = sections[i]
+        if sec == "seats" and (inline_under_seats.match(line) or dotted_under_seats.match(line)):
+            return True
+        if sec is None and (dotted_top.match(line) or seats_inline_top.match(line)):
+            return True
+    return False
+
+
+def _apply_seat_available(
+    lines: list[str], seat: str, value: str, label: str,
+) -> tuple[list[str], list[str]]:
+    """Section-scoped ``[seats.<seat>].available`` override (D3 cases 1/2/3/5)."""
+    section = f"seats.{seat}"
+    sections = _live_sections(lines)
+    keyre = re.compile(r"^\s*available\s*=")
+    hits = [
+        i for i, sec in enumerate(sections)
+        if sec == section and not lines[i].lstrip().startswith("#") and keyre.match(lines[i])
+    ]
+    if len(hits) == 1:
+        out = list(lines)
+        out[hits[0]] = f"available = {value}"
+        return out, []
+    if len(hits) > 1:
+        return lines, [_override_note(label)]
+    header_idx = _find_live_header(lines, section)
+    if header_idx is not None:
+        out = list(lines)
+        out.insert(header_idx + 1, f"available = {value}")
+        return out, []
+    if _seat_defined_other_form(lines, seat):
+        return lines, [_override_note(label)]
+    out = list(lines)
+    if out and out[-1].strip() != "":
+        out.append("")
+    out.append(f"[seats.{seat}]")
+    out.append(f"available = {value}")
+    return out, []
+
+
+def _apply_repo_overrides(
+    base: str, *, default_panel: str, dispatch_seat: str, seat_avail: dict[str, bool],
+) -> tuple[str, list[str]]:
+    """Seed the repo config from the global text VERBATIM (comments preserved),
+    then apply the CONSERVATIVE section-scoped line overrides (D3). The whole-seed
+    pre-gate routes any multi-line / array-of-tables base to leave-verbatim."""
+    if '"""' in base or "'''" in base or "[[" in base:
+        return base, [
+            "could not safely apply overrides — your global config contains a multi-line "
+            "string or array-of-tables; left verbatim; edit .crew/config.toml by hand"
+        ]
+    notes: list[str] = []
+    lines = base.split("\n")
+    lines, n = _apply_toplevel(lines, "default_panel", _toml_str(default_panel), "default_panel")
+    notes += n
+    lines, n = _apply_single_table_key(lines, "dispatch", "seat", _toml_str(dispatch_seat), "dispatch.seat")
+    notes += n
+    for seat, val in seat_avail.items():
+        lines, n = _apply_seat_available(lines, seat, "true" if val else "false", seat)
+        notes += n
+    return "\n".join(lines), notes
+
+
+# --- scaffold-config: command -------------------------------------------------
+
+def _scaffold_stderr(notes: list[str]) -> None:
+    for note in notes:
+        print(f"crew scaffold-config: {note}", file=sys.stderr)
+
+
+def cmd_scaffold_config(args: argparse.Namespace) -> int:
+    """Render + write the commented starter config (D2/D3/D4).
+
+    ONE output contract: resolved-target default / explicit ``--out <path>`` /
+    ``--out -`` stdout TOML preview. The target write OWNS no-clobber (absent →
+    write; present → ``<target>.new`` + ``diverted:true``; ``--force`` →
+    overwrite). stdout = machine payload ONLY (envelope JSON or ``--out -`` TOML);
+    ALL notes/errors → stderr.
+    """
+    scope = "repo" if args.repo else "global"
+
+    # 1. Validate inputs BEFORE any emit (reject nonzero + stderr message).
+    default_panel = args.default_panel or "full"
+    valid_panels = set(seats.PANEL_PRESETS) | set(config.panels() or {})
+    if default_panel not in valid_panels:
+        print(
+            f"error: --default-panel {default_panel!r} is not a known panel "
+            f"({', '.join(sorted(valid_panels))})",
+            file=sys.stderr,
+        )
+        return 2
+    dispatch_seat = args.dispatch_seat or "codex"
+    known = set(known_seat_names())
+    if dispatch_seat not in known:
+        print(
+            f"error: --dispatch-seat {dispatch_seat!r} is not a known subprocess seat "
+            f"({', '.join(sorted(known))}); [dispatch].seat must be a subprocess WRITE "
+            "seat (a panel name or a Task seat is rejected)",
+            file=sys.stderr,
+        )
+        return 2
+    avail_union = known | set(seats.TASK_SEAT_NAMES)
+    opted_in: set[str] = set()
+    for s in (args.add_seat or []):
+        if s not in avail_union:
+            print(
+                f"error: --add-seat {s!r} is not a known seat "
+                f"({', '.join(sorted(avail_union))})",
+                file=sys.stderr,
+            )
+            return 2
+        opted_in.add(s)
+    disabled: set[str] = set()
+    for s in (args.disable_seat or []):
+        if s not in avail_union:
+            print(
+                f"error: --disable-seat {s!r} is not a known seat "
+                f"({', '.join(sorted(avail_union))})",
+                file=sys.stderr,
+            )
+            return 2
+        disabled.add(s)
+
+    # 2. Detection handling — ABSENT flag (omit available) vs BAD file (error).
+    detection: dict | None = None
+    if args.detection is not None:
+        det_path = Path(os.path.expanduser(args.detection))
+        try:
+            raw = det_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot read --detection file {args.detection!r}: {exc}", file=sys.stderr)
+            return 2
+        if not raw.strip():
+            print(f"error: --detection file {args.detection!r} is empty", file=sys.stderr)
+            return 2
+        try:
+            detection = json.loads(raw)
+        except ValueError as exc:
+            print(f"error: --detection file {args.detection!r} is not valid JSON: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(detection, dict):
+            print(f"error: --detection file {args.detection!r} must be a JSON object", file=sys.stderr)
+            return 2
+
+    # 3. Build the content.
+    notes: list[str] = []
+    if scope == "repo":
+        try:
+            base = config.global_config_path().read_text(encoding="utf-8")
+            has_global = True
+        except OSError:
+            base = ""
+            has_global = False
+        if has_global:
+            if config.tomllib is not None:
+                try:
+                    config.tomllib.loads(base)
+                except (config.tomllib.TOMLDecodeError, UnicodeDecodeError):
+                    print(
+                        "error: existing global ~/.crew-config.toml does not parse as TOML; "
+                        "refusing to seed an unloadable base into .crew/config.toml — fix or "
+                        "remove the global file first",
+                        file=sys.stderr,
+                    )
+                    return 2
+            seat_avail: dict[str, bool] = {}
+            for s in sorted(opted_in):
+                seat_avail[s] = True
+            for s in sorted(disabled):
+                seat_avail[s] = False
+            content, onotes = _apply_repo_overrides(
+                base, default_panel=default_panel, dispatch_seat=dispatch_seat,
+                seat_avail=seat_avail,
+            )
+            notes += onotes
+        else:
+            content = _render_config_template(
+                detection, scope="repo", default_panel=default_panel,
+                dispatch_seat=dispatch_seat, opted_in=opted_in, disabled=disabled,
+            )
+            if detection is None:
+                notes.append(
+                    "detection skipped (no --detection flag) — per-seat 'available' lines "
+                    "omitted; availability falls back to the runtime is_available() skip"
+                )
+    else:
+        content = _render_config_template(
+            detection, scope="global", default_panel=default_panel,
+            dispatch_seat=dispatch_seat, opted_in=opted_in, disabled=disabled,
+        )
+        if detection is None:
+            notes.append(
+                "detection skipped (no --detection flag) — per-seat 'available' lines "
+                "omitted; availability falls back to the runtime is_available() skip"
+            )
+
+    content = content.rstrip("\n")
+
+    # 4. Output contract.
+    if args.out == "-":
+        # STDOUT PREVIEW: pure TOML, NO envelope, NO file, notes to stderr.
+        _scaffold_stderr(notes)
+        print(content)
+        return 0
+
+    if args.out:
+        target = os.path.expanduser(args.out)
+    elif scope == "repo":
+        target = str(config.repo_config_path())
+    else:
+        target = str(config.global_config_path())
+
+    _scaffold_stderr(notes)
+
+    # No-clobber write (NOT via _emit) — this function owns the invariant.
+    p = Path(target)
+    text = content + "\n"
+    if args.force or not p.exists():
+        if p.parent and not p.parent.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+        print(json.dumps({"target": target, "wrote": target, "diverted": False}, ensure_ascii=False))
+        return 0
+
+    newp = Path(target + ".new")
+    if newp.exists():
+        print(
+            f"crew scaffold-config: replaced an existing {newp} from a prior diverted run",
+            file=sys.stderr,
+        )
+    if newp.parent and not newp.parent.exists():
+        newp.parent.mkdir(parents=True, exist_ok=True)
+    newp.write_text(text, encoding="utf-8")
+    print(json.dumps({"target": target, "wrote": str(newp), "diverted": True}, ensure_ascii=False))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multiagent",
@@ -2204,6 +2829,73 @@ def build_parser() -> argparse.ArgumentParser:
              "--stage/--seat-role/-o.",
     )
     rndr.set_defaults(func=cmd_render)
+
+    doctor = sub.add_parser(
+        "doctor",
+        help="Probe per-seat provider availability (registry-derived, NON-billable: "
+             "codex/agy = which; cursor = one local `agent --version`) and emit a JSON "
+             "detection map to stdout. Always JSON; notes/errors go to stderr.",
+    )
+    doctor.add_argument(
+        "--session-id", dest="session_id", default=None,
+        help="write the JSON to .crew/reviews/<session-id>/doctor.json (default: "
+             "CLAUDE_SESSION_ID env). The JSON is ALWAYS also printed to stdout.",
+    )
+    doctor.add_argument(
+        "-o", "--out", default=None,
+        help="write the JSON to this path instead of the session path (~ expanded). "
+             "-o wins over the session path; the JSON is still printed to stdout.",
+    )
+    doctor.set_defaults(func=cmd_doctor)
+
+    sc = sub.add_parser(
+        "scaffold-config",
+        help="Render a COMMENTED starter ~/.crew-config.toml (or .crew/config.toml "
+             "with --repo, seeded from the global) with cost-safe defaults + honest "
+             "`available` flags. Owns no-clobber (present target → <target>.new). "
+             "ONE output contract: resolved target / --out <path> / --out - (TOML preview).",
+    )
+    sc.add_argument(
+        "--repo", action="store_true",
+        help="scaffold the per-repo .crew/config.toml (seeded VERBATIM from the global "
+             "if one exists) instead of the global ~/.crew-config.toml",
+    )
+    sc.add_argument(
+        "--force", action="store_true",
+        help="overwrite an existing target directly (used only after explicit confirm); "
+             "without it, an existing target diverts to <target>.new",
+    )
+    sc.add_argument(
+        "-o", "--out", default=None,
+        help="write to this path instead of the resolved target (~ expanded); "
+             "'-' (a single dash) prints the rendered TOML to stdout (no file, no envelope)",
+    )
+    sc.add_argument(
+        "--default-panel", dest="default_panel", default=None,
+        help="default_panel value (validated vs PANEL_PRESETS ∪ configured [panels]; "
+             "default full)",
+    )
+    sc.add_argument(
+        "--dispatch-seat", dest="dispatch_seat", default=None,
+        help="[dispatch].seat value (validated vs known_seat_names() — subprocess WRITE "
+             "seats only; default codex)",
+    )
+    sc.add_argument(
+        "--add-seat", dest="add_seat", action="append", default=None,
+        help="opt a seat IN (omit its available=false); repeatable. Validated vs "
+             "known_seat_names() ∪ TASK_SEAT_NAMES (task seats are correctable).",
+    )
+    sc.add_argument(
+        "--disable-seat", dest="disable_seat", action="append", default=None,
+        help="opt a seat OUT (emit available=false); repeatable. Validated vs "
+             "known_seat_names() ∪ TASK_SEAT_NAMES.",
+    )
+    sc.add_argument(
+        "--detection", dest="detection", default=None,
+        help="a doctor.json detection file. ABSENT → omit per-seat available lines + a "
+             "stderr 'detection skipped' note; GIVEN-but-missing/empty/malformed → error.",
+    )
+    sc.set_defaults(func=cmd_scaffold_config)
 
     return parser
 

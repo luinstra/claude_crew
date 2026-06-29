@@ -170,8 +170,15 @@ For work requiring verification before declaring "done," use `/crew:build` inste
 
 | Command | Description |
 |---------|-------------|
+| `/crew:init` | Onboarding scaffolder for the engine-tuning config — detects installed provider CLIs, then writes a commented `~/.crew-config.toml` (or `.crew/config.toml` with `--repo`, seeded from the global) with cost-safe defaults + honest `available` flags. Never clobbers an existing file silently. |
 | `/crew:crew-config` | Copy CLAUDE.md to current project |
 | `/crew:crew-config global` | Copy CLAUDE.md to global config |
+
+> **`/crew:init` vs `/crew:crew-config`** — different files, different concerns.
+> `/crew:init` scaffolds the **engine-tuning `.toml`** (`default_panel`, panels, seats,
+> `available`, `[dispatch].seat`) that the `config.py` loader reads. `/crew:crew-config`
+> copies the **`CLAUDE.md` operating-instructions doc** into `.claude/CLAUDE.md` (project)
+> or `~/.claude/CLAUDE.md` (global) — it touches no `.toml`.
 
 ### Multi-Model Review
 

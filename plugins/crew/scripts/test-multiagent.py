@@ -5032,6 +5032,404 @@ def test_dispatch():
           not bare and "/crew:" in text, "no bare /command refs", str(bare))
 
 
+def test_doctor():
+    log_section("doctor probe (registry-derived, non-billable, cursor probed once)")
+    from multiagent import seats as _seats  # noqa: E402
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        bins = d / "bin"; bins.mkdir()
+        home = d / "home"; home.mkdir()
+        proj = d / "proj"; proj.mkdir()
+        agent_calls = d / "agent_calls.txt"
+        codex_calls = d / "codex_calls.txt"
+        # codex present — is_available() is pure shutil.which (NEVER exec'd); the
+        # fake records any exec so we can assert doctor made NO billable run.
+        make_fake_bin(bins, "codex", f"""
+        open({str(codex_calls)!r}, 'a').write('x')
+        """)
+        # agent present — the cursor identity probe DOES exec `agent --version`.
+        # Record each call so we can assert it runs AT MOST ONCE (fanned to all
+        # cursor-* seats). Print a date-stamp first line so the identity check passes.
+        make_fake_bin(bins, "agent", f"""
+        open({str(agent_calls)!r}, 'a').write('x')
+        print('2026.06.24-00-00-00-abcdef0')
+        """)
+        # agy is NOT faked -> absent on the isolated PATH.
+        # Isolated PATH: fake bins + the python3/env resolution dirs, EXCLUDING the
+        # real homebrew/.local dirs (so the real codex/agy/agent never leak in).
+        def isol_env(home_p=None, proj_p=None):
+            env = dict(os.environ)
+            env["PATH"] = os.pathsep.join(
+                [str(bins), os.path.dirname(sys.executable), "/usr/bin", "/bin"]
+            )
+            if home_p is not None:
+                env["HOME"] = str(home_p)
+            if proj_p is not None:
+                env["CLAUDE_PROJECT_DIR"] = str(proj_p)
+            env.pop("CLAUDE_SESSION_ID", None)
+            return env
+
+        env = isol_env(home, proj)
+        proc = _run_cli(["doctor", "--session-id", "SES1"], env=env, cwd=str(proj), timeout=30)
+        check("doctor exits 0", proc.returncode == 0, "0", f"{proc.returncode}: {proc.stderr[:200]}")
+        try:
+            payload = json.loads(proc.stdout)
+        except Exception as exc:
+            payload = None
+            check("doctor stdout parses as JSON", False, "valid json", f"{exc}: {proc.stdout[:200]}")
+        if payload is not None:
+            sub = payload.get("subprocess", {})
+            check("doctor: codex detected available (present on PATH)",
+                  sub.get("codex", {}).get("available") is True, "codex true", str(sub.get("codex")))
+            check("doctor: agy detected ABSENT with a PATH diag",
+                  sub.get("agy", {}).get("available") is False
+                  and "PATH" in (sub.get("agy", {}).get("diag") or ""),
+                  "agy false + diag", str(sub.get("agy")))
+            check("doctor: every cursor-* seat present (probe fanned)",
+                  all(sub.get(s, {}).get("available") is True
+                      for s in sub if s.startswith("cursor-")),
+                  "all cursor true", str({k: v for k, v in sub.items() if k.startswith("cursor-")}))
+            task = payload.get("task", {})
+            check("doctor: task block in sorted(TASK_SEAT_NAMES) order (deterministic)",
+                  list(task.keys()) == sorted(_seats.TASK_SEAT_NAMES),
+                  str(sorted(_seats.TASK_SEAT_NAMES)), str(list(task.keys())))
+        # stdout carries ONLY JSON (no stray non-JSON line).
+        check("doctor stdout is JSON-only (no extra lines)",
+              proc.stdout.strip().startswith("{") and proc.stdout.strip().endswith("}"),
+              "pure JSON", proc.stdout[:120])
+        # the cursor binary was probed AT MOST ONCE (not 5x).
+        n_agent = agent_calls.read_text().count("x") if agent_calls.exists() else 0
+        check("doctor probes the cursor binary AT MOST ONCE (fanned to all cursor-* seats)",
+              n_agent <= 1, "<=1 probe", str(n_agent))
+        # codex was NEVER exec'd (is_available is which-only -> no billable run).
+        check("doctor makes NO billable run (codex never exec'd; pure shutil.which)",
+              not codex_calls.exists(), "codex not exec'd", "exec'd" if codex_calls.exists() else "ok")
+        # session-scoped file written AND matches stdout.
+        sess_file = proj / ".crew" / "reviews" / "SES1" / "doctor.json"
+        check("doctor --session-id writes .crew/reviews/<id>/doctor.json",
+              sess_file.is_file(), "session file present",
+              "present" if sess_file.is_file() else "missing")
+        if sess_file.is_file() and payload is not None:
+            check("doctor session file == stdout JSON",
+                  json.loads(sess_file.read_text()) == payload, "equal", "differs")
+
+        # -o wins over the session path (session file NOT also written).
+        proj2 = d / "proj2"; proj2.mkdir()
+        out_path = d / "explicit-doctor.json"
+        env2 = isol_env(home, proj2)
+        proc = _run_cli(["doctor", "--session-id", "SES2", "-o", str(out_path)],
+                        env=env2, cwd=str(proj2), timeout=30)
+        check("doctor -o writes the explicit path", out_path.is_file(),
+              "explicit file", "present" if out_path.is_file() else "missing")
+        check("doctor -o wins: the session path is NOT also written",
+              not (proj2 / ".crew" / "reviews" / "SES2" / "doctor.json").exists(),
+              "no session file", "session file present")
+        check("doctor -o still prints JSON to stdout",
+              proc.stdout.strip().startswith("{"), "JSON on stdout", proc.stdout[:120])
+
+        # NEITHER session nor -o -> NO file written, stdout still JSON.
+        proj3 = d / "proj3"; proj3.mkdir()
+        env3 = isol_env(home, proj3)
+        proc = _run_cli(["doctor"], env=env3, cwd=str(proj3), timeout=30)
+        check("doctor with NEITHER --session-id nor -o writes NO file",
+              not (proj3 / ".crew").exists(), "no .crew dir", "created .crew")
+        check("doctor (no session/-o) still prints JSON to stdout",
+              proc.stdout.strip().startswith("{"), "JSON on stdout", proc.stdout[:120])
+
+
+def test_scaffold_config():
+    log_section("scaffold-config (template + no-clobber + conservative --repo overrides)")
+    from contextlib import redirect_stdout, redirect_stderr  # noqa: E402
+    from io import StringIO  # noqa: E402
+    from multiagent import cli, config  # noqa: E402
+    import tomllib as _toml  # noqa: E402  (tests run on 3.11+)
+
+    def run(argv):
+        args = cli.build_parser().parse_args(argv)
+        out, err = StringIO(), StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = args.func(args)
+        return rc, out.getvalue(), err.getvalue()
+
+    def write_det(path, *, absent=None, present=None):
+        sub = {}
+        for s in (absent or []):
+            sub[s] = {"available": False, "diag": f"{s} not found on PATH"}
+        for s in (present or []):
+            sub[s] = {"available": True, "diag": ""}
+        path.write_text(json.dumps({
+            "subprocess": sub,
+            "task": {"opus": {"available": True, "diag": "x"},
+                     "sonnet": {"available": True, "diag": "y"},
+                     "opus-4.6": {"available": True, "diag": "z"}},
+        }))
+
+    # --- Task 1: public path wrappers equal the private ones ------------------
+    with crew_config() as proj:
+        check("config.repo_config_path() == _config_path()",
+              config.repo_config_path() == config._config_path(),
+              str(config._config_path()), str(config.repo_config_path()))
+        check("config.global_config_path() == _global_config_path()",
+              config.global_config_path() == config._global_config_path(),
+              str(config._global_config_path()), str(config.global_config_path()))
+
+    # --- fresh global template: --out - is PURE TOML, note on stderr ----------
+    with crew_config() as proj:
+        rc, out, err = run(["scaffold-config", "--out", "-",
+                            "--default-panel", "lite", "--dispatch-seat", "agy"])
+        check("scaffold --out - exits 0", rc == 0, "0", str(rc))
+        parsed = None
+        try:
+            parsed = _toml.loads(out)
+            toml_ok = True
+        except Exception as exc:
+            toml_ok = False
+            check("scaffold --out - stdout is valid TOML", False, "valid TOML", f"{exc}: {out[:200]}")
+        check("scaffold --out - stdout is PURE TOML (no JSON envelope)",
+              toml_ok and "diverted" not in out, "no envelope", out[:120])
+        check("bare (no --detection): 'detection skipped' note on STDERR not stdout",
+              "detection skipped" in err and "detection skipped" not in out,
+              "note on stderr only", f"err={err[:80]} out-has-note={'detection skipped' in out}")
+        if parsed is not None:
+            seats_tbl = parsed.get("seats", {})
+            check("bare (no --detection) OMITS every per-seat available line",
+                  all("available" not in tbl for tbl in seats_tbl.values()),
+                  "no available keys", str({k: v for k, v in seats_tbl.items() if 'available' in v}))
+
+        # round-trip through the real loader: getters read the values, ZERO warnings.
+        config.global_config_path().write_text(out)
+        config._reset_cache_for_tests()
+        check("round-trip: default_panel() reads the baked value",
+              config.default_panel() == "lite", "lite", str(config.default_panel()))
+        check("round-trip: dispatch_seat() reads the baked value",
+              config.dispatch_seat() == "agy", "agy", str(config.dispatch_seat()))
+        check("round-trip: ZERO config warnings on the emitted template",
+              not config._warned, "no warnings", str(config._warned))
+
+    # --- detection present: detected-absent + premium -> available=false ------
+    with crew_config() as proj:
+        det = Path(proj) / "doctor.json"
+        write_det(det, absent=["agy"],
+                  present=["codex", "cursor-auto", "cursor-composer",
+                           "cursor-glm", "cursor-gpt", "cursor-gemini"])
+        rc, out, err = run(["scaffold-config", "--out", "-", "--detection", str(det),
+                            "--disable-seat", "opus"])
+        parsed = _toml.loads(out)
+        seats_tbl = parsed.get("seats", {})
+        check("detection: detected-absent agy -> available=false",
+              seats_tbl.get("agy", {}).get("available") is False, "agy false", str(seats_tbl.get("agy")))
+        check("detection: detected-present codex -> available OMITTED",
+              "available" not in seats_tbl.get("codex", {}), "codex no available", str(seats_tbl.get("codex")))
+        check("detection: premium cursor-glm -> available=false (cost-safe)",
+              seats_tbl.get("cursor-glm", {}).get("available") is False,
+              "glm false", str(seats_tbl.get("cursor-glm")))
+        check("detection: --disable-seat opus (TASK seat) -> [seats.opus].available=false",
+              seats_tbl.get("opus", {}).get("available") is False, "opus false", str(seats_tbl.get("opus")))
+        # the opus-disabled output loads clean via the real loader.
+        config.global_config_path().write_text(out)
+        config._reset_cache_for_tests()
+        check("detection: --disable-seat opus output loads + seat_available('opus') False",
+              config.seat_available("opus") is False and not config._warned,
+              "opus unavailable, no warnings", f"{config.seat_available('opus')} warned={config._warned}")
+
+    # --- input validation rejects bad values (nonzero + stderr, no file) ------
+    with crew_config() as proj:
+        target = Path(proj) / "v.toml"
+        for argv, label in [
+            (["scaffold-config", "--out", str(target), "--default-panel", "nope"], "bad --default-panel"),
+            (["scaffold-config", "--out", str(target), "--disable-seat", "notaseat"], "bogus --disable-seat"),
+            (["scaffold-config", "--out", str(target), "--add-seat", "notaseat"], "bogus --add-seat"),
+            (["scaffold-config", "--out", str(target), "--disable-seat", "cursor"], "group token --disable-seat"),
+            (["scaffold-config", "--out", str(target), "--dispatch-seat", "opus"], "task --dispatch-seat (subprocess-only)"),
+        ]:
+            rc, out, err = run(argv)
+            check(f"reject {label}: nonzero + stderr + no file",
+                  rc != 0 and err.strip() and not target.exists(),
+                  "nonzero, stderr, no file", f"rc={rc} err={err[:60]} exists={target.exists()}")
+
+    # --- fail-fast: GIVEN-but-bad --detection (distinct from absent-flag) ------
+    with crew_config() as proj:
+        target = Path(proj) / "ff.toml"
+        missing = Path(proj) / "nope.json"
+        empty = Path(proj) / "empty.json"; empty.write_text("")
+        malformed = Path(proj) / "bad.json"; malformed.write_text("{not json")
+        for det_path, label in [(missing, "missing"), (empty, "empty"), (malformed, "malformed")]:
+            rc, out, err = run(["scaffold-config", "--out", str(target), "--detection", str(det_path)])
+            check(f"--detection {label} file -> nonzero + stderr, no file (NOT the omit path)",
+                  rc != 0 and "error" in err.lower() and not target.exists()
+                  and "detection skipped" not in err,
+                  "fail-fast", f"rc={rc} err={err[:80]} exists={target.exists()}")
+
+    # --- fail-fast: UNPARSEABLE global on --repo ------------------------------
+    with crew_config(glob="this = = not [[[ toml\n") as proj:
+        target = Path(proj) / ".crew" / "config.toml"
+        rc, out, err = run(["scaffold-config", "--repo", "--out", str(target)])
+        check("--repo with UNPARSEABLE global -> nonzero + stderr, nothing written",
+              rc != 0 and err.strip() and not target.exists(),
+              "fail-fast", f"rc={rc} exists={target.exists()}")
+
+    # --- no-clobber 4 paths ---------------------------------------------------
+    with crew_config() as proj:
+        target = Path(proj) / "cfg.toml"
+        rc, out, err = run(["scaffold-config", "--out", str(target), "--default-panel", "full"])
+        env_json = json.loads(out)
+        check("no-clobber: absent target -> wrote target, diverted false",
+              env_json["diverted"] is False and env_json["wrote"] == str(target) and target.is_file(),
+              "diverted false", str(env_json))
+        live_before = target.read_text()
+        rc, out, err = run(["scaffold-config", "--out", str(target), "--default-panel", "full"])
+        env_json = json.loads(out)
+        newp = Path(str(target) + ".new")
+        check("no-clobber: present target -> wrote <target>.new, diverted true",
+              env_json["diverted"] is True and env_json["wrote"] == str(newp) and newp.is_file(),
+              "diverted true + .new", str(env_json))
+        check("no-clobber: live target untouched while diverted",
+              target.read_text() == live_before, "unchanged", "changed")
+        rc, out, err = run(["scaffold-config", "--out", str(target), "--default-panel", "lite"])
+        check("no-clobber: existing <target>.new OVERWRITTEN + stderr note",
+              "replaced an existing" in err and 'default_panel = "lite"' in newp.read_text(),
+              "overwrite + note", f"err={err[:80]}")
+        check("no-clobber: stdout stays the clean envelope (note on stderr)",
+              "diverted" in out and "replaced an existing" not in out,
+              "clean stdout", out[:120])
+        rc, out, err = run(["scaffold-config", "--out", str(target), "--force", "--default-panel", "lite"])
+        env_json = json.loads(out)
+        check("no-clobber: --force overwrites target directly (diverted false)",
+              env_json["diverted"] is False and 'default_panel = "lite"' in target.read_text(),
+              "force overwrite", str(env_json))
+
+    # --- D3 conservative override table ---------------------------------------
+    # multi-[seats.X] section scoping: edit codex.available, leave agy.model alone.
+    multi_global = (
+        '# tuned global\n'
+        'default_panel = "lite"\n\n'
+        '[seats.codex]\n'
+        'model = "gpt-x"\n\n'
+        '[seats.agy]\n'
+        'model = "Gemini 3.1 Pro (High)"\n'
+    )
+    with crew_config(glob=multi_global) as proj:
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-",
+                            "--default-panel", "full", "--dispatch-seat", "codex",
+                            "--disable-seat", "codex"])
+        parsed = _toml.loads(out)
+        check("D3 case1: default_panel replaced in place (lite -> full)",
+              parsed.get("default_panel") == "full", "full", str(parsed.get("default_panel")))
+        check("D3 case2: codex.available inserted into existing [seats.codex] header",
+              parsed["seats"]["codex"].get("available") is False
+              and parsed["seats"]["codex"].get("model") == "gpt-x",
+              "codex false + model kept", str(parsed["seats"].get("codex")))
+        check("D3 section-scoping: [seats.agy].model UNTOUCHED (not hit by codex edit)",
+              parsed["seats"]["agy"].get("model") == "Gemini 3.1 Pro (High)"
+              and "available" not in parsed["seats"]["agy"],
+              "agy model intact, no available", str(parsed["seats"].get("agy")))
+        check("D3: comment '# tuned global' preserved verbatim",
+              "# tuned global" in out, "comment present", "missing")
+        check("D3 case3: [dispatch] appended (absent in base) -> seat lands",
+              parsed.get("dispatch", {}).get("seat") == "codex", "codex", str(parsed.get("dispatch")))
+
+    # absent-key-in-existing-header (--add-seat lands available=true) +
+    # absent-in-every-form (--add-seat cursor-composer appends a new table).
+    glm_global = (
+        'default_panel = "full"\n\n'
+        '[seats.cursor-glm]\n'
+        'model = "glm-5.2-max"\n'
+    )
+    with crew_config(glob=glm_global) as proj:
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-",
+                            "--add-seat", "cursor-glm", "--add-seat", "cursor-composer"])
+        parsed = _toml.loads(out)
+        check("D3 case2: --add-seat cursor-glm inserts available=true in existing header",
+              parsed["seats"]["cursor-glm"].get("available") is True
+              and parsed["seats"]["cursor-glm"].get("model") == "glm-5.2-max",
+              "glm true + model kept", str(parsed["seats"].get("cursor-glm")))
+        check("D3 case3: --add-seat cursor-composer (absent every form) appends a new table",
+              parsed["seats"].get("cursor-composer", {}).get("available") is True,
+              "composer true", str(parsed["seats"].get("cursor-composer")))
+        check("D3 case3: no duplicate [seats.cursor-glm] header (single definition)",
+              out.count("[seats.cursor-glm]") == 1, "1 header", str(out.count("[seats.cursor-glm]")))
+
+    # absent top-level default_panel -> inserted after leading comment block.
+    nopanel_global = "# header comment\n# more\n\n[dispatch]\nseat = \"codex\"\n"
+    with crew_config(glob=nopanel_global) as proj:
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--default-panel", "lite"])
+        parsed = _toml.loads(out)
+        lines = out.split("\n")
+        dp_idx = next(i for i, l in enumerate(lines) if l.startswith("default_panel"))
+        disp_idx = next(i for i, l in enumerate(lines) if l.strip() == "[dispatch]")
+        check("D3 case4: absent default_panel inserted after comments, before first header",
+              parsed.get("default_panel") == "lite" and dp_idx < disp_idx
+              and lines[0].startswith("#"),
+              "inserted in position", f"dp@{dp_idx} disp@{disp_idx}")
+
+    # Case-4 position-0 edge: base starts DIRECTLY with a header, no leading comment.
+    pos0_global = "[seats.codex]\nmodel = \"x\"\n"
+    with crew_config(glob=pos0_global) as proj:
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--default-panel", "lite"])
+        parsed = _toml.loads(out)
+        check("D3 case4 edge: no leading comment -> default_panel inserted at position 0",
+              parsed.get("default_panel") == "lite"
+              and out.split("\n")[0].startswith("default_panel"),
+              "position 0", out.split("\n")[0])
+
+    # multiline-string base -> whole-seed pre-gate leaves it VERBATIM (byte-identical).
+    multiline_global = 'default_panel = "lite"\n\n[seats.codex]\nmodel = """multi\nline"""\n'
+    with crew_config(glob=multiline_global) as proj:
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-",
+                            "--default-panel", "full", "--disable-seat", "codex"])
+        check("D3 pre-gate: multiline-string base left VERBATIM (no line edits)",
+              out.rstrip("\n") == multiline_global.rstrip("\n")
+              and "could not safely apply override" in err,
+              "verbatim + note", f"changed={out.rstrip()!=multiline_global.rstrip()}")
+        # still loads (it was loadable to begin with).
+        _toml.loads(out)
+
+    # inline-table base -> leave codex verbatim + note, NO duplicate, still loads.
+    inline_global = '[seats]\ncodex = { reasoning_effort = "xhigh" }\n'
+    with crew_config(glob=inline_global) as proj:
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "codex"])
+        check("D3 case5: inline-table codex -> stderr note, no duplicate [seats.codex], loads",
+              "could not safely apply override 'codex'" in err
+              and out.count("[seats.codex]") == 0,
+              "leave + note, no dup", f"err={err[:60]} dup={out.count('[seats.codex]')}")
+        loaded = _toml.loads(out)  # must NOT raise TOMLDecodeError
+        check("D3 case5: inline-table output keeps codex inline (override NOT applied)",
+              loaded["seats"]["codex"] == {"reasoning_effort": "xhigh"},
+              "codex inline intact", str(loaded["seats"].get("codex")))
+
+    # dotted-key base -> leave + note, still loads, no duplicate.
+    dotted_global = 'seats.agy.print_timeout = "30s"\n'
+    with crew_config(glob=dotted_global) as proj:
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "agy"])
+        check("D3 case5: dotted-key agy -> stderr note + loads (no duplicate)",
+              "could not safely apply override 'agy'" in err,
+              "leave + note", f"err={err[:60]}")
+        _toml.loads(out)  # must NOT raise
+
+    # commented-out dotted key must NOT block a real correction (case-3 scan skips comments).
+    commented_global = (
+        '# seats.cursor-glm.available = false\n'
+        'default_panel = "full"\n'
+    )
+    with crew_config(glob=commented_global) as proj:
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "cursor-glm"])
+        parsed = _toml.loads(out)
+        check("D3: commented-out dotted key does NOT trigger false Case-5 (correction lands)",
+              parsed["seats"]["cursor-glm"].get("available") is False
+              and "could not safely apply override 'cursor-glm'" not in err,
+              "appended, no false note", f"err={err[:60]}")
+
+    # idempotency: two runs, identical inputs + unchanged global -> byte-identical.
+    with crew_config(glob=multi_global) as proj:
+        argv = ["scaffold-config", "--repo", "--out", "-", "--default-panel", "full",
+                "--dispatch-seat", "codex", "--disable-seat", "codex"]
+        _, out1, _ = run(argv)
+        _, out2, _ = run(argv)
+        check("D3 idempotency: identical inputs -> byte-identical output",
+              out1 == out2, "byte-identical", "differs")
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -5069,6 +5467,8 @@ def main():
     test_panel_catalog()
     test_catalog_registry_disjoint()
     test_no_dotkept_staged_filename()
+    test_doctor()
+    test_scaffold_config()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")

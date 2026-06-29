@@ -1,0 +1,136 @@
+---
+description: Onboarding scaffolder for the crew ENGINE-TUNING config — detects which provider CLIs are installed, then writes a commented ~/.crew-config.toml (or .crew/config.toml with a leading --repo) with cost-safe defaults + honest `available` flags. Never clobbers an existing file silently.
+argument-hint: "[--repo]"
+allowed-tools: Bash, Read
+---
+
+[INIT — config scaffolder / provider detection]
+
+$ARGUMENTS
+
+> **What this is.** The onboarding companion to crew's two tuning files: the global
+> `~/.crew-config.toml` and the per-repo `.crew/config.toml` that the engine's
+> `config.py` loader reads (`default_panel`, `[debate].panel`, `[dispatch].seat`,
+> per-seat `model`/`available`, `[tuning].timeout`, `[panels]`). It DETECTS which
+> provider CLIs are installed, then writes a **commented** starter config with
+> cost-safe defaults so you discover the knobs without hand-authoring TOML.
+
+> **Not to be confused with `/crew:crew-config`.** `/crew:crew-config` copies the
+> **`CLAUDE.md` operating-instructions doc** into `.claude/CLAUDE.md` (project) or
+> `~/.claude/CLAUDE.md` (global) — it touches NO `.toml`. `/crew:init` (this command)
+> scaffolds the **engine-tuning `.toml`** the `config.py` loader reads. Different files,
+> different concerns.
+
+> **`allowed-tools` scopes THIS orchestrator only.** Every file write goes through the
+> engine: `doctor` writes `doctor.json`, `scaffold-config` OWNS the config write +
+> the no-clobber invariant. The short interview answers ride as CLI flags, so nothing
+> is spilled to a file — hence NO `Write` here. The diff in step 5 is produced by a
+> REAL `diff` command via Bash (already granted), never an LLM-generated diff.
+
+> **Detection is honest, NOT auth.** `doctor` proves a CLI is on PATH (and, for Cursor,
+> that the `agent` binary is really Cursor) — it does NOT verify you are authenticated,
+> and it makes NO billable/network call. Surface every present seat as "installed
+> (auth unverified)"; never claim a seat is "ready" or "authed".
+
+## Step 1 — Parse an optional LEADING `--repo`
+
+`--repo` is recognized ONLY as the LEADING token of `$ARGUMENTS` (same place the other
+crew commands look for flags). With `--repo`, the scaffold targets the per-repo
+`.crew/config.toml` (seeded VERBATIM from the global `~/.crew-config.toml` if one
+exists). Without it, the scaffold targets the global `~/.crew-config.toml`.
+
+## Step 2 — Detect installed providers (`doctor`)
+
+Run the engine probe via the bare `crew` dispatcher. Substitute your actual session id
+(the `[Session ID: …]` value) for `<session-id>` — pass it as a LITERAL `--session-id`
+value, NEVER a `${CLAUDE_SESSION_ID}` shell expansion:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/crew" doctor --session-id <session-id>
+```
+
+**Guard the result.** If the `doctor` invocation exits NONZERO, or
+`.crew/reviews/<session-id>/doctor.json` is missing / empty / not readable JSON
+(equivalently, stdout did not carry parseable JSON), SURFACE the error and STOP. Do
+**NOT** proceed to `scaffold-config --detection` with a missing/empty file — that would
+silently trip the engine's "detection omitted" fallback and emit a config with no honest
+`available` flags.
+
+On success, **Read** `.crew/reviews/<session-id>/doctor.json` (the same JSON is also on
+stdout) and SHOW the detection table to the user — label each present subprocess seat as
+"installed (auth unverified)", each absent one with its diag, and the task seats
+(`opus`/`sonnet`/`opus-4.6`) as "subscription-backed (in-session)".
+
+## Step 3 — Short PREFERENCE interview (detect-then-CONFIRM)
+
+Ask ONLY what detection can't infer. Keep it short:
+
+1. **Confirm / correct availability.** The doctor table is detect-then-CONFIRM. Collect:
+   - opt-INs (a seat detected absent that you actually have / will install) →
+     `--add-seat <name>` (repeatable);
+   - opt-OUTs / detection overrides (a detected-present seat you don't want, or a task
+     seat like `opus` you don't want in your default panels) → `--disable-seat <name>`
+     (repeatable).
+   Either a subprocess seat OR a Claude task seat is a valid correction target; explicit
+   correction beats detection.
+2. **`default_panel`** (default `full`).
+3. **Premium-seat add-back** — `cursor-glm` / `cursor-gpt` / `cursor-gemini` draw the
+   premium/metered buckets, so they default OFF. Offer them as opt-IN `--add-seat` only,
+   with that cost note. (`codex` covers the GPT lineage; `agy` covers the Gemini lineage
+   flat-rate; `cursor-glm`'s glm-max draws Cursor's shared premium MAX allotment.)
+4. **`[dispatch].seat`** — the default `/crew:dispatch` WRITE seat (default `codex`;
+   must be a subprocess seat).
+
+## Step 4 — Scaffold the config
+
+Call `scaffold-config` through the dispatcher. Pass `--repo` ONLY if step 1 saw it. Pass
+the `doctor.json` you read as `--detection`, plus the interview answers as flags. Pass
+**NO `--session-id`** (this writes the non-session-scoped config path) and **NO `--out`**
+on the first pass (so it writes the resolved target) and **NO `--force`** (so an existing
+target diverts to `<target>.new`):
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/crew" scaffold-config --detection .crew/reviews/<session-id>/doctor.json --default-panel <panel> --dispatch-seat <seat>
+```
+
+(Add `--repo` first when the user asked for it; append each `--add-seat <name>` /
+`--disable-seat <name>` correction; the `--detection` path is the file `doctor` wrote.)
+
+Read the JSON envelope `{target, wrote, diverted}` from stdout.
+
+## Step 5 — No-clobber UX
+
+- If **`diverted` is false**: the engine wrote the config directly (a fresh file). Report
+  `envelope.wrote` and STOP.
+- If **`diverted` is true**: an existing config was preserved and the proposal landed at
+  `<target>.new` (`envelope.wrote`). Show the user what would change with a REAL diff,
+  then ask them to confirm. Guard `diff` availability first:
+
+```bash
+command -v diff && diff -u <target> <target>.new
+```
+
+  If `diff` is ABSENT (a minimal environment), fall back to **Read**-ing `<target>.new`
+  and showing its path + content instead of a unified diff (never error out). On the
+  user's explicit confirm, RE-RUN the SAME `scaffold-config` command with `--force`
+  appended (the engine owns the write + the clobber — no shell `mv`):
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/crew" scaffold-config --force --detection .crew/reviews/<session-id>/doctor.json --default-panel <panel> --dispatch-seat <seat>
+```
+
+  (carry the same `--repo` / `--add-seat` / `--disable-seat` flags). If the user declines,
+  leave the live config untouched and point them at `<target>.new`.
+
+## Step 6 — What's next
+
+Point the user at the knobs: the full config reference lives in `docs/CLAUDE.md`; per-seat
+tuning (`model`, codex `reasoning_effort`, agy `print_timeout`, `[tuning].timeout`) and
+`[panels]` rosters are commented in the file they just got. For the project
+operating-instructions doc (a different file), mention `/crew:crew-config`.
+
+---
+
+Subscription safety: `doctor` drives only `is_available()` (codex/agy = PATH check; cursor
+= one local `agent --version` identity probe) — no `claude -p`, no Anthropic API, no
+metered/network call. `scaffold-config` makes no probe at all.

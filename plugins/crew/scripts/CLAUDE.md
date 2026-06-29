@@ -37,7 +37,7 @@ their results into the same six-field shape the engine returns.
 
 ```
 multiagent/
-├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `dispatch` (write-mode single-seat WORK delegation) | `render` (incl. `--stage-all`) | `seats` (incl. `--debate`: config-aware full debate panel) | `collect` | `review-prep` subcommands (reached via the bare `../crew` dispatcher)
+├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `dispatch` (write-mode single-seat WORK delegation) | `render` (incl. `--stage-all`) | `seats` (incl. `--debate`: config-aware full debate panel) | `collect` | `review-prep` | `doctor` (/crew:init provider probe) | `scaffold-config` (/crew:init config generator) subcommands (reached via the bare `../crew` dispatcher)
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
@@ -261,6 +261,37 @@ Key contracts (do NOT regress):
   + one-time warn); `available = false` opt-outs a seat (filtered from any
   resolved panel after roster resolution, before the run; explicit-named →
   skip-note; all-unavailable → warn + unfiltered fallback).
+- **`/crew:init` support — `doctor` + `scaffold-config`.** Two registry-derived,
+  NON-billable subcommands powering the `/crew:init` onboarding scaffolder (`cmd_doctor`
+  / `cmd_scaffold_config` in `cli.py`; the target paths resolve through the public
+  `config.repo_config_path()` / `config.global_config_path()` wrappers so init writes
+  EXACTLY where the loader reads). They share ONE stdout/stderr discipline: **stdout
+  carries ONLY the machine payload; EVERY note/error goes to stderr** (init.md parses
+  stdout).
+  - **`doctor`** iterates `known_seat_names()` → `get_provider(n).is_available()` into a
+    `{subprocess, task}` JSON map (the `task` block in `sorted(TASK_SEAT_NAMES)` order →
+    deterministic). NON-billable: codex/agy `is_available()` are pure `shutil.which`;
+    Cursor's local `agent --version` identity probe runs EXACTLY ONCE and is fanned to
+    every `cursor-*` seat (not 5×). Takes `--session-id` (writes
+    `.crew/reviews/<id>/doctor.json`) and `-o` (override path; `-o` wins over the session
+    path); with NEITHER, no file is written. The JSON is ALWAYS printed to stdout (no
+    `--json` flag — output is always JSON).
+  - **`scaffold-config`** renders a COMMENTED starter config emitting ONLY loader-read
+    keys (`reasoning_effort` under `[seats.codex]`, `print_timeout` under `[seats.agy]`,
+    cost-safe defaults, premium seats `available=false`). It consumes `doctor`'s JSON via
+    `--detection` (ABSENT flag → omit per-seat `available` lines + a stderr "detection
+    skipped" note; GIVEN-but-missing/empty/malformed → error+nonzero). ONE output
+    contract: resolved-target default / `--out <path>` / `--out -` (pure-TOML stdout
+    preview, no envelope). The target write OWNS no-clobber (absent → write +
+    `diverted:false`; present → `<target>.new` + `diverted:true`; `--force` → overwrite)
+    and is NOT routed through `_emit`. `--repo` seeds from the global VERBATIM (comments
+    preserved) then applies CONSERVATIVE section-scoped line-edits (default_panel /
+    `[dispatch].seat` / per-seat `available`): only safely-recognized simple shapes are
+    edited; any inline-table / dotted-key / multiline / array-of-tables target is left
+    verbatim + a stderr note (an unparseable global is rejected). Inputs validated before
+    emit: `--default-panel` vs `PANEL_PRESETS ∪ panels()`; `--add-seat`/`--disable-seat`
+    vs `known_seat_names() ∪ TASK_SEAT_NAMES` (task seats correctable); `--dispatch-seat`
+    vs `known_seat_names()` only.
 
 Run its tests with `python plugins/crew/scripts/test-multiagent.py`.
 

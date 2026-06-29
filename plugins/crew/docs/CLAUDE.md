@@ -100,6 +100,14 @@ token like `cursor` is rejected; falls back to the built-in `codex`, and an
 explicit `--seat` overrides). Needs Python 3.11+; on 3.10 the files
 are gracefully ignored with a one-time stderr note.
 
+**Onboarding:** `/crew:init` is the config-onboarding entry point — it detects which
+provider CLIs are installed (non-billable: PATH checks + Cursor's one local identity
+probe), then writes a commented `~/.crew-config.toml` (or `.crew/config.toml` with a
+leading `--repo`, seeded verbatim from the global) with cost-safe defaults + honest
+per-seat `available` flags, never clobbering an existing file silently. (Not to be
+confused with `/crew:crew-config`, which copies the `CLAUDE.md` instructions doc, not
+the engine-tuning `.toml`.)
+
 ### Utilities
 
 | Command | Description |
@@ -115,6 +123,7 @@ are gracefully ignored with a one-time stderr note.
 
 | Command | Description |
 |---------|-------------|
+| `/crew:init` | Scaffold the engine-tuning config (`~/.crew-config.toml`, or `.crew/config.toml` with `--repo`) — detects provider CLIs, writes cost-safe commented defaults, never clobbers silently |
 | `/crew:crew-config` | Copy CLAUDE.md to current project |
 | `/crew:crew-config global` | Copy CLAUDE.md globally |
 

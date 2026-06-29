@@ -87,6 +87,27 @@ def _global_config_path() -> Path:
     return Path.home() / ".crew-config.toml"
 
 
+# --- public target-path wrappers (single source of truth for WHERE) ----------
+# The scaffolder (``crew scaffold-config``) resolves its write targets through
+# THESE so init and the runtime loader can never disagree on the file location.
+# Thin delegators — the private functions stay the canonical implementation.
+
+def repo_config_path() -> Path:
+    """Public wrapper for the per-repo ``.crew/config.toml`` target path.
+
+    Delegates to ``_config_path()`` so the scaffolder writes EXACTLY where the
+    per-repo loader (``_load``) reads — no second copy of the path logic."""
+    return _config_path()
+
+
+def global_config_path() -> Path:
+    """Public wrapper for the global ``~/.crew-config.toml`` target path.
+
+    Delegates to ``_global_config_path()`` so the scaffolder writes EXACTLY where
+    the global loader (``_global_load``) reads — no second copy of the path logic."""
+    return _global_config_path()
+
+
 def _warn_once(key: str, message: str) -> None:
     """Emit a one-time stderr note keyed by ``key`` (never to stdout)."""
     if key in _warned:
