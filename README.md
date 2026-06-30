@@ -390,6 +390,17 @@ Priority order: build loop → measure-twice → todos
 
 To exit early: `/crew:cancel-build` or `/crew:cancel-measure-twice`
 
+### SessionStart Plugin Guidance
+
+The SessionStart hook also injects plugin guidance (agents and skills) into every session. Output volume is controlled by the `CREW_VERBOSE` environment variable:
+
+| `CREW_VERBOSE` | Skill output | Agent output |
+|----------------|--------------|--------------|
+| unset (default) | One-line list: `Skills available: sk:kotlin, sk:kotlin-testing` | Single line listing agents |
+| `1` | Full bulleted descriptions per skill | Full `<system-reminder>` block with per-agent notes |
+
+When a project stack is detected (Kotlin, Exposed, Gradle, Trino), the guidance is wrapped in a `<system-reminder>` block for high salience. For Kotlin projects, a required first action is prepended: load the Kotlin LSP via `ToolSearch(query='select:LSP')` before reading or editing any code, preferring LSP operations over Read+grep for navigation.
+
 ## Project Structure
 
 ```

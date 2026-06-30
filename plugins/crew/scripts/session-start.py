@@ -16,6 +16,7 @@ from models import (
     read_hook_input,
     get_file_age_days,
     count_incomplete_todos,
+    is_verbose,
 )
 from state_discovery import is_loop_state_file, is_active_state_file
 
@@ -179,47 +180,103 @@ def detect_project_stack(directory: Path) -> list[str]:
 
 
 def build_plugin_guidance(stack_hints: list[str]) -> str:
-    """Build plugin integration guidance for session context."""
+    """Build plugin integration guidance for session context.
+
+    Output is gated by CREW_VERBOSE (see ``is_verbose``): the default is a TERSE
+    one-liner for skills + agents; the FULL bulleted block is emitted only when
+    CREW_VERBOSE is set. Stack guidance (when a stack is detected) is always
+    wrapped in a high-salience ``<system-reminder>`` and, for Kotlin, prepends a
+    REQUIRED instruction to load the LSP before reading/editing code.
+    """
     lines = []
+    verbose = is_verbose()
 
-    # Only show skills with IMPORTANT wrapper if project uses relevant stack
+    # Map stack hints → relevant skills (in priority order)
+    relevant_skills: list[str] = []
+    if "Kotlin" in stack_hints:
+        relevant_skills.append("sk:kotlin")
+        relevant_skills.append("sk:kotlin-testing")
+    if "Exposed" in stack_hints:
+        relevant_skills.append("sk:exposed")
+    if "Gradle" in stack_hints:
+        relevant_skills.append("sk:gradle")
+    if "Trino" in stack_hints:
+        relevant_skills.append("sk:trino")
+
+    # LSP is currently configured for Kotlin only — load it whenever Kotlin is present
+    needs_lsp = "Kotlin" in stack_hints
+
     if stack_hints:
+        # Always wrap stack guidance in a system-reminder for high salience.
+        # Terse vs verbose only changes how chatty the bullets are.
+        lines.append("<system-reminder>")
+        lines.append(f"Project stack detected: {', '.join(stack_hints)}.")
+        lines.append("")
+
+        if needs_lsp:
+            lines.append(
+                "**REQUIRED first action**: Load the Kotlin LSP by calling "
+                "`ToolSearch(query='select:LSP')` BEFORE reading or editing any code. "
+                "Prefer LSP operations (goToDefinition, findReferences, hover, documentSymbol) "
+                "over Read+grep for navigating Kotlin code."
+            )
+            lines.append("")
+
+        if relevant_skills:
+            if verbose:
+                lines.append("**Skills available for this stack** — invoke `Skill(<name>)` BEFORE writing code in that domain:")
+                if "Kotlin" in stack_hints:
+                    lines.append("- `sk:kotlin` — data classes, coroutines, null safety, extension functions")
+                    lines.append("- `sk:kotlin-testing` — Kotest, MockK, TestIdProvider, DatabaseTest")
+                if "Exposed" in stack_hints:
+                    lines.append("- `sk:exposed` — repositories, transactions, table definitions")
+                if "Gradle" in stack_hints:
+                    lines.append("- `sk:gradle` — build config, dependencies, version catalogs")
+                if "Trino" in stack_hints:
+                    lines.append("- `sk:trino` — analytics queries, query routing")
+                lines.append("- `sk:git` — commits, rebasing, history (always available)")
+            else:
+                skill_list = ", ".join(relevant_skills)
+                lines.append(f"**Skills available**: {skill_list}")
+                lines.append(
+                    "Invoke the matching `Skill(<name>)` BEFORE writing code in that domain (lazy-load)."
+                )
+            lines.append(
+                "When you invoke a skill, prefix your NEXT user-facing message with "
+                "`[skill: <name>]` so the user can see it loaded."
+            )
+            lines.append("")
+
+        # Confirmation line — gives the user in-session visibility that the hook fired
+        confirm_parts: list[str] = []
+        if needs_lsp:
+            confirm_parts.append("Kotlin LSP available")
+        if relevant_skills:
+            confirm_parts.append(f"skills ready: {', '.join(relevant_skills)}")
+        confirm_text = " · ".join(confirm_parts) if confirm_parts else "stack detected"
+
+        lines.append(
+            "**In your first reply this session**, include a single status line "
+            f"(after any leading thought, before substantive content): `🔧 [crew] {confirm_text}`"
+        )
+        lines.append("</system-reminder>")
+
+    if verbose:
         lines.extend([
-            "<IMPORTANT>",
-            f"## This project uses: {', '.join(stack_hints)}",
             "",
-            "Invoke the corresponding skill BEFORE writing related code:",
-            "",
+            "<system-reminder>",
+            "**Crew agents** for specialized work:",
+            "- Analysis/debugging/planning: `advisor` agent",
+            "- Implementation: `executor` agent",
+            "- Documentation: `document-writer` agent",
+            "- Codebase search: `reader` agent",
+            "</system-reminder>",
         ])
-
-        if "Kotlin" in stack_hints:
-            lines.append("- **Kotlin** → `sk:kotlin` (data classes, coroutines, null safety, extension functions)")
-        if "Kotlin" in stack_hints:  # Kotlin implies kotlin-testing
-            lines.append("- **Kotlin tests** → `sk:kotlin-testing` (Kotest, MockK, TestIdProvider, DatabaseTest)")
-        if "Exposed" in stack_hints:
-            lines.append("- **Exposed ORM** → `sk:exposed` (repositories, transactions, table definitions)")
-        if "Gradle" in stack_hints:
-            lines.append("- **Gradle** → `sk:gradle` (build config, dependencies, version catalogs)")
-        if "Trino" in stack_hints:
-            lines.append("- **Trino** → `sk:trino` (analytics queries, query routing)")
-
+    else:
         lines.extend([
-            "- **Git** → `sk:git` (commits, rebasing, history)",
             "",
-            "Use the Skill tool to invoke these BEFORE writing code.",
-            "</IMPORTANT>",
+            "Crew agents (via Task tool): advisor, executor, document-writer, reader.",
         ])
-
-    lines.extend([
-        "",
-        "<system-reminder>",
-        "**Crew agents** for specialized work:",
-        "- Analysis/debugging/planning: `advisor` agent",
-        "- Implementation: `executor` agent",
-        "- Documentation: `document-writer` agent",
-        "- Codebase search: `reader` agent",
-        "</system-reminder>",
-    ])
 
     return "\n".join(lines)
 

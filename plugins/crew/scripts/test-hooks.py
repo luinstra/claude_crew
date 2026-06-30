@@ -84,6 +84,15 @@ def test_contains(name: str, script: Path, input_data: str, expected: str) -> No
         log_fail(name, f"contains '{expected}'", output)
 
 
+def test_not_contains(name: str, script: Path, input_data: str, not_expected: str) -> None:
+    """Test that script output does NOT contain a substring."""
+    output = run_script(script, input_data)
+    if not_expected not in output:
+        log_pass(name)
+    else:
+        log_fail(name, f"does NOT contain '{not_expected}'", f"found in: {output[:200]}")
+
+
 def main():
     # Isolate from global state by temporarily renaming todos directory
     home = Path.home()
@@ -126,22 +135,125 @@ def main():
             # Test with Kotlin file (stack detection)
             (test_path / "Test.kt").write_text("fun main() {}")
 
+            # Terse mode (default): stack guidance wrapped in <system-reminder>
             test_contains(
-                "Detects Kotlin stack - shows skills with IMPORTANT",
+                "Terse mode, Kotlin stack - stack detection line present",
+                session_start,
+                json.dumps({"directory": str(test_path)}),
+                "Project stack detected: Kotlin",
+            )
+
+            # Check sk: skills are referenced in terse hint
+            test_contains(
+                "Terse mode, Kotlin stack - sk: reference in hint",
                 session_start,
                 json.dumps({"directory": str(test_path)}),
                 "sk:kotlin",
             )
 
+            # LSP load instruction must be present when Kotlin detected
             test_contains(
-                "Kotlin stack triggers IMPORTANT wrapper",
+                "Terse mode, Kotlin stack - LSP load instruction present",
+                session_start,
+                json.dumps({"directory": str(test_path)}),
+                "select:LSP",
+            )
+
+            # Confirmation line instruction must be present
+            test_contains(
+                "Terse mode, Kotlin stack - confirmation line instruction present",
+                session_start,
+                json.dumps({"directory": str(test_path)}),
+                "[crew] Kotlin LSP available",
+            )
+
+            # Skill-prefix instruction must be present
+            test_contains(
+                "Terse mode, Kotlin stack - skill-prefix instruction present",
+                session_start,
+                json.dumps({"directory": str(test_path)}),
+                "[skill:",
+            )
+
+            # No legacy <IMPORTANT> tag in either mode (replaced by <system-reminder>)
+            test_not_contains(
+                "Terse mode, Kotlin stack - no legacy <IMPORTANT> tag",
                 session_start,
                 json.dumps({"directory": str(test_path)}),
                 "<IMPORTANT>",
             )
 
+            # Stack guidance is now wrapped in <system-reminder> (was <IMPORTANT>)
+            test_contains(
+                "Terse mode, Kotlin stack - stack guidance wrapped in <system-reminder>",
+                session_start,
+                json.dumps({"directory": str(test_path)}),
+                "<system-reminder>",
+            )
+
+            # No '## This project uses:' header in terse mode
+            test_not_contains(
+                "Terse mode, Kotlin stack - no '## This project uses:' header",
+                session_start,
+                json.dumps({"directory": str(test_path)}),
+                "## This project uses:",
+            )
+
+            # Verbose mode: <system-reminder> wrap + LSP instruction + skill bullets
+            output_verbose = run_script_verbose(session_start, json.dumps({"directory": str(test_path)}))
+            if "<system-reminder>" in output_verbose and "select:LSP" in output_verbose:
+                log_pass("Verbose mode, Kotlin stack - <system-reminder> + LSP instruction present")
+            else:
+                log_fail("Verbose mode, Kotlin stack - <system-reminder> + LSP instruction present",
+                         "contains <system-reminder> and select:LSP", output_verbose[:400])
+
+            # Verbose mode: skill bullets reference sk: names
+            if "sk:kotlin" in output_verbose:
+                log_pass("Verbose mode, Kotlin stack - sk:kotlin skill bullet present")
+            else:
+                log_fail("Verbose mode, Kotlin stack - sk:kotlin skill bullet present",
+                         "contains sk:kotlin", output_verbose[:400])
+
+            # Verbose mode: no legacy <IMPORTANT> wrap
+            if "<IMPORTANT>" not in output_verbose:
+                log_pass("Verbose mode, Kotlin stack - no legacy <IMPORTANT> tag")
+            else:
+                log_fail("Verbose mode, Kotlin stack - no legacy <IMPORTANT> tag",
+                         "does NOT contain <IMPORTANT>", output_verbose[:200])
+
+            # Verbose mode: no '## This project uses:' header
+            if "## This project uses:" not in output_verbose:
+                log_pass("Verbose mode, Kotlin stack - '## This project uses:' header removed")
+            else:
+                log_fail("Verbose mode, Kotlin stack - '## This project uses:' header removed",
+                         "does NOT contain '## This project uses:'", output_verbose[:200])
+
             # Clean up kotlin file
             (test_path / "Test.kt").unlink()
+
+            # Terse mode: one-line agent hint (no stack present)
+            test_contains(
+                "Terse mode - one-line agent hint present",
+                session_start,
+                json.dumps({"directory": str(test_path)}),
+                "advisor, executor, document-writer, reader",
+            )
+
+            # Terse mode with no stack: no <system-reminder> block at all
+            test_not_contains(
+                "Terse mode (no stack) - no <system-reminder> tag",
+                session_start,
+                json.dumps({"directory": str(test_path)}),
+                "<system-reminder>",
+            )
+
+            # Verbose mode: full <system-reminder> agent block
+            output_v = run_script_verbose(session_start, json.dumps({"directory": str(test_path)}))
+            if "<system-reminder>" in output_v:
+                log_pass("Verbose mode (no stack) - <system-reminder> agent block present")
+            else:
+                log_fail("Verbose mode (no stack) - <system-reminder> agent block present",
+                         "contains <system-reminder>", output_v[:200])
 
             # Test with context snapshot
             crew_dir = test_path / ".crew"
