@@ -279,6 +279,20 @@ def main():
                 "Build Loop Active",
             )
 
+            # Build loop nudge: "Continue until advisor verifies" present in both modes
+            test_contains(
+                "SessionStart (terse) - 'Continue until advisor verifies' nudge present",
+                session_start,
+                json.dumps({"directory": str(test_path)}),
+                "Continue until advisor verifies",
+            )
+            output_bl_v = run_script_verbose(session_start, json.dumps({"directory": str(test_path)}))
+            if "Continue until advisor verifies" in output_bl_v:
+                log_pass("SessionStart (verbose) - 'Continue until advisor verifies' nudge present")
+            else:
+                log_fail("SessionStart (verbose) - 'Continue until advisor verifies' nudge present",
+                         "contains 'Continue until advisor verifies'", output_bl_v[:300])
+
             # Clean up build loop state for next test
             (crew_dir / "build-state.json").unlink()
 
@@ -292,6 +306,14 @@ def main():
                 session_start,
                 json.dumps({"directory": str(test_path)}),
                 "Measure-Twice Loop Active",
+            )
+
+            # Measure-twice nudge: "Continue until advisor approves the plan" present
+            test_contains(
+                "SessionStart (terse) - 'Continue until advisor approves the plan' nudge present",
+                session_start,
+                json.dumps({"directory": str(test_path)}),
+                "Continue until advisor approves the plan",
             )
 
             # Clean up measure-twice state for next test
@@ -483,6 +505,21 @@ def main():
             else:
                 log_fail("Terse mode + 500-char prompt: task line present in reason",
                          "Task: ... line", reason[:200])
+
+            # Also verify truncation in verbose mode
+            out_trunc_v = run_script_verbose(persistent_mode, json.dumps({"directory": str(test_path)}))
+            reason_v = json.loads(out_trunc_v).get("reason", "")
+            task_line_v = [l for l in reason_v.split("\n") if l.startswith("Task:")]
+            if task_line_v:
+                task_value_v = task_line_v[0][len("Task: "):]
+                if len(task_value_v) == 120 and task_value_v.endswith("..."):
+                    log_pass("Verbose mode + 500-char prompt: task truncated to 120 chars with ellipsis")
+                else:
+                    log_fail("Verbose mode + 500-char prompt: task truncated to 120 chars with ellipsis",
+                             "120 chars ending with '...'", f"len={len(task_value_v)}, ends={task_value_v[-5:]!r}")
+            else:
+                log_fail("Verbose mode + 500-char prompt: task line present in reason",
+                         "Task: ... line", reason_v[:200])
 
             (crew_dir / "build-state.json").unlink()
 
@@ -887,6 +924,29 @@ def main():
                 session_start,
                 json.dumps({"directory": str(test_path), "session_id": "test-sess-123"}),
                 "Session ID: test-sess-123",
+            )
+
+            # Session ID preamble present in BOTH terse and verbose
+            test_contains(
+                "SessionStart (terse) - 'Pass this session ID' preamble present",
+                session_start,
+                json.dumps({"directory": str(test_path), "session_id": "test-sess-123"}),
+                "Pass this session ID",
+            )
+            output_sid_v = run_script_verbose(
+                session_start, json.dumps({"directory": str(test_path), "session_id": "test-sess-123"}))
+            if "Pass this session ID" in output_sid_v:
+                log_pass("SessionStart (verbose) - 'Pass this session ID' preamble present")
+            else:
+                log_fail("SessionStart (verbose) - 'Pass this session ID' preamble present",
+                         "contains 'Pass this session ID'", output_sid_v[:300])
+
+            # Preamble references the CLAUDE_SESSION_ID environment variable claim
+            test_contains(
+                "SessionStart - references CLAUDE_SESSION_ID env var claim",
+                session_start,
+                json.dumps({"directory": str(test_path), "session_id": "test-sess-123"}),
+                "CLAUDE_SESSION_ID environment variable",
             )
 
             # Session-scoped bl detected for this session
