@@ -47,6 +47,7 @@ Use the Task tool to delegate to specialized agents:
 | `document-writer` | Documentation | README, API docs, comments |
 | `reviewer` | Review-panel seat — rubric + APPROVED/REVISE (read-only by convention; not sandbox-enforced) | Driven by `/crew:review` (spawned at `model: opus` / `model: sonnet`) |
 | `panelist` | Discuss-panel seat — direct take / objection / tradeoffs, no verdict (read-only by convention) | Driven by `/crew:debate` discuss mode (spawned at `model: opus` / `model: sonnet`) |
+| `formatter` | Cheap faithful reformatter — reshapes a seat's review into the FINDINGS schema verbatim (no inventing/dropping/re-judging) | Per-seat repair pass in `/crew:review`, `/crew:build`, `/crew:measure-twice` (spawned at `model: haiku`) |
 
 ## Skills
 

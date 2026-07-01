@@ -335,6 +335,8 @@ Specialized agents for different tasks. Use via `Task(subagent_type="crew:agent-
 | **executor** | Implementing well-defined tasks (no delegation) | "Add createdAt field to User entity" |
 | **document-writer** | README, API docs, technical writing | "Document the OrderService API" |
 | **reviewer** | Panel seat for `/crew:review` (read-only by convention — has `Bash` for git inspection, not sandbox-enforced; spawned at `model: opus` / `model: sonnet`) | (driven by `/crew:review`) |
+| **panelist** | Discuss-mode council seat for `/crew:debate` (independent critical take — direct take, strongest objection, risks/tradeoffs; no verdict; read-only by convention) | (driven by `/crew:debate`) |
+| **formatter** | Reformats one review seat's raw output into the structured FINDINGS schema (faithful transform, read-only, `model: haiku`) for the per-seat repair fallback | (driven by the review/build/measure-twice repair step) |
 
 ### Quick Reference
 
@@ -421,7 +423,7 @@ claude-crew/
 │   │   │   ├── models.py           # Dataclasses for JSON structures
 │   │   │   ├── persistent-mode.py  # Build loop + todo enforcement
 │   │   │   ├── session-start.py    # State restoration
-│   │   │   └── test-hooks.py       # Test suite
+│   │   │   └── tests/              # Test suite (test-hooks.py, test-multiagent.py, fixtures/)
 │   │   └── docs/
 │   │       └── CLAUDE.md     # User config template
 │   └── sk/

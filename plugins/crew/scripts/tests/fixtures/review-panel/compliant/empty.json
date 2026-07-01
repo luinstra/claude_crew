@@ -1,0 +1,8 @@
+{
+  "name": "empty",
+  "model": "gpt-5",
+  "ok": true,
+  "output": "## VERDICT\nAPPROVED\n\n## CRITERIA\n- Correctness: PASS — behavior matches the spec.\n- Completeness: PASS — edge cases covered.\n- Quality: PASS — readable and consistent.\n- Safety: PASS — no data-loss or security concern.\n\n## FINDINGS\nnone\n\n## CONFIDENCE\nhigh\n",
+  "error": null,
+  "elapsed": 1.0
+}

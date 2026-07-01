@@ -1,0 +1,8 @@
+{
+  "name": "sonnet",
+  "model": "sonnet",
+  "ok": true,
+  "output": "## VERDICT\nAPPROVED\n\n## CRITERIA\n- Correctness: PASS — behavior matches the spec.\n- Completeness: PASS — edge cases covered.\n- Quality: PASS — readable and consistent.\n- Safety: PASS — no data-loss or security concern.\n\n## FINDINGS\n- [MINOR] session-start.py:250 — LSP loaded status emitted before the hook actually loads LSP; prefer LSP required.\n- [MINOR] (no file) — terse mode omits sk:git from the advertised skill list.\n\n## CONFIDENCE\nmedium\n",
+  "error": null,
+  "elapsed": 1.0
+}

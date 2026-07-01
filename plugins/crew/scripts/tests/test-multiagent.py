@@ -2,7 +2,7 @@
 """Tests for the multiagent review engine.
 
 Matches test-hooks.py style: custom log_pass/log_fail/log_section harness, run
-via `python plugins/crew/scripts/test-multiagent.py`, exits nonzero on failure.
+via `python plugins/crew/scripts/tests/test-multiagent.py`, exits nonzero on failure.
 
 Covers Step 1.7:
   1. CodexProvider (mocked subprocess): argv, stdin prompt, -o read, timeout,
@@ -37,13 +37,18 @@ NC = "\033[0m"
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
-SCRIPT_DIR = Path(__file__).parent
+# This test lives in scripts/tests/. The import root (parent of the
+# `multiagent` package + the hook source) is scripts/ = parent.parent; the
+# fixtures sit ALONGSIDE this file in tests/ = parent.
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
+TESTS_DIR = Path(__file__).resolve().parent
 MULTIAGENT_DIR = SCRIPT_DIR / "multiagent"
+FIXTURES_DIR = TESTS_DIR / "fixtures" / "review-panel"
 
 # Make `import multiagent...` resolve (the package parent is SCRIPT_DIR).
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from multiagent import prompts, render, rounds, targets  # noqa: E402
+from multiagent import findings, prompts, render, rounds, targets  # noqa: E402
 from multiagent.providers import (  # noqa: E402
     ProviderResult,
     get_provider,
@@ -698,11 +703,29 @@ def test_result_contract():
     log_section("ProviderResult contract (Step 1.0 / 1.1)")
     r = ProviderResult(name="codex", model="o3", ok=True, output="x", error=None, elapsed=1.5)
     d = r.to_dict()
-    check("to_dict has exactly the six fields",
+    check("to_dict has exactly the six fields (repaired_output omitted when None)",
           set(d.keys()) == {"name", "model", "ok", "output", "error", "elapsed"},
           "six fields", str(set(d.keys())))
     import dataclasses
-    check("to_dict equals dataclasses.asdict", d == dataclasses.asdict(r), "equal", "differ")
+    check("to_dict equals asdict MINUS the None repaired_output",
+          d == {k: v for k, v in dataclasses.asdict(r).items() if k != "repaired_output"},
+          "equal (sans repaired_output)", "differ")
+
+    # A REPAIRED seat carries the optional 7th field; it round-trips and does NOT
+    # touch the original output.
+    rr = ProviderResult(name="codex", model="o3", ok=True, output="ORIGINAL",
+                        error=None, elapsed=1.5, repaired_output="REPAIRED")
+    dd = rr.to_dict()
+    check("to_dict includes repaired_output ONLY when set",
+          dd.get("repaired_output") == "REPAIRED" and dd["output"] == "ORIGINAL",
+          "7th field present, output intact", str(set(dd.keys())))
+    back = ProviderResult.from_dict(dd)
+    check("repaired_output round-trips through from_dict/to_dict",
+          back.repaired_output == "REPAIRED" and back.output == "ORIGINAL",
+          "round-trip holds", f"{back.repaired_output!r}/{back.output!r}")
+    check("from_dict defaults repaired_output to None when absent",
+          ProviderResult.from_dict({"name": "x", "ok": True}).repaired_output is None,
+          "None default", "?")
 
 
 # =============================================================================
@@ -778,6 +801,23 @@ def test_prompts():
     plan = prompts.plan_review("PLAN-BODY", "plan: x.md")
     check("plan_review contains rubric criteria (Clarity/Testability)",
           "Clarity" in plan and "Testability" in plan, "criteria", plan[:120])
+
+    # Structured-output schema (the shared _rubric_footer) — appended to EVERY
+    # review prompt so subprocess AND Task seats are asked for the same parseable
+    # markdown findings.py groups on (Task 1/2).
+    for label, body in (("code_review", code), ("plan_review", plan)):
+        check(f"{label} footer carries the four structured headers",
+              "## VERDICT" in body and "## CRITERIA" in body
+              and "## FINDINGS" in body and "## CONFIDENCE" in body,
+              "VERDICT/CRITERIA/FINDINGS/CONFIDENCE headers", body[-400:])
+        check(f"{label} footer keeps APPROVED/REVISE + low/medium/high",
+              "APPROVED" in body and "REVISE" in body
+              and "low" in body and "medium" in body and "high" in body,
+              "verdict words + confidence scale", body[-400:])
+        check(f"{label} footer states the MINOR/BLOCKING detail budget + prose fallback",
+              "Detail budget" in body and "WHY:" in body and "FIX:" in body
+              and "plain prose" in body,
+              "detail budget + fallback", body[-400:])
 
     # Reference-mode builders (the default) point seats at the target instead of
     # embedding it: no payload, no ARG_MAX pressure.
@@ -5548,6 +5588,633 @@ def test_scaffold_config():
               "detection skipped" not in err, "no skip note", err[:80])
 
 
+# =============================================================================
+# findings.py — parser, grouping predicate, digest renderer (Tasks 3/4/8)
+# =============================================================================
+
+def _fixture_result(kind: str, seat: str) -> ProviderResult:
+    """Load a committed review-panel fixture seat as a ProviderResult."""
+    d = json.loads((FIXTURES_DIR / kind / f"{seat}.json").read_text(encoding="utf-8"))
+    return ProviderResult.from_dict(d)
+
+
+def _mk(sev, path, line, desc, seat="s", text=None):
+    return findings.Finding(severity=sev, raw_path=path, line=line,
+                            description=desc, seat=seat,
+                            text=text if text is not None else desc)
+
+
+def test_findings_parser():
+    log_section("findings.parse_seat (structured parser, pure, never raises)")
+
+    # COMPLIANT block [compliant fixture] -> exact findings/criteria/verdict +
+    # findings_parsed=True.
+    codex = _fixture_result("compliant", "codex")
+    p = findings.parse_seat(codex)
+    check("compliant codex: findings_parsed=True, verdict APPROVED, confidence",
+          p.findings_parsed and p.verdict == "APPROVED" and p.confidence == "medium",
+          "parsed + APPROVED + medium",
+          f"parsed={p.findings_parsed} v={p.verdict} c={p.confidence}")
+    check("compliant codex: 4 criteria parsed (Correctness..Safety all PASS)",
+          p.criteria.get("Correctness") == "PASS" and len(p.criteria) == 4,
+          "4 criteria PASS", str(p.criteria))
+    check("compliant codex: 1 finding, MINOR, line 250, path extracted",
+          len(p.findings) == 1 and p.findings[0].severity == "MINOR"
+          and p.findings[0].line == 250 and p.findings[0].raw_path is not None,
+          "1 MINOR :250 with path", str(p.findings))
+
+    # EMPTY ## FINDINGS section -> findings_parsed=True, zero findings.
+    empty = _fixture_result("compliant", "empty")
+    pe = findings.parse_seat(empty)
+    check("empty-FINDINGS seat: findings_parsed=True, zero findings (counts in N)",
+          pe.findings_parsed and pe.findings == [],
+          "parsed, no findings", f"parsed={pe.findings_parsed} n={len(pe.findings)}")
+
+    # PARTIAL compliance: VERDICT+CRITERIA headers, PROSE findings ->
+    # findings_parsed=False, but verdict/criteria still extracted (metadata additive).
+    partial = _fixture_result("compliant", "partial")
+    pp = findings.parse_seat(partial)
+    check("partial seat: findings_parsed=False (prose findings) — BLOCKING-1",
+          pp.findings_parsed is False, "not parsed", str(pp.findings_parsed))
+    check("partial seat: verdict + criteria STILL extracted (metadata additive)",
+          pp.verdict == "REVISE" and pp.criteria.get("Correctness") == "FAIL",
+          "REVISE + Correctness FAIL", f"v={pp.verdict} c={pp.criteria}")
+
+    # REAL-PROSE block [real-prose fixture] -> findings_parsed=False, no metadata.
+    rcodex = _fixture_result("real-prose", "codex")
+    pr = findings.parse_seat(rcodex)
+    check("real-prose codex: findings_parsed=False, NO metadata (no ## headers)",
+          pr.findings_parsed is False and pr.verdict is None
+          and pr.confidence is None and pr.criteria == {},
+          "not parsed, no metadata",
+          f"parsed={pr.findings_parsed} v={pr.verdict} c={pr.criteria}")
+    # never raises on a failed/empty seat.
+    ragy = _fixture_result("real-prose", "agy")
+    pa = findings.parse_seat(ragy)
+    check("real-prose agy (empty/failed): not parsed, no findings, no raise",
+          pa.findings_parsed is False and pa.findings == [],
+          "graceful", str(pa))
+
+    # CRITERIA parse rule across formats (bullet / bold / table cell).
+    fmt = ProviderResult(name="x", model=None, ok=True, error=None, elapsed=0.0,
+        output="## CRITERIA\n- Correctness: FAIL — bad\n"
+               "**Completeness:** PASS\n"
+               "| **Quality** | **PASS** |\n"
+               "## FINDINGS\nnone\n")
+    pf = findings.parse_seat(fmt)
+    check("CRITERIA parse: bullet `-`, bold `**:**`, AND table-cell `| ** |`",
+          pf.criteria.get("Correctness") == "FAIL"
+          and pf.criteria.get("Completeness") == "PASS"
+          and pf.criteria.get("Quality") == "PASS",
+          "all three formats parse", str(pf.criteria))
+
+    # Two-step path/line extraction — all forms incl. the {1,8}-ext bare-path.
+    def one_finding(line):
+        r = ProviderResult(name="x", model=None, ok=True, error=None, elapsed=0.0,
+            output=f"## FINDINGS\n{line}\n")
+        fs = findings.parse_seat(r).findings
+        return fs[0] if fs else None
+    a = one_finding("- [MINOR] [the label](src/app.py:42) — link form")
+    check("path form (a) markdown-link [label](path:line)",
+          a and a.raw_path == "src/app.py" and a.line == 42, "src/app.py:42",
+          str(a))
+    b = one_finding("- [BLOCKING] pkg/mod.py:17 — bare path:line")
+    check("path form (b) bare path:line (path has '.'/'/', line digits)",
+          b and b.raw_path == "pkg/mod.py" and b.line == 17, "pkg/mod.py:17",
+          str(b))
+    c = one_finding("- [MINOR] build.gradle.kts — bare path, {1,8}-ext, no line")
+    check("path form (c) bare path w/ known ext, no line",
+          c and c.raw_path == "build.gradle.kts" and c.line is None,
+          "build.gradle.kts, None", str(c))
+    d = one_finding("- [MINOR] (no file) — terse drops a skill")
+    check("path form (d) (no file) -> raw_path None",
+          d and d.raw_path is None and d.line is None, "None path",
+          str(d))
+
+    # path form (c2): a bare, well-known EXTENSIONLESS filename keeps a path (so it
+    # groups path-aware) instead of parsing as a no-file finding.
+    df = one_finding("- [BLOCKING] Dockerfile — runs as root, no USER directive")
+    check("path form (c2) bare extensionless Dockerfile keeps a path",
+          df and df.raw_path == "Dockerfile" and df.line is None
+          and df.description == "runs as root, no USER directive",
+          "Dockerfile path-aware", str(df))
+    mk = one_finding("- [MINOR] Makefile:12 — clean target missing")
+    check("path form (c2) Makefile:line honors the trailing line",
+          mk and mk.raw_path == "Makefile" and mk.line == 12,
+          "Makefile:12", str(mk))
+    # a normal capitalized prose word must NOT be mistaken for a filename.
+    nf = one_finding("- [MINOR] Correctness could be better here")
+    check("path form (c2) does NOT misfire on ordinary Capitalized prose",
+          nf and nf.raw_path is None, "no false path", str(nf))
+
+    # path:line:COL -> the column does NOT leak into the description.
+    e = one_finding("- [BLOCKING] cli.py:1696:12 — col must not leak into desc")
+    check("path form (b'): path:line:col strips :col (no column leak in desc)",
+          e and e.raw_path == "cli.py" and e.line == 1696
+          and e.description == "col must not leak into desc"
+          and "12" not in e.description, "cli.py:1696, clean desc", str(e))
+
+    # BUG-CLASS: a `### Sub-section` INSIDE the ## FINDINGS body must NOT terminate
+    # the section — tagged lines below the sub-heading are still parsed/grouped.
+    sub_hdr = ProviderResult(name="x", model=None, ok=True, error=None, elapsed=0.0,
+        output="## FINDINGS\n"
+               "- [BLOCKING] a.py:1 — above the sub-heading\n"
+               "### Details\n"
+               "- [MINOR] b.py:2 — BELOW the sub-heading, must still parse\n"
+               "## CONFIDENCE\nhigh\n")
+    ph = findings.parse_seat(sub_hdr)
+    check("BUG-CLASS ### inside FINDINGS: deeper sub-heading does NOT end section",
+          ph.findings_parsed is True and len(ph.findings) == 2
+          and {f.raw_path for f in ph.findings} == {"a.py", "b.py"}
+          and ph.confidence == "high",
+          "both findings parsed across the ### sub-heading",
+          f"parsed={ph.findings_parsed} n={len(ph.findings)} c={ph.confidence}")
+
+    # BUG-CLASS: MIXED tagged + untagged-prose FINDINGS -> nothing lost. The
+    # untagged prose finding can't be silently dropped, so the seat is marked NOT
+    # findings-parsed (its whole body surfaces raw — nothing vanishes).
+    mixed = ProviderResult(name="x", model=None, ok=True, error=None, elapsed=0.0,
+        output="## FINDINGS\n"
+               "- [BLOCKING] a.py:1 — a tagged finding\n"
+               "the error handling in bar.py is also weak and untagged\n"
+               "## CONFIDENCE\nlow\n")
+    pm = findings.parse_seat(mixed)
+    check("BUG-CLASS mixed tagged+prose: marked NOT parsed so prose is not dropped",
+          pm.findings_parsed is False,
+          "mixed -> not parsed (surfaces raw)", str(pm.findings_parsed))
+
+    # CRITERIA name with a hyphen (`Error-handling`) parses.
+    crit = ProviderResult(name="x", model=None, ok=True, error=None, elapsed=0.0,
+        output="## CRITERIA\n- Error-handling: FAIL — needs a guard\n"
+               "## FINDINGS\nnone\n")
+    pc = findings.parse_seat(crit)
+    check("CRITERIA name with hyphen: `Error-handling: FAIL` parses",
+          pc.criteria.get("Error-handling") == "FAIL",
+          "Error-handling FAIL", str(pc.criteria))
+
+
+def test_findings_grouping():
+    log_section("findings grouping predicate + complete-linkage clustering")
+
+    # merge invariant: same (path,severity)+line, SIMILAR -> one 2/2; DIVERGENT -> two.
+    f1 = _mk("MINOR", "session-start.py", 250, "lsp loaded emitted before hook loads lsp prefer required", "a")
+    f2 = _mk("MINOR", "session-start.py", 252, "lsp loaded emitted before hook loads lsp prefer required wording", "b")
+    g = findings.group([f1, f2])
+    check("merge invariant: same file+sev+line, SIMILAR desc -> one group (2 seats)",
+          len(g) == 1 and g[0].count == 2, "1 group of 2", str([gr.count for gr in g]))
+    f3 = _mk("MINOR", "session-start.py", 250, "toolsearch select undocumented host mismatch risk", "b")
+    g2 = findings.group([f1, f3])
+    check("merge invariant: same file+sev, DIVERGENT desc (Jaccard<0.5) -> two groups",
+          len(g2) == 2, "2 groups", str([gr.count for gr in g2]))
+
+    # complete-linkage: A~B, B~C, A~C<0.5 -> A and C NOT collapsed into one 3/3.
+    A = _mk("MINOR", "f.py", 10, "alpha beta gamma delta", "a")
+    B = _mk("MINOR", "f.py", 10, "alpha beta gamma delta epsilon zeta eta theta", "b")
+    C = _mk("MINOR", "f.py", 10, "epsilon zeta eta theta", "c")
+    check("desc Jaccard wiring: A~B>=0.5, B~C>=0.5, A~C<0.5",
+          findings.jaccard(A.description, B.description) >= 0.5
+          and findings.jaccard(B.description, C.description) >= 0.5
+          and findings.jaccard(A.description, C.description) < 0.5,
+          "chain thresholds hold",
+          f"AB={findings.jaccard(A.description,B.description):.2f} "
+          f"BC={findings.jaccard(B.description,C.description):.2f} "
+          f"AC={findings.jaccard(A.description,C.description):.2f}")
+    g3 = findings.group([A, B, C])
+    check("complete-linkage: transitive chain A~B~C, A≁C -> NOT one 3/3 group",
+          not any(gr.count == 3 for gr in g3), "no 3-member cluster",
+          str([gr.count for gr in g3]))
+
+    # path-suffix: a/config.py vs b/config.py (similar desc) -> NOT merged.
+    pa = _mk("MINOR", "a/config.py", 5, "config value wrong should be fixed here", "a")
+    pb = _mk("MINOR", "b/config.py", 5, "config value wrong should be fixed here", "b")
+    check("path-suffix: a/config.py vs b/config.py (similar desc) -> distinct groups",
+          len(findings.group([pa, pb])) == 2, "2 groups", "?")
+    # config.py vs dir/config.py -> MAY merge (suffix); abs vs rel same file -> merge.
+    rel = _mk("MINOR", "config.py", 5, "config value wrong should be fixed here", "a")
+    sub = _mk("MINOR", "dir/config.py", 5, "config value wrong should be fixed here", "b")
+    check("path-suffix: config.py vs dir/config.py (suffix) -> one group",
+          len(findings.group([rel, sub])) == 1, "1 group", "?")
+    absf = _mk("MINOR", "/Volumes/x/repo/config.py", 5, "config value wrong should be fixed here", "a")
+    check("path-suffix: abs vs repo-relative SAME file -> merge",
+          findings.path_compatible(findings.normalize_path(absf.raw_path, "/none"),
+                                   findings.normalize_path(rel.raw_path, "/none")),
+          "abs ~ rel", "?")
+
+    # line-window (MINOR): 14/15 merge; 14/30 don't; None vs concrete merges.
+    l1 = _mk("MINOR", "f.py", 14, "same shared description for the window test here", "a")
+    l2 = _mk("MINOR", "f.py", 15, "same shared description for the window test here", "b")
+    l3 = _mk("MINOR", "f.py", 30, "same shared description for the window test here", "c")
+    l0 = _mk("MINOR", "f.py", None, "same shared description for the window test here", "d")
+    check("line-window: 14 & 15 (|Δ|=1) -> merge",
+          len(findings.group([l1, l2])) == 1, "1 group", "?")
+    check("line-window: 14 & 30 (|Δ|=16>10) -> do NOT merge",
+          len(findings.group([l1, l3])) == 2, "2 groups", "?")
+    check("line-window: None-line vs concrete (wildcard) -> merge",
+          len(findings.group([l1, l0])) == 1, "1 group", "?")
+
+    # cross-severity NEVER merges (severity is the only hard partition).
+    sb = _mk("BLOCKING", "f.py", 10, "identical wording across both severities here now", "a")
+    sm = _mk("MINOR", "f.py", 10, "identical wording across both severities here now", "b")
+    gs = findings.group([sb, sm])
+    check("severity HARD partition: same file+line+desc, diff severity -> 2 groups",
+          len(gs) == 2, "2 groups", str([(gr.severity, gr.count) for gr in gs]))
+
+    # representative text = the longest complete line in the cluster.
+    short = _mk("MINOR", "f.py", 10, "shared issue paraphrase one here", "a", text="- short repr")
+    longr = _mk("MINOR", "f.py", 10, "shared issue paraphrase one here too", "b",
+                text="- a much much much longer representative line wins")
+    gr = findings.group([short, longr])
+    check("representative = longest complete line in the cluster",
+          len(gr) == 1 and gr[0].representative == "- a much much much longer representative line wins",
+          "longest line", gr[0].representative if gr else "?")
+
+
+def test_collect_grouped():
+    log_section("crew collect --group / --full / --report-unparsed + repair-seat")
+
+    def stage(td, seats, kind="compliant"):
+        rd = Path(td) / ".crew" / "reviews" / "sess"
+        rd.mkdir(parents=True, exist_ok=True)
+        for s in seats:
+            src = FIXTURES_DIR / kind / f"{s}.json"
+            (rd / f"{s}.json").write_text(src.read_text(encoding="utf-8"),
+                                          encoding="utf-8")
+        return rd
+
+    six = ["codex", "agy", "cursor-auto", "cursor-composer", "opus", "sonnet"]
+
+    # --group + --full: writes both; --full byte-equals render_panel; grouped smaller.
+    with tempfile.TemporaryDirectory() as td:
+        stage(td, six)
+        proc = _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", ",".join(six),
+             "--group", "-o", ".crew/reviews/sess/panel.md",
+             "--full", ".crew/reviews/sess/panel-full.md"], cwd=td, timeout=30)
+        grouped = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
+        full = (Path(td) / ".crew/reviews/sess/panel-full.md").read_text()
+        results = [_fixture_result("compliant", s) for s in six]
+        expect_full = render.render_panel(results) + "\n"
+        check("collect --full byte-equals render_panel + '\\n'",
+              proc.returncode == 0 and full == expect_full,
+              "byte-faithful sibling", f"rc={proc.returncode}")
+        check("collect --group digest is materially smaller than --full",
+              len(grouped) < len(full), f"{len(grouped)} < {len(full)}",
+              f"grouped={len(grouped)} full={len(full)}")
+        check("grouped digest: shared finding present ONCE as 6/6 with all seats",
+              grouped.count("6/6 [MINOR]") == 1
+              and "codex, agy, cursor-auto, cursor-composer, opus, sonnet" in grouped,
+              "one 6/6 row", grouped[:80])
+        check("grouped digest: a Task-seat-only finding surfaces as ⚠ SINGLETON",
+              "⚠ SINGLETON 1/6 [BLOCKING]" in grouped and "(opus)" in grouped,
+              "opus BLOCKING singleton", "?")
+        check("grouped digest: VERDICTS roster + CRITERIA MATRIX + GROUPED FINDINGS",
+              "## VERDICTS" in grouped and "## CRITERIA MATRIX" in grouped
+              and "## GROUPED FINDINGS" in grouped, "all sections", "?")
+
+    # denominator vs roster: 6 ran, one partial -> header "6 ran, 5 findings-parsed",
+    # partial in roster + RAW, groups /5, excluded from denominator.
+    with tempfile.TemporaryDirectory() as td:
+        seats = ["codex", "agy", "cursor-auto", "cursor-composer", "opus", "partial"]
+        stage(td, seats)
+        proc = _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", ",".join(seats),
+             "--group", "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
+        dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
+        check("denominator vs roster: header shows '6 ran, 5 findings-parsed'",
+              "(6 ran, 5 findings-parsed)" in dig, "6 ran 5 parsed", dig.split(chr(10))[0])
+        check("partial seat: in VERDICTS roster (verdict REVISE counted)",
+              "- partial  REVISE" in dig, "partial REVISE in roster", "?")
+        check("partial seat: prose body rendered VERBATIM under RAW (no finding dropped)",
+              "## RAW / UNPARSED SEATS" in dig and "seat: partial" in dig
+              and "line window also looks" in dig, "partial RAW verbatim", "?")
+        check("finding denominator excludes the partial seat (groups are /5 not /6)",
+              "/5 [MINOR]" in dig and "/6 [MINOR]" not in dig,
+              "M/5 not M/6", "?")
+
+    # zero-compliant [real-prose fixture]: grouped == render_panel + "\n".
+    with tempfile.TemporaryDirectory() as td:
+        rseats = ["codex", "agy"]
+        stage(td, rseats, kind="real-prose")
+        proc = _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", ",".join(rseats),
+             "--group", "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
+        dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
+        results = [_fixture_result("real-prose", s) for s in rseats]
+        check("zero-compliant (real-prose): grouped panel.md == render_panel + '\\n'",
+              dig == render.render_panel(results) + "\n",
+              "byte-faithful fallback", dig[:80])
+
+    # Claude-only branch (Decision-I): --seats opus,sonnet -> valid 2-seat digest.
+    with tempfile.TemporaryDirectory() as td:
+        stage(td, ["opus", "sonnet"])
+        proc = _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", "opus,sonnet",
+             "--group", "-o", ".crew/reviews/sess/panel.md",
+             "--full", ".crew/reviews/sess/panel-full.md"], cwd=td, timeout=30)
+        dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
+        check("Claude-only branch: --seats opus,sonnet -> valid 2-seat grouped digest",
+              proc.returncode == 0 and "(2 ran, 2 findings-parsed)" in dig
+              and "## GROUPED FINDINGS" in dig, "2-seat digest", dig.split(chr(10))[0])
+        check("Claude-only branch: panel-full.md sibling written too",
+              (Path(td) / ".crew/reviews/sess/panel-full.md").exists(),
+              "full sibling exists", "?")
+
+    # seat order (Decision-J): VERDICTS roster follows --seats order, full names.
+    with tempfile.TemporaryDirectory() as td:
+        order = ["sonnet", "codex", "opus"]
+        stage(td, order)
+        _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", ",".join(order),
+             "--group", "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
+        dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
+        roster = [ln for ln in dig.splitlines() if ln.startswith("- sonnet")
+                  or ln.startswith("- codex") or ln.startswith("- opus")]
+        check("seat order: VERDICTS roster follows --seats order (sonnet, codex, opus)",
+              roster[0].startswith("- sonnet") and roster[1].startswith("- codex")
+              and roster[2].startswith("- opus"), "roster order", str(roster))
+
+    # dotted Task seat (BLOCKING-B): opus-46 passes charset guard + labels opus-46;
+    # raw dot opus-4.6 is REJECTED.
+    with tempfile.TemporaryDirectory() as td:
+        rd = stage(td, ["codex", "opus"])
+        (rd / "opus-46.json").write_text((rd / "opus.json").read_text(), encoding="utf-8")
+        proc = _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", "codex,opus-46",
+             "--group", "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
+        dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
+        check("dotted seat: collect --seats codex,opus-46 succeeds + labels opus-46",
+              proc.returncode == 0 and "- opus-46  " in dig, "opus-46 labeled",
+              f"rc={proc.returncode}")
+        proc2 = _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", "codex,opus-4.6",
+             "--group", "-o", "x.md"], cwd=td, timeout=30)
+        check("dotted seat: a RAW dot (opus-4.6) is rejected by the charset guard",
+              proc2.returncode == 2, "exit 2", f"rc={proc2.returncode}")
+
+    # mixed seat-kinds: subprocess + opus/sonnet fold into shared groups.
+    with tempfile.TemporaryDirectory() as td:
+        stage(td, six)
+        _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", ",".join(six),
+             "--group", "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
+        dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
+        check("mixed seat-kinds: subprocess + Task seats share the 6/6 group",
+              "6/6 [MINOR]" in dig and "opus" in dig and "codex" in dig,
+              "shared group across kinds", "?")
+
+    # Task seat with no usable block -> SKIPPED, excluded from denominator.
+    with tempfile.TemporaryDirectory() as td:
+        rd = stage(td, ["codex", "opus"])
+        skipped = ProviderResult(name="sonnet", model=None, ok=False, output="",
+                                 error="skipped: no result", elapsed=0.0)
+        (rd / "sonnet.json").write_text(json.dumps(skipped.to_dict()), encoding="utf-8")
+        _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", "codex,opus,sonnet",
+             "--group", "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
+        dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
+        # A SKIPPED seat never RAN -> excluded from the ran-count R (and from RAW),
+        # but still shown as "(skipped)" in the VERDICTS roster.
+        check("no-block Task seat: SKIPPED, header '2 ran, 2 findings-parsed'",
+              "(2 ran, 2 findings-parsed)" in dig and "(skipped)" in dig,
+              "skipped excluded from ran-count + N", dig.split(chr(10))[0])
+        # the skipped seat must NOT appear under RAW / UNPARSED (it never ran).
+        raw_section = dig.split("## RAW / UNPARSED SEATS", 1)[1]
+        check("no-block Task seat: SKIPPED seat is NOT listed under RAW / UNPARSED",
+              "seat: sonnet" not in raw_section,
+              "skipped not in RAW", raw_section[:80])
+
+    # singleton-not-buried (seat-kind-blind): lone BLOCKING from a SUBPROCESS seat
+    # AND from a Task seat both surface as ⚠ SINGLETON.
+    with tempfile.TemporaryDirectory() as td:
+        rd = Path(td) / ".crew" / "reviews" / "sess"
+        rd.mkdir(parents=True)
+        sub_block = ProviderResult(name="codex", model=None, ok=True, error=None, elapsed=0.0,
+            output="## VERDICT\nREVISE\n## FINDINGS\n- [BLOCKING] x.py:1 — subprocess lone dissent\n")
+        task_block = ProviderResult(name="opus", model=None, ok=True, error=None, elapsed=0.0,
+            output="## VERDICT\nAPPROVED\n## FINDINGS\n- [MINOR] y.py:1 — task lone dissent\n")
+        (rd / "codex.json").write_text(json.dumps(sub_block.to_dict()), encoding="utf-8")
+        (rd / "opus.json").write_text(json.dumps(task_block.to_dict()), encoding="utf-8")
+        _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", "codex,opus",
+             "--group", "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
+        dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
+        check("singleton seat-kind-blind: subprocess BLOCKING + Task MINOR both ⚠ SINGLETON",
+              dig.count("⚠ SINGLETON") == 2 and "(codex)" in dig and "(opus)" in dig,
+              "two singletons", "?")
+
+    # BUG-CLASS end-to-end: a MIXED tagged+prose seat loses NOTHING — both the
+    # tagged finding AND the untagged prose surface verbatim under RAW.
+    with tempfile.TemporaryDirectory() as td:
+        rd = Path(td) / ".crew" / "reviews" / "sess"
+        rd.mkdir(parents=True)
+        mixed = ProviderResult(name="codex", model=None, ok=True, error=None, elapsed=0.0,
+            output="## FINDINGS\n- [BLOCKING] a.py:1 — tagged finding here\n"
+                   "the error handling in bar.py is ALSO weak and untagged\n")
+        compliant = ProviderResult(name="opus", model=None, ok=True, error=None, elapsed=0.0,
+            output="## VERDICT\nAPPROVED\n## FINDINGS\n- [MINOR] z.py:1 — minor nit\n")
+        (rd / "codex.json").write_text(json.dumps(mixed.to_dict()), encoding="utf-8")
+        (rd / "opus.json").write_text(json.dumps(compliant.to_dict()), encoding="utf-8")
+        _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", "codex,opus",
+             "--group", "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
+        dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
+        raw_section = dig.split("## RAW / UNPARSED SEATS", 1)[1]
+        check("BUG-CLASS mixed seat: tagged + untagged prose BOTH appear in RAW (nothing lost)",
+              "tagged finding here" in raw_section
+              and "ALSO weak and untagged" in raw_section,
+              "both lines verbatim in RAW", raw_section[:120])
+
+    # --group with --full sibling AND a --full WITHOUT --group warning.
+    with tempfile.TemporaryDirectory() as td:
+        stage(td, ["codex", "opus"])
+        proc = _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", "codex,opus",
+             "--full", ".crew/reviews/sess/panel-full.md"], cwd=td, timeout=30)
+        check("collect --full WITHOUT --group: warns on stderr, writes no sibling",
+              proc.returncode == 0 and "warning" in proc.stderr.lower()
+              and "--full" in proc.stderr
+              and not (Path(td) / ".crew/reviews/sess/panel-full.md").exists(),
+              "stderr warning + no sibling", repr(proc.stderr[:120]))
+
+    # --report-unparsed: identifies the partial (non-compliant) seat only.
+    with tempfile.TemporaryDirectory() as td:
+        stage(td, ["codex", "partial", "opus"])
+        proc = _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", "codex,partial,opus",
+             "--report-unparsed"], cwd=td, timeout=30)
+        check("--report-unparsed: lists ONLY the non-compliant seat (partial)",
+              proc.returncode == 0 and proc.stdout.strip() == "partial",
+              "partial", repr(proc.stdout))
+
+    # repair-seat: repaired text lands in repaired_output (grouping-only); the
+    # ORIGINAL output is PRESERVED byte-intact; a repaired (now-compliant) seat
+    # groups normally.
+    with tempfile.TemporaryDirectory() as td:
+        rd = stage(td, ["codex", "partial"])
+        repl = ("## VERDICT\nREVISE\n## FINDINGS\n"
+                "- [BLOCKING] cli.py:1600 — collect drops prose. WHY: no fallback. FIX: raw.\n"
+                "## CONFIDENCE\nmedium\n")
+        repl_path = Path(td) / "repl.txt"
+        repl_path.write_text(repl, encoding="utf-8")
+        before = json.loads((rd / "partial.json").read_text())
+        proc = _run_dispatcher(
+            ["repair-seat", "--seat", str(rd / "partial.json"), "-f", str(repl_path)],
+            cwd=td, timeout=30)
+        after = json.loads((rd / "partial.json").read_text())
+        check("repair-seat: ORIGINAL output UNTOUCHED; repaired text goes to "
+              "repaired_output (six fields preserved + the one new key)",
+              proc.returncode == 0
+              and after["output"] == before["output"]      # original byte-intact
+              and after["repaired_output"] == repl          # repair recorded separately
+              and after["name"] == before["name"] and after["ok"] == before["ok"]
+              and set(after) == set(before) | {"repaired_output"},
+              "original kept, repaired_output added",
+              f"keys={sorted(after)}")
+        check("repair-seat: rewritten JSON round-trips through from_dict/to_dict",
+              ProviderResult.from_dict(after).repaired_output == repl
+              and ProviderResult.from_dict(after).output == before["output"],
+              "round-trip", "?")
+        # the repaired seat now parses + groups (grouping reads repaired_output).
+        chk = _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", "codex,partial",
+             "--report-unparsed"], cwd=td, timeout=30)
+        check("repair-seat: repaired seat is now findings-parsed (report-unparsed empty)",
+              chk.stdout.strip() == "", "no unparsed left", repr(chk.stdout))
+
+    # repair-seat DATA-LOSS PATH (the crux): a repair that PARSES but silently
+    # DROPPED a finding must NOT destroy the original. The grouped digest uses the
+    # (lossy) repaired text, but --full AND the seat file's original output stay
+    # byte-intact, so the dropped finding is STILL recoverable from --full.
+    with tempfile.TemporaryDirectory() as td:
+        rd = Path(td) / ".crew" / "reviews" / "sess"
+        rd.mkdir(parents=True)
+        # original: TWO tagged findings, but wrapped in mixed prose so it does NOT
+        # parse as-is (findings_parsed=False -> a repair candidate).
+        original_out = (
+            "## VERDICT\nREVISE\n## FINDINGS\n"
+            "- [BLOCKING] auth.py:10 — token is logged in plaintext\n"
+            "- [BLOCKING] db.py:20 — SQL built by string concat (injection)\n"
+            "and separately the retry loop never backs off, which is bad\n")
+        seat = ProviderResult(name="partial", model="gpt-5", ok=True,
+                              output=original_out, error=None, elapsed=1.0)
+        (rd / "partial.json").write_text(json.dumps(seat.to_dict()), encoding="utf-8")
+        codex_seat = _fixture_result("compliant", "codex")
+        (rd / "codex.json").write_text(json.dumps(codex_seat.to_dict()), encoding="utf-8")
+        # a LOSSY-but-VALID repair: parses, but keeps only ONE of the two findings.
+        lossy = ("## VERDICT\nREVISE\n## FINDINGS\n"
+                 "- [BLOCKING] auth.py:10 — token is logged in plaintext\n"
+                 "## CONFIDENCE\nhigh\n")
+        lossy_path = Path(td) / "lossy.txt"
+        lossy_path.write_text(lossy, encoding="utf-8")
+        rproc = _run_dispatcher(
+            ["repair-seat", "--seat", str(rd / "partial.json"), "-f", str(lossy_path)],
+            cwd=td, timeout=30)
+        after = json.loads((rd / "partial.json").read_text())
+        check("repair-seat (lossy): exit 0 + ORIGINAL output byte-intact on disk",
+              rproc.returncode == 0 and after["output"] == original_out
+              and after["repaired_output"] == lossy,
+              "original preserved, repaired stored", f"rc={rproc.returncode}")
+        # grouped digest uses the repaired (lossy) text; --full uses the original.
+        _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", "codex,partial",
+             "--group", "-o", ".crew/reviews/sess/panel.md",
+             "--full", ".crew/reviews/sess/panel-full.md"], cwd=td, timeout=30)
+        dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
+        full = (Path(td) / ".crew/reviews/sess/panel-full.md").read_text()
+        # the grouped digest reflects the repair: partial now parses, so it is NOT
+        # in RAW, and its (only surviving) finding groups.
+        check("repair-seat (lossy): grouped digest uses repaired text (partial "
+              "findings-parsed, its surviving finding present)",
+              "token is logged in plaintext" in dig
+              and "seat: partial" not in dig.split("## RAW / UNPARSED SEATS", 1)[1],
+              "grouped uses repaired", dig[:80])
+        # the DROPPED finding is GONE from the grouped digest but RECOVERABLE from
+        # --full (which renders the untouched original).
+        check("repair-seat (lossy): dropped finding is RECOVERABLE from --full "
+              "(original rendered faithfully)",
+              "SQL built by string concat" in full
+              and "retry loop never backs off" in full,
+              "dropped finding survives in --full", "?")
+        # and --full renders the ORIGINAL, not the repaired text.
+        results = [_fixture_result("compliant", "codex"),
+                   ProviderResult.from_dict(after)]
+        check("repair-seat (lossy): --full byte-equals render_panel over ORIGINAL output",
+              full == render.render_panel(results) + "\n",
+              "faithful original in --full", "?")
+
+    # repair-seat FAITHFUL repair (parses, same findings): grouped uses it, --full
+    # still shows the original, the new field round-trips.
+    with tempfile.TemporaryDirectory() as td:
+        rd = stage(td, ["codex", "partial"])
+        original_out = json.loads((rd / "partial.json").read_text())["output"]
+        faithful = ("## VERDICT\nREVISE\n## CRITERIA\n- Correctness: FAIL\n"
+                    "## FINDINGS\n- [BLOCKING] cli.py:1600 — collect can drop "
+                    "prose findings. WHY: no raw fallback. FIX: surface raw.\n"
+                    "## CONFIDENCE\nmedium\n")
+        fpath = Path(td) / "faithful.txt"
+        fpath.write_text(faithful, encoding="utf-8")
+        fproc = _run_dispatcher(
+            ["repair-seat", "--seat", str(rd / "partial.json"), "-f", str(fpath)],
+            cwd=td, timeout=30)
+        after = json.loads((rd / "partial.json").read_text())
+        check("repair-seat (faithful): exit 0, original preserved, repaired_output set",
+              fproc.returncode == 0 and after["output"] == original_out
+              and after["repaired_output"] == faithful, "faithful stored", "?")
+        _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", "codex,partial",
+             "--group", "-o", ".crew/reviews/sess/panel.md",
+             "--full", ".crew/reviews/sess/panel-full.md"], cwd=td, timeout=30)
+        dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
+        full = (Path(td) / ".crew/reviews/sess/panel-full.md").read_text()
+        check("repair-seat (faithful): grouped digest uses the repaired finding",
+              "collect can drop prose findings" in dig
+              and "seat: partial" not in dig.split("## RAW / UNPARSED SEATS", 1)[1],
+              "grouped uses repaired", "?")
+        check("repair-seat (faithful): --full STILL shows the seat's ORIGINAL prose",
+              "line window also looks" in full
+              and "collect can drop prose findings" not in full,
+              "original in --full, not repaired", "?")
+
+    # repair-seat: still-non-compliant after repair -> NON-DESTRUCTIVE no-op.
+    # The reformat doesn't parse, so the ORIGINAL output is PRESERVED (never
+    # overwritten by a degraded haiku rewrite). RAW/full shows the seat's GENUINE
+    # review verbatim; the bad replacement text must NOT appear anywhere.
+    with tempfile.TemporaryDirectory() as td:
+        rd = stage(td, ["codex", "partial"])
+        original = json.loads((rd / "partial.json").read_text())["output"]
+        bad = Path(td) / "bad.txt"
+        bad.write_text("still just prose, no schema headers at all\n", encoding="utf-8")
+        rproc = _run_dispatcher(
+            ["repair-seat", "--seat", str(rd / "partial.json"), "-f", str(bad)],
+            cwd=td, timeout=30)
+        # repair-seat reports a non-zero SENTINEL (no-op, original kept).
+        check("repair-seat: non-parsing reformat -> non-zero no-op sentinel (exit 3)",
+              rproc.returncode == 3, "exit 3 sentinel", f"rc={rproc.returncode}")
+        # the file's output is UNCHANGED — the original is recoverable.
+        after = json.loads((rd / "partial.json").read_text())["output"]
+        check("repair-seat: failed repair leaves ORIGINAL output intact (recoverable)",
+              after == original and "still just prose" not in after,
+              "original preserved", repr(after[:60]))
+        proc = _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", "codex,partial",
+             "--group", "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
+        dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
+        check("repair-seat: STILL-non-compliant after repair -> RAW shows ORIGINAL, "
+              "never the degraded rewrite",
+              "## RAW / UNPARSED SEATS" in dig
+              and "line window also looks" in dig
+              and "still just prose" not in dig,
+              "original in RAW, bad text absent", "?")
+
+    # repair-seat: missing file / non-object -> exit 2.
+    with tempfile.TemporaryDirectory() as td:
+        proc = _run_dispatcher(
+            ["repair-seat", "--seat", str(Path(td) / "nope.json"), "-f", "/dev/null"],
+            cwd=td, timeout=30)
+        check("repair-seat: missing seat file -> exit 2", proc.returncode == 2,
+              "exit 2", f"rc={proc.returncode}")
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -5577,6 +6244,9 @@ def main():
     test_cursor()
     test_from_dict_and_escaping()
     test_collect()
+    test_findings_parser()
+    test_findings_grouping()
+    test_collect_grouped()
     test_config()
     test_global_roster_availability()
     test_panel_availability_consistency()

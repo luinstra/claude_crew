@@ -77,7 +77,7 @@ git commit -m "ci: update workflow permissions"
 | Command | Purpose |
 |---------|---------|
 | `/plugin` | Install plugin from current directory (run from `plugins/crew/` or `plugins/sk/`) |
-| `python plugins/crew/scripts/test-hooks.py` | Run hook unit tests |
+| `python plugins/crew/scripts/tests/test-hooks.py` | Run hook unit tests |
 | `"${CLAUDE_PLUGIN_ROOT}/crew" state show bl` | Debug build loop state (via the bare dispatcher) |
 
 ### Install Git Hook (Required for Contributors)
@@ -204,7 +204,7 @@ Loop complete → crew state deactivate → JSON deleted
 
 ```bash
 # Run hook tests
-python plugins/crew/scripts/test-hooks.py
+python plugins/crew/scripts/tests/test-hooks.py
 
 # Manual state inspection (via the bare crew dispatcher)
 "${CLAUDE_PLUGIN_ROOT}/crew" state show bl
@@ -277,7 +277,7 @@ state_file = directory / ".crew" / "state.json"
 
 - [ ] **Install post-commit hook** (`ln -sf ../../scripts/post-commit-version-bump.sh .git/hooks/post-commit`)
 - [ ] **Use conventional commit format** (`feat:`, `fix:`, etc.)
-- [ ] Run `test-hooks.py` after modifying scripts
+- [ ] Run `tests/test-hooks.py` after modifying scripts
 - [ ] Update `README.md` when adding commands
 - [ ] Update `docs/CLAUDE.md` if changing user-facing behavior
 - [ ] Use `/crew:` prefix in all command references

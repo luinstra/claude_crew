@@ -79,14 +79,49 @@ only issues in the change itself."""
 
 
 def _rubric_footer() -> str:
+    """The shared structured-output ask appended to EVERY review prompt.
+
+    One footer, one builder — so subprocess seats (codex/agy/cursor-*) AND the
+    Claude Task seats (opus/sonnet/opus-4.6) are ALL asked for the SAME structured
+    markdown. ``findings.py`` parses exactly these four section headers (``##
+    VERDICT`` / ``## CRITERIA`` / ``## FINDINGS`` / ``## CONFIDENCE``) so the panel
+    can dedup + group findings across seats. The schema is plain markdown — a seat
+    that ignores it still reads fine, and its prose is rendered verbatim (never
+    dropped). The detail budget (Decision-F) keeps a [MINOR] to one line while
+    letting a [BLOCKING] carry a short WHY:/FIX:.
+    """
     return (
-        "After scoring, list findings. Tag each finding with a severity:\n"
+        "Return your review as STRUCTURED markdown so the panel can group "
+        "findings across seats. Use these EXACT section headers:\n"
+        "\n"
+        "## VERDICT\n"
+        "APPROVED (no [BLOCKING] findings) or REVISE (one or more [BLOCKING] "
+        "findings) — one word on its own line.\n"
+        "\n"
+        "## CRITERIA\n"
+        "One line per criterion named above, e.g. `- Correctness: PASS — reason` "
+        "or `- Completeness: FAIL — reason`.\n"
+        "\n"
+        "## FINDINGS\n"
+        "One finding PER LINE, each beginning with a severity tag. Severity "
+        "meaning:\n"
         "  [BLOCKING] — must be fixed before this can be accepted.\n"
         "  [MINOR]    — should be addressed but does not block acceptance.\n"
-        "Then give an overall CONFIDENCE (low / medium / high) that the target "
-        "clears the bar.\n"
-        "End with a one-line verdict: APPROVED (no [BLOCKING] findings) or "
-        "REVISE (one or more [BLOCKING] findings)."
+        "Detail budget: a [MINOR] is ONE tight, complete line; a [BLOCKING] may "
+        "add a short WHY: and FIX:. Shape each line as\n"
+        "  - [MINOR] path/to/file.ext:LINE — one tight, complete line.\n"
+        "  - [BLOCKING] path/to/file.ext:LINE — what's wrong. WHY: why it blocks. "
+        "FIX: the suggestion.\n"
+        "Prefer a repo-relative path; omit `:LINE` when not line-specific; write "
+        "`(no file)` when the finding has no path. If you have NO findings, write "
+        "an explicitly empty section (the single word `none`).\n"
+        "\n"
+        "## CONFIDENCE\n"
+        "low / medium / high — your overall confidence that the target clears the "
+        "bar.\n"
+        "\n"
+        "If you cannot follow this structure, write your review as plain prose — "
+        "it will still be read."
     )
 
 

@@ -31,16 +31,34 @@ class ProviderResult:
     error: str | None    # diagnostic when ok is False
     elapsed: float
 
-    def to_dict(self) -> dict:
-        """Return all six fields as a plain dict.
+    # OPTIONAL 7th field — the haiku-reformatted, findings-schema text produced by
+    # `repair-seat`. It is GROUPING-ONLY: `findings.parse_seat` reads it (when set)
+    # to extract findings/verdict/criteria for the grouped digest, but `output`
+    # (the seat's GENUINE review) is NEVER overwritten — `render_panel`/`--full`
+    # and the RAW/UNPARSED section ALWAYS render the original `output`. So NO
+    # repair — lossy, garbled, or faithful — can ever remove or alter a seat's
+    # original words on disk; the worst a bad repair can do is make ONE seat's
+    # grouped digest slightly inaccurate, while the faithful --full/RAW record
+    # stays byte-intact. Defaults None (no repair); omitted from `to_dict` when
+    # None so an un-repaired seat's JSON keeps the byte-identical SIX-field shape.
+    repaired_output: str | None = None
 
-        Mirrors the ``models.py`` convention (``asdict(self)``). The CLI/render
-        layer batches a list of these and calls ``json.dumps`` ONCE over the
-        list for ``--json`` output (see render.py / cli.py); we deliberately do
-        NOT add a per-result ``to_json()`` because the renderer owns the
-        array-level serialization.
+    def to_dict(self) -> dict:
+        """Return the seat's fields as a plain dict.
+
+        Mirrors the ``models.py`` convention (``asdict(self)``) BUT drops the
+        optional ``repaired_output`` when it is None, so an un-repaired seat's
+        JSON keeps the byte-identical SIX-field shape existing consumers expect
+        (the field only materializes after a `repair-seat`). The CLI/render layer
+        batches a list of these and calls ``json.dumps`` ONCE over the list for
+        ``--json`` output (see render.py / cli.py); we deliberately do NOT add a
+        per-result ``to_json()`` because the renderer owns the array-level
+        serialization.
         """
-        return dataclasses.asdict(self)
+        d = dataclasses.asdict(self)
+        if self.repaired_output is None:
+            d.pop("repaired_output", None)
+        return d
 
     @classmethod
     def from_dict(cls, d) -> "ProviderResult":
@@ -94,8 +112,13 @@ class ProviderResult:
             elapsed = float(d.get("elapsed", 0.0))   # "bad"/list/None -> 0.0
         except (TypeError, ValueError):
             elapsed = 0.0
+
+        # OPTIONAL grouping-only field — present only after a `repair-seat`. Absent
+        # / None -> the seat has no repaired projection (parse the original output).
+        rep = d.get("repaired_output")
+        repaired_output = None if rep is None else str(rep)
         return cls(name=name, model=model, ok=ok, output=output,
-                   error=error, elapsed=elapsed)
+                   error=error, elapsed=elapsed, repaired_output=repaired_output)
 
 
 # =============================================================================

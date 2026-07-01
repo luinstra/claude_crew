@@ -77,6 +77,26 @@ strictly:
 5. End with a one-line verdict: **APPROVED** (no `[BLOCKING]` findings) or
    **REVISE** (one or more `[BLOCKING]` findings).
 
+### Output schema — use these EXACT section headers
+
+The prompt you receive already specifies this, but to be explicit: return your
+review as STRUCTURED markdown using these four headers, in this order, so the
+panel can dedup + group findings across seats:
+
+- `## VERDICT` — `APPROVED` or `REVISE`, one word on its own line.
+- `## CRITERIA` — one line per criterion, e.g. `- Correctness: PASS — reason`.
+- `## FINDINGS` — one finding PER LINE, each beginning with a severity tag:
+  `- [BLOCKING] path/to/file.ext:LINE — what's wrong. WHY: … FIX: …` or
+  `- [MINOR] path/to/file.ext:LINE — one tight line.` Omit `:LINE` when not
+  line-specific; write `(no file)` when there's no path; if you have NO findings,
+  write the single word `none`. Do NOT mix untagged prose into this section —
+  every finding gets its own tagged line (untagged prose here forces the whole
+  seat to be rendered raw so nothing is lost, but that defeats grouping).
+- `## CONFIDENCE` — `low` / `medium` / `high`.
+
+If you genuinely cannot follow this structure, write plain prose — it is still
+read verbatim (it just can't be grouped with the other seats).
+
 ## What you do (council mode)
 
 > **Note:** discuss-mode debates (`/crew:debate`) now spawn the dedicated

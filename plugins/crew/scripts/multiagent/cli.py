@@ -54,7 +54,7 @@ import re
 import shutil
 import subprocess
 
-from multiagent import config, prompts, render, rounds, seats, targets
+from multiagent import config, findings, prompts, render, rounds, seats, targets
 from multiagent.providers import (
     ProviderResult,
     available_seats,
@@ -1536,7 +1536,17 @@ def cmd_seats(args: argparse.Namespace) -> int:
 
 def cmd_collect(args: argparse.Namespace) -> int:
     """Collapse the named per-seat ``<seat>.json`` result files into ONE markdown
-    digest (a FAITHFUL ``render_panel`` projection — never a summarizer/voter).
+    digest.
+
+    THREE modes over the same named-seats read (Decision-G):
+      * default (no flag) — a FAITHFUL ``render_panel`` concatenation, byte-
+        identical to before this feature (the existing ``test_collect`` contract).
+      * ``--group`` — the deduped GROUPED digest (``findings.render_digest``):
+        VERDICTS roster + CRITERIA MATRIX + GROUPED FINDINGS ``M/N`` + RAW seats.
+        ``--full <path>`` ALSO writes the faithful sibling. Both the subprocess
+        AND the (orchestrator-persisted, dot-stripped) Task seats flow through it.
+      * ``--report-unparsed`` — print ONLY the ran-but-non-findings-parsed seat
+        names (the haiku-repair candidates, Part 2); write no digest.
 
     Reads EXACTLY the seats named in ``--seats`` (in that order) — NO glob. This
     is the deterministic fix for the stale-seat bug: the reviews dir is reused
@@ -1616,7 +1626,35 @@ def cmd_collect(args: argparse.Namespace) -> int:
             )
         results.append(result)
 
-    text = render.render_panel(results)
+    # --report-unparsed: QUERY mode for the orchestrator-side haiku repair (Part
+    # 2). Print ONLY the seats that RAN but did NOT parse into structured findings
+    # (newline-separated, --seats order), write no digest. The orchestrator reads
+    # this list, reformats each via a haiku Task seat, writes it back with
+    # `repair-seat`, then re-collects with --group.
+    if getattr(args, "report_unparsed", False):
+        for name in findings.unparsed_seats(results):
+            print(name)
+        return 0
+
+    # --full only does something WITH --group (it writes the faithful sibling of
+    # the grouped digest). Warn loudly rather than silently no-op'ing it.
+    if getattr(args, "full", None) and not getattr(args, "group", False):
+        print(
+            "warning: --full has no effect without --group; no faithful sibling "
+            "was written (pass --group to enable it).",
+            file=sys.stderr,
+        )
+
+    if getattr(args, "group", False):
+        # GROUPED digest (Decision-G): the deduped "N/N seats flagged X" panel.
+        # --full ALSO writes the byte-faithful render_panel sibling (the recovery
+        # artifact + the advisory size denominator).
+        text = findings.render_digest(results)
+        if getattr(args, "full", None):
+            _emit(render.render_panel(results), args.full)
+    else:
+        # No --group -> byte-identical to today (the faithful projection).
+        text = render.render_panel(results)
     _emit(text, args.out)
     # With -o the digest went to a file, so stdout carries ONLY the path
     # (mirrors --stage's path-only stdout contract; keeps the call allowlist-safe
@@ -1624,6 +1662,96 @@ def cmd_collect(args: argparse.Namespace) -> int:
     # passed is the path to echo.
     if args.out:
         print(args.out)
+    return 0
+
+
+# Sentinel exit code: the replacement did NOT parse, so repair was a NON-
+# DESTRUCTIVE no-op and the seat file is UNCHANGED (original preserved). Distinct
+# from 2 (usage/read error) so the orchestrator can tell "kept the original" from
+# "couldn't run".
+REPAIR_NOOP = 3
+
+
+def cmd_repair_seat(args: argparse.Namespace) -> int:
+    """Store a haiku-reformatted, findings-schema projection of a seat's review in
+    a SEPARATE ``repaired_output`` field of ``<seat>.json`` — but ONLY IF that
+    text actually parses into the FINDINGS schema. The seat's original ``output``
+    is NEVER touched.
+
+    Part 2 (per-seat haiku repair): the orchestrator Reads a non-compliant seat's
+    raw ``output``, spawns a haiku Task agent to REFORMAT it into the FINDINGS
+    schema (a faithful format transform, NOT a re-review), then writes the result
+    back here. It is written to ``repaired_output``; ``name/model/ok/output/error/
+    elapsed`` are ALL preserved byte-intact.
+
+    **Never-lose-a-finding guarantee (the core invariant):** the repaired text is
+    used for GROUPING ONLY. ``findings.parse_seat`` reads ``repaired_output`` (when
+    present) to extract the grouped digest's findings/verdict/criteria, but the
+    faithful ``--full`` render and the RAW / UNPARSED section ALWAYS render the
+    ORIGINAL ``output``. So even a repair that PARSES but silently DROPPED a finding
+    during reformatting cannot lose it: the dropped finding is still in the
+    untouched ``output`` and remains recoverable from ``panel-full.md`` / RAW. The
+    worst a bad repair can do is make THIS one seat's grouped rows slightly
+    inaccurate; the genuine review on disk is untouchable.
+
+    ``repaired_output`` is populated ONLY IF it parses (``parse_seat`` →
+    ``findings_parsed=True``). If the reformat STILL does not parse, the write is a
+    NO-OP — ``repaired_output`` is left UNSET and the command exits ``REPAIR_NOOP``
+    (3); the seat falls back to its raw original in BOTH the grouped digest and
+    ``--full``/RAW. ``collect``/``findings`` stay PURE — this helper only validates
+    + records a field; it spawns NO agent."""
+    seat_path = Path(args.seat)
+    if not seat_path.exists():
+        print(f"error: no seat file at {args.seat!r}", file=sys.stderr)
+        return 2
+    try:
+        data = json.loads(seat_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"error: cannot read seat file {args.seat!r}: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(data, dict):
+        print(f"error: seat file {args.seat!r} is not a JSON object", file=sys.stderr)
+        return 2
+
+    if args.file:
+        try:
+            replacement = Path(args.file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot read replacement file {args.file!r}: {exc}",
+                  file=sys.stderr)
+            return 2
+    else:
+        replacement = sys.stdin.read()
+
+    # Rebuild the render-safe shape (coercion). Validate the REPLACEMENT parses
+    # BEFORE recording it — a repair that doesn't parse is a no-op. Validate on a
+    # candidate whose ``output`` is the replacement (repaired_output unset) so we
+    # test the REPLACEMENT's own parseability, not any prior repair.
+    result = ProviderResult.from_dict(data)
+    candidate = ProviderResult(
+        name=result.name, model=result.model, ok=result.ok,
+        output=replacement, error=result.error, elapsed=result.elapsed,
+    )
+    if not findings.parse_seat(candidate).findings_parsed:
+        # No-op: the reformat still doesn't parse. Leave the seat UNCHANGED (no
+        # repaired_output) so it falls back to its raw original in BOTH the grouped
+        # digest and RAW/panel-full.
+        print(
+            f"repair-seat: reformatted text for {seat_path.name} still does not "
+            "parse into the FINDINGS schema; leaving the seat UNCHANGED "
+            "(no-op, the seat will render raw).",
+            file=sys.stderr,
+        )
+        return REPAIR_NOOP
+
+    # Record the repaired text in the SEPARATE grouping-only field. The original
+    # ``output`` is NEVER overwritten: --full/RAW always render the seat's genuine
+    # review, so a repair that dropped a finding cannot make it unrecoverable.
+    result.repaired_output = replacement
+    seat_path.write_text(
+        json.dumps(result.to_dict(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8")
+    print(str(seat_path))
     return 0
 
 
@@ -2692,15 +2820,52 @@ def build_parser() -> argparse.ArgumentParser:
     )
     coll.add_argument(
         "--seats", dest="seats", default="",
-        help="comma-separated resolved subprocess-seat names. collect reads EXACTLY "
-             "<seat>.json for each; a missing seat renders as a SKIPPED block; "
-             "stale/foreign files are never read. (collect never globs.)",
+        help="comma-separated resolved seat names: subprocess (codex/agy/cursor-*) "
+             "AND the dot-stripped Task seats (opus, sonnet, opus-46). collect reads "
+             "EXACTLY <seat>.json for each; a missing seat renders as a SKIPPED "
+             "block; stale/foreign files are never read. (collect never globs.)",
     )
     coll.add_argument(
         "-o", "--out", default=None,
         help="write the digest to this file (keeps the call shell-redirect-free)",
     )
+    coll.add_argument(
+        "--group", action="store_true",
+        help="emit the GROUPED/deduped digest (VERDICTS roster + CRITERIA MATRIX + "
+             "GROUPED FINDINGS 'M/N' + RAW seats) instead of the faithful "
+             "concatenation. No --group = byte-identical to today.",
+    )
+    coll.add_argument(
+        "--full", default=None, metavar="PATH",
+        help="with --group, ALSO write the byte-faithful render_panel concatenation "
+             "of all named seats to PATH (the recovery artifact / size denominator).",
+    )
+    coll.add_argument(
+        "--report-unparsed", dest="report_unparsed", action="store_true",
+        help="print ONLY the seats that ran but did NOT parse into structured "
+             "findings (newline-separated) — the haiku-repair candidates. Writes no "
+             "digest.",
+    )
     coll.set_defaults(func=cmd_collect)
+
+    rs = sub.add_parser(
+        "repair-seat",
+        help="Write the haiku-reformatted findings from -f/stdin to a SEPARATE "
+             "`repaired_output` field of a seat's <seat>.json — NEVER overwriting "
+             "the original `output`. Non-destructive: `repaired_output` is "
+             "populated ONLY IF it parses (else no-op, exit REPAIR_NOOP=3). "
+             "Grouping uses `repaired_output` when present; --full/RAW always "
+             "render the original `output`.",
+    )
+    rs.add_argument(
+        "--seat", dest="seat", required=True, metavar="PATH",
+        help="path to the seat's <seat>.json file to rewrite in place",
+    )
+    rs.add_argument(
+        "-f", "--file", dest="file", default=None,
+        help="read the replacement output text from this file (default: stdin)",
+    )
+    rs.set_defaults(func=cmd_repair_seat)
 
     rp = sub.add_parser(
         "review-prep",

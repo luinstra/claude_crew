@@ -1,0 +1,8 @@
+{
+  "name": "agy",
+  "model": "Gemini 3.1 Pro (High)",
+  "ok": false,
+  "output": "",
+  "error": "agy returned no output",
+  "elapsed": 16.151686291210353
+}

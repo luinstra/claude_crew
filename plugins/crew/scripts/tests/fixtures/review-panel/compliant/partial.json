@@ -1,0 +1,8 @@
+{
+  "name": "partial",
+  "model": "gpt-5",
+  "ok": true,
+  "output": "## VERDICT\nREVISE\n\n## CRITERIA\n- Correctness: FAIL — the collect path can drop findings.\n- Completeness: PASS — most cases covered.\n\n## FINDINGS\nThe collect path drops findings when a seat emits prose instead of the tagged\nschema. That needs fixing before this can merge, and the line window also looks\noff by a few lines in practice.\n\n## CONFIDENCE\nmedium\n",
+  "error": null,
+  "elapsed": 1.0
+}

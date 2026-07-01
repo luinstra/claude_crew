@@ -1,7 +1,7 @@
 ---
 description: Start verified development loop with multi-model review before completion
 argument-hint: "<task description>"
-allowed-tools: Bash, Task, Read, Glob
+allowed-tools: Bash, Task, Read, Write, Glob
 ---
 
 [BUILD LOOP STARTING]
@@ -106,9 +106,11 @@ synthesized from whichever seats succeed.
 
 **ALWAYS run `review-prep` (2a.0–2a.1 below) — it is the SOLE source of the
 `task_seats`/`task_seat_models` Step 2b needs.** Skip ONLY the per-seat subprocess
-fan-out (2a.2) + the `collect` (2a.3) when `subprocess_seats` is empty (e.g.
-`--panel lite`/`solo`) — go straight to Step 2b and synthesize from the Task seats
-alone. Otherwise fan the subprocess seats out
+fan-out (2a.2) when `subprocess_seats` is empty (e.g. `--panel lite`/`solo`) — go
+straight to Step 2b. (You STILL persist the Task seats in Step 2c and run the SAME
+grouped `collect` in Step 2c.5 over the Task seats alone — Decision-I; there is no
+"synthesize from raw Task returns" path anymore.) Otherwise fan the subprocess
+seats out
 over the working-tree diff **one `crew run` call per seat, in parallel** — each a
 separate, visible, individually-killable shell (the per-seat shape
 `/crew:debate`'s multi-round path uses), not one opaque `review` call hiding them
@@ -146,14 +148,17 @@ add `--inline-diff` to embed it instead (forwarded to the staged prompt).
 itself), and the engine still EXECUTES only the subprocess seats. **Parse the
 one-line JSON** it prints (read it
 directly from the command's stdout — it is NOT a shell `$(…)` capture): use
-`subprocess_seats` to iterate the per-seat loop AND (JOINED comma-separated) to
-pass to `collect --seats` in 2a.3. The per-seat `run` DERIVES its `-f` from
-`--session-id` (= `prompt_path`, `.crew/reviews/<session-id>/prompt-seat.txt`), so
-you do NOT pass `prompt_path` as `-f` yourself (see 2a.2).
+`subprocess_seats` to iterate the per-seat loop AND (JOINED comma-separated) as
+part of the `collect --seats` list in Step 2c.5. The per-seat `run` DERIVES its
+`-f` from `--session-id` (= `prompt_path`,
+`.crew/reviews/<session-id>/prompt-seat.txt`), so you do NOT pass `prompt_path` as
+`-f` yourself (see 2a.2).
 **If `subprocess_seats` is empty** (a Claude-only `--panel lite`/`solo` resolves to
-no subprocess seats, so `prompt_path` is `""` and nothing was staged), **SKIP the
-2a.2 per-seat loop AND the 2a.3 collect** entirely — go straight to Step 2b and
-synthesize from the Task seats alone.
+no subprocess seats, so `prompt_path` is `""` and nothing was staged), **SKIP only
+the 2a.2 per-seat loop** — go straight to Step 2b. You STILL persist the Task seats
+(Step 2c) and run the SAME grouped `collect` (Step 2c.5) with `--seats
+<dot-stripped task_seats only>`; the grouped `panel.md` then covers the Claude-only
+roster (Decision-I).
 
 **2a.2 — run EACH seat in its own parallel shell.** First, **clear any pre-existing
 `<seat>.json`** for the seats you are about to run — the session dir
@@ -184,34 +189,11 @@ prep) and `-o` = `<seat>.json`:
 - Same model / sandbox / auth-banner / ARG_MAX handling as the old single-call
   path — `run` uses the identical provider machinery.
 
-**2a.3 — collect.** WAIT for every 2a.2 `crew run <seat>` background shell to EXIT
-before calling collect — a seat whose `<seat>.json` has not been written yet is
-STILL RUNNING, not skipped (the same wait discipline as the Task seats in Step
-2b). Because `collect` renders a missing file as a SKIPPED block, collecting early
-would silently drop a slow-but-still-running seat from the verdict. Only after ALL
-per-seat run shells have completed do you run collect.
-
-Then collapse the per-seat result files into ONE markdown digest instead of
-reading N `<seat>.json` files. You ALREADY have the resolved subprocess-seat list
-as the `subprocess_seats` array from the 2a.0–2a.1 `review-prep` JSON (the SAME
-list the per-seat loop iterated). **JOIN those seat names comma-separated** and
-pass that SAME list as `collect --seats <comma-list>` so collect digests EXACTLY
-the seats that ran:
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" collect --session-id <session-id> --seats <resolved-subprocess-seats> -o .crew/reviews/<session-id>/panel.md
-```
-
-where `<resolved-subprocess-seats>` is the comma-separated join of `subprocess_seats`
-from the `review-prep` JSON. `collect` reads EXACTLY those named
-`<seat>.json` files (never globs — a stale/foreign file is never folded in), and a
-named-but-missing seat renders as a SKIPPED block labeled with its name. It writes
-a faithful `render_panel` digest (it does NOT summarize, vote, or reorder) and
-prints only the output path. Then **Read `panel.md` once** — it is the full
-subprocess panel as labeled blocks — and carry it into Step 2d alongside the Task
-seats. `panel.md` blocks follow the `--seats` ORDER; each is seat-labeled, so
-reference seats by their LABEL ("the codex block", "the cursor-auto verdict"),
-never positionally.
+**2a.3 — do NOT collect yet.** The subprocess seats are NOT collected here on
+their own anymore. The WHOLE panel — subprocess AND Task seats — flows through ONE
+grouped `collect` in **Step 2c.5**, after the Task seats are persisted. Just launch
+the 2a.2 shells (in parallel) and move on to Step 2b; Step 2c.5 owns the
+wait-for-both barrier and the single collect.
 
 ### Step 2b — Fan out Task seats (parallel)
 
@@ -294,11 +276,16 @@ identically to a failed subprocess seat.
 > and have falsely declared a finished seat "dead", discarding a good review. A
 > seat that has not returned is **still running, not failed** — wait for it.
 
-For each Task seat, normalize its return into the SAME six fields as the
-subprocess results:
+For each Task seat **in `task_seats`** (from the `review-prep` JSON — NOT a
+hardcoded `opus`/`sonnet` pair), normalize its return into the SAME six fields as
+the subprocess results:
 
-- `name` = `opus` / `sonnet` (the seat name).
-- `model` = the pinned model (`opus` / `sonnet`).
+- `name` = the seat's dot-stripped name (the same `[A-Za-z0-9_-]`-only slug
+  `_seat_role_slug` in `cli.py` derives — the ONE canonical dot-strip source, so
+  `opus-4.6` → `opus-46` and a dotted role never drifts between staging, persist,
+  and collect).
+- `model` = the pinned model from `task_seat_models[<seat>]` (e.g. `opus`,
+  `sonnet`, or the version-locked `claude-opus-4-6` for `opus-4.6`).
 - `ok` = True if the seat's **returned result** is a usable review block;
   **False** only if that result is an error, has no usable block, or the harness
   reports the Task failed/missing. (Judge from the returned result — never a proxy.)
@@ -311,11 +298,91 @@ A failed Task seat renders exactly like a failed subprocess seat. A
 skipped/unspawnable seat renders a clearly-marked skipped block and is excluded
 from the verdict math.
 
+**Persist each normalized Task seat to disk so it flows through the SAME grouped
+`collect` as the subprocess seats** (Decision-H). For EACH entry in `task_seats`
+(from the prep JSON — NOT a hardcoded `opus,sonnet` pair), compute its
+dot-stripped filename the SAME way `render --stage-all` does (strip any char
+outside `[A-Za-z0-9_-]`, so `opus-4.6` → `opus-46`), clear any stale file, then
+Write the six-field dict:
+
+```bash
+rm -f .crew/reviews/<session-id>/<dot-stripped seat>.json
+```
+
+Then use the **Write tool** (no shell heredoc) to write the normalized
+`ProviderResult` — the exact six fields `{name, model, ok, output, error,
+elapsed}` — to `.crew/reviews/<session-id>/<dot-stripped seat>.json` as JSON. Use
+the dot-stripped name as BOTH the filename and the `name` field (e.g. `opus-46.json`
+with `"name": "opus-46"`), so the filename, the `collect --seats` entry, and the
+digest label match end-to-end and a dotted name never trips collect's charset
+guard (Decision-J).
+
+### Step 2c.5 — Wait-for-both, repair non-compliant seats, then collect ONCE
+
+**Wait-for-BOTH barrier.** Before collecting, wait for BOTH (a) every Step 2a.2
+subprocess `crew run <seat>` shell to EXIT, AND (b) every Step 2b Task seat to
+return AND be persisted in Step 2c. A seat whose `<seat>.json` is not written yet
+is STILL RUNNING, not skipped — collecting early would silently drop it.
+
+Define `<ran_seats>` = the comma-join of `subprocess_seats` (resolved order from
+the prep JSON) **then** the dot-stripped `task_seats` (Decision-J order). In the
+Claude-only branch (`subprocess_seats` empty) `<ran_seats>` is just the
+dot-stripped `task_seats`.
+
+**Repair non-compliant seats (per-seat haiku reformat).** A seat that ignored the
+structured `## FINDINGS` schema can't be grouped — give it ONE cheap repair pass.
+Ask the engine which seats did not parse:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/crew" collect --session-id <session-id> --seats <ran_seats> --report-unparsed
+```
+
+This prints the seat names (one per line) whose output ran but did NOT parse into
+structured findings. For EACH such `<seat>`:
+
+1. **Read** its raw `output` field — `.crew/reviews/<session-id>/<seat>.json`.
+2. Spawn the cheap **formatter** agent to reformat that text into the schema (a
+   FAITHFUL transform — it must NOT invent, drop, or re-judge findings):
+
+   ```
+   Task(subagent_type="crew:formatter", model="haiku",
+        prompt="Reformat this review into the FINDINGS schema verbatim — do not
+   invent or drop findings, only reformat:\n\n<the seat's raw output field>")
+   ```
+
+3. Write the formatter's returned text into the seat file with the engine
+   (it writes to a SEPARATE `repaired_output` field, NEVER overwriting the
+   original `output`):
+
+   ```bash
+   "${CLAUDE_PLUGIN_ROOT}/crew" repair-seat --seat .crew/reviews/<session-id>/<seat>.json -f <temp-file-with-reformatted-text>
+   ```
+
+`repair-seat` is **non-destructive**: it populates `repaired_output` ONLY IF the
+reformatted text parses into the FINDINGS schema. If it STILL doesn't parse, the
+write is a **no-op** — `repaired_output` is left unset and the command exits a
+non-zero sentinel (3). Grouping uses `repaired_output` when present, while
+`--full` and the RAW section ALWAYS render the original `output`, so a degraded
+rewrite can never overwrite the seat's genuine review: `collect` renders the
+ORIGINAL text raw (graceful degradation, never worse than the seat's real words). Just continue — the file is
+correct either way. The formatter is an in-session `haiku` Task seat — no
+`claude -p`, no API key.
+
+**Collect ONCE — grouped + faithful:**
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/crew" collect --session-id <session-id> --seats <ran_seats> --group -o .crew/reviews/<session-id>/panel.md --full .crew/reviews/<session-id>/panel-full.md
+```
+
+`--group` writes the deduped digest to `panel.md`; `--full` writes the faithful
+per-seat concatenation to `panel-full.md` (the recovery artifact). **Read
+`panel.md` once** and carry that ONE digest into Step 2d — do NOT also carry the
+raw Task-seat blocks into context.
+
 ### Step 2d — Synthesize the verdict
 
-Read the full panel — the subprocess seats come from the single `panel.md` collect
-digest (Step 2a.3), joined with the normalized Task seats — and
-emit the existing verdict format:
+Read the ONE grouped `panel.md` digest (Step 2c.5) — it already folds the WHOLE
+panel (subprocess AND Task seats) — and emit the existing verdict format:
 
 - APPROVED: Work is complete and code quality is acceptable.
 - REVISE: Issues found. Classify each as [BLOCKING] or [MINOR].
@@ -323,12 +390,19 @@ emit the existing verdict format:
 If APPROVED or only [MINOR] issues, state: `VERDICT: APPROVED`.
 If [BLOCKING] issues exist, state: `VERDICT: REVISE` with the list of issues.
 
+`panel.md` has four sections, read them ALL: **VERDICTS** (roster of every seat
+that ran + tally — reference seats by LABEL, never positionally), **CRITERIA
+MATRIX** (per-criterion PASS/FAIL/`?`), **GROUPED FINDINGS** (each finding once,
+with an `M/N` agreement count where N = findings-parsed seats; a **`⚠ SINGLETON`**
+lone dissent is weighed ON ITS MERITS, never dismissed for being one seat), and
+**RAW / UNPARSED SEATS** (any seat that didn't parse even after repair, verbatim —
+**still read these**, a partial seat's prose findings live here).
+
 **Never choke — synthesize from whatever succeeded.** A failed/skipped seat
-(subprocess OR Task) NEVER aborts the verification and is NEVER silently dropped:
-synthesize the verdict from the seats that produced usable output, and render
-each failed/skipped seat's block with its diagnostic alongside the successful
-ones. ONLY when **zero** seats in the panel produced usable output do you skip
-the verdict and instead report:
+(subprocess OR Task) NEVER aborts the verification and is NEVER silently dropped
+(it shows in the VERDICTS roster and/or the RAW section): synthesize from the
+seats that produced usable output. ONLY when **zero** seats produced usable output
+do you skip the verdict and instead report:
 `could not verify — all seats failed: <per-seat diagnostics>`.
 
 ## Step 3: Handle the Verdict

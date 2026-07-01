@@ -1,0 +1,8 @@
+{
+  "name": "cursor-composer",
+  "model": "composer-1",
+  "ok": true,
+  "output": "## VERDICT\nAPPROVED\n\n## CRITERIA\n- Correctness: PASS — behavior matches the spec.\n- Completeness: PASS — edge cases covered.\n- Quality: PASS — readable and consistent.\n- Safety: PASS — no data-loss or security concern.\n\n## FINDINGS\n- [MINOR] session-start.py:255 — LSP loaded status emitted before the hook actually loads LSP; prefer LSP required wording instead.\n- [MINOR] session-start.py — ToolSearch select:LSP is an undocumented host tool-name mismatch risk.\n\n## CONFIDENCE\nmedium\n",
+  "error": null,
+  "elapsed": 1.0
+}

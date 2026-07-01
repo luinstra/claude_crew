@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Test script for claude-crew hooks
-Run from project root: python3 scripts/test-hooks.py
+Run from project root: python3 plugins/crew/scripts/tests/test-hooks.py
 """
 
 import json
@@ -20,8 +20,16 @@ NC = "\033[0m"  # No Color
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
-SCRIPT_DIR = Path(__file__).parent
+# This test lives in scripts/tests/; the hook source it imports/execs sits in
+# scripts/ = parent.parent (PROJECT_DIR = plugins/crew = one level above that).
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 PROJECT_DIR = SCRIPT_DIR.parent
+
+# The importlib-loaded hook modules (e.g. session-start.py) do a bare
+# `from models import ...` with no sys.path guard of their own. Pre-move this
+# test sat in scripts/, so scripts/ was sys.path[0] and that import resolved;
+# now that the test lives one level deeper, put scripts/ back on the path.
+sys.path.insert(0, str(SCRIPT_DIR))
 
 
 def log_pass(name: str) -> None:

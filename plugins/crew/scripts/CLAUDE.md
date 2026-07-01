@@ -20,8 +20,7 @@ scripts/
 ├── models.py            # Dataclasses for all JSON structures
 ├── persistent-mode.py   # Stop hook: enforces continuation
 ├── session-start.py     # SessionStart hook: restores state
-├── test-hooks.py        # Unit tests (state machine + hooks)
-├── test-multiagent.py   # Unit tests for the multiagent engine
+├── tests/               # Unit tests (test-hooks.py, test-multiagent.py, fixtures/)
 └── multiagent/          # Multi-model review/council engine (see below)
 ```
 
@@ -37,12 +36,13 @@ their results into the same six-field shape the engine returns.
 
 ```
 multiagent/
-├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `dispatch` (write-mode single-seat WORK delegation) | `render` (incl. `--stage-all`) | `seats` (incl. `--debate`: config-aware full debate panel) | `collect` | `review-prep` | `doctor` (/crew:init provider probe) | `scaffold-config` (/crew:init config generator) subcommands (reached via the bare `../crew` dispatcher)
+├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `dispatch` (write-mode single-seat WORK delegation) | `render` (incl. `--stage-all`) | `seats` (incl. `--debate`: config-aware full debate panel) | `collect` (incl. `--group`/`--full`/`--report-unparsed`) | `repair-seat` (write the haiku repair to a seat's separate `repaired_output` field, never overwriting `output`) | `review-prep` | `doctor` (/crew:init provider probe) | `scaffold-config` (/crew:init config generator) subcommands (reached via the bare `../crew` dispatcher)
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
 ├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel + debate_panel ([debate].panel) + dispatch_seat ([dispatch].seat, validated vs known_seat_names()) + per-seat tuning + [panels] roster + seat `available`; per-repo>global>builtin; pure leaf, no cli/providers import; Python 3.11+ tomllib, else gracefully ignored)
-├── render.py            # side-by-side panel + --json rendering
+├── render.py            # side-by-side panel + --json rendering (the faithful projection + raw-fallback)
+├── findings.py          # PURE parser + complete-linkage grouping + grouped-digest renderer (no I/O, no model calls, never raises); powers `collect --group`
 └── providers/
     ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC (executor: run() + supports_workspace_write capability, fail-CLOSED/opt-in for /crew:dispatch), registry + known_seat_names()
     ├── codex.py         # CodexProvider — `codex exec - --sandbox read-only -o <tmp>`, prompt via stdin
@@ -185,23 +185,59 @@ Key contracts (do NOT regress):
   the opaque echo the commands ignored.) `run --json` always exits 0 with the
   six-field result, so per-seat
   never-choke is automatic (no all-failed abort to handle). After the fan-out,
-  the orchestrator collapses the N per-seat `<seat>.json` files into ONE markdown
-  digest with `crew collect --session-id <id> --seats <comma-joined seat list>
-  -o panel.md` and reads `panel.md` once (instead of N raw-JSON reads). `collect`
-  reads EXACTLY the named seats (never globs — a stale `<seat>.json` from an
-  earlier panel in the reused session dir is never folded in), labels every block
-  by its requested seat name (a missing, unreadable, non-JSON, or non-object file
-  → a labeled SKIPPED block; a well-formed JSON object renders per its fields via
-  `from_dict`'s render-safe coercion), rejects a seat name with path chars
-  (nonzero), and emits a FAITHFUL `render_panel` projection (never
-  summarizes/votes/reorders). The orchestrator clears each expected `<seat>.json`
-  BEFORE launching the per-seat run shells (the session dir is reused, so a
-  leftover/killed-seat file would otherwise be read as fresh) and WAITS for every
-  run shell to exit before collecting. The `review`
-  subcommand still exists for ad-hoc one-shot fan-out; the commands just don't use
-  it. (`/crew:debate` fans out per-seat in BOTH paths now — its multi-round path
-  always did, and the single-round path scaffolds via `debate --seats none` then
-  runs each subprocess seat with `run <seat>`, same as the commands above.)
+  the orchestrator persists EACH normalized Task seat (opus/sonnet, dot-stripped
+  filename — `opus-4.6` → `opus-46.json`) as a `<seat>.json` too, so the WHOLE
+  panel (subprocess AND Task seats) flows through ONE `collect`. It then collapses
+  the per-seat files into ONE GROUPED markdown digest with
+  `crew collect --session-id <id> --seats <comma-joined ran seats> --group
+  -o panel.md --full panel-full.md` and reads the deduped `panel.md` once.
+  `collect` reads EXACTLY the named seats (never globs — a stale `<seat>.json` from
+  an earlier panel in the reused session dir is never folded in), labels every
+  block by its requested seat name (a missing, unreadable, non-JSON, or non-object
+  file → a labeled SKIPPED block; a well-formed JSON object renders per its fields
+  via `from_dict`'s render-safe coercion), and rejects a seat name with path chars
+  (nonzero). `collect` is **no longer faithful-only** — it has THREE additive
+  modes over the same named-seats read (`multiagent/findings.py` is the pure
+  parser+grouping module; `collect`/`findings` spawn NO agents):
+  - **no flag** — the original FAITHFUL `render_panel` projection (never
+    summarizes/votes/reorders); byte-identical to before (the `test_collect`
+    contract).
+  - **`--group`** — the deduped digest (`findings.render_digest`): a VERDICTS
+    roster (every ran seat) + CRITERIA MATRIX + GROUPED FINDINGS (`M/N` agreement,
+    N = findings-parsed seats only, `⚠ SINGLETON` for lone dissents) + a RAW /
+    UNPARSED SEATS section that renders any non-parseable seat verbatim (Decision-C
+    — a finding is NEVER dropped). Merge predicate (Decision-D): severity is the
+    only hard partition; within it, COMPLETE-LINKAGE clustering on
+    `path_compatible AND line_compatible AND jaccard>=0.5`. Falls back to exactly
+    `render_panel` when NO seat is findings-parsed. `--full <path>` ALSO writes the
+    faithful sibling (the recovery artifact / advisory size denominator).
+  - **`--report-unparsed`** — prints ONLY the ran-but-non-findings-parsed seat
+    names (the haiku-repair candidates); writes no digest.
+
+  **Per-seat haiku repair (orchestrator-side).** Between the seat fan-out and the
+  grouped collect, the command markdown runs `collect --report-unparsed`, and for
+  each non-compliant seat Reads its raw `output`, spawns a `crew:formatter` (haiku,
+  read-only) Task to reformat it into the FINDINGS schema (a FAITHFUL transform —
+  never invents/drops/re-judges), then writes the result back with
+  `crew repair-seat --seat <file> -f <text>` (writes the reformatted text to a
+  SEPARATE `repaired_output` field, NEVER overwriting the seat's original
+  `output`; round-trippable via `to_dict`/`from_dict`).
+  `repair-seat` is **non-destructive**: it populates `repaired_output` ONLY IF
+  the reformat parses (`findings.parse_seat` → `findings_parsed=True`); if it
+  STILL doesn't parse the write is a NO-OP that leaves `repaired_output` unset
+  and exits a non-zero sentinel (`REPAIR_NOOP`=3). Grouping/`--group` uses
+  `repaired_output` when present, while `--full` and the RAW section ALWAYS
+  render the original `output` — so a degraded haiku rewrite can never overwrite
+  the seat's genuine review, and a seat still non-compliant after repair renders
+  its ORIGINAL text raw (graceful degradation, never worse than the original).
+  The
+  orchestrator clears each expected `<seat>.json` BEFORE launching the per-seat run
+  shells and WAITS for BOTH every subprocess run shell AND every Task-seat persist
+  before collecting. The `review` subcommand still exists for ad-hoc one-shot
+  fan-out; the commands just don't use it. (`/crew:debate` fans out per-seat in
+  BOTH paths now — its multi-round path always did, and the single-round path
+  scaffolds via `debate --seats none` then runs each subprocess seat with
+  `run <seat>`, same as the commands above. Debate does NOT use `collect`.)
 - **`dispatch` (write-mode single-seat WORK delegation).** The EXECUTION
   complement to read-only review/debate: `crew dispatch "<task>" [--seat <name>]`
   sends ONE subprocess seat (default `codex`; resolution `--seat` >
@@ -293,7 +329,7 @@ Key contracts (do NOT regress):
     vs `known_seat_names() ∪ TASK_SEAT_NAMES` (task seats correctable); `--dispatch-seat`
     vs `known_seat_names()` only.
 
-Run its tests with `python plugins/crew/scripts/test-multiagent.py`.
+Run its tests with `python plugins/crew/scripts/tests/test-multiagent.py`.
 
 ## Key Patterns
 
@@ -524,10 +560,10 @@ The `session-start.py` hook cleans up stale state files on every session start:
 
 ```bash
 # Run all tests
-python test-hooks.py
+python tests/test-hooks.py
 
 # Run with verbose output
-python test-hooks.py -v
+python tests/test-hooks.py -v
 ```
 
 Tests cover:
@@ -545,7 +581,7 @@ Tests cover:
 - [ ] Use `CLAUDE_PROJECT_DIR` env var for directory
 - [ ] Handle missing state files gracefully (return defaults)
 - [ ] Set file permissions to 0o600 for state files
-- [ ] Run `test-hooks.py` after changes
+- [ ] Run `tests/test-hooks.py` after changes
 - [ ] Output valid JSON only (no print debugging to stdout)
 
 ## Related Guides
