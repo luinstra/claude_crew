@@ -101,6 +101,8 @@ synthesized from whichever seats succeed.
 > **`allowed-tools` scopes THIS orchestrator only.** It grants nothing to the
 > seats spawned below — seat tool access is governed per-seat by the reviewer
 > agent frontmatter (`Read, Grep, Glob, Bash`) and the engine's sandbox flags.
+> (`Write` stays in `allowed-tools` for the temp files that feed `persist-seat
+> -f` and `repair-seat -f` — do not drop it.)
 
 ### Step 2a — Fan out subprocess seats (one visible shell PER SEAT)
 
@@ -293,25 +295,25 @@ A failed Task seat renders exactly like a failed subprocess seat. A
 skipped/unspawnable seat renders a clearly-marked skipped block and is excluded
 from the verdict math.
 
-**Persist each normalized Task seat to disk so it flows through the SAME grouped
-`collect` as the subprocess seats** (Decision-H). For EACH entry in `task_seats`
-(from the prep JSON — NOT a hardcoded `opus,sonnet` pair), compute its
-dot-stripped filename the SAME way `render --stage-all` does (strip any char
-outside `[A-Za-z0-9_-]`; identity for the current roster), clear any stale
-file, then
-Write the six-field dict:
+**Persist each Task seat through the engine** (Decision-H). For EACH entry in
+`task_seats` (from the prep JSON — never a hardcoded list), write the seat's
+returned Task result to a temp file with the Write tool, then:
 
 ```bash
-rm -f .crew/reviews/<session-id>/<dot-stripped seat>.json
+"${CLAUDE_PLUGIN_ROOT}/crew" persist-seat <seat> --session-id <session-id> --model "<task_seat_models[<seat>]>" -f <temp-file>
 ```
 
-Then use the **Write tool** (no shell heredoc) to write the normalized
-`ProviderResult` — the exact six fields `{name, model, ok, output, error,
-elapsed}` — to `.crew/reviews/<session-id>/<dot-stripped seat>.json` as JSON. Use
-the dot-stripped name as BOTH the filename and the `name` field (e.g. `fable.json`
-with `"name": "fable"`), so the filename, the `collect --seats` entry, and the
-digest label match end-to-end and a dotted name never trips collect's charset
-guard (Decision-J).
+For a seat whose Task errored / returned no usable block, persist the failure
+instead (never fabricate an ok result):
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/crew" persist-seat <seat> --session-id <session-id> --model "<task_seat_models[<seat>]>" --failed --error "<one-line diagnostic>"
+```
+
+The engine derives the dot-stripped filename and the six-field shape itself —
+the printed path is the `<seat>.json` the Step 2c.5 collect reads. The seat
+entry you pass to `collect --seats` is the seat's dot-stripped slug, i.e. the
+filename stem the engine printed.
 
 ### Step 2c.5 — Wait-for-both, repair non-compliant seats, then collect ONCE
 

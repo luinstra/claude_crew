@@ -186,9 +186,12 @@ Key contracts (do NOT regress):
   the opaque echo the commands ignored.) `run --json` always exits 0 with the
   six-field result, so per-seat
   never-choke is automatic (no all-failed abort to handle). After the fan-out,
-  the orchestrator persists EACH normalized Task seat (opus/sonnet/fable; a
-  dotted role would persist under its dot-stripped filename) as a `<seat>.json`
-  too, so the WHOLE
+  the orchestrator persists EACH normalized Task seat (opus/sonnet/fable) via
+  `crew persist-seat <seat> --session-id <id> --model <pin> -f <text>` (or
+  `--failed --error <diag>` for a seat that errored) — the engine owns the
+  dot-stripped slug AND the six-field shape, so the command markdown no longer
+  hand-assembles the `<seat>.json` with the Write tool. Each Task seat lands as a
+  `<seat>.json` too, so the WHOLE
   panel (subprocess AND Task seats) flows through ONE `collect`. It then collapses
   the per-seat files into ONE GROUPED markdown digest with
   `crew collect --session-id <id> --seats <comma-joined ran seats> --group

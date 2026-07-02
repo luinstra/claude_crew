@@ -4351,6 +4351,22 @@ def test_no_dotkept_staged_filename():
           "; ".join(offenders) if offenders else "zero matches")
 
 
+def test_persist_seat_doc_sync():
+    log_section("persist-seat: the three review-bearing docs use the engine call")
+    # DOC-SYNC guard: the review/build/measure-twice command markdown must route
+    # Task-seat persistence through `crew persist-seat` (engine-owned slug +
+    # six-field shape), NOT the retired hand-rolled Write-tool six-field block.
+    # SCRIPT_DIR is plugins/crew/scripts/; its parent is plugins/crew/ — the same
+    # `SCRIPT_DIR.parent` repo root the dot-kept FILENAME scan above resolves.
+    docs = ["commands/review.md", "commands/build.md", "commands/measure-twice.md"]
+    for rel in docs:
+        text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
+        check(f"{rel} invokes crew persist-seat",
+              'crew" persist-seat' in text, "present", "MISSING")
+        check(f"{rel} has NO hand-rolled six-field Write persistence",
+              "the exact six fields" not in text, "absent", "STILL PRESENT")
+
+
 # =============================================================================
 # /crew:dispatch — write-mode single-seat delegation
 # =============================================================================
@@ -6660,6 +6676,7 @@ def main():
     test_panel_catalog()
     test_catalog_registry_disjoint()
     test_no_dotkept_staged_filename()
+    test_persist_seat_doc_sync()
     test_doctor()
     test_probe()
     test_scaffold_config()
