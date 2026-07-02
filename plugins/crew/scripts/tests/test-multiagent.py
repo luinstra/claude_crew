@@ -3392,7 +3392,7 @@ def test_global_roster_availability():
               "{'full': ['codex','opus'], 'quick': ['codex']}", str(p))
         # default_panel="quick" is now ACCEPTED (validates vs PANEL_PRESETS ∪ panels()).
     with project_config('default_panel = "quick"\n[panels]\nquick = ["codex"]\n'):
-        check("default_panel='quick' accepted (custom [panels] name)",
+        check("default_panel='quick' accepted (matches [panels] override, also a builtin name)",
               config.default_panel() == "quick", "quick", str(config.default_panel()))
     # Unknown seat in a roster list is dropped (warn once); the entry survives.
     with project_config('[panels]\nmix = ["codex", "nope"]\n'):

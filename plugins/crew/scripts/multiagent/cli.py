@@ -2336,7 +2336,7 @@ def _render_config_template(
     L.append("")
     L.append("# [panels] — redefine a built-in preset or add a custom one (usable via --panel <name>).")
     L.append("# [panels]")
-    L.append('# quick = ["codex", "opus"]')
+    L.append('# nightly = ["codex", "opus"]')
     L.append("")
     L.append("# ---- Per-seat tuning + availability -------------------------------------------------")
     L.append("# available = false drops a seat from EVERY resolved panel. It is an opt-OUT: runtime")
