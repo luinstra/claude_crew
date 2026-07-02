@@ -4362,10 +4362,28 @@ def test_persist_seat_doc_sync():
     # SCRIPT_DIR is plugins/crew/scripts/; its parent is plugins/crew/ — the same
     # `SCRIPT_DIR.parent` repo root the dot-kept FILENAME scan above resolves.
     docs = ["commands/review.md", "commands/build.md", "commands/measure-twice.md"]
+
+    # SENTINEL_PHRASES: load-bearing orchestration invariants that must read
+    # IDENTICALLY (verbatim substring) across all three review-bearing docs.
+    # Duplication is unavoidable (Claude Code command markdown has no include
+    # mechanism), so this table is the sync guard — a phrase reworded in only
+    # ONE doc fails here instead of silently drifting. Audited 2026-07-02: all
+    # six already matched verbatim in all three docs (no drift found, so no
+    # reconciliation was needed this pass).
+    SENTINEL_PHRASES = [
+        'crew" persist-seat',
+        "The Task RESULT is the only completion signal",
+        "NEVER judge a seat by a proxy",
+        "Wait-for-BOTH barrier.",
+        "`repair-seat` is **non-destructive**",
+        "Never choke — synthesize from whatever succeeded.",
+    ]
+
     for rel in docs:
         text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
-        check(f"{rel} invokes crew persist-seat",
-              'crew" persist-seat' in text, "present", "MISSING")
+        for phrase in SENTINEL_PHRASES:
+            check(f"{rel} contains sentinel: {phrase!r}",
+                  phrase in text, "present", "MISSING")
         check(f"{rel} has NO hand-rolled six-field Write persistence",
               "the exact six fields" not in text, "absent", "STILL PRESENT")
 
