@@ -151,7 +151,8 @@ Key contracts (do NOT regress):
   pass is the **comma-joined `task_seats`** from the `review-prep` JSON (NOT a
   hardcoded `opus,sonnet`), so staging, spawn, and model pins all derive from the
   one catalog and the staged filename always matches what the spawn reads (a
-  `.`-bearing role like `opus-4.6` stages AND is read as `prompt-opus-46.txt`).
+  `.`-bearing role — none in the current roster — would stage AND be read as its
+  dot-stripped filename).
   Each role gets its own
   "acting as the **<role>** seat" label; the special role `seat` maps to
   `seat_role=None` (no label — matching the shared `prompt-seat.txt`). It reuses
@@ -185,8 +186,9 @@ Key contracts (do NOT regress):
   the opaque echo the commands ignored.) `run --json` always exits 0 with the
   six-field result, so per-seat
   never-choke is automatic (no all-failed abort to handle). After the fan-out,
-  the orchestrator persists EACH normalized Task seat (opus/sonnet, dot-stripped
-  filename — `opus-4.6` → `opus-46.json`) as a `<seat>.json` too, so the WHOLE
+  the orchestrator persists EACH normalized Task seat (opus/sonnet/fable; a
+  dotted role would persist under its dot-stripped filename) as a `<seat>.json`
+  too, so the WHOLE
   panel (subprocess AND Task seats) flows through ONE `collect`. It then collapses
   the per-seat files into ONE GROUPED markdown digest with
   `crew collect --session-id <id> --seats <comma-joined ran seats> --group
@@ -225,7 +227,9 @@ Key contracts (do NOT regress):
   `repair-seat` is **non-destructive**: it populates `repaired_output` ONLY IF
   the reformat parses (`findings.parse_seat` → `findings_parsed=True`); if it
   STILL doesn't parse the write is a NO-OP that leaves `repaired_output` unset
-  and exits a non-zero sentinel (`REPAIR_NOOP`=3). Grouping/`--group` uses
+  and exits 0 with a stderr kept-original note (a no-op is successful graceful
+  degradation, not an error — exit 2 stays reserved for real usage/read
+  errors). Grouping/`--group` uses
   `repaired_output` when present, while `--full` and the RAW section ALWAYS
   render the original `output` — so a degraded haiku rewrite can never overwrite
   the seat's genuine review, and a seat still non-compliant after repair renders

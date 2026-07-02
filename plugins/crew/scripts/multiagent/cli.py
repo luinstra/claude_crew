@@ -317,7 +317,7 @@ def _resolve_debate_seats(panel_arg: str | None, seats_arg: str | None) -> list[
     """Resolve the FULL debate panel seat list — subprocess AND Claude Task seats.
 
     Unlike ``_resolve_seats`` (subprocess-only, registry-filtered), this KEEPS the
-    Claude Task seats (opus/sonnet/opus-4.6) so the debate orchestrator can split
+    Claude Task seats (opus/sonnet/fable) so the debate orchestrator can split
     the resolved panel into its per-seat subprocess fan-out and its Task dispatch.
     Group tokens (``cursor``) are expanded; order preserved, de-duplicated.
 
@@ -327,8 +327,7 @@ def _resolve_debate_seats(panel_arg: str | None, seats_arg: str | None) -> list[
     Explicit ``--seats`` entries are VALIDATED after group expansion by EXACT
     membership in the fixed UNION allowlist ``known_seat_names() ∪
     seats.TASK_SEAT_NAMES``. The union is the key — it KEEPS the Task seats
-    (opus/sonnet/opus-4.6, which are NOT in the registry, and whose dotted name a
-    charset filter would wrongly reject) while REJECTING garbage. Membership in
+    (opus/sonnet/fable, which are NOT in the registry) while REJECTING garbage. Membership in
     this enumerated allowlist IS the path-safety guarantee (strictly stronger than
     a charset filter — no path-unsafe string can be a member), so no separate
     regex guard is needed here. An unknown name (e.g. ``cursor-../../x``, which is
@@ -413,7 +412,8 @@ def _seat_role_slug(role: str) -> str:
     ``.crew/reviews/``) and fall back to ``seat`` when empty. This is the ONE
     canonical role→filename-slug source that ``_stage_path``/``--stage-all`` funnel
     through, so staging and spawn always agree on the staged filename (e.g. a
-    ``.``-bearing role like ``opus-4.6`` stages AND is read as ``prompt-opus-46.txt``).
+    ``.``-bearing role like a hypothetical ``opus-4.6`` stages AND is read as
+    ``prompt-opus-46.txt``).
     """
     return re.sub(r"[^A-Za-z0-9_-]", "", (role or "").strip()) or "seat"
 
@@ -1632,6 +1632,19 @@ def cmd_collect(args: argparse.Namespace) -> int:
     # this list, reformats each via a haiku Task seat, writes it back with
     # `repair-seat`, then re-collects with --group.
     if getattr(args, "report_unparsed", False):
+        # Query mode ignores the digest-shaping flags — say so rather than
+        # silently no-op'ing them (same loud-warn discipline as --full below).
+        ignored = [flag for flag, given in (
+            ("--group", getattr(args, "group", False)),
+            ("--full", getattr(args, "full", None)),
+            ("-o/--out", getattr(args, "out", None)),
+        ) if given]
+        if ignored:
+            print(
+                f"warning: {', '.join(ignored)} ignored with --report-unparsed "
+                "(query mode writes no digest; seat names go to stdout).",
+                file=sys.stderr,
+            )
         for name in findings.unparsed_seats(results):
             print(name)
         return 0
@@ -1665,13 +1678,6 @@ def cmd_collect(args: argparse.Namespace) -> int:
     return 0
 
 
-# Sentinel exit code: the replacement did NOT parse, so repair was a NON-
-# DESTRUCTIVE no-op and the seat file is UNCHANGED (original preserved). Distinct
-# from 2 (usage/read error) so the orchestrator can tell "kept the original" from
-# "couldn't run".
-REPAIR_NOOP = 3
-
-
 def cmd_repair_seat(args: argparse.Namespace) -> int:
     """Store a haiku-reformatted, findings-schema projection of a seat's review in
     a SEPARATE ``repaired_output`` field of ``<seat>.json`` — but ONLY IF that
@@ -1696,10 +1702,13 @@ def cmd_repair_seat(args: argparse.Namespace) -> int:
 
     ``repaired_output`` is populated ONLY IF it parses (``parse_seat`` →
     ``findings_parsed=True``). If the reformat STILL does not parse, the write is a
-    NO-OP — ``repaired_output`` is left UNSET and the command exits ``REPAIR_NOOP``
-    (3); the seat falls back to its raw original in BOTH the grouped digest and
-    ``--full``/RAW. ``collect``/``findings`` stay PURE — this helper only validates
-    + records a field; it spawns NO agent."""
+    NO-OP — ``repaired_output`` is left UNSET, a stderr note says the original was
+    kept, and the command exits 0: a kept-original no-op is SUCCESSFUL graceful
+    degradation (the seat file is correct either way), not an error the
+    orchestrator should react to. Exit 2 stays reserved for real usage/read
+    errors. The seat falls back to its raw original in BOTH the grouped digest
+    and ``--full``/RAW. ``collect``/``findings`` stay PURE — this helper only
+    validates + records a field; it spawns NO agent."""
     seat_path = Path(args.seat)
     if not seat_path.exists():
         print(f"error: no seat file at {args.seat!r}", file=sys.stderr)
@@ -1742,7 +1751,7 @@ def cmd_repair_seat(args: argparse.Namespace) -> int:
             "(no-op, the seat will render raw).",
             file=sys.stderr,
         )
-        return REPAIR_NOOP
+        return 0
 
     # Record the repaired text in the SEPARATE grouping-only field. The original
     # ``output`` is NEVER overwritten: --full/RAW always render the seat's genuine
@@ -1985,7 +1994,7 @@ _PREMIUM_OFF_SEATS = ("cursor-glm", "cursor-gpt", "cursor-gemini")
 _TASK_SEAT_DIAGS = {
     "opus": "Claude subscription (in-session); not CLI-detectable",
     "sonnet": "Claude subscription (in-session); not CLI-detectable",
-    "opus-4.6": "Claude subscription (in-session); opt-in",
+    "fable": "Claude subscription (in-session); opt-in (premium tier)",
 }
 
 
@@ -2821,7 +2830,7 @@ def build_parser() -> argparse.ArgumentParser:
     coll.add_argument(
         "--seats", dest="seats", default="",
         help="comma-separated resolved seat names: subprocess (codex/agy/cursor-*) "
-             "AND the dot-stripped Task seats (opus, sonnet, opus-46). collect reads "
+             "AND the (dot-stripped) Task seats (opus, sonnet, fable). collect reads "
              "EXACTLY <seat>.json for each; a missing seat renders as a SKIPPED "
              "block; stale/foreign files are never read. (collect never globs.)",
     )
@@ -2853,7 +2862,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write the haiku-reformatted findings from -f/stdin to a SEPARATE "
              "`repaired_output` field of a seat's <seat>.json — NEVER overwriting "
              "the original `output`. Non-destructive: `repaired_output` is "
-             "populated ONLY IF it parses (else no-op, exit REPAIR_NOOP=3). "
+             "populated ONLY IF it parses (else a kept-original no-op: stderr "
+             "note, exit 0; exit 2 = real usage/read error). "
              "Grouping uses `repaired_output` when present; --full/RAW always "
              "render the original `output`.",
     )

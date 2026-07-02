@@ -14,9 +14,15 @@ It is a relocation of the existing roster into data, NOT a roster change:
     the duplication intentional (importing the subset from ``cli`` would couple
     this pure-data module to ``cli``); the test is the single guard.
   - ``TASK_SEAT_NAMES`` — the Claude seats as STRINGS (opus/sonnet, plus opt-in
-    ``opus-4.6``). Disjoint from the subprocess registry by design.
-  - ``MODEL_OVERRIDES`` — seat-name → model id for the only override today
-    (``opus-4.6`` → ``claude-opus-4-6``). Seats not in the map pin their own name.
+    ``fable``). Disjoint from the subprocess registry by design.
+  - ``MODEL_OVERRIDES`` — seat-name → model id for seats whose name is not a
+    valid Task-tool model alias. EMPTY today: every current seat (opus, sonnet,
+    fable) is a first-class alias and pins its own name. The mechanism stays for
+    a future version-locked seat — but note the Task tool's model parameter now
+    VALIDATES against the alias set, so a full model id (the removed
+    ``opus-4.6`` → ``claude-opus-4-6`` pin) is REJECTED at spawn, not silently
+    fallen back from. A new override entry only works if the Task tool accepts
+    the target id.
 
 The ``cursor`` preset stores the literal group TOKEN ``["cursor"]`` verbatim —
 NOT an expanded ``cursor-*`` list. This module is pure data and CANNOT expand
@@ -26,12 +32,16 @@ and grows with ``CURSOR_SEATS``.
 """
 
 # The Claude (Task) seats, as plain strings. Disjoint from the subprocess
-# registry. ``opus-4.6`` is opt-in — in NO preset, added explicitly via --seats.
-TASK_SEAT_NAMES = {"opus", "sonnet", "opus-4.6"}
+# registry. ``fable`` is opt-in — in NO preset, added explicitly via --seats
+# (fable is the premium Mythos-class tier; keeping it opt-in means no default
+# panel silently spends it). ``opus-4.6`` was REMOVED: the Task tool's model
+# parameter validates against the alias set (sonnet/opus/haiku/fable), so its
+# ``claude-opus-4-6`` pin is rejected at spawn — the seat could never be seated.
+TASK_SEAT_NAMES = {"opus", "sonnet", "fable"}
 
-# Seat-name → model id. The only override today; seats not present pin their own
-# name (e.g. opus → opus, sonnet → sonnet).
-MODEL_OVERRIDES = {"opus-4.6": "claude-opus-4-6"}
+# Seat-name → model id. Empty today — every seat pins its own name (opus →
+# opus, fable → fable). See the module docstring before adding an entry.
+MODEL_OVERRIDES: dict[str, str] = {}
 
 # The named panel presets. ``full``'s subprocess subset (codex + agy + two Cursor
 # model-seats) MUST equal cli._DEFAULT_SUBPROCESS_PANEL as a sequence — the

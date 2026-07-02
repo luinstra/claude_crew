@@ -100,6 +100,14 @@ _CRITERIA_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Anchored form first: the verdict word ALONE on its line (optionally bolded) —
+# the shape the schema asks for. Prose like "This is not APPROVED" can't match
+# it, so a compliant own-line verdict always beats an incidental mention. The
+# loose form is the fallback for tolerated shapes like `**Verdict: REVISE**`.
+_VERDICT_LINE_RE = re.compile(
+    r"^\s*(?:\*\*)?(APPROVED|REVISE)(?:\*\*)?\s*\.?\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 _VERDICT_RE = re.compile(r"\b(APPROVED|REVISE)\b", re.IGNORECASE)
 _CONFIDENCE_RE = re.compile(r"\b(low|medium|high)\b", re.IGNORECASE)
 
@@ -284,7 +292,7 @@ def parse_seat(result: ProviderResult) -> SeatParse:
 
     vbody = sections.get("VERDICT")
     if vbody is not None:
-        m = _VERDICT_RE.search(vbody)
+        m = _VERDICT_LINE_RE.search(vbody) or _VERDICT_RE.search(vbody)
         if m:
             parse.verdict = m.group(1).upper()
 
@@ -467,7 +475,9 @@ def render_digest(results: list[ProviderResult], repo_root: str | None = None) -
     P = len(parsed_idx)
     names = ", ".join(r.name for r in results)
     lines: list[str] = []
-    lines.append(f"# PANEL DIGEST — seats ran: {names}  ({R} ran, {P} findings-parsed)")
+    # "seats:" not "seats ran:" — the list is every NAMED seat, skipped included;
+    # the VERDICTS roster below is what distinguishes ran from skipped.
+    lines.append(f"# PANEL DIGEST — seats: {names}  ({R} ran, {P} findings-parsed)")
     lines.append("")
 
     # --- VERDICTS roster (every seat that RAN; Decision-L(a)) ---

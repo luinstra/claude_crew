@@ -22,8 +22,8 @@ global `~/.crew-config.toml` > built-in **full**; no env tier). Do NOT hardcode
   global config. `--seats <comma-list>` — an explicit subset of any registered
   seat (e.g. `--seats codex,opus`); `--seats`
   wins if both are given. `cursor-gemini`, `cursor-glm`, and `cursor-gpt` are opt-in (add via `--seats`).
-  Opt-in `opus-4.6` is a third Claude voice pinned to a version-locked model — add
-  it explicitly (e.g. `--seats codex,opus,sonnet,opus-4.6`).
+  Opt-in `fable` is a premium-tier Claude voice (`model="fable"`) — add it
+  explicitly (e.g. `--seats codex,opus,sonnet,fable`).
 - **The engine resolves the preset — the orchestrator does NOT.** `review-prep`
   (Step 2a) takes the user's `--panel`/`--seats` and resolves it into
   `subprocess_seats` (the `codex`/`agy`/`cursor-*` entries),
@@ -215,10 +215,9 @@ target, staging ALL of them in ONE `--stage-all` call fed the **comma-joined
 ```
 
 **Skip this `--stage-all` call entirely if `task_seats` is empty** (a
-subprocess-only panel like `--panel cursor`). A Task seat name with a `.` (e.g.
-`opus-4.6`) stages with the dot stripped from the filename (`prompt-opus-46.txt`)
-— the same derivation the spawn line below reads, so the staged file and the read
-file can never diverge.
+subprocess-only panel like `--panel cursor`). A Task seat name with a `.` (none in the current roster) would stage with the
+dot stripped from the filename — the same derivation the spawn line below reads,
+so the staged file and the read file can never diverge.
 
 `--stage-all` stages one LABELED prompt PER comma-listed role in a SINGLE call —
 `.crew/reviews/<session-id>/prompt-<role>.txt` for each, each carrying its own
@@ -239,17 +238,13 @@ executor's summary inline (it's small) so every seat shares the same intent. Eac
 seat is the SAME agent (`crew:reviewer`) with a per-spawn `model` override
 selecting the voice. **Iterate `task_seats` from the prep JSON**; for each
 `<seat>` read its model from `task_seat_models[<seat>]` and its prompt from the
-staged `prompt-<seat, dot-stripped>.txt` (e.g. `opus-4.6` → `prompt-opus-46.txt`).
-Do NOT hardcode seat names or model pins — both come from the JSON:
+staged `prompt-<seat, dot-stripped>.txt`. Do NOT hardcode seat names or model
+pins — both come from the JSON:
 
 ```
 # for each <seat> in task_seats:
 Task(subagent_type="crew:reviewer", model="<task_seat_models[<seat>]>", prompt="<contents of .crew/reviews/<session-id>/prompt-<seat, dot-stripped>.txt> + executor summary")
 ```
-
-> A pinned `claude-opus-4-6` model (when `opus-4.6` is in `task_seat_models`) is
-> checked against your org allowlist — it **silently falls back** to the inherited
-> model if 4.6 isn't allowed.
 
 The rendered prompt already states this is a **code review**, tells the seat to
 inspect the changes itself in reference mode (the compound working-tree diff,
@@ -282,10 +277,10 @@ the subprocess results:
 
 - `name` = the seat's dot-stripped name (the same `[A-Za-z0-9_-]`-only slug
   `_seat_role_slug` in `cli.py` derives — the ONE canonical dot-strip source, so
-  `opus-4.6` → `opus-46` and a dotted role never drifts between staging, persist,
-  and collect).
+  a dotted role never drifts between staging, persist, and collect; for the
+  current roster the slug is the name itself).
 - `model` = the pinned model from `task_seat_models[<seat>]` (e.g. `opus`,
-  `sonnet`, or the version-locked `claude-opus-4-6` for `opus-4.6`).
+  `sonnet`, `fable`).
 - `ok` = True if the seat's **returned result** is a usable review block;
   **False** only if that result is an error, has no usable block, or the harness
   reports the Task failed/missing. (Judge from the returned result — never a proxy.)
@@ -302,7 +297,8 @@ from the verdict math.
 `collect` as the subprocess seats** (Decision-H). For EACH entry in `task_seats`
 (from the prep JSON — NOT a hardcoded `opus,sonnet` pair), compute its
 dot-stripped filename the SAME way `render --stage-all` does (strip any char
-outside `[A-Za-z0-9_-]`, so `opus-4.6` → `opus-46`), clear any stale file, then
+outside `[A-Za-z0-9_-]`; identity for the current roster), clear any stale
+file, then
 Write the six-field dict:
 
 ```bash
@@ -312,8 +308,8 @@ rm -f .crew/reviews/<session-id>/<dot-stripped seat>.json
 Then use the **Write tool** (no shell heredoc) to write the normalized
 `ProviderResult` — the exact six fields `{name, model, ok, output, error,
 elapsed}` — to `.crew/reviews/<session-id>/<dot-stripped seat>.json` as JSON. Use
-the dot-stripped name as BOTH the filename and the `name` field (e.g. `opus-46.json`
-with `"name": "opus-46"`), so the filename, the `collect --seats` entry, and the
+the dot-stripped name as BOTH the filename and the `name` field (e.g. `fable.json`
+with `"name": "fable"`), so the filename, the `collect --seats` entry, and the
 digest label match end-to-end and a dotted name never trips collect's charset
 guard (Decision-J).
 
@@ -360,8 +356,9 @@ structured findings. For EACH such `<seat>`:
 
 `repair-seat` is **non-destructive**: it populates `repaired_output` ONLY IF the
 reformatted text parses into the FINDINGS schema. If it STILL doesn't parse, the
-write is a **no-op** — `repaired_output` is left unset and the command exits a
-non-zero sentinel (3). Grouping uses `repaired_output` when present, while
+write is a **no-op** — `repaired_output` is left unset and the command exits 0
+with a stderr kept-original note (a no-op is success, not an error; exit 2 =
+real usage/read error). Grouping uses `repaired_output` when present, while
 `--full` and the RAW section ALWAYS render the original `output`, so a degraded
 rewrite can never overwrite the seat's genuine review: `collect` renders the
 ORIGINAL text raw (graceful degradation, never worse than the seat's real words). Just continue — the file is

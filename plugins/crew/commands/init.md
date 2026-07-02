@@ -59,7 +59,7 @@ silently trip the engine's "detection omitted" fallback and emit a config with n
 On success, **Read** `.crew/reviews/<session-id>/doctor.json` (the same JSON is also on
 stdout) and SHOW the detection table to the user — label each present subprocess seat as
 "installed (auth unverified)", each absent one with its diag, and the task seats
-(`opus`/`sonnet`/`opus-4.6`) as "subscription-backed (in-session)".
+(`opus`/`sonnet`/`fable`) as "subscription-backed (in-session)".
 
 ## Step 3 — Short PREFERENCE interview (detect-then-CONFIRM)
 

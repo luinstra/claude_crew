@@ -78,8 +78,8 @@ Skills provide specialized guidance that activates automatically based on contex
 opus + sonnet), `--panel lite` (opus + sonnet), `--panel solo` (opus),
 `--panel cursor` (all Cursor models — gpt/gemini/glm/auto/composer, no codex/Claude), or
 `--seats codex,opus` (any subset of
-`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-auto, cursor-composer, opus, sonnet, opus-4.6`; `cursor-gpt`,
-`cursor-gemini`, and `cursor-glm` are opt-in — codex covers the GPT lineage, agy covers the Gemini lineage flat-rate; `opus-4.6` is an opt-in third Claude voice pinned to `claude-opus-4-6`). Not every change needs the full panel — e.g.
+`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-auto, cursor-composer, opus, sonnet, fable`; `cursor-gpt`,
+`cursor-gemini`, and `cursor-glm` are opt-in — codex covers the GPT lineage, agy covers the Gemini lineage flat-rate; `fable` is an opt-in premium-tier Claude voice, `model="fable"`). Not every change needs the full panel — e.g.
 `/crew:build --panel lite "fix the bug"`.
 
 `full` is the **built-in** default. An optional per-repo `.crew/config.toml`

@@ -32,8 +32,8 @@ configured default.
   global config (e.g. `[panels].quick`). `--seats <comma-list>` — an explicit
   subset of any registered seat (e.g. `--seats codex,opus`); `--seats`
   wins if both are given. `cursor-gemini`, `cursor-glm`, and `cursor-gpt` are opt-in (add via `--seats`).
-  Opt-in `opus-4.6` is a third Claude voice pinned to a version-locked model — add
-  it explicitly (e.g. `--seats codex,opus,sonnet,opus-4.6`).
+  Opt-in `fable` is a premium-tier Claude voice (`model="fable"`) — add it
+  explicitly (e.g. `--seats codex,opus,sonnet,fable`).
 - **The engine resolves the preset — the orchestrator does NOT.** `review-prep`
   (Step 3) takes the user's `--panel`/`--seats` and resolves it into
   `subprocess_seats` (the `codex`/`agy`/`cursor-*` entries),
@@ -201,10 +201,9 @@ engine in Step 3, staging ALL of them in ONE `--stage-all` call fed the
 ```
 
 **Skip this `--stage-all` call entirely if `task_seats` is empty** (a
-subprocess-only panel like `--panel cursor`). A Task seat name with a `.` (e.g.
-`opus-4.6`) stages with the dot stripped from the filename
-(`prompt-opus-46.txt`) — the same derivation the spawn line below reads, so the
-staged file and the read file can never diverge.
+subprocess-only panel like `--panel cursor`). A Task seat name with a `.` (none in the current roster) would stage with the
+dot stripped from the filename — the same derivation the spawn line below
+reads, so the staged file and the read file can never diverge.
 
 (`<TARGET>` is the plan `.md` path or git scope from Step 1; `<BASE>` is the same
 base passed in Step 3 — drop `--base` for a plan-file or working-tree target.)
@@ -225,19 +224,13 @@ Then dispatch each seat with the rendered text as its prompt — the SAME agent
 (`crew:reviewer`) with a per-spawn `model` override selecting the voice. **Iterate
 `task_seats` from the prep JSON**; for each `<seat>` read its model from
 `task_seat_models[<seat>]` and its prompt from the staged
-`prompt-<seat, dot-stripped>.txt` (e.g. `opus-4.6` → `prompt-opus-46.txt`). Do NOT
-hardcode seat names or model pins — both come from the JSON:
+`prompt-<seat, dot-stripped>.txt`. Do NOT hardcode seat names or model pins —
+both come from the JSON:
 
 ```
 # for each <seat> in task_seats:
 Task(subagent_type="crew:reviewer", model="<task_seat_models[<seat>]>", prompt="<contents of .crew/reviews/<session-id>/prompt-<seat, dot-stripped>.txt>")
 ```
-
-> **`opus-4.6` caveat:** the `claude-opus-4-6` pin (from `task_seat_models`) is
-> checked against your org's
-> model allowlist — if 4.6 isn't allowed it **silently falls back** to the
-> inherited model (you'd get another 4.8, with no error). Only trust the version
-> spread if 4.6 is actually available to you.
 
 The rendered prompt already states plan-vs-code, tells the seat how to reach the
 target itself (the plan file path, or the diff command — reference mode), lists
@@ -272,10 +265,10 @@ fields as the subprocess results (the Step 1.0 contract):
 
 - `name` = the seat's dot-stripped name (the same `[A-Za-z0-9_-]`-only slug
   `_seat_role_slug` in `cli.py` derives — the ONE canonical dot-strip source, so
-  `opus-4.6` → `opus-46` and a dotted role never drifts between staging, persist,
-  and collect).
+  a dotted role never drifts between staging, persist, and collect; for the
+  current roster the slug is the name itself).
 - `model` = the pinned model from `task_seat_models[<seat>]` (e.g. `opus`,
-  `sonnet`, or the version-locked `claude-opus-4-6` for `opus-4.6`).
+  `sonnet`, `fable`).
 - `ok` = True if the seat's **returned result** is a usable review block;
   **False** only if that returned result is an error, has no usable block, or the
   harness reports the Task failed/missing. (Judge from the returned result — never
@@ -293,7 +286,8 @@ a clearly-marked skipped block and is excluded from the verdict math.
 `collect` as the subprocess seats** (Decision-H). For EACH entry in `task_seats`
 (from the prep JSON — NOT a hardcoded `opus,sonnet` pair), compute its
 dot-stripped filename the SAME way `render --stage-all` does (strip any char
-outside `[A-Za-z0-9_-]`, so `opus-4.6` → `opus-46`), clear any stale file, then
+outside `[A-Za-z0-9_-]`; identity for the current roster), clear any stale
+file, then
 Write the six-field dict:
 
 ```bash
@@ -304,7 +298,7 @@ Then use the **Write tool** (no shell heredoc) to write the normalized
 `ProviderResult` — the exact six fields `{name, model, ok, output, error,
 elapsed}` — to `.crew/reviews/<session-id>/<dot-stripped seat>.json` as JSON. Use
 the dot-stripped name as BOTH the filename and the `name` field's seat label
-(e.g. `opus-46.json` with `"name": "opus-46"`), so the persisted filename, the
+(e.g. `fable.json` with `"name": "fable"`), so the persisted filename, the
 `collect --seats` entry, and the digest column label are identical end-to-end and
 a dotted name never trips collect's charset guard (Decision-J).
 
@@ -354,13 +348,15 @@ structured findings. For EACH such `<seat>`:
 
 `repair-seat` is **non-destructive**: it populates `repaired_output` ONLY IF the
 reformatted text actually parses into the FINDINGS schema. If the reformat STILL
-doesn't parse, it is a **no-op** — `repaired_output` is left unset and the
-command exits with a non-zero sentinel (3). Grouping uses `repaired_output` when
-present, while `--full` and the RAW section ALWAYS render the original `output`,
-so a degraded haiku rewrite can NEVER overwrite the seat's genuine review:
-`collect` then renders the ORIGINAL text raw (graceful degradation that is never
-worse than the seat's real words), and `panel-full.md` keeps the original verbatim. You do not need to inspect the
-exit code — just continue; the file is correct either way. The formatter is
+doesn't parse, it is a **no-op** — `repaired_output` is left unset, a stderr
+note says the original was kept, and the command exits 0 (a kept-original no-op
+is success, not an error; exit 2 = real usage/read error). Grouping uses
+`repaired_output` when present, while `--full` and the RAW section ALWAYS render
+the original `output`, so a degraded haiku rewrite can NEVER overwrite the
+seat's genuine review: `collect` then renders the ORIGINAL text raw (graceful
+degradation that is never worse than the seat's real words), and
+`panel-full.md` keeps the original verbatim. Either way, just continue — the
+file is correct. The formatter is
 in-session on the subscription (a `haiku` Task seat) — no `claude -p`, no API key.
 
 **Collect ONCE — grouped + faithful.** Now collapse the WHOLE panel into ONE

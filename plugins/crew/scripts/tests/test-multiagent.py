@@ -1306,7 +1306,7 @@ def test_run_subcommand():
 
     # Task seat (orchestrator-owned) -> LOUD, specific failure: exit 2 with a
     # message naming "Task seat" + "orchestrator" (NOT the generic unknown one).
-    for task_seat in ("opus", "sonnet", "opus-4.6"):
+    for task_seat in ("opus", "sonnet", "fable"):
         proc = _run_cli(["run", task_seat, "hi"], timeout=30)
         check(f"run {task_seat} (Task seat) -> exit 2 + 'Task seat'/'orchestrator' message",
               proc.returncode == 2
@@ -3951,16 +3951,31 @@ def test_review_prep():
               and obj["task_seats"] == [] and obj["task_seat_models"] == {},
               str(_registered_cursor), str(obj))
 
-    # 12. Mixed unified --seats split: subprocess vs TASK_SEAT_NAMES, with model pin.
+    # 12. Mixed unified --seats split: subprocess vs TASK_SEAT_NAMES. The REMOVED
+    #     opus-4.6 seat (its claude-opus-4-6 pin is rejected by the Task tool's
+    #     model validation, so it could never be seated) is dropped like any
+    #     unknown name — a removal regression guard.
     with tempfile.TemporaryDirectory() as td:
         _write_plan(Path(td))
         proc, obj = _prep(["--seats", "codex,opus,opus-4.6", "--session-id", "ms"], td)
-        check("review-prep --seats codex,opus,opus-4.6 splits subprocess vs task + pins opus-4.6",
+        check("review-prep --seats codex,opus,opus-4.6: the REMOVED opus-4.6 seat is dropped",
               proc.returncode == 0 and obj is not None
               and obj["subprocess_seats"] == ["codex"]
-              and obj["task_seats"] == ["opus", "opus-4.6"]
-              and obj["task_seat_models"] == {"opus": "opus", "opus-4.6": "claude-opus-4-6"},
-              "mixed split + model pin", str(obj))
+              and obj["task_seats"] == ["opus"]
+              and obj["task_seat_models"] == {"opus": "opus"},
+              "opus-4.6 dropped from both lists", str(obj))
+
+    # 12b. The opt-in fable Task seat splits as a task seat and pins its OWN
+    #      name (a first-class alias — no MODEL_OVERRIDES entry).
+    with tempfile.TemporaryDirectory() as td:
+        _write_plan(Path(td))
+        proc, obj = _prep(["--seats", "codex,fable", "--session-id", "fs"], td)
+        check("review-prep --seats codex,fable: fable is a task seat pinned model='fable'",
+              proc.returncode == 0 and obj is not None
+              and obj["subprocess_seats"] == ["codex"]
+              and obj["task_seats"] == ["fable"]
+              and obj["task_seat_models"] == {"fable": "fable"},
+              "fable task seat, own-name pin", str(obj))
 
     # 13. Unknown unified --seats name -> silently DROPPED (back-compat with
     #     _resolve_seats's drop behavior); exit 0.
@@ -4017,25 +4032,25 @@ def test_review_prep():
               and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"},
               "seats override subprocess, panel supplies task", str(obj))
 
-    # 16. Staging<->spawn consistency: the comma-joined task_seats (incl. opus-4.6)
-    #     fed to `render --stage-all` stages prompt-opus-46.txt (dot stripped) — the
-    #     SAME filename the spawn line reads, so they can never diverge.
+    # 16. Staging<->spawn consistency: the comma-joined task_seats (incl. the
+    #     opt-in fable) fed to `render --stage-all` stages one prompt per seat —
+    #     the SAME filenames the spawn line reads, so they can never diverge.
     with tempfile.TemporaryDirectory() as td:
         _write_plan(Path(td))
-        prep, obj = _prep(["--seats", "opus,sonnet,opus-4.6", "--session-id", "sc"], td)
+        prep, obj = _prep(["--seats", "opus,sonnet,fable", "--session-id", "sc"], td)
         joined = ",".join(obj["task_seats"]) if obj else ""
         render = _run_dispatcher(
             ["render", "plan.md", "--mode", "review", "--stage-all", joined,
              "--session-id", "sc"], cwd=td, timeout=30)
-        opus46 = Path(td) / ".crew" / "reviews" / "sc" / "prompt-opus-46.txt"
+        fable = Path(td) / ".crew" / "reviews" / "sc" / "prompt-fable.txt"
         opus = Path(td) / ".crew" / "reviews" / "sc" / "prompt-opus.txt"
         sonnet = Path(td) / ".crew" / "reviews" / "sc" / "prompt-sonnet.txt"
-        check("review-prep task_seats join feeds --stage-all -> stages prompt-opus-46.txt (dot stripped)",
+        check("review-prep task_seats join feeds --stage-all -> stages one prompt per seat",
               prep.returncode == 0 and render.returncode == 0
-              and obj["task_seats"] == ["opus", "sonnet", "opus-4.6"]
-              and opus.is_file() and sonnet.is_file() and opus46.is_file(),
-              "prompt-opus-46.txt staged from joined task_seats",
-              f"join={joined!r} rc={render.returncode} opus46={opus46.is_file()}")
+              and obj["task_seats"] == ["opus", "sonnet", "fable"]
+              and opus.is_file() and sonnet.is_file() and fable.is_file(),
+              "prompt-fable.txt staged from joined task_seats",
+              f"join={joined!r} rc={render.returncode} fable={fable.is_file()}")
 
 
 def test_debate_panel_resolver():
@@ -4123,17 +4138,16 @@ def test_debate_panel_resolver():
           rc == 0 and lines == ["codex", "opus"], "['codex', 'opus']",
           f"rc={rc} {lines}")
 
-    # 7b. REGRESSION GUARD: the dotted Task seat opus-4.6 (in TASK_SEAT_NAMES,
-    #     documented for `--seats opus,sonnet,opus-4.6`) must be ACCEPTED. A prior
-    #     charset filter rejecting dots wrongly bounced it; union membership alone
-    #     is the correct guard (the allowlist IS the path-safety guarantee).
+    # 7b. The REMOVED opus-4.6 seat (its claude-opus-4-6 pin is rejected by the
+    #     Task tool's model validation) is now an UNKNOWN name -> rejected exactly
+    #     like bogusseat. The opt-in fable Task seat is a member -> accepted.
     rc, lines = resolve(None, ["--seats", "opus-4.6"])
-    check("seats --debate --seats opus-4.6 (dotted Task seat) -> ACCEPTED",
-          rc == 0 and lines == ["opus-4.6"], "['opus-4.6']", f"rc={rc} {lines}")
-    rc, lines = resolve(None, ["--seats", "opus,sonnet,opus-4.6"])
-    check("seats --debate --seats opus,sonnet,opus-4.6 -> all three KEPT (task seats)",
-          rc == 0 and lines == ["opus", "sonnet", "opus-4.6"],
-          "['opus', 'sonnet', 'opus-4.6']", f"rc={rc} {lines}")
+    check("seats --debate --seats opus-4.6 (REMOVED seat) -> REJECTED",
+          rc != 0 and lines == [], "rc!=0 and []", f"rc={rc} {lines}")
+    rc, lines = resolve(None, ["--seats", "opus,sonnet,fable"])
+    check("seats --debate --seats opus,sonnet,fable -> all three KEPT (task seats)",
+          rc == 0 and lines == ["opus", "sonnet", "fable"],
+          "['opus', 'sonnet', 'fable']", f"rc={rc} {lines}")
 
     # 8. MINOR: `seats --panel <preset>` WITHOUT --debate errors (--panel only
     #    steers the debate resolver; it would otherwise be silently ignored).
@@ -4192,15 +4206,38 @@ def test_panel_catalog():
           set(seats.PANEL_PRESETS.keys()) == {"full", "lite", "solo", "cursor"},
           "{full, lite, solo, cursor}", str(set(seats.PANEL_PRESETS.keys())))
 
-    # Task seats (strings) superset of the known Claude seats incl. opt-in 4.6.
-    check("TASK_SEAT_NAMES superset of {opus, sonnet, opus-4.6}",
-          {"opus", "sonnet", "opus-4.6"} <= set(seats.TASK_SEAT_NAMES),
-          "superset of {opus, sonnet, opus-4.6}", str(seats.TASK_SEAT_NAMES))
+    # Task seats (strings): exactly the known Claude seats incl. the opt-in
+    # fable. The REMOVED opus-4.6 must NOT reappear (its version-locked pin is
+    # rejected by the Task tool's model validation — the seat can't be seated).
+    check("TASK_SEAT_NAMES == {opus, sonnet, fable} (opus-4.6 removed)",
+          set(seats.TASK_SEAT_NAMES) == {"opus", "sonnet", "fable"},
+          "{opus, sonnet, fable}", str(seats.TASK_SEAT_NAMES))
 
-    # The only model override today.
-    check("MODEL_OVERRIDES['opus-4.6'] == 'claude-opus-4-6'",
-          seats.MODEL_OVERRIDES.get("opus-4.6") == "claude-opus-4-6",
-          "claude-opus-4-6", str(seats.MODEL_OVERRIDES.get("opus-4.6")))
+    # No override today — every seat pins its own name. The mechanism still
+    # resolves an entry when one exists (guarded with a temporary fake entry).
+    check("MODEL_OVERRIDES is empty (every seat pins its own name)",
+          seats.MODEL_OVERRIDES == {}, "{}", str(seats.MODEL_OVERRIDES))
+    _saved = dict(seats.MODEL_OVERRIDES)
+    try:
+        seats.MODEL_OVERRIDES["fake-1.0"] = "claude-fake-1-0"
+        check("resolve_model honors a MODEL_OVERRIDES entry when present",
+              seats.resolve_model("fake-1.0") == "claude-fake-1-0",
+              "claude-fake-1-0", seats.resolve_model("fake-1.0"))
+    finally:
+        seats.MODEL_OVERRIDES.clear()
+        seats.MODEL_OVERRIDES.update(_saved)
+
+    # fable is a first-class model alias — NO override, pins its own name.
+    check("resolve_model('fable') == 'fable' (alias, no MODEL_OVERRIDES entry)",
+          seats.resolve_model("fable") == "fable"
+          and "fable" not in seats.MODEL_OVERRIDES,
+          "fable, no override", str(seats.MODEL_OVERRIDES.get("fable")))
+
+    # fable is opt-in — in NO preset (the default panel never silently spends
+    # the premium tier).
+    check("fable is in NO panel preset (opt-in only)",
+          all("fable" not in v for v in seats.PANEL_PRESETS.values()),
+          "absent from all presets", str(seats.PANEL_PRESETS))
 
     # ROSTER-FIDELITY drift guard: the subprocess subset of full (the names that
     # are NOT Task seats) equals cli._DEFAULT_SUBPROCESS_PANEL as a sequence.
@@ -4292,10 +4329,10 @@ def test_no_dotkept_staged_filename():
     # debate.md hand-writes its render `-o` filenames, so _seat_role_slug can't
     # reach them — this scan is what stops the dot-KEPT staged-filename drift from
     # silently recurring. SCOPED to the FILENAME spelling ONLY: we deliberately do
-    # NOT scan a bare `opus-4.6`, which would false-positive on the LEGIT
-    # `--seat-role opus-4.6` render token, the `opus-4.6` seat name in
-    # `--seats`/prose, and MODEL_OVERRIDES/TASK_SEAT_NAMES entries — all of which
-    # STAY. Only the dot-kept FILENAME spelling is forbidden.
+    # NOT scan a bare `opus-4.6` (historical test literals and removal notes
+    # legitimately mention the retired seat). Only the dot-kept FILENAME
+    # spelling is forbidden — the guard outlives the seat because the dot-strip
+    # convention applies to ANY future dotted role.
     crew_root = SCRIPT_DIR.parent  # plugins/crew/
     forbidden = _re.compile(r"prompt-opus-4\.6|opus-4\.6\.txt")
     offenders = []
@@ -5202,7 +5239,7 @@ def test_scaffold_config():
             "subprocess": sub,
             "task": {"opus": {"available": True, "diag": "x"},
                      "sonnet": {"available": True, "diag": "y"},
-                     "opus-4.6": {"available": True, "diag": "z"}},
+                     "fable": {"available": True, "diag": "z"}},
         }))
 
     # --- Task 1: public path wrappers equal the private ones ------------------
@@ -5668,6 +5705,25 @@ def test_findings_parser():
           and pf.criteria.get("Quality") == "PASS",
           "all three formats parse", str(pf.criteria))
 
+    # VERDICT parse: an ANCHORED own-line verdict beats an incidental mention in
+    # surrounding prose — "not APPROVED" on an earlier line must not win over a
+    # compliant own-line REVISE.
+    vmix = ProviderResult(name="x", model=None, ok=True, error=None, elapsed=0.0,
+        output="## VERDICT\nWe are not APPROVED here.\nREVISE\n\n## FINDINGS\nnone\n")
+    check("VERDICT parse: own-line REVISE beats earlier prose 'not APPROVED'",
+          findings.parse_seat(vmix).verdict == "REVISE",
+          "REVISE", str(findings.parse_seat(vmix).verdict))
+    vbold = ProviderResult(name="x", model=None, ok=True, error=None, elapsed=0.0,
+        output="## VERDICT\n**APPROVED**\n\n## FINDINGS\nnone\n")
+    check("VERDICT parse: bolded own-line **APPROVED** matches the anchored form",
+          findings.parse_seat(vbold).verdict == "APPROVED",
+          "APPROVED", str(findings.parse_seat(vbold).verdict))
+    vloose = ProviderResult(name="x", model=None, ok=True, error=None, elapsed=0.0,
+        output="## VERDICT\n**Verdict: REVISE** — two blockers.\n\n## FINDINGS\nnone\n")
+    check("VERDICT parse: loose fallback still reads `**Verdict: REVISE**` prose",
+          findings.parse_seat(vloose).verdict == "REVISE",
+          "REVISE", str(findings.parse_seat(vloose).verdict))
+
     # Two-step path/line extraction — all forms incl. the {1,8}-ext bare-path.
     def one_finding(line):
         r = ProviderResult(name="x", model=None, ok=True, error=None, elapsed=0.0,
@@ -5870,6 +5926,12 @@ def test_collect_grouped():
         check("grouped digest: VERDICTS roster + CRITERIA MATRIX + GROUPED FINDINGS",
               "## VERDICTS" in grouped and "## CRITERIA MATRIX" in grouped
               and "## GROUPED FINDINGS" in grouped, "all sections", "?")
+        # header says "seats:" (the NAMED list, skipped included) — not "seats
+        # ran:"; the roster below is what distinguishes ran from skipped.
+        check("grouped digest: header labels the list 'seats:' (not 'seats ran:')",
+              grouped.startswith("# PANEL DIGEST — seats: ")
+              and "seats ran:" not in grouped,
+              "'seats:' header", grouped[:80])
 
     # denominator vs roster: 6 ran, one partial -> header "6 ran, 5 findings-parsed",
     # partial in roster + RAW, groups /5, excluded from denominator.
@@ -6045,6 +6107,22 @@ def test_collect_grouped():
         check("--report-unparsed: lists ONLY the non-compliant seat (partial)",
               proc.returncode == 0 and proc.stdout.strip() == "partial",
               "partial", repr(proc.stdout))
+        check("--report-unparsed alone: no ignored-flags warning on stderr",
+              "ignored with --report-unparsed" not in proc.stderr,
+              "no warning", repr(proc.stderr[:120]))
+        # combining query mode with digest-shaping flags warns loudly on stderr
+        # (stdout still carries ONLY the seat names — nothing is written).
+        wproc = _run_dispatcher(
+            ["collect", "--session-id", "sess", "--seats", "codex,partial,opus",
+             "--report-unparsed", "--group",
+             "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
+        check("--report-unparsed + --group/-o: stderr warns, stdout names only, "
+              "no digest written",
+              wproc.returncode == 0 and wproc.stdout.strip() == "partial"
+              and "ignored with --report-unparsed" in wproc.stderr
+              and "--group" in wproc.stderr and "-o/--out" in wproc.stderr
+              and not (Path(td) / ".crew/reviews/sess/panel.md").exists(),
+              "warned + query-only", repr(wproc.stderr[:160]))
 
     # repair-seat: repaired text lands in repaired_output (grouping-only); the
     # ORIGINAL output is PRESERVED byte-intact; a repaired (now-compliant) seat
@@ -6187,9 +6265,11 @@ def test_collect_grouped():
         rproc = _run_dispatcher(
             ["repair-seat", "--seat", str(rd / "partial.json"), "-f", str(bad)],
             cwd=td, timeout=30)
-        # repair-seat reports a non-zero SENTINEL (no-op, original kept).
-        check("repair-seat: non-parsing reformat -> non-zero no-op sentinel (exit 3)",
-              rproc.returncode == 3, "exit 3 sentinel", f"rc={rproc.returncode}")
+        # a kept-original no-op is SUCCESS (exit 0) with a stderr note — not an
+        # error the orchestrator should react to (exit 2 = real usage/read error).
+        check("repair-seat: non-parsing reformat -> exit 0 + stderr kept-original note",
+              rproc.returncode == 0 and "leaving the seat UNCHANGED" in rproc.stderr,
+              "exit 0 + note", f"rc={rproc.returncode} err={rproc.stderr[:120]!r}")
         # the file's output is UNCHANGED — the original is recoverable.
         after = json.loads((rd / "partial.json").read_text())["output"]
         check("repair-seat: failed repair leaves ORIGINAL output intact (recoverable)",

@@ -82,7 +82,7 @@ def _rubric_footer() -> str:
     """The shared structured-output ask appended to EVERY review prompt.
 
     One footer, one builder — so subprocess seats (codex/agy/cursor-*) AND the
-    Claude Task seats (opus/sonnet/opus-4.6) are ALL asked for the SAME structured
+    Claude Task seats (opus/sonnet/fable) are ALL asked for the SAME structured
     markdown. ``findings.py`` parses exactly these four section headers (``##
     VERDICT`` / ``## CRITERIA`` / ``## FINDINGS`` / ``## CONFIDENCE``) so the panel
     can dedup + group findings across seats. The schema is plain markdown — a seat

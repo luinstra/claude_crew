@@ -41,10 +41,10 @@ $ARGUMENTS
   repo can default its debates fuller than its reviews — debate's value is
   cross-model diversity. An explicit `--panel`/`--seats` always wins, exactly as
   before.
-- **Opt-in `opus-4.6` Claude seat** — a third Claude voice pinned to
-  `claude-opus-4-6` (some prefer 4.6 over 4.7/4.8). NOT in any default; add it
-  explicitly (e.g. `--seats opus,sonnet,opus-4.6`). A Task seat (`crew:panelist`
-  discuss / `crew:reviewer` review), just version-pinned.
+- **Opt-in `fable` Claude seat** — a premium Mythos-class Claude voice
+  (`model="fable"`, a first-class alias like opus/sonnet). NOT in any default so
+  a routine debate never silently spends the premium tier; add it explicitly
+  (e.g. `--seats opus,sonnet,fable`) for the hardest questions.
 - **Mode** — inferred, not flagged: a free-form **question** → **discuss** mode
   (seats give a take; dispatch `crew:panelist`). An argument naming a **diff /
   branch / plan `.md`** → **review** mode (seats score it; dispatch
@@ -82,10 +82,11 @@ choice wins (`--seats` over `--panel`):
 `seats --debate` prints the FULL resolved panel — one seat per line, group
 tokens (`cursor`) already expanded, including the Claude voices — so it is the
 single seat list to split. Then split it: the `codex`/`agy`/`cursor-*`
-entries are **subprocess seats** (the Python engine); `opus`/`sonnet`/`opus-4.6`
+entries are **subprocess seats** (the Python engine); `opus`/`sonnet`/`fable`
 are **task seats** (`crew:panelist`
 for discuss / `crew:reviewer` for review, via the Task tool — in-session, on the
-subscription, no `claude -p`, no API key; `opus-4.6` pins `model="claude-opus-4-6"`).
+subscription, no `claude -p`, no API key; every current Task seat pins its own
+name as the model, e.g. `fable` → `model="fable"`).
 Seat the models in the resolved list only. For `--panel cursor` the subprocess
 seats are all cursor-* (pass `--seats cursor` to the engine, which expands it to
 every cursor-* seat) and the Task-seats step is SKIPPED (no Claude Task seats). A failed/skipped seat NEVER sinks the debate (see "Never choke" below) — the
@@ -189,22 +190,22 @@ into A4 alongside the Task seats.
 
 **Skip this step if the resolved panel has no Task seat** (e.g. `--panel cursor`)
 — go straight to A4. Otherwise, for each Claude-seat entry (`opus`, `sonnet`, or
-opt-in `opus-4.6`) in the panel, render its prompt from the ONE builder — **one
+opt-in `fable`) in the panel, render its prompt from the ONE builder — **one
 render line per Claude seat in the panel** — then dispatch the discuss seat
 (`crew:panelist`) in parallel:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role opus -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-opus.txt
 "${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role sonnet -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-sonnet.txt
-# opt-in — only if opus-4.6 is in the panel:
-"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role opus-4.6 -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-opus-46.txt
+# opt-in — only if fable is in the panel:
+"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role fable -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-fable.txt
 ```
 
 ```
 Task(subagent_type="crew:panelist", model="opus",   prompt="<contents of .crew/debates/<dir>/.prompt-opus.txt>")
 Task(subagent_type="crew:panelist", model="sonnet", prompt="<contents of .crew/debates/<dir>/.prompt-sonnet.txt>")
-# opt-in opus-4.6 — version-pinned; silently falls back to the inherited model if 4.6 isn't on your org allowlist:
-Task(subagent_type="crew:panelist", model="claude-opus-4-6", prompt="<contents of .crew/debates/<dir>/.prompt-opus-46.txt>")
+# opt-in fable — premium tier; only if it's in the panel:
+Task(subagent_type="crew:panelist", model="fable", prompt="<contents of .crew/debates/<dir>/.prompt-fable.txt>")
 ```
 
 (Review mode: render with `--mode review <target>` instead of `-f question`, and
@@ -280,10 +281,9 @@ and folds them in as injection-guarded DATA — on round 1 there is no prior):
 ```
 
 Render EVERY seat in the panel — subprocess AND task, including the opt-in
-`opus-4.6` Task seat when it's present — exactly as A3 renders one prompt per
-Claude seat. For `opus-4.6` stage to `.prompt-opus-46-r<n>.txt` (drop the dot,
-the same `opus-4.6` → `opus-46` filename A3 uses); just keep the render `-o` and
-the matching Task `prompt="<contents of …>"` pointed at the same file.
+`fable` Task seat when present — exactly as A3 renders one prompt per Claude
+seat; keep the render `-o` and the matching Task `prompt="<contents of …>"`
+pointed at the same file.
 
 Then run the round's seats (in parallel where possible):
 
@@ -291,20 +291,18 @@ Then run the round's seats (in parallel where possible):
   ```bash
   "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt --json -o .crew/debates/<run-id>/<seat>-r<n>.json
   ```
-- **Task seats** (`opus`/`sonnet`/opt-in `opus-4.6`): dispatch one `crew:panelist`
-  per Claude seat in the panel, **pinning each seat by its required model id** —
-  `opus` → `model="opus"`, `sonnet` → `model="sonnet"`, `opus-4.6` →
-  `model="claude-opus-4-6"`. NEVER blindly `model="<seat>"`: `opus-4.6` is not a
-  valid model id and would silently fall back to the inherited model (wrong voice,
-  no error) — the exact silent-fallback caveat A3 carries (`opus-4.6` is
-  version-pinned; it falls back to the inherited model if 4.6 isn't on your org
-  allowlist). This is the SAME task-seat set and SAME pinning A3 uses, so
-  single-round and multi-round stay in lockstep.
+- **Task seats** (`opus`/`sonnet`/opt-in `fable`): dispatch one `crew:panelist`
+  per Claude seat in the panel, **pinning each seat by its model id** — `opus` →
+  `model="opus"`, `sonnet` → `model="sonnet"`, `fable` → `model="fable"` (every
+  current Task seat pins its own name; the Task tool validates the model value,
+  so a full version-locked id would be rejected at spawn). This is the SAME
+  task-seat set and SAME pinning A3 uses, so single-round and multi-round stay
+  in lockstep.
   ```
   Task(subagent_type="crew:panelist", model="opus",            prompt="<contents of .crew/debates/<run-id>/.prompt-opus-r<n>.txt>")
   Task(subagent_type="crew:panelist", model="sonnet",          prompt="<contents of .crew/debates/<run-id>/.prompt-sonnet-r<n>.txt>")
-  # opt-in opus-4.6 — only if it's in the panel; version-pinned, silent fallback if not allowlisted:
-  Task(subagent_type="crew:panelist", model="claude-opus-4-6", prompt="<contents of .crew/debates/<run-id>/.prompt-opus-46-r<n>.txt>")
+  # opt-in fable — only if it's in the panel:
+  Task(subagent_type="crew:panelist", model="fable",           prompt="<contents of .crew/debates/<run-id>/.prompt-fable-r<n>.txt>")
   ```
   Use each Task's RETURNED result as its take and completion signal — never an output-file size or other proxy (see A3).
 
