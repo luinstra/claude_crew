@@ -36,7 +36,7 @@ their results into the same six-field shape the engine returns.
 
 ```
 multiagent/
-├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `dispatch` (write-mode single-seat WORK delegation) | `render` (incl. `--stage-all`) | `seats` (incl. `--debate`: config-aware full debate panel) | `collect` (incl. `--group`/`--full`/`--report-unparsed`) | `repair-seat` (write the haiku repair to a seat's separate `repaired_output` field, never overwriting `output`) | `review-prep` | `doctor` (/crew:init provider probe) | `probe` (opt-in BILLABLE live seat smoke test — doctor proves a seat's CLI is installed, probe proves it actually returns usable output) | `scaffold-config` (/crew:init config generator) subcommands (reached via the bare `../crew` dispatcher)
+├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `dispatch` (write-mode single-seat WORK delegation) | `render` (incl. `--stage-all`) | `seats` (incl. `--debate`: config-aware full debate panel) | `collect` (incl. `--group`/`--full`/`--report-unparsed`) | `repair-seat` (write the haiku repair to a seat's separate `repaired_output` field, never overwriting `output`) | `review-prep` | `persist-seat` (write ONE normalized Task-seat result to the session dir — engine-owned slug + six-field shape) | `doctor` (/crew:init provider probe) | `probe` (opt-in BILLABLE live seat smoke test — doctor proves a seat's CLI is installed, probe proves it actually returns usable output) | `scaffold-config` (/crew:init config generator) subcommands (reached via the bare `../crew` dispatcher)
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
@@ -85,54 +85,56 @@ Key contracts (do NOT regress):
   enforcement paths if it's ever pointed at untrusted diffs.
 - **`--out <file>`** writes results to a file so the call needs no shell redirect
   (stays permission-allowlistable).
-- **Panel selection** — the commands accept `--panel full|lite|solo|cursor|quick` /
-  `--seats <subset>` and pass them STRAIGHT to `crew review-prep`, which OWNS the
-  resolution (`seats.PANEL_PRESETS` + `seats.MODEL_OVERRIDES`): it splits the
-  preset/`--seats` into `subprocess_seats` (the `codex`/`agy`/`cursor-*`
-  entries), `task_seats` (the Claude voices), and `task_seat_models` (each
-  Task seat's model pin), and the orchestrator just reads that JSON — it no longer
-  classifies seat names, defines presets, or hardcodes a model pin (the engine
-  still EXECUTES only the subprocess subset, skipped when empty). The default
-  panel is `codex + agy + cursor-auto/composer + opus + sonnet`; `cursor-gpt`,
-  `cursor-gemini`, and `cursor-glm` are registered but opt-in (codex already covers
-  the GPT lineage, so `cursor-gpt` isn't defaulted; `agy` covers the Gemini lineage
-  flat-rate, so the metered `cursor-gemini` is left opt-in; and `cursor-glm`'s
-  glm-max draws on Cursor's shared premium MAX allotment, so it's opt-in too —
-  `cursor-auto` fills that slot from the cheap/dedicated bucket). When the user
-  names NEITHER `--panel` nor `--seats`, the default panel NAME comes from
-  `default_panel` (`config.py`, per-repo `.crew/config.toml` → global
-  `~/.crew-config.toml`), falling back to the built-in `full`; precedence is
-  CLI flag > per-repo config > global config > builtin (no env tier — the old
-  env surface is retired). Panel-NAME resolution AND the `available` filter funnel through ONE
-  shared point in `cli.py` (`_panel_seat_list` consults `config.panels()` before
-  `seats.PANEL_PRESETS`). Two availability shapes share the same `available=false`
-  drop + explicit-name skip-note: the single-list chokepoint `_resolve_seats`
-  (ad-hoc `crew review`/`council`/`seats` + the debate resolver) uses
-  `_filter_available`, which falls back to the unfiltered panel if the one list
-  would empty; `review-prep` uses the lower-level `_drop_unavailable` per split
-  (subprocess vs task) and applies a WHOLE-PANEL fallback ONCE — restoring the
-  unfiltered panel only if the ENTIRE resolved panel (subprocess + task + any
-  opaque `--task-seats` override) is empty, so disabling one seat-kind can't
-  resurrect the other and an override keeps the panel non-empty. Wired into ALL
-  panel paths so `[panels]` + availability behave identically everywhere.
-  `/crew:debate` honors config via a separate resolver: it cannot call
-  `review-prep` (it resolves its panel in the command markdown), so `crew seats
-  --debate` prints the FULL debate panel (subprocess AND Claude Task seats),
-  applying the debate precedence `--seats`/`--panel` > `config.debate_panel()`
-  (`[debate].panel`) > `config.default_panel()` > built-in `full`. This is the
-  lightest hook (extending the existing `seats` subcommand, not a heavyweight
-  `debate-prep` mirror of `review-prep`); note debate adds the `debate_panel`
-  tier that `review-prep` has no equivalent for.
-  `--panel cursor` =
-  `--seats cursor` (ALL Cursor seats incl. cursor-gpt/cursor-gemini/cursor-glm/cursor-auto,
-  no codex/Claude).
-  The engine itself only knows subprocess seats, and its subprocess-seat allowlist
-  is registry-derived via `known_seat_names()` (no hardcoded codex/agy list). The
-  `cursor` GROUP TOKEN (in `--seats` and `[panels]` rosters) expands to every
-  registered `cursor-*` seat via `_expand_seat_groups`, so it grows with
-  `CURSOR_SEATS`. `render --stage --session-id <id>` stages a seat prompt to
-  `.crew/reviews/<session-id>/prompt-<seat-role>.txt` (session resolved in Python —
-  arg → `CLAUDE_SESSION_ID` env — so the command carries no `${…}` expansion).
+
+### Presets & config precedence
+
+- **Panel selection** — the commands accept `--panel full|lite|solo|cursor|quick` / `--seats <subset>`
+  and pass them STRAIGHT to `crew review-prep`, which OWNS the resolution (`seats.PANEL_PRESETS` +
+  `seats.MODEL_OVERRIDES`): it splits the preset/`--seats` into `subprocess_seats` (the
+  `codex`/`agy`/`cursor-*` entries), `task_seats` (the Claude voices), and `task_seat_models` (each Task
+  seat's model pin), and the orchestrator just reads that JSON — it no longer classifies seat names,
+  defines presets, or hardcodes a model pin (the engine still EXECUTES only the subprocess subset,
+  skipped when empty).
+- The default panel is `codex + agy + cursor-auto/composer + opus + sonnet`; `cursor-gpt`,
+  `cursor-gemini`, and `cursor-glm` are registered but opt-in (codex already covers the GPT lineage, so
+  `cursor-gpt` isn't defaulted; `agy` covers the Gemini lineage flat-rate, so the metered
+  `cursor-gemini` is left opt-in; and `cursor-glm`'s glm-max draws on Cursor's shared premium MAX
+  allotment, so it's opt-in too — `cursor-auto` fills that slot from the cheap/dedicated bucket).
+- When the user names NEITHER `--panel` nor `--seats`, the default panel NAME comes from `default_panel`
+  (`config.py`, per-repo `.crew/config.toml` → global `~/.crew-config.toml`), falling back to the
+  built-in `full`; precedence is CLI flag > per-repo config > global config > builtin (no env tier — the
+  old env surface is retired).
+- `/crew:debate` honors config via a separate resolver: it cannot call `review-prep` (it resolves its
+  panel in the command markdown), so `crew seats --debate` prints the FULL debate panel (subprocess AND
+  Claude Task seats), applying the debate precedence `--seats`/`--panel` > `config.debate_panel()`
+  (`[debate].panel`) > `config.default_panel()` > built-in `full`. This is the lightest hook (extending
+  the existing `seats` subcommand, not a heavyweight `debate-prep` mirror of `review-prep`); note debate
+  adds the `debate_panel` tier that `review-prep` has no equivalent for.
+
+### Availability filtering
+
+- Panel-NAME resolution AND the `available` filter funnel through ONE shared point in `cli.py`
+  (`_panel_seat_list` consults `config.panels()` before `seats.PANEL_PRESETS`).
+- Two availability shapes share the same `available=false` drop + explicit-name skip-note: the
+  single-list chokepoint `_resolve_seats` (ad-hoc `crew review`/`council`/`seats` + the debate resolver)
+  uses `_filter_available`, which falls back to the unfiltered panel if the one list would empty;
+  `review-prep` uses the lower-level `_drop_unavailable` per split (subprocess vs task) and applies a
+  WHOLE-PANEL fallback ONCE — restoring the unfiltered panel only if the ENTIRE resolved panel
+  (subprocess + task + any opaque `--task-seats` override) is empty, so disabling one seat-kind can't
+  resurrect the other and an override keeps the panel non-empty. Wired into ALL panel paths so
+  `[panels]` + availability behave identically everywhere.
+
+### Group tokens & staging
+
+- `--panel cursor` = `--seats cursor` (ALL Cursor seats incl.
+  cursor-gpt/cursor-gemini/cursor-glm/cursor-auto, no codex/Claude).
+- The engine itself only knows subprocess seats, and its subprocess-seat allowlist is registry-derived
+  via `known_seat_names()` (no hardcoded codex/agy list). The `cursor` GROUP TOKEN (in `--seats` and
+  `[panels]` rosters) expands to every registered `cursor-*` seat via `_expand_seat_groups`, so it grows
+  with `CURSOR_SEATS`.
+- `render --stage --session-id <id>` stages a seat prompt to
+  `.crew/reviews/<session-id>/prompt-<seat-role>.txt` (session resolved in Python — arg →
+  `CLAUDE_SESSION_ID` env — so the command carries no `${…}` expansion).
 - **Plugin-root `crew` dispatcher (canonical invocation).** Commands invoke the
   engine via the bare `"${CLAUDE_PLUGIN_ROOT}/crew" <sub> …` dispatcher (a thin
   launcher at `plugins/crew/crew`, run directly via its shebang + exec bit — no
@@ -164,87 +166,83 @@ Key contracts (do NOT regress):
   `known_seat_names()`. `debate` keeps its per-seat `-o` renders (it stages into
   its own `.crew/debates/<dir>/` for round threading, which `--stage-all`'s
   `.crew/reviews/` layout doesn't model) — it gets the dispatcher prefix only.
-- **Per-seat fan-out (visibility).** The review-bearing commands
-  (`review`/`build`/`measure-twice`) fan subprocess seats out ONE
-  `crew run <seat>` call PER seat — each a separate, visible, killable shell —
-  rather than one opaque `crew review --seats <all>` call that hides them in the
-  `_fan_out` thread pool. The orchestrator preps the fan-out with ONE
-  `crew review-prep <target> --panel <preset>` (or `--seats <spec>`)
-  `--session-id <id>` call, which resolves the target, splits `--panel`/`--seats`
-  into the subprocess seat list AND the Task-seat split, stages the shared
-  subprocess prompt once (`render --stage` machinery, byte-identical), and PRINTS
-  `{prompt_path, subprocess_seats, task_seats, task_seat_models}` as JSON — it runs
-  NOTHING. The orchestrator then iterates `subprocess_seats`, running each via
-  `run <seat> --session-id <id> --json` — `run` DERIVES `-f` (`prompt-seat.txt`)
-  and `-o` (`<seat>.json`) from the session dir when they're omitted, so the
-  fan-out line no longer types either path; explicit `-f`/`-o` still override
-  independently (debate's own `.crew/debates/` layout keeps passing explicit
-  paths). (`review-prep` resolves BOTH seat kinds but
-  EXECUTES neither — the Claude Task seats stay orchestrator-DISPATCHED; the
-  commands now CONSUME `task_seats` + `task_seat_models` to stage via `--stage-all`
-  and spawn each Task seat with `model = task_seat_models[seat]`, so it is no longer
-  the opaque echo the commands ignored.) `run --json` always exits 0 with the
-  six-field result, so per-seat
-  never-choke is automatic (no all-failed abort to handle). After the fan-out,
-  the orchestrator persists EACH normalized Task seat (opus/sonnet/fable) via
-  `crew persist-seat <seat> --session-id <id> --model <pin> -f <text>` (or
-  `--failed --error <diag>` for a seat that errored) — the engine owns the
-  dot-stripped slug AND the six-field shape, so the command markdown no longer
-  hand-assembles the `<seat>.json` with the Write tool. Each Task seat lands as a
-  `<seat>.json` too, so the WHOLE
-  panel (subprocess AND Task seats) flows through ONE `collect`. It then collapses
-  the per-seat files into ONE GROUPED markdown digest with
-  `crew collect --session-id <id> --seats <comma-joined ran seats> --group
-  -o panel.md --full panel-full.md` and reads the deduped `panel.md` once.
-  `collect` reads EXACTLY the named seats (never globs — a stale `<seat>.json` from
-  an earlier panel in the reused session dir is never folded in), labels every
-  block by its requested seat name (a missing, unreadable, non-JSON, or non-object
-  file → a labeled SKIPPED block; a well-formed JSON object renders per its fields
-  via `from_dict`'s render-safe coercion), and rejects a seat name with path chars
-  (nonzero). `collect` is **no longer faithful-only** — it has THREE additive
-  modes over the same named-seats read (`multiagent/findings.py` is the pure
-  parser+grouping module; `collect`/`findings` spawn NO agents):
-  - **no flag** — the original FAITHFUL `render_panel` projection (never
-    summarizes/votes/reorders); byte-identical to before (the `test_collect`
-    contract).
-  - **`--group`** — the deduped digest (`findings.render_digest`): a VERDICTS
-    roster (every ran seat) + CRITERIA MATRIX + GROUPED FINDINGS (`M/N` agreement,
-    N = findings-parsed seats only, `⚠ SINGLETON` for lone dissents) + a RAW /
-    UNPARSED SEATS section that renders any non-parseable seat verbatim (Decision-C
-    — a finding is NEVER dropped). Merge predicate (Decision-D): severity is the
-    only hard partition; within it, COMPLETE-LINKAGE clustering on
-    `path_compatible AND line_compatible AND jaccard>=0.5`. Falls back to exactly
-    `render_panel` when NO seat is findings-parsed. `--full <path>` ALSO writes the
-    faithful sibling (the recovery artifact / advisory size denominator).
-  - **`--report-unparsed`** — prints ONLY the ran-but-non-findings-parsed seat
-    names (the haiku-repair candidates); writes no digest.
 
-  **Per-seat haiku repair (orchestrator-side).** Between the seat fan-out and the
-  grouped collect, the command markdown runs `collect --report-unparsed`, and for
-  each non-compliant seat Reads its raw `output`, spawns a `crew:formatter` (haiku,
-  read-only) Task to reformat it into the FINDINGS schema (a FAITHFUL transform —
-  never invents/drops/re-judges), then writes the result back with
-  `crew repair-seat --seat <file> -f <text>` (writes the reformatted text to a
-  SEPARATE `repaired_output` field, NEVER overwriting the seat's original
-  `output`; round-trippable via `to_dict`/`from_dict`).
-  `repair-seat` is **non-destructive**: it populates `repaired_output` ONLY IF
-  the reformat parses (`findings.parse_seat` → `findings_parsed=True`); if it
-  STILL doesn't parse the write is a NO-OP that leaves `repaired_output` unset
-  and exits 0 with a stderr kept-original note (a no-op is successful graceful
-  degradation, not an error — exit 2 stays reserved for real usage/read
-  errors). Grouping/`--group` uses
-  `repaired_output` when present, while `--full` and the RAW section ALWAYS
-  render the original `output` — so a degraded haiku rewrite can never overwrite
-  the seat's genuine review, and a seat still non-compliant after repair renders
-  its ORIGINAL text raw (graceful degradation, never worse than the original).
-  The
-  orchestrator clears each expected `<seat>.json` BEFORE launching the per-seat run
-  shells and WAITS for BOTH every subprocess run shell AND every Task-seat persist
-  before collecting. The `review` subcommand still exists for ad-hoc one-shot
-  fan-out; the commands just don't use it. (`/crew:debate` fans out per-seat in
-  BOTH paths now — its multi-round path always did, and the single-round path
-  scaffolds via `debate --seats none` then runs each subprocess seat with
-  `run <seat>`, same as the commands above. Debate does NOT use `collect`.)
+### Prep
+
+- The orchestrator preps the fan-out with ONE `crew review-prep <target> --panel <preset>` (or `--seats
+  <spec>`) `--session-id <id>` call, which resolves the target, splits `--panel`/`--seats` into the
+  subprocess seat list AND the Task-seat split, stages the shared subprocess prompt once (`render
+  --stage` machinery, byte-identical), and PRINTS `{prompt_path, subprocess_seats, task_seats,
+  task_seat_models}` as JSON — it runs NOTHING.
+
+### Subprocess fan-out
+
+- **Per-seat fan-out (visibility).** The review-bearing commands (`review`/`build`/`measure-twice`) fan
+  subprocess seats out ONE `crew run <seat>` call PER seat — each a separate, visible, killable shell —
+  rather than one opaque `crew review --seats <all>` call that hides them in the `_fan_out` thread pool.
+- The orchestrator then iterates `subprocess_seats`, running each via `run <seat> --session-id <id>
+  --json` — `run` DERIVES `-f` (`prompt-seat.txt`) and `-o` (`<seat>.json`) from the session dir when
+  they're omitted, so the fan-out line no longer types either path; explicit `-f`/`-o` still override
+  independently (debate's own `.crew/debates/` layout keeps passing explicit paths).
+- `run --json` always exits 0 with the six-field result, so per-seat never-choke is automatic (no
+  all-failed abort to handle).
+
+### Task-seat dispatch & persist
+
+- (`review-prep` resolves BOTH seat kinds but EXECUTES neither — the Claude Task seats stay
+  orchestrator-DISPATCHED; the commands now CONSUME `task_seats` + `task_seat_models` to stage via
+  `--stage-all` and spawn each Task seat with `model = task_seat_models[seat]`, so it is no longer the
+  opaque echo the commands ignored.)
+- After the fan-out, the orchestrator persists EACH normalized Task seat (opus/sonnet/fable) via `crew
+  persist-seat <seat> --session-id <id> --model <pin> -f <text>` (or `--failed --error <diag>` for a
+  seat that errored) — the engine owns the dot-stripped slug AND the six-field shape, so the command
+  markdown no longer hand-assembles the `<seat>.json` with the Write tool.
+
+### Repair & collect
+
+- Each Task seat lands as a `<seat>.json` too, so the WHOLE panel (subprocess AND Task seats) flows
+  through ONE `collect`. It then collapses the per-seat files into ONE GROUPED markdown digest with
+  `crew collect --session-id <id> --seats <comma-joined ran seats> --group -o panel.md --full
+  panel-full.md` and reads the deduped `panel.md` once.
+- `collect` reads EXACTLY the named seats (never globs — a stale `<seat>.json` from an earlier panel in
+  the reused session dir is never folded in), labels every block by its requested seat name (a missing,
+  unreadable, non-JSON, or non-object file → a labeled SKIPPED block; a well-formed JSON object renders
+  per its fields via `from_dict`'s render-safe coercion), and rejects a seat name with path chars
+  (nonzero). `collect` is **no longer faithful-only** — it has THREE additive modes over the same
+  named-seats read (`multiagent/findings.py` is the pure parser+grouping module; `collect`/`findings`
+  spawn NO agents):
+  - **no flag** — the original FAITHFUL `render_panel` projection (never summarizes/votes/reorders);
+    byte-identical to before (the `test_collect` contract).
+  - **`--group`** — the deduped digest (`findings.render_digest`): a VERDICTS roster (every ran
+    seat) + CRITERIA MATRIX + GROUPED FINDINGS (`M/N` agreement, N = findings-parsed seats only, `⚠
+    SINGLETON` for lone dissents) + a RAW / UNPARSED SEATS section that renders any non-parseable
+    seat verbatim (Decision-C — a finding is NEVER dropped). Merge predicate (Decision-D): severity
+    is the only hard partition; within it, COMPLETE-LINKAGE clustering on `path_compatible AND
+    line_compatible AND jaccard>=0.5`. Falls back to exactly `render_panel` when NO seat is
+    findings-parsed. `--full <path>` ALSO writes the faithful sibling (the recovery artifact /
+    advisory size denominator).
+  - **`--report-unparsed`** — prints ONLY the ran-but-non-findings-parsed seat names (the
+    haiku-repair candidates); writes no digest.
+- **Per-seat haiku repair (orchestrator-side).** Between the seat fan-out and the grouped collect, the
+  command markdown runs `collect --report-unparsed`, and for each non-compliant seat Reads its raw
+  `output`, spawns a `crew:formatter` (haiku, read-only) Task to reformat it into the FINDINGS schema (a
+  FAITHFUL transform — never invents/drops/re-judges), then writes the result back with `crew
+  repair-seat --seat <file> -f <text>` (writes the reformatted text to a SEPARATE `repaired_output`
+  field, NEVER overwriting the seat's original `output`; round-trippable via `to_dict`/`from_dict`).
+- `repair-seat` is **non-destructive**: it populates `repaired_output` ONLY IF the reformat parses
+  (`findings.parse_seat` → `findings_parsed=True`); if it STILL doesn't parse the write is a NO-OP that
+  leaves `repaired_output` unset and exits 0 with a stderr kept-original note (a no-op is successful
+  graceful degradation, not an error — exit 2 stays reserved for real usage/read errors).
+  Grouping/`--group` uses `repaired_output` when present, while `--full` and the RAW section ALWAYS
+  render the original `output` — so a degraded haiku rewrite can never overwrite the seat's genuine
+  review, and a seat still non-compliant after repair renders its ORIGINAL text raw (graceful
+  degradation, never worse than the original).
+- The orchestrator clears each expected `<seat>.json` BEFORE launching the per-seat run shells and WAITS
+  for BOTH every subprocess run shell AND every Task-seat persist before collecting. The `review`
+  subcommand still exists for ad-hoc one-shot fan-out; the commands just don't use it. (`/crew:debate`
+  fans out per-seat in BOTH paths now — its multi-round path always did, and the single-round path
+  scaffolds via `debate --seats none` then runs each subprocess seat with `run <seat>`, same as the
+  commands above. Debate does NOT use `collect`.)
 - **`dispatch` (write-mode single-seat WORK delegation).** The EXECUTION
   complement to read-only review/debate: `crew dispatch "<task>" [--seat <name>]`
   sends ONE subprocess seat (default `codex`; resolution `--seat` >
