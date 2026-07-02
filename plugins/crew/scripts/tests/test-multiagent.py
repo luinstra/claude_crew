@@ -6115,6 +6115,13 @@ def test_collect_grouped():
         check("collect --group digest is materially smaller than --full",
               len(grouped) < len(full), f"{len(grouped)} < {len(full)}",
               f"grouped={len(grouped)} full={len(full)}")
+        import re as _re
+        check("collect --group --full: stderr reports the digest-vs-full size stat",
+              _re.search(r"digest \d+B vs full \d+B \(\d+%\)", proc.stderr) is not None,
+              "digest NB vs full MB (K%) on stderr", proc.stderr)
+        check("collect --group --full: stdout is STILL only the -o path",
+              proc.stdout == ".crew/reviews/sess/panel.md\n",
+              "path-only stdout", repr(proc.stdout))
         check("grouped digest: shared finding present ONCE as 6/6 with all seats",
               grouped.count("6/6 [MINOR]") == 1
               and "codex, agy, cursor-auto, cursor-composer, opus, sonnet" in grouped,

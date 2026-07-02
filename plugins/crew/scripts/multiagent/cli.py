@@ -1664,7 +1664,11 @@ def cmd_collect(args: argparse.Namespace) -> int:
         # artifact + the advisory size denominator).
         text = findings.render_digest(results)
         if getattr(args, "full", None):
-            _emit(render.render_panel(results), args.full)
+            full_text = render.render_panel(results)
+            _emit(full_text, args.full)
+            pct = round(100 * len(text) / max(1, len(full_text)))
+            print(f"collect: digest {len(text)}B vs full {len(full_text)}B "
+                  f"({pct}%)", file=sys.stderr)
     else:
         # No --group -> byte-identical to today (the faithful projection).
         text = render.render_panel(results)
