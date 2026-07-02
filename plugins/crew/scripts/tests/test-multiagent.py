@@ -6475,6 +6475,151 @@ def test_collect_grouped():
               "exit 2", f"rc={proc.returncode}")
 
 
+def test_persist_seat():
+    log_section("crew persist-seat (engine-owned Task-seat persistence)")
+
+    SIX = {"name", "model", "ok", "output", "error", "elapsed"}
+
+    # 1. Happy path: -f file with review text -> .crew/reviews/S/fable.json with
+    #    EXACTLY the six fields (no repaired_output); name/model=="fable"; ok True;
+    #    output round-trips byte-identical; stdout.strip() == written path.
+    with tempfile.TemporaryDirectory() as td:
+        text = "## VERDICT\nAPPROVED\n\n## FINDINGS\n- [MINOR] a.py:1 — nit.\n"
+        src = Path(td) / "review.txt"
+        src.write_text(text, encoding="utf-8")
+        proc = _run_dispatcher(
+            ["persist-seat", "fable", "--session-id", "S", "--model", "fable",
+             "-f", str(src)], cwd=td, timeout=30)
+        out_path = Path(td) / ".crew" / "reviews" / "S" / "fable.json"
+        check("persist happy: exit 0", proc.returncode == 0, "0",
+              f"rc={proc.returncode} err={proc.stderr}")
+        check("persist happy: fable.json written", out_path.exists(),
+              "file exists", "missing")
+        data = json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else {}
+        check("persist happy: EXACTLY six fields (no repaired_output)",
+              set(data.keys()) == SIX, str(sorted(SIX)), str(sorted(data.keys())))
+        check("persist happy: name == 'fable'", data.get("name") == "fable",
+              "fable", str(data.get("name")))
+        check("persist happy: model == 'fable'", data.get("model") == "fable",
+              "fable", str(data.get("model")))
+        check("persist happy: ok is True", data.get("ok") is True, "True",
+              str(data.get("ok")))
+        check("persist happy: output round-trips byte-identical",
+              data.get("output") == text, repr(text[:20]), repr(str(data.get("output"))[:20]))
+        check("persist happy: stdout.strip() == written path",
+              proc.stdout.strip() == str(Path(".crew") / "reviews" / "S" / "fable.json"),
+              ".crew/reviews/S/fable.json", proc.stdout.strip())
+
+    # 2. Dotted seat "x.9" -> file x9.json AND "name": "x9" (slug used for BOTH).
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "r.txt"
+        src.write_text("hi", encoding="utf-8")
+        proc = _run_dispatcher(
+            ["persist-seat", "x.9", "--session-id", "S", "--model", "sonnet",
+             "-f", str(src)], cwd=td, timeout=30)
+        dotted = Path(td) / ".crew" / "reviews" / "S" / "x9.json"
+        data = json.loads(dotted.read_text(encoding="utf-8")) if dotted.exists() else {}
+        check("dotted seat: file is x9.json (dot-stripped slug)",
+              proc.returncode == 0 and dotted.exists(), "x9.json exists",
+              f"rc={proc.returncode}")
+        check("dotted seat: name field == 'x9' (slug used for BOTH)",
+              data.get("name") == "x9", "x9", str(data.get("name")))
+
+    # 3. stdin path (no -f): text piped in -> same result as -f.
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            os.chmod(CREW_DISPATCHER, 0o755)
+        except OSError:
+            pass
+        proc = subprocess.run(
+            [str(CREW_DISPATCHER), "persist-seat", "opus", "--session-id", "S",
+             "--model", "opus"],
+            input="piped review body", capture_output=True, text=True,
+            cwd=td, timeout=30)
+        opus_path = Path(td) / ".crew" / "reviews" / "S" / "opus.json"
+        data = json.loads(opus_path.read_text(encoding="utf-8")) if opus_path.exists() else {}
+        check("stdin: no -f reads output from stdin",
+              proc.returncode == 0 and data.get("output") == "piped review body",
+              "piped review body", str(data.get("output")))
+
+    # 4. --failed --error "spawn timeout" -> ok false, error set, exit 0.
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "r.txt"
+        src.write_text("", encoding="utf-8")
+        proc = _run_dispatcher(
+            ["persist-seat", "sonnet", "--session-id", "S", "--model", "sonnet",
+             "-f", str(src), "--failed", "--error", "spawn timeout"],
+            cwd=td, timeout=30)
+        p = Path(td) / ".crew" / "reviews" / "S" / "sonnet.json"
+        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        check("failed+error: ok False, error set, exit 0",
+              proc.returncode == 0 and data.get("ok") is False
+              and data.get("error") == "spawn timeout",
+              "ok=False error='spawn timeout'",
+              f"rc={proc.returncode} ok={data.get('ok')} error={data.get('error')}")
+
+    # 5. --failed with no --error -> ok false, error is the documented default.
+    with tempfile.TemporaryDirectory() as td:
+        proc = subprocess.run(
+            [str(CREW_DISPATCHER), "persist-seat", "sonnet", "--session-id", "S",
+             "--model", "sonnet", "--failed"],
+            input="", capture_output=True, text=True, cwd=td, timeout=30)
+        p = Path(td) / ".crew" / "reviews" / "S" / "sonnet.json"
+        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        check("failed no --error: default diagnostic",
+              proc.returncode == 0 and data.get("ok") is False
+              and data.get("error") == "Task seat failed (no diagnostic provided)",
+              "default diagnostic", str(data.get("error")))
+
+    # 6. Overwrite: persist twice with different text -> file holds SECOND text.
+    with tempfile.TemporaryDirectory() as td:
+        a = Path(td) / "a.txt"; a.write_text("FIRST", encoding="utf-8")
+        b = Path(td) / "b.txt"; b.write_text("SECOND", encoding="utf-8")
+        _run_dispatcher(["persist-seat", "opus", "--session-id", "S",
+                         "--model", "opus", "-f", str(a)], cwd=td, timeout=30)
+        _run_dispatcher(["persist-seat", "opus", "--session-id", "S",
+                         "--model", "opus", "-f", str(b)], cwd=td, timeout=30)
+        p = Path(td) / ".crew" / "reviews" / "S" / "opus.json"
+        data = json.loads(p.read_text(encoding="utf-8"))
+        check("overwrite: second persist replaces stale text",
+              data.get("output") == "SECOND", "SECOND", str(data.get("output")))
+
+    # 7. Integration: persist "sonnet" + a fixture codex.json, then grouped collect
+    #    -> exit 0 and "- sonnet" in the VERDICTS roster (persisted seat flows
+    #    through the SAME grouped collect).
+    with tempfile.TemporaryDirectory() as td:
+        rd = Path(td) / ".crew" / "reviews" / "S"
+        rd.mkdir(parents=True, exist_ok=True)
+        (rd / "codex.json").write_text(
+            (FIXTURES_DIR / "compliant" / "codex.json").read_text(encoding="utf-8"),
+            encoding="utf-8")
+        sonnet_text = _fixture_result("compliant", "sonnet").output
+        src = Path(td) / "sonnet.txt"
+        src.write_text(sonnet_text, encoding="utf-8")
+        pp = _run_dispatcher(
+            ["persist-seat", "sonnet", "--session-id", "S", "--model", "sonnet",
+             "-f", str(src)], cwd=td, timeout=30)
+        cp = _run_dispatcher(
+            ["collect", "--session-id", "S", "--seats", "codex,sonnet", "--group",
+             "-o", ".crew/reviews/S/panel.md"], cwd=td, timeout=30)
+        dig = (rd / "panel.md").read_text(encoding="utf-8") if (rd / "panel.md").exists() else ""
+        check("integration: persist + grouped collect exit 0",
+              pp.returncode == 0 and cp.returncode == 0, "both 0",
+              f"persist={pp.returncode} collect={cp.returncode} err={cp.stderr}")
+        check("integration: persisted 'sonnet' appears in VERDICTS roster",
+              "- sonnet" in dig, "- sonnet in roster", dig[:120])
+
+    # 8. Placeholder session id "<session-id>" -> exit 2 + stderr, no file written.
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "r.txt"; src.write_text("x", encoding="utf-8")
+        proc = _run_dispatcher(
+            ["persist-seat", "sonnet", "--session-id", "<session-id>",
+             "--model", "sonnet", "-f", str(src)], cwd=td, timeout=30)
+        check("placeholder session id: exit nonzero (2) + stderr",
+              proc.returncode == 2 and proc.stderr.strip() != "",
+              "rc=2 + stderr", f"rc={proc.returncode} err={proc.stderr!r}")
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -6518,6 +6663,7 @@ def main():
     test_doctor()
     test_probe()
     test_scaffold_config()
+    test_persist_seat()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")

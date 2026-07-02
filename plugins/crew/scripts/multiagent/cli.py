@@ -1764,6 +1764,65 @@ def cmd_repair_seat(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_persist_seat(args: argparse.Namespace) -> int:
+    """Write ONE normalized Task-seat result to the session dir (engine-owned).
+
+    Replaces the command-markdown convention where the ORCHESTRATOR hand-built
+    the six-field JSON with the Write tool (slug computed by the LLM, name==
+    filename kept by discipline). The engine now owns slug derivation, the
+    render-safe shape, stale-file replacement, and the path echo — the same
+    fragility-collapse rationale as ``run``'s -f/-o derivation. Subprocess seats
+    never come through here (their runs write ``<seat>.json`` directly).
+
+    Task seats ONLY. The slug is derived from ``_seat_role_slug`` — the ONE
+    canonical role->filename source shared with staging/collect — so the filename
+    and the ``name`` field can never diverge (they come from one call). The
+    session dir resolves via ``_reviews_subdir`` (the SAME sanitizing resolver
+    ``collect`` reads from), so a persisted seat always lands where the grouped
+    ``collect`` looks. Overwriting an existing ``<slug>.json`` IS the stale-file
+    clear the convention did with ``rm -f``."""
+    # Resolve + placeholder-guard the session id up front (same posture as
+    # cmd_render --stage / cmd_collect): resolve (arg -> CLAUDE_SESSION_ID env),
+    # THEN reject an unsubstituted <...> template so a templating slip fails loud
+    # rather than silently collapsing to a constant `session-id` segment.
+    session_id = _resolve_session_id(args.session_id)
+    if "<" in session_id or ">" in session_id:
+        print(
+            f"error: session id looks like an unsubstituted placeholder "
+            f"({session_id!r}); pass your actual session id (the "
+            "[Session ID: …] value), not the literal template",
+            file=sys.stderr,
+        )
+        return 2
+    if not (args.seat or "").strip():
+        print("error: empty seat name", file=sys.stderr)
+        return 2
+    slug = _seat_role_slug(args.seat)
+    if args.file:
+        try:
+            output = Path(args.file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot read {args.file!r}: {exc}", file=sys.stderr)
+            return 2
+    else:
+        output = sys.stdin.read()
+    error = None
+    if args.failed:
+        error = (args.error or "").strip() or "Task seat failed (no diagnostic provided)"
+    result = ProviderResult(
+        name=slug, model=args.model, ok=not args.failed,
+        output=output, error=error, elapsed=float(args.elapsed),
+    )
+    out_dir = _reviews_subdir(session_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{slug}.json"
+    path.write_text(
+        json.dumps(result.to_dict(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8")
+    print(str(path))
+    return 0
+
+
 def cmd_review_prep(args: argparse.Namespace) -> int:
     """Prepare a review/build/measure-twice fan-out and PRINT a JSON contract —
     it runs NOTHING.
@@ -2984,6 +3043,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="read the replacement output text from this file (default: stdin)",
     )
     rs.set_defaults(func=cmd_repair_seat)
+
+    ps = sub.add_parser(
+        "persist-seat",
+        help="Write ONE normalized Task-seat result to .crew/reviews/<id>/"
+             "<slug>.json (six-field ProviderResult, `name` = slug). The engine "
+             "owns slug derivation, the render-safe shape, stale-file replacement, "
+             "and the path echo — no LLM hand-assembly. Task seats only — "
+             "subprocess seats persist themselves via `run`. Prints ONLY the "
+             "written path (exit 0); exit 2 on usage errors (empty seat, unreadable "
+             "-f, placeholder/unresolvable session id).",
+    )
+    ps.add_argument("seat", help="seat/role name; the slug (dot-stripped) is BOTH "
+                                 "the filename and the `name` field")
+    ps.add_argument("--session-id", dest="session_id", default=None,
+                    help="session id for .crew/reviews/<session-id>/ "
+                         "(default: CLAUDE_SESSION_ID env)")
+    ps.add_argument("--model", dest="model", required=True,
+                    help="the seat's model pin, written verbatim to `model`")
+    ps.add_argument("-f", "--file", dest="file", default=None,
+                    help="read the seat's output text from this file (default: stdin)")
+    ps.add_argument("--failed", dest="failed", action="store_true",
+                    help="mark the seat failed: `ok` becomes false")
+    ps.add_argument("--error", dest="error", default=None,
+                    help="diagnostic recorded in `error` when --failed (default: a "
+                         "generic 'Task seat failed' message)")
+    ps.add_argument("--elapsed", dest="elapsed", type=float, default=0.0,
+                    help="wall-clock seconds recorded in `elapsed` (default: 0.0)")
+    ps.set_defaults(func=cmd_persist_seat)
 
     rp = sub.add_parser(
         "review-prep",
