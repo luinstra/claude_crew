@@ -51,9 +51,23 @@ def log_section(name: str) -> None:
     print(f"{YELLOW}=== {name} ==={NC}")
 
 
+# One empty dir shared by every subprocess env this suite builds: HOME is ALWAYS
+# neutralized to it so the scripts under test can never read from — or clean up! —
+# the developer's real home (session-start.py runs stale-file cleanup over
+# ~/.claude/todos and counts real pending todos into its status messages).
+# Tests that need a populated HOME override env["HOME"] after building the env.
+_NEUTRAL_HOME = tempfile.mkdtemp(prefix="crew-test-neutral-home-")
+
+
+def _neutral_env() -> dict:
+    env = dict(os.environ)
+    env["HOME"] = _NEUTRAL_HOME
+    return env
+
+
 def run_script(script: Path, input_data: str, extra_env: dict = None) -> str:
     """Run a Python script with input and return output."""
-    env = {**os.environ}
+    env = _neutral_env()
     # Strip CREW_VERBOSE by default so tests run terse unless specified
     env.pop("CREW_VERBOSE", None)
     if extra_env:
@@ -102,17 +116,11 @@ def test_not_contains(name: str, script: Path, input_data: str, not_expected: st
 
 
 def main():
-    # Isolate from global state by temporarily renaming todos directory
-    home = Path.home()
-    global_todos = home / ".claude" / "todos"
-    backup_todos = home / ".claude" / "todos.test-backup"
-
-    # Move global todos out of the way if they exist
-    has_backup = False
-    if global_todos.exists():
-        global_todos.rename(backup_todos)
-        has_backup = True
-
+    # Global-state isolation: every subprocess env pins HOME to _NEUTRAL_HOME
+    # (see _neutral_env), so the scripts under test can never read from — or
+    # clean up — the developer's real ~/.claude. This replaces the old
+    # rename-aside of the real ~/.claude/todos, which mutated the real home
+    # and stranded it in todos.test-backup if a run crashed mid-way.
     try:
         # Create temp directory for tests
         with tempfile.TemporaryDirectory() as test_dir:
@@ -572,7 +580,7 @@ def main():
                     capture_output=True,
                     text=True,
                     cwd=cwd,
-                    env={**os.environ, "CLAUDE_PROJECT_DIR": str(cwd)},
+                    env={**_neutral_env(), "CLAUDE_PROJECT_DIR": str(cwd)},
                 )
                 return result.stdout.strip(), result.stderr.strip(), result.returncode
 
@@ -858,7 +866,7 @@ def main():
                          'session_id: s2', stdout)
 
             # CLAUDE_SESSION_ID env var fallback (--verbose for JSON assertion)
-            env_with_session = {**os.environ, "CLAUDE_PROJECT_DIR": str(test_path), "CLAUDE_SESSION_ID": "s2"}
+            env_with_session = {**_neutral_env(), "CLAUDE_PROJECT_DIR": str(test_path), "CLAUDE_SESSION_ID": "s2"}
             result = subprocess.run(
                 [sys.executable, str(crew_state), "show", "bl", "--verbose"],
                 capture_output=True, text=True, cwd=test_path, env=env_with_session)
@@ -1025,7 +1033,9 @@ def main():
             # =========================================================================
             log_section("Stale todo cleanup")
 
-            todos_dir = Path.home() / ".claude" / "todos"
+            # Plant fixtures in the NEUTRAL home the subprocess sees (run_script
+            # pins HOME there) — never in the developer's real ~/.claude/todos.
+            todos_dir = Path(_NEUTRAL_HOME) / ".claude" / "todos"
             todos_dir.mkdir(parents=True, exist_ok=True)
 
             # Create empty todo file — should be cleaned up immediately
@@ -1307,8 +1317,10 @@ def main():
                 log_fail("is_active_state_file(malformed)", "False", "True")
 
             # Verify: incomplete todos do NOT block stop (path #3 was removed —
-            # native Claude Code todo handling covers this now)
-            todos_dir = Path.home() / ".claude" / "todos"
+            # native Claude Code todo handling covers this now). Plant the todo
+            # in the NEUTRAL home so the subprocess actually sees it — the
+            # assertion is meaningless if the file is invisible to the hook.
+            todos_dir = Path(_NEUTRAL_HOME) / ".claude" / "todos"
             todos_dir.mkdir(parents=True, exist_ok=True)
             test_session_id = f"test-session-{os.getpid()}"
             todo_file = todos_dir / f"{test_session_id}-agent-{test_session_id}.json"
@@ -1325,13 +1337,9 @@ def main():
                 todo_file.unlink(missing_ok=True)
 
     finally:
-        # Restore global todos
-        if has_backup and backup_todos.exists():
-            # Remove any test todos directory if it was created
-            if global_todos.exists():
-                import shutil
-                shutil.rmtree(global_todos)
-            backup_todos.rename(global_todos)
+        # Nothing to restore — isolation is the neutral HOME, not a mutation
+        # of the developer's real ~/.claude.
+        pass
 
     # =========================================================================
     # SUMMARY

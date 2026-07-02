@@ -4085,7 +4085,7 @@ def test_debate_panel_resolver():
                 crew = Path(td) / ".crew"
                 crew.mkdir(parents=True)
                 (crew / "config.toml").write_text(config_toml)
-            env = {**os.environ, "CLAUDE_PROJECT_DIR": td}
+            env = {**_neutral_env(), "CLAUDE_PROJECT_DIR": td}
             proc = _run_dispatcher(["seats", "--debate", *extra_args],
                                    env=env, cwd=td, timeout=30)
             lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
@@ -4169,7 +4169,7 @@ def test_debate_panel_resolver():
     # 8. MINOR: `seats --panel <preset>` WITHOUT --debate errors (--panel only
     #    steers the debate resolver; it would otherwise be silently ignored).
     with tempfile.TemporaryDirectory() as td:
-        env = {**os.environ, "CLAUDE_PROJECT_DIR": td}
+        env = {**_neutral_env(), "CLAUDE_PROJECT_DIR": td}
         proc = _run_dispatcher(["seats", "--panel", "lite"],
                                env=env, cwd=td, timeout=30)
     out_lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
@@ -4186,7 +4186,7 @@ def test_debate_panel_resolver():
         crew = Path(td) / ".crew"
         crew.mkdir(parents=True)
         (crew / "config.toml").write_text('[seats.cursor-auto]\navailable = false\n')
-        env = {**os.environ, "CLAUDE_PROJECT_DIR": td}
+        env = {**_neutral_env(), "CLAUDE_PROJECT_DIR": td}
         proc = _run_dispatcher(["seats", "--debate", "--panel", "cursor"],
                                env=env, cwd=td, timeout=30)
     dlines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
@@ -4204,7 +4204,7 @@ def test_debate_panel_resolver():
         crew.mkdir(parents=True)
         (crew / "config.toml").write_text(
             'default_panel = "cursor"\n[seats.cursor-auto]\navailable = false\n')
-        env = {**os.environ, "CLAUDE_PROJECT_DIR": td}
+        env = {**_neutral_env(), "CLAUDE_PROJECT_DIR": td}
         proc = _run_dispatcher(["seats", "--debate"], env=env, cwd=td, timeout=30)
     dlines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
     check("seats --debate (no --panel) drops the unavailable seat SILENTLY",
