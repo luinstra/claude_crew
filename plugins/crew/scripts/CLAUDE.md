@@ -47,7 +47,7 @@ multiagent/
     ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC (executor: run() + supports_workspace_write capability, fail-CLOSED/opt-in for /crew:dispatch), registry + known_seat_names()
     ├── codex.py         # CodexProvider — `codex exec - --sandbox read-only -o <tmp>`, prompt via stdin
     ├── cursor.py        # CursorProvider — the live `cursor-gpt`/`cursor-gemini`/`cursor-glm`/`cursor-auto`/`cursor-composer` seats; CURSOR_SEATS is the one-line-to-extend source of truth
-    └── agy.py           # AgyProvider (default panel) — `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions)
+    └── agy.py           # AgyProvider (default panel) — `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions). Re-validated 2026-07-01: 3-run `crew probe agy` = pass/pass/pass (6–11s) — the CLI connects and follows instructions; historical empty/off-target REVIEWS were prompt-level, not a dead seat. Re-probe before any future demotion decision.
 ```
 
 Key contracts (do NOT regress):
