@@ -2,7 +2,7 @@
   "$schema": "https://code.claude.com/plugin.schema.json",
   "name": "crew",
   "description": "Persistence, specialized agents, and workflow commands for Claude Code",
-  "version": "0.37.0",
+  "version": "0.38.0",
   "author": {
     "name": "Jeremy Luinstra",
     "email": "luinstra@gmail.com"
