@@ -203,7 +203,8 @@ succeed, and only an all-seats-failed panel skips the verdict.
 `/crew:measure-twice` all accept panel flags at the start of their argument:
 
 - `--panel full` = `codex,agy,cursor-auto,cursor-composer,opus,sonnet`
-  (the default) · `--panel lite` = `opus,sonnet` · `--panel solo` = `opus`
+  (the default) · `--panel lite` = `opus,sonnet` · `--panel solo` = `opus` ·
+  `--panel quick` = `codex,sonnet` (the cheapest cross-model pair)
 - `--panel cursor` = all Cursor model-seats (`--seats cursor`, which the engine
   expands to every registered `cursor-*` seat) — a pure cross-model Cursor panel,
   no codex and no opus/sonnet Task seats
@@ -219,7 +220,8 @@ succeed, and only an all-seats-failed panel skips the verdict.
   your plan).
 
 Not every change needs the full panel — `lite` (the two Claude voices, no
-external CLI) or a single seat is plenty for routine work.
+external CLI), `quick` (codex + sonnet, cross-model at low cost) for routine
+diffs, or a single seat is plenty for routine work.
 
 #### Per-repo config
 
@@ -281,8 +283,8 @@ posture as the per-repo file.
 default_panel = "lite"            # your machine-wide default
 
 [panels]
-full  = ["codex", "opus", "sonnet"]   # redefine a built-in preset's roster
-quick = ["codex", "opus"]             # add a custom preset (use via --panel quick)
+full    = ["codex", "opus", "sonnet"]   # redefine a built-in preset's roster
+nightly = ["codex", "opus"]             # add a custom preset (use via --panel nightly)
 
 [seats.cursor-glm]
 available = false                 # not authed here -> dropped from any panel;

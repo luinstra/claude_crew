@@ -4201,10 +4201,10 @@ def test_panel_catalog():
     from multiagent import seats  # noqa: E402
     from multiagent import cli  # noqa: E402
 
-    # Keys present, exactly the four presets.
-    check("PANEL_PRESETS keys == {full, lite, solo, cursor}",
-          set(seats.PANEL_PRESETS.keys()) == {"full", "lite", "solo", "cursor"},
-          "{full, lite, solo, cursor}", str(set(seats.PANEL_PRESETS.keys())))
+    # Keys present, exactly the five presets.
+    check("PANEL_PRESETS keys == {full, lite, solo, cursor, quick}",
+          set(seats.PANEL_PRESETS.keys()) == {"full", "lite", "solo", "cursor", "quick"},
+          "{full, lite, solo, cursor, quick}", str(set(seats.PANEL_PRESETS.keys())))
 
     # Task seats (strings): exactly the known Claude seats incl. the opt-in
     # fable. The REMOVED opus-4.6 must NOT reappear (its version-locked pin is
@@ -4258,6 +4258,9 @@ def test_panel_catalog():
     check("cursor == ['cursor'] (literal group token, unexpanded)",
           seats.PANEL_PRESETS["cursor"] == ["cursor"],
           "['cursor']", str(seats.PANEL_PRESETS["cursor"]))
+    check("quick preset is codex+sonnet",
+          seats.PANEL_PRESETS["quick"] == ["codex", "sonnet"],
+          "['codex', 'sonnet']", str(seats.PANEL_PRESETS["quick"]))
 
     # NO-PROVIDER-IMPORT, enforced STRUCTURALLY in a CLEAN subprocess: importing
     # seats must NOT pull in multiagent.providers / build the registry. (A clean

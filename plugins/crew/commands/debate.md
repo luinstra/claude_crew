@@ -20,7 +20,9 @@ $ARGUMENTS
   round's positions and may rebut/revise.
 - **Panel** — `--panel full` =
   `codex,agy,cursor-auto,cursor-composer,opus,sonnet` (the built-in fallback) ·
-  `--panel lite` = `opus,sonnet` · `--panel solo` = `opus` · `--panel cursor` =
+  `--panel lite` = `opus,sonnet` · `--panel solo` = `opus` · `--panel quick` =
+  `codex,sonnet` (the cheapest cross-model pair, good for routine questions) ·
+  `--panel cursor` =
   all Cursor model-seats (`--seats cursor`, which the engine expands to every
   registered cursor-* seat — cursor-gpt, cursor-gemini, cursor-glm, cursor-auto,
   cursor-composer, and any future ones); a pure cross-model Cursor panel — NO
@@ -30,7 +32,7 @@ $ARGUMENTS
   `cursor-gpt`, `cursor-gemini`, and `cursor-glm` are opt-in — work via `--seats …` / `--panel cursor`
   but are not in the default panel; `codex` covers the GPT lineage and `agy` covers the Gemini lineage flat-rate).
   `--panel <name>` also accepts any **custom roster** defined under `[panels]`
-  in per-repo or global config (e.g. `--panel quick`). `--seats` wins over `--panel`.
+  in per-repo or global config (e.g. `--panel nightly`). `--seats` wins over `--panel`.
 - **Config-aware default** — when you name NEITHER `--panel` NOR `--seats`, the
   panel is NOT hard-`full`: it is resolved by the engine from config across two
   tiers — per-repo `.crew/config.toml` then global `~/.crew-config.toml` (see the

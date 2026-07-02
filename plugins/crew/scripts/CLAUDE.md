@@ -85,7 +85,7 @@ Key contracts (do NOT regress):
   enforcement paths if it's ever pointed at untrusted diffs.
 - **`--out <file>`** writes results to a file so the call needs no shell redirect
   (stays permission-allowlistable).
-- **Panel selection** — the commands accept `--panel full|lite|solo|cursor` /
+- **Panel selection** — the commands accept `--panel full|lite|solo|cursor|quick` /
   `--seats <subset>` and pass them STRAIGHT to `crew review-prep`, which OWNS the
   resolution (`seats.PANEL_PRESETS` + `seats.MODEL_OVERRIDES`): it splits the
   preset/`--seats` into `subprocess_seats` (the `codex`/`agy`/`cursor-*`

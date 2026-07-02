@@ -6,13 +6,14 @@ what makes the ``TASK_SEAT_NAMES``⟂registry disjointness self-evident and
 testable, and keeps ``cli.py`` focused on argparse/dispatch.
 
 It is a relocation of the existing roster into data, NOT a roster change:
-  - ``PANEL_PRESETS`` — the ``full``/``lite``/``solo``/``cursor`` preset → seat
-    lists from the command markdown (review.md/build.md/measure-twice.md/
-    debate.md). The ``full`` preset's subprocess subset (the names that are NOT
-    Task seats) reproduces ``cli._DEFAULT_SUBPROCESS_PANEL`` exactly — that
-    equality is the roster-fidelity DRIFT GUARD asserted by the tests. We keep
-    the duplication intentional (importing the subset from ``cli`` would couple
-    this pure-data module to ``cli``); the test is the single guard.
+  - ``PANEL_PRESETS`` — the ``full``/``lite``/``solo``/``cursor``/``quick``
+    preset → seat lists from the command markdown (review.md/build.md/
+    measure-twice.md/debate.md). The ``full`` preset's subprocess subset (the
+    names that are NOT Task seats) reproduces ``cli._DEFAULT_SUBPROCESS_PANEL``
+    exactly — that equality is the roster-fidelity DRIFT GUARD asserted by the
+    tests. We keep the duplication intentional (importing the subset from
+    ``cli`` would couple this pure-data module to ``cli``); the test is the
+    single guard.
   - ``TASK_SEAT_NAMES`` — the Claude seats as STRINGS (opus/sonnet, plus opt-in
     ``fable``). Disjoint from the subprocess registry by design.
   - ``MODEL_OVERRIDES`` — seat-name → model id for seats whose name is not a
@@ -49,6 +50,7 @@ MODEL_OVERRIDES: dict[str, str] = {}
 # later in cli.py), NOT a baked-in cursor-* list.
 PANEL_PRESETS = {
     "full": ["codex", "agy", "cursor-auto", "cursor-composer", "opus", "sonnet"],
+    "quick": ["codex", "sonnet"],  # cheapest cross-model pair — routine reviews
     "lite": ["opus", "sonnet"],
     "solo": ["opus"],
     "cursor": ["cursor"],

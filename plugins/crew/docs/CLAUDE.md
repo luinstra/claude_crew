@@ -76,7 +76,8 @@ Skills provide specialized guidance that activates automatically based on contex
 **Panel size (build / measure-twice / review / debate):** start the argument with
 `--panel full` (default — codex + agy + cursor-auto + cursor-composer +
 opus + sonnet), `--panel lite` (opus + sonnet), `--panel solo` (opus),
-`--panel cursor` (all Cursor models — gpt/gemini/glm/auto/composer, no codex/Claude), or
+`--panel quick` (codex + sonnet — the cheapest cross-model pair, good for
+routine diffs), `--panel cursor` (all Cursor models — gpt/gemini/glm/auto/composer, no codex/Claude), or
 `--seats codex,opus` (any subset of
 `codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-auto, cursor-composer, opus, sonnet, fable`; `cursor-gpt`,
 `cursor-gemini`, and `cursor-glm` are opt-in — codex covers the GPT lineage, agy covers the Gemini lineage flat-rate; `fable` is an opt-in premium-tier Claude voice, `model="fable"`). Not every change needs the full panel — e.g.

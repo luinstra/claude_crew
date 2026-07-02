@@ -17,10 +17,11 @@ resolves across tiers (precedence CLI flag > per-repo `.crew/config.toml` >
 global `~/.crew-config.toml` > built-in **full**; no env tier). Do NOT hardcode
 `--panel full` — passing it would override a user's configured default.
 
-- `--panel full|lite|solo|cursor|<custom>` — a named preset. The four are
-  built in; `<custom>` is any roster defined under `[panels]` in per-repo or
-  global config. `--seats <comma-list>` — an explicit subset of any registered
-  seat (e.g. `--seats codex,opus`); `--seats`
+- `--panel full|lite|solo|cursor|quick|<custom>` — a named preset. The five
+  are built in (`quick` = `codex,sonnet` — the cheapest cross-model pair, good
+  for routine diffs); `<custom>` is any roster defined under `[panels]` in
+  per-repo or global config. `--seats <comma-list>` — an explicit subset of any
+  registered seat (e.g. `--seats codex,opus`); `--seats`
   wins if both are given. `cursor-gemini`, `cursor-glm`, and `cursor-gpt` are opt-in (add via `--seats`).
   Opt-in `fable` is a premium-tier Claude voice (`model="fable"`) — add it
   explicitly (e.g. `--seats codex,opus,sonnet,fable`).
