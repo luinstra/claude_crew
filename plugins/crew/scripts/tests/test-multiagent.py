@@ -5387,6 +5387,64 @@ def test_probe():
                   payload.get("codex", {}).get("status") == "fail",
                   "fail", str(payload.get("codex")))
 
+        # 10. Fake codex that echoes the probe prompt verbatim (CONTAINS
+        # "single line: PROBE-OK" but no line strips to exactly "PROBE-OK")
+        # -> status degraded, exit 1. Regression for the false-pass where the
+        # probe prompt itself contains the substring "PROBE-OK".
+        bins_echo = d / "bin-echo"; bins_echo.mkdir()
+        make_fake_bin(bins_echo, "codex", """
+        import sys
+        a = sys.argv[1:]
+        out = None
+        for i, x in enumerate(a):
+            if x == "-o":
+                out = a[i + 1]
+        prompt = sys.stdin.read()
+        with open(out, "w") as f:
+            f.write(prompt)
+        sys.exit(0)
+        """)
+        env_echo = isol_env(bins_echo)
+        proc = _run_cli(["probe", "codex"], env=env_echo, timeout=30)
+        check("probe echoed-prompt -> exit 1 (no exact PROBE-OK line)",
+              proc.returncode == 1, "1", f"{proc.returncode}: {proc.stderr[:200]}")
+        try:
+            payload = json.loads(proc.stdout)
+        except Exception as exc:
+            payload = None
+            check("probe echoed-prompt stdout parses as JSON", False, "valid json",
+                  f"{exc}: {proc.stdout[:200]}")
+        if payload is not None:
+            check("probe echoed-prompt -> codex status degraded",
+                  payload.get("codex", {}).get("status") == "degraded",
+                  "degraded", str(payload.get("codex")))
+
+        # 11. -o write-branch coverage (mirrors test_doctor's -o branch): the
+        # passing fake -> the file exists, parses as JSON, codex status pass;
+        # stdout still carries the JSON per the existing contract.
+        out_path_probe = d / "explicit-probe.json"
+        proc = _run_cli(["probe", "codex", "-o", str(out_path_probe)],
+                         env=env_pass, timeout=30)
+        check("probe -o -> exit 0", proc.returncode == 0, "0",
+              f"{proc.returncode}: {proc.stderr[:200]}")
+        check("probe -o writes the explicit path", out_path_probe.is_file(),
+              "explicit file", "present" if out_path_probe.is_file() else "missing")
+        if out_path_probe.is_file():
+            file_payload = json.loads(out_path_probe.read_text(encoding="utf-8"))
+            check("probe -o file parses as JSON with codex status pass",
+                  file_payload.get("codex", {}).get("status") == "pass",
+                  "pass", str(file_payload.get("codex")))
+        try:
+            stdout_payload = json.loads(proc.stdout)
+        except Exception as exc:
+            stdout_payload = None
+            check("probe -o stdout still parses as JSON", False, "valid json",
+                  f"{exc}: {proc.stdout[:200]}")
+        if stdout_payload is not None:
+            check("probe -o stdout carries codex status pass",
+                  stdout_payload.get("codex", {}).get("status") == "pass",
+                  "pass", str(stdout_payload.get("codex")))
+
         # 8. Task seats (opus/sonnet/fable) named explicitly -> exit 2 with a
         # message saying Task seats are orchestrator-dispatched and cannot be
         # probed by the engine (mirrors cmd_run's Task-seat error branch).
@@ -6662,6 +6720,9 @@ def test_persist_seat():
         check("placeholder session id: exit nonzero (2) + stderr",
               proc.returncode == 2 and proc.stderr.strip() != "",
               "rc=2 + stderr", f"rc={proc.returncode} err={proc.stderr!r}")
+        check("placeholder session id: no .crew/ directory created",
+              not (Path(td) / ".crew").exists(), ".crew absent",
+              f"exists={(Path(td) / '.crew').exists()}")
 
 
 def main():

@@ -1666,8 +1666,10 @@ def cmd_collect(args: argparse.Namespace) -> int:
         if getattr(args, "full", None):
             full_text = render.render_panel(results)
             _emit(full_text, args.full)
-            pct = round(100 * len(text) / max(1, len(full_text)))
-            print(f"collect: digest {len(text)}B vs full {len(full_text)}B "
+            digest_bytes = len(text.encode("utf-8"))
+            full_bytes = len(full_text.encode("utf-8"))
+            pct = round(100 * digest_bytes / max(1, full_bytes))
+            print(f"collect: digest {digest_bytes}B vs full {full_bytes}B "
                   f"({pct}%)", file=sys.stderr)
     else:
         # No --group -> byte-identical to today (the faithful projection).
@@ -2215,7 +2217,7 @@ def cmd_probe(args: argparse.Namespace) -> int:
         timeout = _resolve_timeout(args.timeout)
         r = provider.run(_PROBE_PROMPT, model=model, timeout=timeout)
         out = (r.output or "").strip()
-        if r.ok and "PROBE-OK" in out:
+        if r.ok and any(ln.strip() == "PROBE-OK" for ln in out.splitlines()):
             status, detail = "pass", ""
         elif r.ok and out:
             status, detail = "degraded", f"no PROBE-OK marker; got: {out[:120]!r}"
@@ -2973,7 +2975,7 @@ def build_parser() -> argparse.ArgumentParser:
     seats_p.add_argument(
         "--panel", default=None,
         help="named preset (only used with --debate): resolved via the configured "
-             "[panels] roster then seats.PANEL_PRESETS (e.g. full/lite/solo/cursor "
+             "[panels] roster then seats.PANEL_PRESETS (e.g. full/lite/solo/cursor/quick "
              "or a custom [panels] name) into the full debate seat list; an unknown "
              "name falls back to 'full'",
     )
@@ -3094,7 +3096,7 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument(
         "--panel", dest="panel", default=None,
         help="named preset resolved via the configured [panels] roster then "
-             "seats.PANEL_PRESETS (e.g. full/lite/solo/cursor or a custom [panels] "
+             "seats.PANEL_PRESETS (e.g. full/lite/solo/cursor/quick or a custom [panels] "
              "name; unknown → 'full') into BOTH subprocess and task seats. Default "
              "absent (None): with no --seats either, review-prep resolves the "
              "default_panel (per-repo .crew/config.toml → global ~/.crew-config.toml), "
