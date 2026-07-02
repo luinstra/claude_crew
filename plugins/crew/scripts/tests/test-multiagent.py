@@ -101,8 +101,23 @@ def make_fake_bin(dir_path: Path, name: str, script_body: str) -> Path:
     return p
 
 
-def path_with(*dirs: Path) -> dict:
+# One empty dir shared by every subprocess env this suite builds: HOME is ALWAYS
+# neutralized to it so a developer's real ~/.crew-config.toml can never leak into
+# a subprocess test. Without this, a real global config (e.g. [dispatch].seat =
+# "cursor-gpt") reroutes dispatch/panel resolution to a REAL, BILLABLE CLI instead
+# of the fake bins on PATH. Tests that need a populated HOME override env["HOME"]
+# after calling path_with().
+_NEUTRAL_HOME = tempfile.mkdtemp(prefix="crew-test-neutral-home-")
+
+
+def _neutral_env() -> dict:
     env = dict(os.environ)
+    env["HOME"] = _NEUTRAL_HOME
+    return env
+
+
+def path_with(*dirs: Path) -> dict:
+    env = _neutral_env()
     env["PATH"] = os.pathsep.join(str(d) for d in dirs) + os.pathsep + env.get("PATH", "")
     return env
 
@@ -1081,7 +1096,8 @@ def _run_cli(args, env=None, cwd=None, input_text=None, timeout=60):
     cli = MULTIAGENT_DIR / "cli.py"
     return subprocess.run(
         [sys.executable, str(cli), *args],
-        capture_output=True, text=True, env=env, cwd=cwd, timeout=timeout,
+        capture_output=True, text=True, env=env if env is not None else _neutral_env(),
+        cwd=cwd, timeout=timeout,
     )
 
 
@@ -1105,7 +1121,8 @@ def _run_dispatcher(args, env=None, cwd=None, timeout=60):
         pass
     return subprocess.run(
         [str(CREW_DISPATCHER), *args],
-        capture_output=True, text=True, env=env, cwd=cwd, timeout=timeout,
+        capture_output=True, text=True, env=env if env is not None else _neutral_env(),
+        cwd=cwd, timeout=timeout,
     )
 
 
@@ -4770,6 +4787,29 @@ def test_dispatch():
         proc, env = _run_dispatch(repo, bins, ["x"], project_dir=proj, home=str(home))
         check("dispatch [dispatch].seat=agy routes (no --seat) -> envelope seat=agy",
               env and env["seat"] == "agy", "seat=agy", str(env))
+
+        # (9b) HERMETICITY REGRESSION (billable-leak incident): a REAL
+        #      ~/.crew-config.toml in the parent process's HOME must NEVER leak
+        #      into a dispatch subprocess that doesn't pass home=. Before the
+        #      path_with/_run_cli HOME neutralization, a developer's global
+        #      [dispatch].seat = "cursor-glm" rerouted this test's dispatch to
+        #      the REAL (billable) Cursor CLI instead of the fake codex bin.
+        poisoned = Path(td) / "poisoned-home"; poisoned.mkdir()
+        (poisoned / ".crew-config.toml").write_text('[dispatch]\nseat = "cursor-glm"\n')
+        repo = Path(td) / "r9b"; repo.mkdir(); _init_repo(str(repo))
+        saved_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(poisoned)
+        try:
+            proc, env = _run_dispatch(repo, bins, ["x"])  # no home= — the leaky shape
+        finally:
+            if saved_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = saved_home
+        check("dispatch ignores the PARENT process's real ~/.crew-config.toml "
+              "(no home= -> neutral HOME -> builtin codex, NOT cursor-glm)",
+              env and env["seat"] == "codex" and env["ok"] is True,
+              "seat=codex ok=true (fake bin ran)", str(env))
 
         # (10) DETACH (checkout <sha>, same commit) -> branch_changed=true via the
         #      '<detached>' sentinel, head_moved=false (BLOCKING-1: a None branch
