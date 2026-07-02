@@ -2066,6 +2066,110 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+# =============================================================================
+# `probe` — live, opt-in, BILLABLE end-to-end seat smoke test
+# =============================================================================
+#
+# `doctor` proves a seat's CLI is on PATH (non-billable, no exec). `probe`
+# proves a seat actually RETURNS a usable review: it sends a trivial canned
+# prompt through the real provider machinery (the same `get_provider(...).run`
+# path `cmd_run` uses) and checks for a marker string in the reply. This is the
+# opt-in check for the agy-silently-dead-across-sessions failure mode that
+# `doctor`'s PATH-only probe cannot see.
+
+_PROBE_PROMPT = (
+    "This is a connectivity probe, not a review. Reply with exactly the "
+    "single line: PROBE-OK\n"
+    "Do not run any commands. Do not read any files. Reply with that one "
+    "line and nothing else."
+)
+
+
+def cmd_probe(args: argparse.Namespace) -> int:
+    """Live end-to-end seat smoke test. BILLABLE (runs each seat's real CLI).
+
+    doctor answers "is the CLI installed?"; probe answers "does the seat
+    actually return usable output?". Subprocess seats only — Task seats are
+    orchestrator-dispatched and rejected with the same loud message cmd_run
+    uses. Exit 0 = every probed seat passed/skipped; 1 = any fail/degraded;
+    2 = usage error.
+    """
+    names = list(known_seat_names()) if args.all else args.seats
+    if not names:
+        print("error: name at least one seat or pass --all", file=sys.stderr)
+        return 2
+    for n in names:
+        if n in seats.TASK_SEAT_NAMES:
+            print(
+                f"error: {n!r} is a Task seat — orchestrator-dispatched, "
+                "not probeable by the engine",
+                file=sys.stderr,
+            )
+            return 2
+        if n not in known_seat_names():
+            print(f"error: unknown seat {n!r}", file=sys.stderr)
+            return 2
+
+    # The BILLABLE warning always prints before any provider runs.
+    print(
+        "probe: BILLABLE — this runs each seat's real CLI once.",
+        file=sys.stderr,
+    )
+    results: dict[str, dict] = {}
+    for n in names:
+        provider = get_provider(n)
+        avail, diag = provider.is_available()
+        if not avail:
+            results[n] = {"status": "skipped", "detail": diag, "elapsed": 0.0}
+            continue
+        # Provider invocation copied from cmd_run's real call: same model
+        # precedence (codex config default; None elsewhere — probe exposes no
+        # --model override) and the same _resolve_timeout precedence chain.
+        model = _codex_model() if n == "codex" else None
+        timeout = _resolve_timeout(args.timeout)
+        r = provider.run(_PROBE_PROMPT, model=model, timeout=timeout)
+        out = (r.output or "").strip()
+        if r.ok and "PROBE-OK" in out:
+            status, detail = "pass", ""
+        elif r.ok and out:
+            status, detail = "degraded", f"no PROBE-OK marker; got: {out[:120]!r}"
+        else:
+            status, detail = "fail", (r.error or "empty output")
+        results[n] = {
+            "status": status, "detail": detail, "elapsed": float(r.elapsed or 0.0),
+        }
+
+    text = json.dumps(results, ensure_ascii=False, indent=2)
+
+    # -o / session-path write matrix (D1, copied from cmd_doctor's exact
+    # branch): -o wins; else the session path (.crew/reviews/<id>/probe.json);
+    # else no file. The JSON is ALWAYS also printed to stdout.
+    out_path = args.out
+    if out_path:
+        out_path = os.path.expanduser(out_path)
+    else:
+        session_id = _resolve_session_id(args.session_id)
+        if "<" in session_id or ">" in session_id:
+            print(
+                f"error: session id looks like an unsubstituted placeholder "
+                f"({session_id!r}); pass your actual session id (the "
+                "[Session ID: …] value), not the literal template",
+                file=sys.stderr,
+            )
+            return 2
+        if session_id:
+            out_path = str(_reviews_subdir(session_id) / "probe.json")
+
+    if out_path:
+        p = Path(out_path)
+        if p.parent and not p.parent.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text + "\n", encoding="utf-8")
+
+    print(text)
+    return 0 if all(v["status"] in ("pass", "skipped") for v in results.values()) else 1
+
+
 # --- scaffold-config: template rendering -------------------------------------
 
 def _toml_str(s: str) -> str:
@@ -3109,6 +3213,35 @@ def build_parser() -> argparse.ArgumentParser:
              "-o wins over the session path; the JSON is still printed to stdout.",
     )
     doctor.set_defaults(func=cmd_doctor)
+
+    probe = sub.add_parser(
+        "probe",
+        help="BILLABLE — live end-to-end seat smoke test: sends a trivial "
+             "canned prompt through each named seat's real CLI and checks for "
+             "a marker in the reply. doctor proves installed; probe proves it "
+             "works. A BILLABLE warning always prints to stderr before any "
+             "provider runs.",
+    )
+    probe.add_argument(
+        "seats", nargs="*", default=[],
+        help="subprocess seat name(s) to probe (codex, agy, or cursor-*)",
+    )
+    probe.add_argument(
+        "--all", action="store_true",
+        help="probe every registered subprocess seat (known_seat_names())",
+    )
+    probe.add_argument("--timeout", type=int, default=None, help="wall-clock timeout (s)")
+    probe.add_argument(
+        "--session-id", dest="session_id", default=None,
+        help="write the JSON to .crew/reviews/<session-id>/probe.json (default: "
+             "CLAUDE_SESSION_ID env). The JSON is ALWAYS also printed to stdout.",
+    )
+    probe.add_argument(
+        "-o", "--out", default=None,
+        help="write the JSON to this path instead of the session path (~ expanded). "
+             "-o wins over the session path; the JSON is still printed to stdout.",
+    )
+    probe.set_defaults(func=cmd_probe)
 
     sc = sub.add_parser(
         "scaffold-config",

@@ -5215,6 +5215,154 @@ def test_doctor():
               proc.stdout.strip().startswith("{"), "JSON on stdout", proc.stdout[:120])
 
 
+def test_probe():
+    log_section("crew probe (live seat smoke test, opt-in billable)")
+
+    def isol_env(bins):
+        # Isolated PATH — REPLACES PATH entirely (not path_with's prepend) so a
+        # real codex on the dev machine can never leak in and mask an "absent
+        # CLI" case (mirrors test_doctor's isol_env).
+        env = dict(os.environ)
+        env["PATH"] = os.pathsep.join(
+            [str(bins), os.path.dirname(sys.executable), "/usr/bin", "/bin"]
+        )
+        env.pop("CLAUDE_SESSION_ID", None)
+        return env
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+
+        # 1. Unknown seat name -> exit 2, error on stderr, no JSON on stdout.
+        bins_empty = d / "bin-empty"; bins_empty.mkdir()
+        env_empty = isol_env(bins_empty)
+        proc = _run_cli(["probe", "not-a-real-seat"], env=env_empty, timeout=30)
+        check("probe unknown seat -> exit 2",
+              proc.returncode == 2, "2", str(proc.returncode))
+        check("probe unknown seat -> error on stderr",
+              proc.stderr.strip() != "", "stderr message", proc.stderr[:120])
+        check("probe unknown seat -> no JSON on stdout",
+              proc.stdout.strip() == "", "empty stdout", proc.stdout[:120])
+
+        # 2. Absent CLI (codex not on the isolated PATH) -> status skipped, exit 0.
+        proc = _run_cli(["probe", "codex"], env=env_empty, timeout=30)
+        check("probe absent CLI -> exit 0", proc.returncode == 0, "0",
+              f"{proc.returncode}: {proc.stderr[:200]}")
+        try:
+            payload = json.loads(proc.stdout)
+        except Exception as exc:
+            payload = None
+            check("probe absent CLI stdout parses as JSON", False, "valid json",
+                  f"{exc}: {proc.stdout[:200]}")
+        if payload is not None:
+            check("probe absent CLI -> codex status skipped",
+                  payload.get("codex", {}).get("status") == "skipped",
+                  "skipped", str(payload.get("codex")))
+
+        # 3. Fake codex that prints PROBE-OK -> status pass, exit 0.
+        bins_pass = d / "bin-pass"; bins_pass.mkdir()
+        make_fake_bin(bins_pass, "codex", """
+        import sys
+        a = sys.argv[1:]
+        out = None
+        for i, x in enumerate(a):
+            if x == "-o":
+                out = a[i + 1]
+        sys.stdin.read()
+        with open(out, "w") as f:
+            f.write("PROBE-OK\\n")
+        sys.exit(0)
+        """)
+        env_pass = isol_env(bins_pass)
+        proc = _run_cli(["probe", "codex"], env=env_pass, timeout=30)
+        check("probe pass -> exit 0", proc.returncode == 0, "0",
+              f"{proc.returncode}: {proc.stderr[:200]}")
+        # 6. stderr contains "BILLABLE" before any provider ran.
+        check("probe pass -> BILLABLE warning on stderr",
+              "BILLABLE" in proc.stderr, "BILLABLE", proc.stderr[:200])
+        try:
+            payload = json.loads(proc.stdout)
+        except Exception as exc:
+            payload = None
+            check("probe pass stdout parses as JSON", False, "valid json",
+                  f"{exc}: {proc.stdout[:200]}")
+        if payload is not None:
+            check("probe pass -> codex status pass",
+                  payload.get("codex", {}).get("status") == "pass",
+                  "pass", str(payload.get("codex")))
+        # 7. stdout parses as JSON and contains ONLY the JSON (doctor's discipline).
+        check("probe pass -> stdout is JSON-only (no extra lines)",
+              proc.stdout.strip().startswith("{") and proc.stdout.strip().endswith("}"),
+              "pure JSON", proc.stdout[:120])
+
+        # 4. Fake codex that prints unrelated prose -> status degraded, exit 1.
+        bins_degraded = d / "bin-degraded"; bins_degraded.mkdir()
+        make_fake_bin(bins_degraded, "codex", """
+        import sys
+        a = sys.argv[1:]
+        out = None
+        for i, x in enumerate(a):
+            if x == "-o":
+                out = a[i + 1]
+        sys.stdin.read()
+        with open(out, "w") as f:
+            f.write("Sure, here is a completely unrelated essay about cats.")
+        sys.exit(0)
+        """)
+        env_degraded = isol_env(bins_degraded)
+        proc = _run_cli(["probe", "codex"], env=env_degraded, timeout=30)
+        check("probe degraded -> exit 1", proc.returncode == 1, "1",
+              f"{proc.returncode}: {proc.stderr[:200]}")
+        check("probe degraded -> BILLABLE warning on stderr",
+              "BILLABLE" in proc.stderr, "BILLABLE", proc.stderr[:200])
+        try:
+            payload = json.loads(proc.stdout)
+        except Exception as exc:
+            payload = None
+            check("probe degraded stdout parses as JSON", False, "valid json",
+                  f"{exc}: {proc.stdout[:200]}")
+        if payload is not None:
+            check("probe degraded -> codex status degraded",
+                  payload.get("codex", {}).get("status") == "degraded",
+                  "degraded", str(payload.get("codex")))
+
+        # 5. Fake codex that exits nonzero with no output -> status fail, exit 1.
+        bins_fail = d / "bin-fail"; bins_fail.mkdir()
+        make_fake_bin(bins_fail, "codex", """
+        import sys
+        sys.stdin.read()
+        sys.stderr.write("boom: simulated codex crash")
+        sys.exit(1)
+        """)
+        env_fail = isol_env(bins_fail)
+        proc = _run_cli(["probe", "codex"], env=env_fail, timeout=30)
+        check("probe fail -> exit 1", proc.returncode == 1, "1",
+              f"{proc.returncode}: {proc.stderr[:200]}")
+        check("probe fail -> BILLABLE warning on stderr",
+              "BILLABLE" in proc.stderr, "BILLABLE", proc.stderr[:200])
+        try:
+            payload = json.loads(proc.stdout)
+        except Exception as exc:
+            payload = None
+            check("probe fail stdout parses as JSON", False, "valid json",
+                  f"{exc}: {proc.stdout[:200]}")
+        if payload is not None:
+            check("probe fail -> codex status fail",
+                  payload.get("codex", {}).get("status") == "fail",
+                  "fail", str(payload.get("codex")))
+
+        # 8. Task seats (opus/sonnet/fable) named explicitly -> exit 2 with a
+        # message saying Task seats are orchestrator-dispatched and cannot be
+        # probed by the engine (mirrors cmd_run's Task-seat error branch).
+        for task_seat in ("opus", "sonnet", "fable"):
+            proc = _run_cli(["probe", task_seat], env=env_empty, timeout=30)
+            check(f"probe {task_seat} (Task seat) -> exit 2 + 'Task seat'/'orchestrator' message",
+                  proc.returncode == 2
+                  and "Task seat" in proc.stderr
+                  and "orchestrator" in proc.stderr
+                  and task_seat in proc.stderr,
+                  "exit2 + Task seat/orchestrator", f"{proc.returncode}: {proc.stderr!r}")
+
+
 def test_scaffold_config():
     log_section("scaffold-config (template + no-clobber + conservative --repo overrides)")
     from contextlib import redirect_stdout, redirect_stderr  # noqa: E402
@@ -6336,6 +6484,7 @@ def main():
     test_catalog_registry_disjoint()
     test_no_dotkept_staged_filename()
     test_doctor()
+    test_probe()
     test_scaffold_config()
 
     print()

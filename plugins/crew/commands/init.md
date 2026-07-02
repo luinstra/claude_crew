@@ -61,6 +61,13 @@ stdout) and SHOW the detection table to the user — label each present subproce
 "installed (auth unverified)", each absent one with its diag, and the task seats
 (`opus`/`sonnet`/`fable`) as "subscription-backed (in-session)".
 
+- **Optional follow-up: `probe`.** `doctor` proved each seat's CLI is installed; it did
+  NOT prove any seat actually answers. If the user wants that stronger guarantee, offer
+  `"${CLAUDE_PLUGIN_ROOT}/crew" probe --all` (or a subset of seat names) — it sends one
+  trivial prompt through each seat's real CLI and reports pass/degraded/fail/skipped.
+  This is BILLABLE (it runs each seat's real CLI once), so ask before running it — never
+  run it unprompted.
+
 ## Step 3 — Short PREFERENCE interview (detect-then-CONFIRM)
 
 Ask ONLY what detection can't infer. Keep it short:
