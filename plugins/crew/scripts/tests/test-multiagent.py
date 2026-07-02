@@ -5362,6 +5362,38 @@ def test_probe():
                   and task_seat in proc.stderr,
                   "exit2 + Task seat/orchestrator", f"{proc.returncode}: {proc.stderr!r}")
 
+        # 9. --session-id "<session-id>" (literal unsubstituted placeholder) ->
+        # exit 2 with the fake seat CLI NEVER invoked. Usage-error validation
+        # (the placeholder check) must run BEFORE the billable per-seat loop,
+        # mirroring cmd_run's session-id guard ahead of provider.run.
+        marker = d / "invoked.marker"
+        bins_marker = d / "bin-marker"; bins_marker.mkdir()
+        make_fake_bin(bins_marker, "codex", f"""
+        import sys
+        from pathlib import Path
+        Path({str(marker)!r}).write_text("invoked")
+        a = sys.argv[1:]
+        out = None
+        for i, x in enumerate(a):
+            if x == "-o":
+                out = a[i + 1]
+        sys.stdin.read()
+        with open(out, "w") as f:
+            f.write("PROBE-OK\\n")
+        sys.exit(0)
+        """)
+        env_marker = isol_env(bins_marker)
+        proc = _run_cli(
+            ["probe", "codex", "--session-id", "<session-id>"],
+            env=env_marker, timeout=30,
+        )
+        check("probe placeholder session-id -> exit 2",
+              proc.returncode == 2, "2", str(proc.returncode))
+        check("probe placeholder session-id -> error mentions placeholder",
+              "placeholder" in proc.stderr, "placeholder", proc.stderr[:200])
+        check("probe placeholder session-id -> fake seat CLI NOT executed",
+              not marker.exists(), "marker absent", f"exists={marker.exists()}")
+
 
 def test_scaffold_config():
     log_section("scaffold-config (template + no-clobber + conservative --repo overrides)")

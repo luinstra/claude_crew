@@ -2096,7 +2096,7 @@ def cmd_probe(args: argparse.Namespace) -> int:
     """
     names = list(known_seat_names()) if args.all else args.seats
     if not names:
-        print("error: name at least one seat or pass --all", file=sys.stderr)
+        print("error: name at least one seat, or pass --all", file=sys.stderr)
         return 2
     for n in names:
         if n in seats.TASK_SEAT_NAMES:
@@ -2109,6 +2109,29 @@ def cmd_probe(args: argparse.Namespace) -> int:
         if n not in known_seat_names():
             print(f"error: unknown seat {n!r}", file=sys.stderr)
             return 2
+
+    # -o / session-path write matrix (D1, copied from cmd_doctor's exact
+    # branch): -o wins; else the session path (.crew/reviews/<id>/probe.json);
+    # else no file. The JSON is ALWAYS also printed to stdout. Resolved (and
+    # the session-id placeholder usage error raised) BEFORE any billable
+    # provider.run below — mirroring cmd_run's session-id guard ahead of its
+    # own provider.run — so a malformed --session-id exits 2 with NO seat
+    # CLI having been invoked.
+    out_path = args.out
+    if out_path:
+        out_path = os.path.expanduser(out_path)
+    else:
+        session_id = _resolve_session_id(args.session_id)
+        if "<" in session_id or ">" in session_id:
+            print(
+                f"error: session id looks like an unsubstituted placeholder "
+                f"({session_id!r}); pass your actual session id (the "
+                "[Session ID: …] value), not the literal template",
+                file=sys.stderr,
+            )
+            return 2
+        if session_id:
+            out_path = str(_reviews_subdir(session_id) / "probe.json")
 
     # The BILLABLE warning always prints before any provider runs.
     print(
@@ -2140,25 +2163,6 @@ def cmd_probe(args: argparse.Namespace) -> int:
         }
 
     text = json.dumps(results, ensure_ascii=False, indent=2)
-
-    # -o / session-path write matrix (D1, copied from cmd_doctor's exact
-    # branch): -o wins; else the session path (.crew/reviews/<id>/probe.json);
-    # else no file. The JSON is ALWAYS also printed to stdout.
-    out_path = args.out
-    if out_path:
-        out_path = os.path.expanduser(out_path)
-    else:
-        session_id = _resolve_session_id(args.session_id)
-        if "<" in session_id or ">" in session_id:
-            print(
-                f"error: session id looks like an unsubstituted placeholder "
-                f"({session_id!r}); pass your actual session id (the "
-                "[Session ID: …] value), not the literal template",
-                file=sys.stderr,
-            )
-            return 2
-        if session_id:
-            out_path = str(_reviews_subdir(session_id) / "probe.json")
 
     if out_path:
         p = Path(out_path)
