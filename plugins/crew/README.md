@@ -5,7 +5,7 @@ Persistence, specialized agents, and workflow commands for Claude Code.
 ## What's In Here
 
 - **7 specialized agents** — advisor, executor, reader, document-writer, reviewer, panelist, formatter
-- **14 slash commands** — planning, execution, search, build/measure-twice loops
+- **Slash commands** — planning, execution, search, build/measure-twice loops
 - **2 lifecycle hooks** — SessionStart context restoration, Stop persistence enforcement
 - **Python state machine** — session-scoped JSON state files in `.crew/`
 
