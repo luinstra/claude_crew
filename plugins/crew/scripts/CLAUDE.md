@@ -480,11 +480,17 @@ class HookResult:
     message: Optional[str]    # Info message
     reason: Optional[str]     # Block reason
 
-# Usage
-HookResult.allow()                    # {"continue": true}
-HookResult.allow("Info message")      # {"continue": true, "message": "..."}
-HookResult.block("Must continue")     # {"continue": false, "reason": "..."}
+# Usage (schema pinned by the 2026-07-06 C2 live smoke)
+HookResult.allow()                    # {}
+HookResult.allow("Info message")      # {"message": "..."}
+HookResult.block("Must continue")    # {"decision": "block", "reason": "..."}
 ```
+
+> **Do NOT emit `{"continue": false}` to block a Stop.** The 2026-07-06 C2
+> live smoke proved it INERT for blocking — Claude Code honors it as a
+> HARD-STOP directive (the child session terminated at the first stop
+> attempt). `{"decision": "block", "reason": ...}` is the load-bearing,
+> smoke-verified blocking shape.
 
 ### BuildState
 

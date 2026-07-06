@@ -111,12 +111,28 @@ class HookResult:
     reason: Optional[str] = None
 
     def to_json(self) -> str:
-        """Serialize to JSON for hook output."""
-        result: dict[str, Any] = {"continue": self.continue_}
+        """Serialize to JSON for hook output.
+
+        Schema is pinned by the 2026-07-06 C2 live smoke (L10 posture:
+        dual-emit-where-safe — here dual-emit is UNSAFE, so single-shape):
+
+        - Block: ``{"decision": "block", "reason": msg}`` is the load-bearing
+          shape. The legacy ``{"continue": false, ...}`` was smoke-proven
+          INERT for blocking a Stop — Claude Code honored it as a HARD-STOP
+          directive (child session ended at the first stop attempt with
+          ``terminal_reason=stop_hook_prevented``; state-file iteration stayed
+          at 2). Because ``continue: false`` demonstrably forces termination,
+          it must NOT be dual-emitted alongside ``decision: block``.
+        - Allow: ``{}`` — benign empty object; asserts nothing about the
+          ambiguous ``continue`` field.
+        """
+        result: dict[str, Any] = {}
+        if not self.continue_:
+            result["decision"] = "block"
+            if self.reason is not None:
+                result["reason"] = self.reason
         if self.message is not None:
             result["message"] = self.message
-        if self.reason is not None:
-            result["reason"] = self.reason
         return json.dumps(result)
 
     @classmethod

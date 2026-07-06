@@ -346,11 +346,13 @@ def main():
                 f.unlink()
 
             # Test with no state - should allow stop
+            # Allow shape is the benign {} — asserts nothing about the
+            # ambiguous "continue" field (2026-07-06 C2 smoke).
             test_equals(
                 "No state - allows stop",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                '{"continue": true}',
+                '{}',
             )
 
             # Test with active build loop
@@ -358,11 +360,15 @@ def main():
                 '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
             )
 
+            # Block shape pinned by the 2026-07-06 C2 live smoke: the legacy
+            # {"continue": false} was proven INERT (hard-stopped the child
+            # session); {"decision": "block", "reason": ...} is the honored,
+            # load-bearing schema. Assert EXACTLY the shipped shape.
             test_contains(
                 "Active build loop - blocks stop",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                '"continue": false',
+                '"decision": "block", "reason":',
             )
 
             test_contains(
@@ -381,7 +387,7 @@ def main():
                 "Inactive build loop - allows stop",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                '{"continue": true}',
+                '{}',
             )
 
             # Clean up build loop state
@@ -396,7 +402,7 @@ def main():
                 "Active measure-twice loop - blocks stop",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                '"continue": false',
+                '"decision": "block", "reason":',
             )
 
             test_contains(
@@ -415,7 +421,7 @@ def main():
                 "Inactive measure-twice loop - allows stop",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                '{"continue": true}',
+                '{}',
             )
 
             # Test priority: build loop takes precedence over measure-twice
@@ -894,7 +900,7 @@ def main():
                 "Stop hook s1 - blocks when s1 has active loop",
                 persistent_mode,
                 json.dumps({"directory": str(test_path), "session_id": "s1"}),
-                '"continue": false',
+                '"decision": "block", "reason":',
             )
 
             # Stop hook with session_id=s2 allows
@@ -902,7 +908,7 @@ def main():
                 "Stop hook s2 - allows when only s1 has active loop",
                 persistent_mode,
                 json.dumps({"directory": str(test_path), "session_id": "s2"}),
-                '{"continue": true}',
+                '{}',
             )
 
             # Stop hook with empty session_id only checks legacy files
@@ -910,7 +916,7 @@ def main():
                 "Stop hook no session - allows (no legacy file)",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                '{"continue": true}',
+                '{}',
             )
 
             # File with no session_id is claimed by session that has one
@@ -922,7 +928,7 @@ def main():
                 "Stop hook session claims file (no session_id in file)",
                 persistent_mode,
                 json.dumps({"directory": str(test_path), "session_id": "any-session"}),
-                '"continue": false',
+                '"decision": "block", "reason":',
             )
 
             # Clean up
@@ -1331,7 +1337,7 @@ def main():
                     "Incomplete todos do NOT block stop (no active loop)",
                     persistent_mode,
                     json.dumps({"directory": str(test_path), "session_id": test_session_id}),
-                    '{"continue": true}',
+                    '{}',
                 )
             finally:
                 todo_file.unlink(missing_ok=True)
