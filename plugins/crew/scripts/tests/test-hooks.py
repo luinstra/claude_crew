@@ -6,6 +6,7 @@ Run from project root: python3 plugins/crew/scripts/tests/test-hooks.py
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1384,6 +1385,117 @@ def main():
                 )
             finally:
                 todo_file.unlink(missing_ok=True)
+
+            # =========================================================================
+            # PHASE 4 (C4): PYTHON 3.9 IMPORT BOMB + LOUD FAIL-OPEN
+            # =========================================================================
+            log_section("hooks: version guard + fail-open (C4)")
+
+            session_start_path = SCRIPT_DIR / "session-start.py"
+            state_discovery_path = SCRIPT_DIR / "state_discovery.py"
+
+            # Static: state_discovery carries the __future__ import (the
+            # `-> Path | None` annotation is a def-time TypeError on 3.9
+            # without it).
+            sd_src = state_discovery_path.read_text()
+            if "from __future__ import annotations" in sd_src:
+                log_pass("state_discovery.py has `from __future__ import annotations`")
+            else:
+                log_fail("state_discovery.py has `from __future__ import annotations`",
+                         "__future__ import present", "absent")
+
+            # Static: the stdlib-only version guard appears textually BEFORE
+            # the first project import in both hook entry points.
+            for hook_path in (persistent_mode, session_start_path):
+                src = hook_path.read_text()
+                guard_idx = src.find("sys.version_info < (3, 10)")
+                import_idx = src.find("from models import")
+                if 0 <= guard_idx < import_idx:
+                    log_pass(f"{hook_path.name}: version guard precedes project imports")
+                else:
+                    log_fail(f"{hook_path.name}: version guard precedes project imports",
+                             "guard before `from models import`",
+                             f"guard_idx={guard_idx}, import_idx={import_idx}")
+
+            # Behavioral: an unexpected in-hook crash fails OPEN (valid allow
+            # JSON on stdout) and LOUD (diagnostic on stderr + the
+            # smoke-verified systemMessage field). Fault: a non-string
+            # "directory" makes Path() raise TypeError inside main().
+            for hook_path in (persistent_mode, session_start_path):
+                crash_env = _neutral_env()
+                crash_env.pop("CLAUDE_PROJECT_DIR", None)  # force the stdin fault path
+                proc = subprocess.run(
+                    [sys.executable, str(hook_path)],
+                    input='{"directory": 123}',
+                    capture_output=True, text=True, cwd=SCRIPT_DIR, env=crash_env,
+                )
+                name = f"{hook_path.name}: crash fails open + loud"
+                try:
+                    payload = json.loads(proc.stdout.strip())
+                except (json.JSONDecodeError, ValueError):
+                    payload = None
+                if (
+                    proc.returncode == 0
+                    and isinstance(payload, dict)
+                    and "decision" not in payload
+                    and "crashed" in payload.get("systemMessage", "")
+                    and "[crew]" in proc.stderr
+                ):
+                    log_pass(name)
+                else:
+                    log_fail(name,
+                             "rc 0, allow JSON with systemMessage, stderr diagnostic",
+                             f"rc={proc.returncode} stdout={proc.stdout[:150]!r} stderr={proc.stderr[:150]!r}")
+
+            # Real-interpreter test (skip if no Python 3.9 available): both
+            # hook entry points are visible no-ops on 3.9 (allow + loud
+            # diagnostic, exit 0), and state_discovery imports cleanly.
+            py39 = None
+            for candidate in ("python3.9", "/usr/bin/python3"):
+                cand_path = shutil.which(candidate) if candidate == "python3.9" else candidate
+                if not cand_path or not Path(cand_path).exists():
+                    continue
+                ver = subprocess.run([cand_path, "-c", "import sys; print(sys.version_info[:2])"],
+                                     capture_output=True, text=True)
+                if ver.returncode == 0 and ver.stdout.strip() == "(3, 9)":
+                    py39 = cand_path
+                    break
+            if py39 is None:
+                print(f"{YELLOW}~ SKIP{NC}: no Python 3.9 interpreter found (real-interpreter guard test)")
+            else:
+                imp = subprocess.run(
+                    [py39, "-c", "import state_discovery"],
+                    capture_output=True, text=True, cwd=SCRIPT_DIR,
+                )
+                if imp.returncode == 0:
+                    log_pass("python3.9 imports state_discovery (annotations lazy)")
+                else:
+                    log_fail("python3.9 imports state_discovery",
+                             "rc 0", f"rc={imp.returncode} stderr={imp.stderr[:200]!r}")
+
+                for hook_path in (persistent_mode, session_start_path):
+                    proc = subprocess.run(
+                        [py39, str(hook_path)],
+                        input=json.dumps({"directory": str(test_path)}),
+                        capture_output=True, text=True, cwd=SCRIPT_DIR, env=_neutral_env(),
+                    )
+                    name = f"{hook_path.name} on 3.9: visible no-op (allow + diagnostic)"
+                    try:
+                        payload = json.loads(proc.stdout.strip())
+                    except (json.JSONDecodeError, ValueError):
+                        payload = None
+                    if (
+                        proc.returncode == 0
+                        and isinstance(payload, dict)
+                        and "decision" not in payload
+                        and "unsupported" in payload.get("systemMessage", "")
+                        and "[crew]" in proc.stderr
+                    ):
+                        log_pass(name)
+                    else:
+                        log_fail(name,
+                                 "rc 0, allow JSON + systemMessage, stderr diagnostic",
+                                 f"rc={proc.returncode} stdout={proc.stdout[:150]!r} stderr={proc.stderr[:150]!r}")
 
     finally:
         # Nothing to restore — isolation is the neutral HOME, not a mutation

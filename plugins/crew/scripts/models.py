@@ -109,6 +109,7 @@ class HookResult:
     continue_: bool = True  # 'continue' is a Python keyword
     message: Optional[str] = None
     reason: Optional[str] = None
+    system_message: Optional[str] = None  # user-visible diagnostic (allow-side)
 
     def to_json(self) -> str:
         """Serialize to JSON for hook output.
@@ -133,12 +134,23 @@ class HookResult:
                 result["reason"] = self.reason
         if self.message is not None:
             result["message"] = self.message
+        if self.system_message is not None:
+            # "systemMessage" on an allow payload is smoke-VERIFIED (2026-07-06
+            # C2 probe): Claude Code parses it into a first-class
+            # hook_system_message transcript attachment — the loud-diagnostic
+            # carrier for fail-open hook paths (C4).
+            result["systemMessage"] = self.system_message
         return json.dumps(result)
 
     @classmethod
     def allow(cls, message: Optional[str] = None) -> "HookResult":
         """Create a result that allows the action to continue."""
         return cls(continue_=True, message=message)
+
+    @classmethod
+    def allow_with_diagnostic(cls, diagnostic: str) -> "HookResult":
+        """Allow, but surface a loud user-visible diagnostic (systemMessage)."""
+        return cls(continue_=True, system_message=diagnostic)
 
     @classmethod
     def block(cls, reason: str) -> "HookResult":

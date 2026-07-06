@@ -5,6 +5,25 @@ Blocks Stop while a build or measure-twice loop is active.
 Generic todo continuation is handled by Claude Code natively.
 """
 
+# --- C4 version guard: stdlib-only, 3.9-parseable, BEFORE any project import.
+# Python 3.9 is UNSUPPORTED for hook functionality (repo requires 3.10+), but
+# must be GRACEFUL: allow + loud diagnostic, never a silent crash and never
+# functional persistence. Diagnostic channels are the smoke-VERIFIED ones from
+# the 2026-07-06 C2 record: stderr + systemMessage (allow-side).
+import json
+import sys
+
+if sys.version_info < (3, 10):
+    _DIAG = (
+        "[crew] Stop hook disabled: Python %d.%d is unsupported (crew hooks "
+        "require Python 3.10+). Persistence loops will NOT block — fix the "
+        "hook interpreter (e.g. install python3 >= 3.10 on PATH)."
+        % sys.version_info[:2]
+    )
+    print(json.dumps({"systemMessage": _DIAG}))
+    print(_DIAG, file=sys.stderr)
+    sys.exit(0)
+
 from pathlib import Path
 
 from models import (
@@ -128,4 +147,15 @@ Present the current plan to the user and explain where it stands.
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001 — Stop is architecturally fail-open;
+        # make the failure LOUD (smoke-verified channels), never silent.
+        _diag = (
+            "[crew] Stop hook crashed (%s: %s) — allowing stop. An active "
+            "persistence loop may not be enforced this fire."
+            % (exc.__class__.__name__, exc)
+        )
+        print(json.dumps({"systemMessage": _diag}))
+        print(_diag, file=sys.stderr)
+        sys.exit(0)

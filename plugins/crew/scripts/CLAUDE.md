@@ -483,6 +483,7 @@ class HookResult:
 # Usage (schema pinned by the 2026-07-06 C2 live smoke)
 HookResult.allow()                    # {}
 HookResult.allow("Info message")      # {"message": "..."}
+HookResult.allow_with_diagnostic("…") # {"systemMessage": "..."} (loud allow)
 HookResult.block("Must continue")    # {"decision": "block", "reason": "..."}
 ```
 

@@ -4,7 +4,25 @@ Claude Crew Session Start Hook
 Restores persistent mode states and injects plugin integration guidance.
 """
 
+# --- C4 version guard: stdlib-only, 3.9-parseable, BEFORE any project import.
+# Python 3.9 is UNSUPPORTED for hook functionality (repo requires 3.10+), but
+# must be GRACEFUL: allow + loud diagnostic, never a silent crash. Diagnostic
+# channels are the smoke-VERIFIED ones from the 2026-07-06 C2 record: stderr +
+# systemMessage (allow-side).
 import json
+import sys
+
+if sys.version_info < (3, 10):
+    _DIAG = (
+        "[crew] SessionStart hook disabled: Python %d.%d is unsupported (crew "
+        "hooks require Python 3.10+). State restore and cleanup skipped — fix "
+        "the hook interpreter (e.g. install python3 >= 3.10 on PATH)."
+        % sys.version_info[:2]
+    )
+    print(json.dumps({"systemMessage": _DIAG}))
+    print(_DIAG, file=sys.stderr)
+    sys.exit(0)
+
 import re
 import shutil
 import time
@@ -429,4 +447,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001 — hooks are fail-open;
+        # make the failure LOUD (smoke-verified channels), never silent.
+        _diag = (
+            "[crew] SessionStart hook crashed (%s: %s) — continuing without "
+            "state restore/cleanup for this session."
+            % (exc.__class__.__name__, exc)
+        )
+        print(json.dumps({"systemMessage": _diag}))
+        print(_diag, file=sys.stderr)
+        sys.exit(0)
