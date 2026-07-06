@@ -251,6 +251,8 @@ print(HookResult.allow_with_diagnostic("Hook degraded: ...").to_json())
 print(HookResult.block("Reason to block").to_json())
 ```
 
+**Note:** SessionStart crash diagnostics belong on `SessionStartResult.with_context()` (the `hookSpecificOutput.additionalContext` channel), distinct from Stop's `HookResult.allow_with_diagnostic()` (the `systemMessage` channel). The one exception is SessionStart's pre-import 3.9 version-guard fallback, which is stdlib-only and can't build a `SessionStartResult`, so it emits `systemMessage`.
+
 ## Common Mistakes
 
 ❌ **Referencing commands without prefix**

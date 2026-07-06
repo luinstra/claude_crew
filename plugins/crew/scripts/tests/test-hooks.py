@@ -144,6 +144,25 @@ def main():
         log_fail('HookResult.block() -> {"decision": "block", "reason": ...}',
                  '{"decision": "block", "reason": "Must continue"}', _block_json)
 
+    # SessionStart uses its OWN diagnostic/context channel —
+    # hookSpecificOutput.additionalContext — NOT systemMessage. This is the
+    # channel the 3.10+ crash handler (session-start.py bottom) emits on; the
+    # 3.9 pre-import version-guard fallback emits systemMessage instead only
+    # because it's stdlib-only and can't build this object.
+    from models import SessionStartResult
+    _ctx_json = SessionStartResult.with_context("restored context").to_json()
+    if json.loads(_ctx_json) == {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": "restored context",
+        }
+    }:
+        log_pass('SessionStartResult.with_context() -> {"hookSpecificOutput": {...additionalContext...}}')
+    else:
+        log_fail('SessionStartResult.with_context() -> {"hookSpecificOutput": {...additionalContext...}}',
+                 '{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "restored context"}}',
+                 _ctx_json)
+
     # Global-state isolation: every subprocess env pins HOME to _NEUTRAL_HOME
     # (see _neutral_env), so the scripts under test can never read from — or
     # clean up — the developer's real ~/.claude. This replaces the old
@@ -449,6 +468,18 @@ def main():
                 json.dumps({"directory": str(test_path), "session_id": "s9"}),
                 "--session-id s9",
             )
+            # A session_id carrying a space/shell metacharacter must be
+            # shlex.quote'd in the copy-pasteable nudge (complements the spaced
+            # plan-path test) — an unquoted value would split/execute.
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
+            )
+            test_contains(
+                "Build loop nudge - shell-quotes session_id with metacharacter",
+                persistent_mode,
+                json.dumps({"directory": str(test_path), "session_id": "s x;rm"}),
+                "--session-id 's x;rm'",
+            )
 
             # Test with inactive build loop
             (crew_dir / "build-state.json").write_text(
@@ -518,6 +549,20 @@ def main():
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
                 "review-prep '.crew/plans/auth plan.md'",
+            )
+
+            # The measure-twice nudge renders the same shlex.quote'd session_flag
+            # as the build loop — a spaced/metacharacter session_id is quoted.
+            (crew_dir / "measure-twice-state.json").write_text(json.dumps({
+                "active": True, "task_description": "Design auth",
+                "plan_file": ".crew/plans/auth.md",
+                "iteration": 1, "max_iterations": 10,
+            }))
+            test_contains(
+                "Measure-twice nudge - shell-quotes session_id with metacharacter",
+                persistent_mode,
+                json.dumps({"directory": str(test_path), "session_id": "s x;rm"}),
+                "--session-id 's x;rm'",
             )
 
             # Test with inactive measure-twice loop

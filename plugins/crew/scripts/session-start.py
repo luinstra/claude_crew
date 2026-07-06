@@ -6,9 +6,13 @@ Restores persistent mode states and injects plugin integration guidance.
 
 # --- C4 version guard: stdlib-only, 3.9-parseable, BEFORE any project import.
 # Python 3.9 is UNSUPPORTED for hook functionality (repo requires 3.10+), but
-# must be GRACEFUL: allow + loud diagnostic, never a silent crash. Diagnostic
-# channels are the smoke-VERIFIED ones from the 2026-07-06 C2 record: stderr +
-# systemMessage (allow-side).
+# must be GRACEFUL: allow + loud diagnostic, never a silent crash. This
+# pre-import fallback runs stdlib-only — it CANNOT build a SessionStartResult
+# (models isn't imported yet) — so it emits its diagnostic on the `systemMessage`
+# channel (the C2-smoke-verified allow-side carrier) + stderr. This is the
+# intentional split from the post-import 3.10+ crash handler at the bottom of
+# the module, which CAN build a SessionStartResult and therefore emits via
+# SessionStart's documented hookSpecificOutput.additionalContext channel.
 import json
 import sys
 
