@@ -117,6 +117,33 @@ def test_not_contains(name: str, script: Path, input_data: str, not_expected: st
 
 
 def main():
+    # =========================================================================
+    # MODELS: HookResult.to_json() shape contract (direct unit assertions —
+    # the three shipped shapes, pinned by the 2026-07-06 C2 live smoke)
+    # =========================================================================
+    log_section("models.HookResult.to_json() shapes")
+    from models import HookResult
+
+    _allow_json = HookResult.allow().to_json()
+    if _allow_json == "{}":
+        log_pass("HookResult.allow() -> {}")
+    else:
+        log_fail("HookResult.allow() -> {}", "{}", _allow_json)
+
+    _diag_json = HookResult.allow_with_diagnostic("hook degraded").to_json()
+    if json.loads(_diag_json) == {"systemMessage": "hook degraded"}:
+        log_pass('HookResult.allow_with_diagnostic() -> {"systemMessage": ...}')
+    else:
+        log_fail('HookResult.allow_with_diagnostic() -> {"systemMessage": ...}',
+                 '{"systemMessage": "hook degraded"}', _diag_json)
+
+    _block_json = HookResult.block("Must continue").to_json()
+    if json.loads(_block_json) == {"decision": "block", "reason": "Must continue"}:
+        log_pass('HookResult.block() -> {"decision": "block", "reason": ...}')
+    else:
+        log_fail('HookResult.block() -> {"decision": "block", "reason": ...}',
+                 '{"decision": "block", "reason": "Must continue"}', _block_json)
+
     # Global-state isolation: every subprocess env pins HOME to _NEUTRAL_HOME
     # (see _neutral_env), so the scripts under test can never read from — or
     # clean up — the developer's real ~/.claude. This replaces the old
@@ -401,6 +428,28 @@ def main():
                 "Spawn advisor",
             )
 
+            # The nudge's copy-pasteable command must not end in a bare
+            # `--session-id` when session_id is empty, and must render the
+            # flag with its value when one is present.
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
+            )
+            test_not_contains(
+                "Build loop nudge - no bare --session-id when session_id empty",
+                persistent_mode,
+                json.dumps({"directory": str(test_path)}),
+                "--session-id",
+            )
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
+            )
+            test_contains(
+                "Build loop nudge - renders --session-id with value",
+                persistent_mode,
+                json.dumps({"directory": str(test_path), "session_id": "s9"}),
+                "--session-id s9",
+            )
+
             # Test with inactive build loop
             (crew_dir / "build-state.json").write_text(
                 '{"active": false, "prompt": "Old task"}'
@@ -454,6 +503,21 @@ def main():
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
                 "Spawn advisor",
+            )
+
+            # A plan path with spaces (or shell metacharacters) must be
+            # shell-quoted in the suggested review-prep command — an unquoted
+            # path splits/executes when the orchestrator copies the command.
+            (crew_dir / "measure-twice-state.json").write_text(json.dumps({
+                "active": True, "task_description": "Design auth",
+                "plan_file": ".crew/plans/auth plan.md",
+                "iteration": 1, "max_iterations": 10,
+            }))
+            test_contains(
+                "Measure-twice nudge - shell-quotes spaced plan path",
+                persistent_mode,
+                json.dumps({"directory": str(test_path)}),
+                "review-prep '.crew/plans/auth plan.md'",
             )
 
             # Test with inactive measure-twice loop
@@ -1418,9 +1482,12 @@ def main():
                              f"guard_idx={guard_idx}, import_idx={import_idx}")
 
             # Behavioral: an unexpected in-hook crash fails OPEN (valid allow
-            # JSON on stdout) and LOUD (diagnostic on stderr + the
-            # smoke-verified systemMessage field). Fault: a non-string
-            # "directory" makes Path() raise TypeError inside main().
+            # JSON on stdout) and LOUD (diagnostic on stderr + the hook's own
+            # documented output channel: Stop uses the smoke-verified
+            # systemMessage; SessionStart uses its documented
+            # hookSpecificOutput.additionalContext channel). Fault: a
+            # non-string "directory" makes Path() raise TypeError inside
+            # main().
             for hook_path in (persistent_mode, session_start_path):
                 crash_env = _neutral_env()
                 crash_env.pop("CLAUDE_PROJECT_DIR", None)  # force the stdin fault path
@@ -1434,17 +1501,25 @@ def main():
                     payload = json.loads(proc.stdout.strip())
                 except (json.JSONDecodeError, ValueError):
                     payload = None
+                if isinstance(payload, dict):
+                    if hook_path.name == "session-start.py":
+                        hso = payload.get("hookSpecificOutput", {})
+                        diag = hso.get("additionalContext", "") if isinstance(hso, dict) else ""
+                    else:
+                        diag = payload.get("systemMessage", "")
+                else:
+                    diag = ""
                 if (
                     proc.returncode == 0
                     and isinstance(payload, dict)
                     and "decision" not in payload
-                    and "crashed" in payload.get("systemMessage", "")
+                    and "crashed" in diag
                     and "[crew]" in proc.stderr
                 ):
                     log_pass(name)
                 else:
                     log_fail(name,
-                             "rc 0, allow JSON with systemMessage, stderr diagnostic",
+                             "rc 0, allow JSON with loud diagnostic field, stderr diagnostic",
                              f"rc={proc.returncode} stdout={proc.stdout[:150]!r} stderr={proc.stderr[:150]!r}")
 
             # Real-interpreter test (skip if no Python 3.9 available): both

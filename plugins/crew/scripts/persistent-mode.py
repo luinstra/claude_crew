@@ -24,6 +24,7 @@ if sys.version_info < (3, 10):
     print(_DIAG, file=sys.stderr)
     sys.exit(0)
 
+import shlex
 from pathlib import Path
 
 from models import (
@@ -46,6 +47,10 @@ def main():
 
     crew_dir = directory / ".crew"
 
+    # Rendered inside copy-pasteable shell commands: only emit the flag when
+    # there is a value (no trailing bare `--session-id`), and shell-quote it.
+    session_flag = f" --session-id {shlex.quote(session_id)}" if session_id else ""
+
     # Priority 1: Build Loop (session-scoped lookup)
     loop_file = find_session_state_file(crew_dir, "build-state", session_id)
     if loop_file:
@@ -64,7 +69,7 @@ Task: {task_text}
 
 Continue working. When complete, verify via the multi-model panel
 (/crew:build Step 2):
-1. "${{CLAUDE_PLUGIN_ROOT}}/crew" review-prep working-tree --session-id {session_id}
+1. "${{CLAUDE_PLUGIN_ROOT}}/crew" review-prep working-tree{session_flag}
 2. Fan out ALL resolved seats, wait for every seat, collect, synthesize
 3. If APPROVED, deactivate the loop and summarize
 4. If REVISE with [BLOCKING] issues, fix and re-verify
@@ -113,7 +118,7 @@ Plan: {measure_state.plan_file}
 Continue refining the plan. Verify via the multi-model panel
 (/crew:measure-twice Phase 3):
 1. If you just received panel feedback, revise the plan to address [BLOCKING] issues
-2. "${{CLAUDE_PLUGIN_ROOT}}/crew" review-prep {measure_state.plan_file} --session-id {session_id}
+2. "${{CLAUDE_PLUGIN_ROOT}}/crew" review-prep {shlex.quote(measure_state.plan_file)}{session_flag}
 3. Fan out ALL resolved seats, wait for every seat, collect, synthesize
 4. When APPROVED (or only [MINOR] issues), deactivate the loop and present the final plan
 
@@ -156,6 +161,8 @@ if __name__ == "__main__":
             "persistence loop may not be enforced this fire."
             % (exc.__class__.__name__, exc)
         )
-        print(json.dumps({"systemMessage": _diag}))
+        # models is importable here (top-of-module import succeeded before
+        # main() ran), so use the shared allow-with-diagnostic shape.
+        print(HookResult.allow_with_diagnostic(_diag).to_json())
         print(_diag, file=sys.stderr)
         sys.exit(0)

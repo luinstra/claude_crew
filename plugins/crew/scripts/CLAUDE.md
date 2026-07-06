@@ -479,6 +479,7 @@ class HookResult:
     continue_: bool = True    # Allow or block
     message: Optional[str]    # Info message
     reason: Optional[str]     # Block reason
+    system_message: Optional[str]  # User-visible diagnostic (systemMessage, allow-side)
 
 # Usage (schema pinned by the 2026-07-06 C2 live smoke)
 HookResult.allow()                    # {}

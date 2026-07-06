@@ -241,10 +241,13 @@ Python hooks must output valid JSON:
 ```python
 from models import HookResult
 
-# Allow the action
+# Allow the action — emits {}
 print(HookResult.allow().to_json())
 
-# Block with message
+# Allow with a loud user-visible diagnostic — emits {"systemMessage": "..."}
+print(HookResult.allow_with_diagnostic("Hook degraded: ...").to_json())
+
+# Block with reason — emits {"decision": "block", "reason": "..."}
 print(HookResult.block("Reason to block").to_json())
 ```
 

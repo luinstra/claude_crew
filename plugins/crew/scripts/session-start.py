@@ -456,6 +456,11 @@ if __name__ == "__main__":
             "state restore/cleanup for this session."
             % (exc.__class__.__name__, exc)
         )
-        print(json.dumps({"systemMessage": _diag}))
+        # models is importable here (top-of-module import succeeded before
+        # main() ran). SessionStart's documented context channel is
+        # hookSpecificOutput.additionalContext (systemMessage is only
+        # C2-verified on the Stop allow-side), so emit the diagnostic the
+        # same way this hook emits its normal payload — plus stderr.
+        print(SessionStartResult.with_context(_diag).to_json())
         print(_diag, file=sys.stderr)
         sys.exit(0)

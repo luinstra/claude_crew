@@ -137,7 +137,7 @@ For non-trivial work, use the **plan → execute** workflow to keep your main co
 4. **Execute** — `/crew:execute` to implement via executor agent
 5. **Verify** — Check results, iterate if needed
 
-For work requiring verification before declaring "done," use `/crew:build` instead — it won't let you stop until an advisor approves completion.
+For work requiring verification before declaring "done," use `/crew:build` instead — it won't let you stop until the multi-model review panel approves completion.
 
 ## Commands
 
