@@ -35,8 +35,51 @@ from models import (
     read_hook_input,
     is_verbose,
     truncate,
+    LOAD_CORRUPT,
+    LOAD_FUTURE_SCHEMA,
 )
 from state_discovery import find_session_state_file
+
+
+def _corrupt_block_message(loop_file: Path) -> str:
+    """One-time block diagnostic for an unparseable state file (never-choke:
+    the file is set aside as .corrupt so the NEXT Stop allows)."""
+    return (
+        f"[Crew - State File Corrupt]\n\n"
+        f"The loop state file `{loop_file.name}` could not be parsed (corrupt "
+        f"JSON) — any active loop state is lost. It has been set aside as "
+        f"`{loop_file.name}.corrupt`. If a loop was active, re-init it with "
+        f"`/crew:build` or `/crew:measure-twice`."
+    )
+
+
+def _future_schema_diagnostic(loop_file: Path) -> str:
+    """Loud allow-side diagnostic for a newer-crew state file (refuse to
+    touch: no rename, no rewrite — a downgrade must not strand a live loop)."""
+    return (
+        f"[crew] `{loop_file.name}` was written by a newer crew version "
+        f"(state schema ahead of this install) — leaving it untouched. Upgrade "
+        f"crew or deactivate the loop manually. Allowing stop."
+    )
+
+
+def _handle_load_status(loop_file: Path, status: str):
+    """Handle non-OK load statuses. Returns True if the hook emitted output
+    and should return; False to continue with the loaded (OK) state."""
+    if status == LOAD_CORRUPT:
+        # Set the corrupt file aside so the next Stop allows (one-time block).
+        corrupt_path = loop_file.with_name(loop_file.name + ".corrupt")
+        try:
+            loop_file.replace(corrupt_path)
+        except OSError:
+            pass
+        print(HookResult.block(_corrupt_block_message(loop_file)).to_json())
+        return True
+    if status == LOAD_FUTURE_SCHEMA:
+        # Refuse to touch: bytes untouched, loud diagnostic, allow stop.
+        print(HookResult.allow_with_diagnostic(_future_schema_diagnostic(loop_file)).to_json())
+        return True
+    return False
 
 
 def main():
@@ -54,9 +97,16 @@ def main():
     # Priority 1: Build Loop (session-scoped lookup)
     loop_file = find_session_state_file(crew_dir, "build-state", session_id)
     if loop_file:
-        loop_state = BuildState.load(loop_file)
+        loop_state, status = BuildState.load_with_status(loop_file)
+        if _handle_load_status(loop_file, status):
+            return
 
         if loop_state.active:
+            # L1 adoption stamp: claim an unowned legacy file for this session
+            # before the iteration save (the fire already saves — zero extra
+            # writes). Closes the co-adoption window at first touch.
+            if not loop_state.session_id and session_id:
+                loop_state.session_id = session_id
             if loop_state.iteration <= loop_state.max_iterations:
                 # iteration field = "next nudge to display"; init sets it to 1,
                 # we display it as-is then increment for the next Stop fire.
@@ -101,9 +151,14 @@ Review what was accomplished and whether the task is complete.
     # Priority 2: Measure-Twice Loop (session-scoped lookup)
     measure_file = find_session_state_file(crew_dir, "measure-twice-state", session_id)
     if measure_file:
-        measure_state = MeasureTwiceState.load(measure_file)
+        measure_state, status = MeasureTwiceState.load_with_status(measure_file)
+        if _handle_load_status(measure_file, status):
+            return
 
         if measure_state.active:
+            # L1 adoption stamp (see build loop above).
+            if not measure_state.session_id and session_id:
+                measure_state.session_id = session_id
             if measure_state.iteration <= measure_state.max_iterations:
                 # iteration field = "next nudge to display"; init sets it to 1,
                 # we display it as-is then increment for the next Stop fire.

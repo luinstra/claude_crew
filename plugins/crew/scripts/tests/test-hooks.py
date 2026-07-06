@@ -390,7 +390,8 @@ def main():
 
             # Clean test directory
             for f in crew_dir.glob("*"):
-                f.unlink()
+                if f.is_file():
+                    f.unlink()
 
             # Test with no state - should allow stop
             # Allow shape is the benign {} — asserts nothing about the
@@ -602,7 +603,8 @@ def main():
             log_section("persistent-mode.py (terse/verbose)")
 
             for f in crew_dir.glob("*"):
-                f.unlink()
+                if f.is_file():
+                    f.unlink()
 
             # iteration=1 (first Stop fire): display reads "1/N", full recipe present
             (crew_dir / "build-state.json").write_text(
@@ -1494,6 +1496,204 @@ def main():
                 )
             finally:
                 todo_file.unlink(missing_ok=True)
+
+            # =========================================================================
+            # PHASE 5 (R1 + L1 + L2 + L3): STATE-FILE ROBUSTNESS
+            # =========================================================================
+            log_section("state robustness (atomic writes, corrupt/schema, adoption)")
+
+            import stat as _stat
+
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+
+            # --- 0600-at-create + schema stamp (no chmod window) ---
+            p5_state = crew_dir / "build-state.json"
+            models_module.BuildState(active=True, prompt="p5", iteration=1).save(p5_state)
+            mode = _stat.S_IMODE(os.stat(p5_state).st_mode)
+            if mode == 0o600:
+                log_pass("save() creates state file 0600 (no chmod window)")
+            else:
+                log_fail("save() creates state file 0600", "0o600", oct(mode))
+
+            with open(p5_state) as f:
+                _saved = json.load(f)
+            if _saved.get("schema") == 1:
+                log_pass("save() stamps schema:1")
+            else:
+                log_fail("save() stamps schema:1", "1", str(_saved.get("schema")))
+
+            # --- Atomicity: crash between temp-write and os.replace ---
+            # A monkeypatched os.replace records the TEMP file's mode (proving
+            # it is 0600 too) then raises: the original must stay intact and
+            # the finally-cleanup must leave no stray temp.
+            orig_content = p5_state.read_text()
+            _temp_modes = []
+            _saved_replace = models_module.os.replace
+
+            def _capture_then_boom(src, dst):
+                try:
+                    _temp_modes.append(_stat.S_IMODE(os.stat(src).st_mode))
+                except OSError:
+                    _temp_modes.append(None)
+                raise RuntimeError("simulated crash before replace")
+
+            models_module.os.replace = _capture_then_boom
+            try:
+                try:
+                    models_module.atomic_write_json(p5_state, {"active": False, "clobbered": True})
+                except RuntimeError:
+                    pass
+            finally:
+                models_module.os.replace = _saved_replace
+
+            after_content = p5_state.read_text()
+            stray = list(crew_dir.glob(".build-state.json.*.tmp"))
+            if after_content == orig_content and not stray:
+                log_pass("atomic write: crash before replace leaves original intact + no stray temp")
+            else:
+                log_fail("atomic write: crash before replace leaves original intact + no stray temp",
+                         "original bytes, zero temp files",
+                         f"changed={after_content != orig_content}, stray={[s.name for s in stray]}")
+
+            if _temp_modes and _temp_modes[0] == 0o600:
+                log_pass("atomic write: temp file is 0600 by construction")
+            else:
+                log_fail("atomic write: temp file is 0600 by construction", "0o600",
+                         oct(_temp_modes[0]) if _temp_modes and _temp_modes[0] is not None else str(_temp_modes))
+
+            # --- Concurrent increment: no torn state, unique temps ---
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            run_crew_state(["init", "bl", "--prompt", "race"], test_path)
+            run_crew_state(["set", "bl", "iteration", "5"], test_path)
+            _race_procs = [
+                subprocess.Popen(
+                    [sys.executable, str(crew_state), "increment", "bl", "iteration"],
+                    cwd=test_path,
+                    env={**_neutral_env(), "CLAUDE_PROJECT_DIR": str(test_path)},
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                for _ in range(2)
+            ]
+            for pr in _race_procs:
+                pr.wait()
+            try:
+                with open(crew_dir / "build-state.json") as f:
+                    raced = json.load(f)
+                parseable = True
+            except (OSError, json.JSONDecodeError):
+                raced, parseable = {}, False
+            race_stray = list(crew_dir.glob(".build-state.json.*.tmp"))
+            # Lost update is accepted (both may read 5 → 6); corruption is not.
+            if parseable and raced.get("iteration") in (6, 7) and not race_stray:
+                log_pass("concurrent increment: final JSON parseable, valid state, no temp collision")
+            else:
+                log_fail("concurrent increment: final JSON parseable, valid state, no temp collision",
+                         "parseable JSON, iteration in {6,7}, no stray temp",
+                         f"parseable={parseable}, iter={raced.get('iteration')}, stray={[s.name for s in race_stray]}")
+
+            # --- L1 adoption stamp ---
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "legacy", "iteration": 1, "max_iterations": 10}'
+            )
+            run_script(persistent_mode, json.dumps({"directory": str(test_path), "session_id": "s1"}))
+            with open(crew_dir / "build-state.json") as f:
+                stamped = json.load(f)
+            if stamped.get("session_id") == "s1":
+                log_pass("adoption stamp: legacy file gains the hook's session_id")
+            else:
+                log_fail("adoption stamp: legacy file gains the hook's session_id", "s1", str(stamped.get("session_id")))
+
+            out_s2 = run_script(persistent_mode, json.dumps({"directory": str(test_path), "session_id": "s2"}))
+            if out_s2 == "{}":
+                log_pass("adoption stamp: a second, different session no longer co-adopts (allows)")
+            else:
+                log_fail("adoption stamp: a second, different session no longer co-adopts (allows)", "{}", out_s2[:200])
+
+            # --- Corrupt ≠ missing: one-time block + .corrupt rename + next Stop allows ---
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            corrupt_file = crew_dir / "build-state.json"
+            corrupt_file.write_text('{"active": true, "prompt": "broken", trunc')  # invalid JSON
+            out_corrupt = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            payload_c = json.loads(out_corrupt)
+            if payload_c.get("decision") == "block" and "corrupt" in payload_c.get("reason", "").lower():
+                log_pass("corrupt state → one-time block with diagnostic (not silent allow)")
+            else:
+                log_fail("corrupt state → one-time block with diagnostic", "decision:block + corrupt reason", out_corrupt[:200])
+
+            if (crew_dir / "build-state.json.corrupt").exists() and not corrupt_file.exists():
+                log_pass("corrupt state → file set aside as .corrupt")
+            else:
+                log_fail("corrupt state → file set aside as .corrupt", ".corrupt exists, original gone",
+                         f"corrupt_exists={(crew_dir / 'build-state.json.corrupt').exists()}, orig_exists={corrupt_file.exists()}")
+
+            out_corrupt2 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if out_corrupt2 == "{}":
+                log_pass("corrupt state → second Stop allows (never loops forever)")
+            else:
+                log_fail("corrupt state → second Stop allows", "{}", out_corrupt2[:200])
+
+            # --- Schema: absent loads as v1 ---
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "noschema", "iteration": 1, "max_iterations": 10}'
+            )
+            out_noschema = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if json.loads(out_noschema).get("decision") == "block":
+                log_pass("absent schema loads as v1 → active loop still blocks")
+            else:
+                log_fail("absent schema loads as v1 → active loop still blocks", "decision:block", out_noschema[:200])
+
+            # --- Higher schema: refuse to touch (bytes untouched, NOT renamed) ---
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            future_file = crew_dir / "build-state.json"
+            future_file.write_text(
+                '{"active": true, "prompt": "newer", "iteration": 1, "max_iterations": 10, "schema": 99}'
+            )
+            before_bytes = future_file.read_bytes()
+            out_future = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            payload_f = json.loads(out_future)
+            after_bytes = future_file.read_bytes()
+            renamed = (crew_dir / "build-state.json.corrupt").exists()
+            if ("decision" not in payload_f
+                    and "newer crew" in payload_f.get("systemMessage", "")
+                    and after_bytes == before_bytes
+                    and not renamed
+                    and future_file.exists()):
+                log_pass("higher schema (99) → refuse to touch: bytes untouched, not renamed, loud allow diagnostic")
+            else:
+                log_fail("higher schema (99) → refuse to touch",
+                         "allow + systemMessage, bytes identical, no .corrupt rename",
+                         f"decision={payload_f.get('decision')}, sysmsg={payload_f.get('systemMessage','')[:60]!r}, "
+                         f"bytes_equal={after_bytes == before_bytes}, renamed={renamed}")
+
+            # --- L3: read path does not create .crew/ ---
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            p5_empty = test_path / "p5-empty-proj"
+            p5_empty.mkdir()
+            run_crew_state(["show", "bl"], p5_empty)
+            if not (p5_empty / ".crew").exists():
+                log_pass("crew state show in empty dir does not create .crew/")
+            else:
+                log_fail("crew state show in empty dir does not create .crew/", "no .crew/", ".crew/ created")
+
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
 
             # =========================================================================
             # PHASE 4 (C4): PYTHON 3.9 IMPORT BOMB + LOUD FAIL-OPEN

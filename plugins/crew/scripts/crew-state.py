@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Import from models.py (same directory)
-from models import BuildState, MeasureTwiceState
+from models import BuildState, MeasureTwiceState, atomic_write_json, SCHEMA_VERSION
 
 LOOP_ALIASES = {
     "build": "bl", "bl": "bl",
@@ -61,7 +61,8 @@ def get_state_path(loop: str, session_id: str = "") -> Path:
         sys.exit(1)
     project_dir = get_project_dir()
     crew_dir = project_dir / ".crew"
-    crew_dir.mkdir(parents=True, exist_ok=True)
+    # L3: this is a READ-path helper — it must NOT create `.crew/`. Directory
+    # creation lives solely in the write path (atomic_write_json's own mkdir).
     return crew_dir / get_loop_filename(canonical, session_id)
 
 
@@ -261,16 +262,14 @@ def cmd_deactivate(args):
 
     # Build dict with extra metadata
     data = asdict(state)
+    data["schema"] = SCHEMA_VERSION
     data["active"] = False
     data["completed_at"] = datetime.now().isoformat()
     if args.reason:
         data["reason"] = args.reason
 
-    # Write directly (bypass .save() to include extra fields)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-    os.chmod(path, 0o600)
+    # Write directly (bypass .save() to include extra fields), atomically + 0600.
+    atomic_write_json(path, data)
 
 
 def cmd_increment(args):
