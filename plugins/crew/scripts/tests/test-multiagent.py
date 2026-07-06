@@ -6765,6 +6765,94 @@ def test_persist_seat():
               f"exists={(Path(td) / '.crew').exists()}")
 
 
+def test_process_group_reaping():
+    """R3 (untested failure mode #6): a timed-out codex/cursor/agy seat reaps its
+    WHOLE process group so a billable grandchild is not orphaned. One case per
+    provider proves the shared _proc.run_reaped helper at all three call sites
+    (and exercises the extracted agy _terminate escalation)."""
+    log_section("provider process-group reaping (R3)")
+    import signal as _signal
+    from multiagent.providers.cursor import CursorProvider
+
+    # Fake CLI: spawns a sleeping grandchild in the SAME process group (no
+    # start_new_session), records both PIDs, then hangs. Only a process-GROUP
+    # kill reaps the grandchild; killing the direct child alone would orphan it.
+    fake_hang = """
+    import os, sys, subprocess, time, json
+    PIDFILE = {pidfile!r}
+    gc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    with open(PIDFILE, "w") as f:
+        json.dump({{"parent": os.getpid(), "grandchild": gc.pid}}, f)
+        f.flush()
+    time.sleep(120)
+    """
+
+    def _pid_alive(pid):
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    def _run_case(seat, binname, invoke, *, timeout, config_toml=None):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            pidfile = d / "pids.json"
+            make_fake_bin(d, binname, fake_hang.format(pidfile=str(pidfile)))
+            env_path = os.environ["PATH"]
+            os.environ["PATH"] = str(d) + os.pathsep + env_path
+            ctx = project_config(config_toml) if config_toml else None
+            try:
+                if ctx is not None:
+                    ctx.__enter__()
+                res = invoke(timeout)
+            finally:
+                os.environ["PATH"] = env_path
+                if ctx is not None:
+                    ctx.__exit__(None, None, None)
+
+            gc_pid = None
+            if pidfile.exists():
+                try:
+                    gc_pid = json.loads(pidfile.read_text()).get("grandchild")
+                except (OSError, json.JSONDecodeError):
+                    gc_pid = None
+
+            check(f"{seat}: timed-out run -> ok=False with timeout error",
+                  res.ok is False and bool(res.error) and "timed out" in res.error.lower(),
+                  "ok=False 'timed out'", f"ok={res.ok} error={res.error!r}")
+
+            reaped = False
+            if gc_pid is not None:
+                for _ in range(80):  # up to ~8s (SIGTERM kills promptly)
+                    if not _pid_alive(gc_pid):
+                        reaped = True
+                        break
+                    time.sleep(0.1)
+                if not reaped:
+                    try:
+                        os.kill(gc_pid, _signal.SIGKILL)  # avoid leaking the leak
+                    except OSError:
+                        pass
+            check(f"{seat}: grandchild reaped on timeout (no orphaned process)",
+                  gc_pid is not None and reaped,
+                  "grandchild PID dead", f"gc_pid={gc_pid} reaped={reaped}")
+
+    # codex / cursor pass the caller timeout straight through.
+    _run_case("codex", "codex",
+              lambda t: CodexProvider().run("PROMPT", timeout=t), timeout=2)
+    _run_case("cursor", "agent",
+              lambda t: CursorProvider("cursor-test", "some-model").run("PROMPT", timeout=t),
+              timeout=2)
+    # agy's wall-clock floor = print_timeout + grace; pin print_timeout low so the
+    # kill fires fast (mirrors the existing agy hang test).
+    _run_case("agy", "agy",
+              lambda t: AgyProvider().run("PROMPT", timeout=t),
+              timeout=1, config_toml='[seats.agy]\nprint_timeout = "1s"\n')
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -6780,6 +6868,7 @@ def main():
     test_agy_oversized()
     test_agy_run()
     test_agy_is_available()
+    test_process_group_reaping()
     test_render()
     test_prompts()
     test_targets()

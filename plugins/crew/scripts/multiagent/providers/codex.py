@@ -22,13 +22,13 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import tempfile
 import time
 
 from multiagent import config
 
 from . import Provider, ProviderResult
+from ._proc import TIMEOUT, run_reaped
 
 
 class CodexProvider(Provider):
@@ -100,16 +100,11 @@ class CodexProvider(Provider):
         )
 
         try:
-            try:
-                proc = subprocess.run(
-                    argv,
-                    input=prompt,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    cwd=run_cwd,
-                )
-            except subprocess.TimeoutExpired:
+            # Shared reaped runner (R3): start_new_session + SIGTERM→SIGKILL
+            # killpg teardown on timeout so a hung codex can't orphan billable
+            # grandchildren. Prompt via stdin (input_text), cwd preserved.
+            result = run_reaped(argv, input_text=prompt, timeout=timeout, cwd=run_cwd)
+            if result is TIMEOUT:
                 elapsed = time.monotonic() - start
                 return ProviderResult(
                     name=self.name,
@@ -119,17 +114,18 @@ class CodexProvider(Provider):
                     error=f"codex timed out after {timeout}s",
                     elapsed=elapsed,
                 )
+            returncode, proc_stdout, proc_stderr = result
 
             elapsed = time.monotonic() - start
 
-            if proc.returncode != 0:
-                err = (proc.stderr or proc.stdout or "").strip()
+            if returncode != 0:
+                err = (proc_stderr or proc_stdout or "").strip()
                 return ProviderResult(
                     name=self.name,
                     model=model,
                     ok=False,
                     output="",
-                    error=err or f"codex exited with status {proc.returncode}",
+                    error=err or f"codex exited with status {returncode}",
                     elapsed=elapsed,
                 )
 
@@ -139,11 +135,11 @@ class CodexProvider(Provider):
                 with open(out_path, "r", encoding="utf-8", errors="replace") as f:
                     output = f.read().strip()
             except OSError:
-                output = (proc.stdout or "").strip()
+                output = (proc_stdout or "").strip()
 
             if not output:
                 # Fall back to stdout, else report empty as a failure.
-                output = (proc.stdout or "").strip()
+                output = (proc_stdout or "").strip()
             if not output:
                 return ProviderResult(
                     name=self.name,

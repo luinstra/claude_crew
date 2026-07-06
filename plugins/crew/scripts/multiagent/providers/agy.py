@@ -44,13 +44,12 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import signal
-import subprocess
 import time
 
 from multiagent import config
 
 from . import Provider, ProviderResult
+from ._proc import TIMEOUT, run_reaped
 
 
 # Conservative cap well under macOS ARG_MAX (~1 MB) to leave headroom for the
@@ -63,10 +62,6 @@ DEFAULT_PRINT_TIMEOUT = "8m"
 # Grace margin (seconds) added on top of --print-timeout for teardown so the
 # wall-clock floor sits just above agy's own print deadline.
 TEARDOWN_GRACE_SECONDS = 5
-
-# Hard deadline (seconds) for reaping after SIGTERM/SIGKILL so a hung
-# invocation can't pin its worker thread indefinitely.
-REAP_DEADLINE_SECONDS = 10
 
 # ANSI escape sequence stripper.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
@@ -276,22 +271,11 @@ class AgyProvider(Provider):
             else None
         )
 
-        proc = subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,  # own process group, so we can reap children
-            cwd=run_cwd,
-        )
-
-        try:
-            stdout, stderr = proc.communicate(timeout=wall_clock)
-        except subprocess.TimeoutExpired:
-            # SIGTERM -> SIGKILL -> hard-deadline waitpid so a hung invocation
-            # cannot pin its worker thread.
-            self._terminate(proc)
+        # Shared reaped runner (R3): start_new_session + SIGTERM→SIGKILL killpg
+        # teardown on timeout. stdin is DEVNULL (input_text=None) — byte-identical
+        # to agy's prior Popen(stdin=DEVNULL) invocation.
+        result = run_reaped(argv, timeout=wall_clock, cwd=run_cwd)
+        if result is TIMEOUT:
             return ProviderResult(
                 name=self.name,
                 model=resolved_model,
@@ -300,6 +284,7 @@ class AgyProvider(Provider):
                 error=f"agy timed out after {wall_clock:.0f}s (wall clock)",
                 elapsed=time.monotonic() - start,
             )
+        returncode, stdout, stderr = result
 
         elapsed = time.monotonic() - start
         cleaned = strip_ansi(stdout or "").strip()
@@ -329,14 +314,14 @@ class AgyProvider(Provider):
             )
 
         # Nonzero exit with real output -> still a failure, capture diagnostic.
-        if proc.returncode != 0:
+        if returncode != 0:
             err = strip_ansi(stderr or "").strip()
             return ProviderResult(
                 name=self.name,
                 model=resolved_model,
                 ok=False,
                 output="",
-                error=err or f"agy exited with status {proc.returncode}",
+                error=err or f"agy exited with status {returncode}",
                 elapsed=elapsed,
             )
 
@@ -348,33 +333,3 @@ class AgyProvider(Provider):
             error=None,
             elapsed=elapsed,
         )
-
-    def _terminate(self, proc: subprocess.Popen) -> None:
-        """SIGTERM -> SIGKILL -> hard-deadline reap of the process group."""
-        try:
-            pgid = os.getpgid(proc.pid)
-        except (ProcessLookupError, OSError):
-            pgid = None
-
-        def _signal(sig: int) -> None:
-            try:
-                if pgid is not None:
-                    os.killpg(pgid, sig)
-                else:
-                    proc.send_signal(sig)
-            except (ProcessLookupError, OSError):
-                pass
-
-        _signal(signal.SIGTERM)
-        try:
-            proc.wait(timeout=REAP_DEADLINE_SECONDS / 2)
-            return
-        except subprocess.TimeoutExpired:
-            pass
-
-        _signal(signal.SIGKILL)
-        try:
-            proc.wait(timeout=REAP_DEADLINE_SECONDS / 2)
-        except subprocess.TimeoutExpired:
-            # Last resort: don't block the worker thread forever.
-            pass

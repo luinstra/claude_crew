@@ -28,11 +28,11 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import subprocess
 import time
 
 from multiagent import config
 from multiagent.providers import Provider, ProviderResult
+from multiagent.providers._proc import TIMEOUT, run_reaped
 
 # ANSI escape code pattern for stripping terminal colour sequences.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mGKHF]")
@@ -144,14 +144,15 @@ class CursorProvider(Provider):
         if shutil.which("agent") is None:
             return False, "agent not found on PATH"
         try:
-            result = subprocess.run(
-                ["agent", "--version"], capture_output=True, text=True, timeout=10,
-            )
-            combined = (result.stdout + result.stderr).strip()
-            first_line = combined.splitlines()[0] if combined else ""
-            if not (_VERSION_DATESTAMP_RE.match(first_line) or "cursor" in combined.lower()):
-                return False, "agent binary found but does not appear to be Cursor Agent"
-        except (subprocess.TimeoutExpired, OSError):
+            probe = run_reaped(["agent", "--version"], timeout=10)
+        except OSError:
+            return False, "agent binary found but does not appear to be Cursor Agent"
+        if probe is TIMEOUT:
+            return False, "agent binary found but does not appear to be Cursor Agent"
+        _rc, probe_out, probe_err = probe
+        combined = ((probe_out or "") + (probe_err or "")).strip()
+        first_line = combined.splitlines()[0] if combined else ""
+        if not (_VERSION_DATESTAMP_RE.match(first_line) or "cursor" in combined.lower()):
             return False, "agent binary found but does not appear to be Cursor Agent"
         return True, ""
 
@@ -212,26 +213,28 @@ class CursorProvider(Provider):
             "--workspace", cwd, "--model", chosen_model, prompt,
         ]
         start = time.monotonic()
+        # Shared reaped runner (R3): start_new_session + SIGTERM→SIGKILL killpg
+        # teardown on timeout so a hung cursor agent can't orphan billable
+        # grandchildren. OSError (launch failure) preserved as before.
         try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd,
-            )
-        except subprocess.TimeoutExpired:
-            return ProviderResult(
-                name=self.name, model=chosen_model, ok=False, output="",
-                error=f"Cursor Agent timed out after {timeout}s",
-                elapsed=time.monotonic() - start,
-            )
+            result = run_reaped(cmd, timeout=timeout, cwd=cwd)
         except OSError as exc:
             return ProviderResult(
                 name=self.name, model=chosen_model, ok=False, output="",
                 error=f"Failed to launch agent: {exc}",
                 elapsed=time.monotonic() - start,
             )
+        if result is TIMEOUT:
+            return ProviderResult(
+                name=self.name, model=chosen_model, ok=False, output="",
+                error=f"Cursor Agent timed out after {timeout}s",
+                elapsed=time.monotonic() - start,
+            )
+        returncode, proc_stdout, proc_stderr = result
 
         elapsed = time.monotonic() - start
-        raw_output = _strip_ansi(proc.stdout)
-        combined_lower = (raw_output + proc.stderr).lower()
+        raw_output = _strip_ansi(proc_stdout)
+        combined_lower = (raw_output + proc_stderr).lower()
         auth_marker = _auth_failure_marker(combined_lower)
         if auth_marker is not None:
             return ProviderResult(
@@ -240,17 +243,17 @@ class CursorProvider(Provider):
                        "Sign in at cursor.com/login."),
                 elapsed=elapsed,
             )
-        if proc.returncode != 0:
+        if returncode != 0:
             return ProviderResult(
                 name=self.name, model=chosen_model, ok=False, output=raw_output,
-                error=(f"agent exited with code {proc.returncode}. "
-                       f"stderr: {_strip_ansi(proc.stderr)[:500]}"),
+                error=(f"agent exited with code {returncode}. "
+                       f"stderr: {_strip_ansi(proc_stderr)[:500]}"),
                 elapsed=elapsed,
             )
         # Empty output at exit 0 is NOT a valid review (mirrors codex/agy): an
         # all-empty panel must not be rendered as an OK "(no output)" review.
         if not raw_output.strip():
-            stderr_clean = _strip_ansi(proc.stderr).strip()
+            stderr_clean = _strip_ansi(proc_stderr).strip()
             return ProviderResult(
                 name=self.name, model=chosen_model, ok=False, output="",
                 error=("agent returned empty output at exit 0"
