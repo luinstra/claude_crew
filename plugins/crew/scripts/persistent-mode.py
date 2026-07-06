@@ -43,10 +43,12 @@ def main():
 
 Task: {task_text}
 
-Continue working. When complete:
-1. Spawn advisor to verify and review your work
-2. If APPROVED, deactivate the loop and summarize what was accomplished
-3. If REVISE with [BLOCKING] issues, fix them and re-verify
+Continue working. When complete, verify via the multi-model panel
+(/crew:build Step 2):
+1. "${{CLAUDE_PLUGIN_ROOT}}/crew" review-prep working-tree --session-id {session_id}
+2. Fan out ALL resolved seats, wait for every seat, collect, synthesize
+3. If APPROVED, deactivate the loop and summarize
+4. If REVISE with [BLOCKING] issues, fix and re-verify
 
 To exit early: `/crew:cancel-build`
 """
@@ -89,10 +91,12 @@ Review what was accomplished and whether the task is complete.
 Task: {task_text}
 Plan: {measure_state.plan_file}
 
-Continue refining the plan:
-1. If you just received advisor feedback, revise the plan to address [BLOCKING] issues
-2. Spawn advisor to re-review using Task(subagent_type="crew:advisor", prompt="...")
-3. When APPROVED (or only [MINOR] issues), deactivate the loop and present the final plan
+Continue refining the plan. Verify via the multi-model panel
+(/crew:measure-twice Phase 3):
+1. If you just received panel feedback, revise the plan to address [BLOCKING] issues
+2. "${{CLAUDE_PLUGIN_ROOT}}/crew" review-prep {measure_state.plan_file} --session-id {session_id}
+3. Fan out ALL resolved seats, wait for every seat, collect, synthesize
+4. When APPROVED (or only [MINOR] issues), deactivate the loop and present the final plan
 
 To exit early: `/crew:cancel-measure-twice`
 """

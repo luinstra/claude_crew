@@ -177,7 +177,7 @@ class SessionStartResult:
 
 @dataclass
 class BuildState:
-    """State for build loop persistence with advisor verification."""
+    """State for build loop persistence with multi-model panel verification."""
     active: bool = False
     prompt: str = ""
     iteration: int = 1

@@ -295,19 +295,19 @@ def main():
                 "Build Loop Active",
             )
 
-            # Build loop nudge: "Continue until advisor verifies" present in both modes
+            # Build loop restore banner: panel wording present in both modes
             test_contains(
-                "SessionStart (terse) - 'Continue until advisor verifies' nudge present",
+                "SessionStart (terse) - panel completion nudge present",
                 session_start,
                 json.dumps({"directory": str(test_path)}),
-                "Continue until advisor verifies",
+                "Continue until the multi-model panel approves completion",
             )
             output_bl_v = run_script_verbose(session_start, json.dumps({"directory": str(test_path)}))
-            if "Continue until advisor verifies" in output_bl_v:
-                log_pass("SessionStart (verbose) - 'Continue until advisor verifies' nudge present")
+            if "Continue until the multi-model panel approves completion" in output_bl_v:
+                log_pass("SessionStart (verbose) - panel completion nudge present")
             else:
-                log_fail("SessionStart (verbose) - 'Continue until advisor verifies' nudge present",
-                         "contains 'Continue until advisor verifies'", output_bl_v[:300])
+                log_fail("SessionStart (verbose) - panel completion nudge present",
+                         "contains 'Continue until the multi-model panel approves completion'", output_bl_v[:300])
 
             # Clean up build loop state for next test
             (crew_dir / "build-state.json").unlink()
@@ -324,12 +324,12 @@ def main():
                 "Measure-Twice Loop Active",
             )
 
-            # Measure-twice nudge: "Continue until advisor approves the plan" present
+            # Measure-twice restore banner: panel wording present
             test_contains(
-                "SessionStart (terse) - 'Continue until advisor approves the plan' nudge present",
+                "SessionStart (terse) - 'Continue until the panel approves the plan' nudge present",
                 session_start,
                 json.dumps({"directory": str(test_path)}),
-                "Continue until advisor approves the plan",
+                "Continue until the panel approves the plan",
             )
 
             # Clean up measure-twice state for next test
@@ -378,6 +378,28 @@ def main():
                 "Build Loop",
             )
 
+            # Phase 3 (C3): the first-fire nudge prescribes the multi-model
+            # panel flow, not the retired lone-advisor flow. Reset to
+            # iteration 1 so the full recipe (not the terse variant) renders.
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
+            )
+            test_contains(
+                "Build loop nudge - prescribes panel (review-prep)",
+                persistent_mode,
+                json.dumps({"directory": str(test_path)}),
+                "review-prep",
+            )
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
+            )
+            test_not_contains(
+                "Build loop nudge - no lone-advisor recipe",
+                persistent_mode,
+                json.dumps({"directory": str(test_path)}),
+                "Spawn advisor",
+            )
+
             # Test with inactive build loop
             (crew_dir / "build-state.json").write_text(
                 '{"active": false, "prompt": "Old task"}'
@@ -410,6 +432,27 @@ def main():
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
                 "Measure-Twice Loop",
+            )
+
+            # Phase 3 (C3): measure-twice first-fire nudge prescribes the
+            # panel flow, not the retired lone-advisor re-review.
+            (crew_dir / "measure-twice-state.json").write_text(
+                '{"active": true, "task_description": "Design auth", "plan_file": ".crew/plans/auth.md", "iteration": 1, "max_iterations": 10}'
+            )
+            test_contains(
+                "Measure-twice nudge - prescribes panel (review-prep)",
+                persistent_mode,
+                json.dumps({"directory": str(test_path)}),
+                "review-prep",
+            )
+            (crew_dir / "measure-twice-state.json").write_text(
+                '{"active": true, "task_description": "Design auth", "plan_file": ".crew/plans/auth.md", "iteration": 1, "max_iterations": 10}'
+            )
+            test_not_contains(
+                "Measure-twice nudge - no lone-advisor recipe",
+                persistent_mode,
+                json.dumps({"directory": str(test_path)}),
+                "Spawn advisor",
             )
 
             # Test with inactive measure-twice loop
@@ -456,11 +499,11 @@ def main():
                 '{"active": true, "prompt": "Fix auth bug", "iteration": 1, "max_iterations": 10}'
             )
             out_terse_iter1 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
-            if "When complete:" in out_terse_iter1:
+            if "verify via the multi-model panel" in out_terse_iter1:
                 log_pass("Terse mode + iteration 1 (bl): full recipe present")
             else:
                 log_fail("Terse mode + iteration 1 (bl): full recipe present",
-                         "contains 'When complete:'", out_terse_iter1[:300])
+                         "contains 'verify via the multi-model panel'", out_terse_iter1[:300])
 
             # First Stop fire displays "Iteration 1/10" (display-then-increment)
             if "Iteration 1/10" in out_terse_iter1:
@@ -471,11 +514,11 @@ def main():
 
             # State now has iteration=2. Terse second fire: recipe absent
             out_terse_iter2 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
-            if "When complete:" not in out_terse_iter2:
+            if "verify via the multi-model panel" not in out_terse_iter2:
                 log_pass("Terse mode + iteration 2 (bl): recipe absent")
             else:
                 log_fail("Terse mode + iteration 2 (bl): recipe absent",
-                         "does NOT contain 'When complete:'", out_terse_iter2[:300])
+                         "does NOT contain 'verify via the multi-model panel'", out_terse_iter2[:300])
 
             if "cancel-build" not in out_terse_iter2:
                 log_pass("Terse mode + iteration 2 (bl): cancel-build absent")
@@ -492,11 +535,11 @@ def main():
 
             # Verbose mode (state now iteration=3): full recipe present despite iteration>1
             out_verbose_iter3 = run_script_verbose(persistent_mode, json.dumps({"directory": str(test_path)}))
-            if "When complete:" in out_verbose_iter3:
+            if "verify via the multi-model panel" in out_verbose_iter3:
                 log_pass("Verbose mode + iteration 3 (bl): full recipe present")
             else:
                 log_fail("Verbose mode + iteration 3 (bl): full recipe present",
-                         "contains 'When complete:'", out_verbose_iter3[:300])
+                         "contains 'verify via the multi-model panel'", out_verbose_iter3[:300])
 
             # Safety cap: exactly max_iterations nudges. State is at iteration=4 now.
             # Run 7 more terse nudges → display 4/10..10/10, leaving iteration=11.

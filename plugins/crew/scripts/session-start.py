@@ -339,7 +339,7 @@ def build_session_status(
                         this_session_loops.append(
                             f"[Build Loop Active - {iteration}/{max_iter}]\n"
                             f"Task: {prompt}\n"
-                            f"Continue until advisor verifies and approves completion."
+                            f"Continue until the multi-model panel approves completion."
                         )
                     else:
                         other_session_loops.append(
@@ -355,7 +355,7 @@ def build_session_status(
                             f"[Measure-Twice Loop Active - {iteration}/{max_iter}]\n"
                             f"Task: {task}\n"
                             f"Plan: {plan}\n"
-                            f"Continue until advisor approves the plan."
+                            f"Continue until the panel approves the plan."
                         )
                     else:
                         other_session_loops.append(

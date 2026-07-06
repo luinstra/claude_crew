@@ -437,7 +437,7 @@ When the panel's verdict is APPROVED (or REVISE with only [MINOR] issues):
 
 1. **Deactivate the loop:**
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" state deactivate bl --reason "Advisor verified complete"
+"${CLAUDE_PLUGIN_ROOT}/crew" state deactivate bl --reason "Panel approved"
 ```
 
 2. **Summarize what was accomplished** and let the user know the task is complete.

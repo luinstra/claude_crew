@@ -465,7 +465,7 @@ When the panel's verdict is **APPROVED** (or REVISE with only [MINOR] issues):
 
 1. **Deactivate the loop:**
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" state deactivate mt --reason "Advisor approved"
+"${CLAUDE_PLUGIN_ROOT}/crew" state deactivate mt --reason "Panel approved"
 ```
 
 2. **Present the final plan to the user:**
