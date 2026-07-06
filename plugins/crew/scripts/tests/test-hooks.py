@@ -1696,6 +1696,85 @@ def main():
                     f.unlink()
 
             # =========================================================================
+            # PHASE 6 (R2): BOUNDED STACK DETECTION
+            # =========================================================================
+            log_section("stack detection (pruned bounded walk)")
+
+            detect_project_stack = ss_module.detect_project_stack
+
+            # Prune proven: a .kt ONLY under a pruned dir is NOT detected.
+            p6_prune = test_path / "p6-prune"
+            (p6_prune / "node_modules" / "pkg" / "src").mkdir(parents=True)
+            (p6_prune / "node_modules" / "pkg" / "src" / "Buried.kt").write_text("class X")
+            if "Kotlin" not in detect_project_stack(p6_prune):
+                log_pass("stack detect: .kt only under a pruned dir (node_modules) is NOT detected")
+            else:
+                log_fail("stack detect: .kt only under a pruned dir is NOT detected", "no Kotlin", "Kotlin detected")
+
+            # Hit: a .kt in a real source dir IS detected.
+            p6_hit = test_path / "p6-hit"
+            (p6_hit / "src" / "main").mkdir(parents=True)
+            (p6_hit / "src" / "main" / "App.kt").write_text("class A")
+            if "Kotlin" in detect_project_stack(p6_hit):
+                log_pass("stack detect: .kt in a real source dir IS detected")
+            else:
+                log_fail("stack detect: .kt in a real source dir IS detected", "Kotlin", "not detected")
+
+            # Parity: a .gradle.kts yields BOTH Kotlin and Gradle (old globs did).
+            p6_gradle = test_path / "p6-gradle"
+            p6_gradle.mkdir()
+            (p6_gradle / "settings.gradle.kts").write_text('rootProject.name = "x"')
+            gh = detect_project_stack(p6_gradle)
+            if "Kotlin" in gh and "Gradle" in gh:
+                log_pass("stack detect: a .gradle.kts yields both Kotlin and Gradle (glob parity)")
+            else:
+                log_fail("stack detect: a .gradle.kts yields both Kotlin and Gradle", "Kotlin+Gradle", str(gh))
+
+            # Wall-clock bound: a deep/wide decoy under node_modules + one real
+            # .kt returns well under the hook budget because the decoy is pruned.
+            p6_wall = test_path / "p6-wall"
+            (p6_wall / "src").mkdir(parents=True)
+            (p6_wall / "src" / "Main.kt").write_text("class M")
+            _decoy = p6_wall / "node_modules"
+            for _i in range(40):
+                _d = _decoy / f"pkg{_i}" / "deep" / "deeper"
+                _d.mkdir(parents=True)
+                for _j in range(20):
+                    (_d / f"f{_j}.js").write_text("x")
+            _t0 = _time.perf_counter()
+            wall_hints = detect_project_stack(p6_wall)
+            _elapsed = _time.perf_counter() - _t0
+            if "Kotlin" in wall_hints and _elapsed < 2.0:
+                log_pass(f"stack detect: pruned walk returns fast on a big decoy tree ({_elapsed:.3f}s)")
+            else:
+                log_fail("stack detect: pruned walk returns fast on a big decoy tree",
+                         "Kotlin + < 2s", f"hints={wall_hints}, elapsed={_elapsed:.3f}s")
+
+            # Entry-cap: a low cap halts the walk before it descends to a deep
+            # .kt (root's plain files exhaust the budget first) — proves the cap.
+            p6_cap = test_path / "p6-cap"
+            p6_cap.mkdir()
+            for _j in range(10):
+                (p6_cap / f"plain{_j}.txt").write_text("x")
+            _sub = p6_cap / "sub"
+            _sub.mkdir()
+            (_sub / "Deep.kt").write_text("class D")
+            _saved_cap = ss_module.STACK_WALK_MAX_ENTRIES
+            ss_module.STACK_WALK_MAX_ENTRIES = 5
+            try:
+                capped = detect_project_stack(p6_cap)
+            finally:
+                ss_module.STACK_WALK_MAX_ENTRIES = _saved_cap
+            if "Kotlin" not in capped:
+                log_pass("stack detect: entry cap halts the walk before a deep .kt (bounded)")
+            else:
+                log_fail("stack detect: entry cap halts the walk before a deep .kt", "no Kotlin (cap hit)", str(capped))
+            if "Kotlin" in detect_project_stack(p6_cap):
+                log_pass("stack detect: same tree with default cap finds the deep .kt (cap was the cause)")
+            else:
+                log_fail("stack detect: same tree with default cap finds the deep .kt", "Kotlin", "not detected")
+
+            # =========================================================================
             # PHASE 4 (C4): PYTHON 3.9 IMPORT BOMB + LOUD FAIL-OPEN
             # =========================================================================
             log_section("hooks: version guard + fail-open (C4)")

@@ -27,6 +27,7 @@ if sys.version_info < (3, 10):
     print(_DIAG, file=sys.stderr)
     sys.exit(0)
 
+import os
 import re
 import shutil
 import time
@@ -47,6 +48,13 @@ MAX_AGE_DAYS = 7
 MAX_AGE_SECONDS = MAX_AGE_DAYS * 86400
 STALE_INACTIVE_DAYS = 1
 STALE_INACTIVE_SECONDS = STALE_INACTIVE_DAYS * 86400
+
+# R2: bound the stack-detection walk so it can't blow the 10s SessionStart hook
+# budget on a big tree. Canonical artifact/vendor dirs are pruned (real Kotlin
+# sources never live under them); the entry cap is a hard ceiling on files
+# visited. Both are module-level so tests can dial the cap down.
+STACK_PRUNE_DIRS = {".git", "node_modules", "build", ".venv", "venv", ".gradle", "dist", "target"}
+STACK_WALK_MAX_ENTRIES = 20_000
 
 
 def cleanup_stale_files(directory: Path) -> None:
@@ -172,18 +180,39 @@ def cleanup_stale_todos(todos_dir: Path) -> None:
 
 
 def detect_project_stack(directory: Path) -> list[str]:
-    """Detect project tech stack and return skill trigger hints."""
+    """Detect project tech stack and return skill trigger hints.
+
+    R2: a single BOUNDED ``os.walk`` pass (pruned artifact dirs + an entry cap +
+    early-exit once all extensions are seen) replaces three unbounded recursive
+    globs, so a huge tree can't blow the 10s SessionStart hook budget. The hint
+    output is behavior-identical to the old glob logic.
+    """
     hints = []
 
-    # Kotlin: .kt, .kts files → triggers sk:kotlin
-    kt_files = list(directory.glob("**/*.kt"))[:1]  # Just check if any exist
-    kts_files = list(directory.glob("**/*.kts"))[:1]
-    if kt_files or kts_files:
-        hints.append("Kotlin")
+    # Kotlin (.kt / .kts) and Gradle Kotlin DSL (.gradle.kts, which ALSO matches
+    # **/*.kts) — detected in one walk. Exposed/Trino stay a root build-file read.
+    found_kt = found_kts = found_gradle_kts = False
+    visited = 0
+    for root, dirnames, filenames in os.walk(str(directory)):
+        # Prune in-place so os.walk never descends into artifact/vendor dirs.
+        dirnames[:] = [d for d in dirnames if d not in STACK_PRUNE_DIRS]
+        for name in filenames:
+            visited += 1
+            if name.endswith(".gradle.kts"):
+                found_gradle_kts = True
+                found_kts = True  # .gradle.kts also matched the old **/*.kts glob
+            elif name.endswith(".kts"):
+                found_kts = True
+            elif name.endswith(".kt"):
+                found_kt = True
+            if found_kt and found_kts and found_gradle_kts:
+                break
+        if (found_kt and found_kts and found_gradle_kts) or visited >= STACK_WALK_MAX_ENTRIES:
+            break
 
-    # Gradle Kotlin DSL → triggers sk:gradle
-    gradle_kts = list(directory.glob("**/*.gradle.kts"))[:1]
-    if gradle_kts:
+    if found_kt or found_kts:
+        hints.append("Kotlin")
+    if found_gradle_kts:
         hints.append("Gradle")
 
     # Exposed ORM: check build files for exposed dependency → triggers sk:exposed
