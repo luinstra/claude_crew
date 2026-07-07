@@ -1,7 +1,7 @@
 """Shared helpers for discovering crew state files across legacy and session-scoped layouts."""
 
-# C4: keeps `Path | None` annotations lazy so stock macOS /usr/bin/python3
-# (3.9) can IMPORT this module without a TypeError at def time — the hook
+# Keeps `Path | None` annotations lazy so stock macOS /usr/bin/python3
+# (3.9) can IMPORT this module without a TypeError at def time; the hook
 # entry points' version guards then fail open loudly instead of crashing.
 from __future__ import annotations
 

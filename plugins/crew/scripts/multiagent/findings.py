@@ -10,18 +10,18 @@ Design contracts (do NOT regress):
   * **Pure.** No file/network/model I/O. ``parse_seat`` NEVER raises — it
     operates on an already-coerced ``ProviderResult`` and degrades to "not
     parsed" on anything it can't read.
-  * **Never DROP a finding (Decision-C).** ``findings_parsed`` gates the RAW
+  * **Never DROP a finding.** ``findings_parsed`` gates the RAW
     skip on FINDINGS parseability ALONE — NOT on VERDICT/CRITERIA presence. A
     seat with metadata headers but PROSE findings has ``findings_parsed=False``
     and is rendered VERBATIM (its verdict/criteria may still feed the
     roster/matrix; its prose body still appears raw, so nothing is lost).
-  * **Never over-merge (Decision-D).** Severity is the ONLY hard partition.
+  * **Never over-merge.** Severity is the ONLY hard partition.
     Within a partition, COMPLETE-LINKAGE clustering: a finding joins a cluster
     only if it is ``compatible(...)`` with EVERY existing member
     (``path_compatible AND line_compatible AND jaccard>=0.5``). Because
     ``path_compatible`` is not transitive, complete-linkage keeps distinct-dir
     findings apart and forbids single-link transitive bridging.
-  * **Two distinct counts (Decision-L).** The VERDICTS roster is over every seat
+  * **Two distinct counts.** The VERDICTS roster is over every seat
     that RAN; each finding's ``M/N`` denominator N is over findings-parsed seats
     ONLY. They are labeled visibly differently and never conflated.
 """
@@ -147,7 +147,7 @@ def _sections(text: str) -> dict[str, str]:
 
     Only the seat's OWN section bodies are returned — metadata (verdict,
     criteria, confidence) is read EXCLUSIVELY from its named section, so a free-
-    prose seat with no ``## VERDICT`` header yields no verdict (Decision-C: the
+    prose seat with no ``## VERDICT`` header yields no verdict (the
     real-prose fixture has 'no metadata').
     """
     sections: dict[str, str] = {}
@@ -179,7 +179,7 @@ def _sections(text: str) -> dict[str, str]:
 
 
 def _parse_path_line(remainder: str) -> tuple[str | None, int | None, str]:
-    """Two-step (Decision-D) leading path/line extractor; returns
+    """Two-step leading path/line extractor; returns
     ``(raw_path, line, description)``. ``description`` is the remainder with the
     matched path/line + a leading separator stripped (or the whole remainder when
     no path matched)."""
@@ -319,7 +319,7 @@ def parse_seat(result: ProviderResult) -> SeatParse:
 
 
 # =============================================================================
-# Grouping predicate (Decision-D) — pure, deterministic, no model call
+# Grouping predicate: pure, deterministic, no model call
 # =============================================================================
 
 _STOPWORDS = frozenset(
@@ -353,7 +353,7 @@ def normalize_path(raw: str | None, repo_root: str | None = None) -> list[str] |
 
 
 def path_compatible(a: list[str] | None, b: list[str] | None) -> bool:
-    """True when two normalized paths may name the SAME file (Decision-D).
+    """True when two normalized paths may name the SAME file.
 
     Both None -> True (file-less findings compare on description alone); exactly
     one None -> False (don't merge a file-specific finding with a file-less one);
@@ -367,7 +367,7 @@ def path_compatible(a: list[str] | None, b: list[str] | None) -> bool:
 
 
 def line_compatible(a: int | None, b: int | None) -> bool:
-    """Symmetric ±10-line window (Decision-D). Absent line is a wildcard."""
+    """Symmetric ±10-line window; an absent line is a wildcard."""
     if a is None or b is None:
         return True
     return abs(a - b) <= 10
@@ -390,7 +390,7 @@ def jaccard(a: str, b: str) -> float:
 
 def compatible(a: Finding, b: Finding, repo_root: str | None = None) -> bool:
     """The combined merge predicate: same severity, path-, line-, and
-    description-compatible (Decision-D)."""
+    description-compatible."""
     if a.severity != b.severity:
         return False
     if not path_compatible(normalize_path(a.raw_path, repo_root),
@@ -406,8 +406,8 @@ _SEVERITY_ORDER = ("BLOCKING", "MINOR")
 
 def group(findings: list[Finding], repo_root: str | None = None) -> list[Group]:
     """HARD-partition by severity, then COMPLETE-LINKAGE cluster within each
-    partition (Decision-D). Greedy first-fit is deterministic (not guaranteed
-    minimal — over-split is safe, the synthesis LLM merges leftovers)."""
+    partition. Greedy first-fit is deterministic (not guaranteed
+    minimal; over-split is safe, the synthesis LLM merges leftovers)."""
     groups: list[Group] = []
     for sev in _SEVERITY_ORDER:
         clusters: list[list[Finding]] = []
@@ -423,7 +423,7 @@ def group(findings: list[Finding], repo_root: str | None = None) -> list[Group]:
 
 
 # =============================================================================
-# Digest renderer (Decision-C, D, J, L)
+# Digest renderer
 # =============================================================================
 
 _CANONICAL_CRITERIA = ("Correctness", "Completeness", "Quality", "Safety",
@@ -458,7 +458,7 @@ def _criterion_for(parse: SeatParse, row: str) -> str:
 
 def render_digest(results: list[ProviderResult], repo_root: str | None = None) -> str:
     """Render the grouped panel digest. Falls back to the byte-faithful
-    ``render.render_panel`` when NO seat is findings-parsed (Decision-C/2)."""
+    ``render.render_panel`` when NO seat is findings-parsed."""
     parses = [parse_seat(r) for r in results]
     parsed_idx = [i for i, p in enumerate(parses) if p.findings_parsed]
 
@@ -480,7 +480,7 @@ def render_digest(results: list[ProviderResult], repo_root: str | None = None) -
     lines.append(f"# PANEL DIGEST — seats: {names}  ({R} ran, {P} findings-parsed)")
     lines.append("")
 
-    # --- VERDICTS roster (every seat that RAN; Decision-L(a)) ---
+    # --- VERDICTS roster (every seat that RAN) ---
     lines.append("## VERDICTS  (roster: every seat that ran)")
     n_appr = n_rev = 0
     for r, p in zip(results, parses):
@@ -514,7 +514,7 @@ def render_digest(results: list[ProviderResult], repo_root: str | None = None) -
             lines.append((row.ljust(label_w) + "  " + "  ".join(cells)).rstrip())
         lines.append("")
 
-    # --- GROUPED FINDINGS (N = findings-parsed seats; Decision-L(b)) ---
+    # --- GROUPED FINDINGS (N = findings-parsed seats) ---
     findings: list[Finding] = []
     for i in parsed_idx:
         findings.extend(parses[i].findings)

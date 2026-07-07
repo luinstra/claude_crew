@@ -116,17 +116,16 @@ class HookResult:
     def to_json(self) -> str:
         """Serialize to JSON for hook output.
 
-        Schema is pinned by the 2026-07-06 C2 live smoke (L10 posture:
-        dual-emit-where-safe — here dual-emit is UNSAFE, so single-shape):
+        Each hook output uses a single JSON shape (dual-emit here is UNSAFE):
 
         - Block: ``{"decision": "block", "reason": msg}`` is the load-bearing
-          shape. The legacy ``{"continue": false, ...}`` was smoke-proven
-          INERT for blocking a Stop — Claude Code honored it as a HARD-STOP
-          directive (child session ended at the first stop attempt with
-          ``terminal_reason=stop_hook_prevented``; state-file iteration stayed
+          shape. The legacy ``{"continue": false, ...}`` is INERT for blocking
+          a Stop: Claude Code honors it as a HARD-STOP directive (the child
+          session ends at the first stop attempt with
+          ``terminal_reason=stop_hook_prevented``; state-file iteration stays
           at 2). Because ``continue: false`` demonstrably forces termination,
           it must NOT be dual-emitted alongside ``decision: block``.
-        - Allow: ``{}`` — benign empty object; asserts nothing about the
+        - Allow: ``{}`` (benign empty object); asserts nothing about the
           ambiguous ``continue`` field.
         """
         result: dict[str, Any] = {}
@@ -137,10 +136,9 @@ class HookResult:
         if self.message is not None:
             result["message"] = self.message
         if self.system_message is not None:
-            # "systemMessage" on an allow payload is smoke-VERIFIED (2026-07-06
-            # C2 probe): Claude Code parses it into a first-class
-            # hook_system_message transcript attachment — the loud-diagnostic
-            # carrier for fail-open hook paths (C4).
+            # "systemMessage" on an allow payload surfaces to the user: Claude
+            # Code parses it into a first-class hook_system_message transcript
+            # attachment, the loud-diagnostic carrier for fail-open hook paths.
             result["systemMessage"] = self.system_message
         return json.dumps(result)
 
@@ -205,13 +203,13 @@ LOAD_FUTURE_SCHEMA = "future_schema"
 def atomic_write_json(path: Path, data: dict) -> None:
     """Atomically write ``data`` as JSON to ``path``, 0600 from birth.
 
-    R1 + L5-fold: ``tempfile.mkstemp`` creates the temp file 0600 by
+    ``tempfile.mkstemp`` creates the temp file 0600 by
     construction in the TARGET directory (same filesystem → ``os.replace`` is
     atomic; no torn state). Each writer owns a UNIQUE temp path, so concurrent
     writers never clobber one another's temp — last ``os.replace`` wins with a
     fully-formed file. The ``finally`` cleanup removes the temp on failure
     (and is a suppressed no-op on success, where the temp was already renamed
-    away). Directory creation lives ONLY here (L3): reads never mkdir.
+    away). Directory creation lives ONLY here: reads never mkdir.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")

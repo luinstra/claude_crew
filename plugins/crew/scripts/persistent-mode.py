@@ -5,11 +5,10 @@ Blocks Stop while a build or measure-twice loop is active.
 Generic todo continuation is handled by Claude Code natively.
 """
 
-# --- C4 version guard: stdlib-only, 3.9-parseable, BEFORE any project import.
+# --- Version guard: stdlib-only, 3.9-parseable, BEFORE any project import.
 # Python 3.9 is UNSUPPORTED for hook functionality (repo requires 3.10+), but
 # must be GRACEFUL: allow + loud diagnostic, never a silent crash and never
-# functional persistence. Diagnostic channels are the smoke-VERIFIED ones from
-# the 2026-07-06 C2 record: stderr + systemMessage (allow-side).
+# functional persistence. Diagnostic channels: stderr + systemMessage (allow-side).
 import json
 import sys
 
@@ -129,7 +128,7 @@ def main():
             return
 
         if loop_state.active:
-            # L1 adoption stamp: claim an unowned legacy file for this session
+            # adoption stamp: claim an unowned legacy file for this session
             # before the iteration save (the fire already saves — zero extra
             # writes). Closes the co-adoption window at first touch.
             if not loop_state.session_id and session_id:
@@ -183,7 +182,7 @@ Review what was accomplished and whether the task is complete.
             return
 
         if measure_state.active:
-            # L1 adoption stamp (see build loop above).
+            # adoption stamp (see build loop above).
             if not measure_state.session_id and session_id:
                 measure_state.session_id = session_id
             if measure_state.iteration <= measure_state.max_iterations:
@@ -236,8 +235,8 @@ Present the current plan to the user and explain where it stands.
 if __name__ == "__main__":
     try:
         main()
-    except Exception as exc:  # noqa: BLE001 — Stop is architecturally fail-open;
-        # make the failure LOUD (smoke-verified channels), never silent.
+    except Exception as exc:  # noqa: BLE001. Stop is architecturally fail-open;
+        # make the failure LOUD (stderr + systemMessage), never silent.
         _diag = (
             "[crew] Stop hook crashed (%s: %s) — allowing stop. An active "
             "persistence loop may not be enforced this fire."

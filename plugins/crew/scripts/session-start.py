@@ -4,12 +4,12 @@ Claude Crew Session Start Hook
 Restores persistent mode states and injects plugin integration guidance.
 """
 
-# --- C4 version guard: stdlib-only, 3.9-parseable, BEFORE any project import.
+# --- Version guard: stdlib-only, 3.9-parseable, BEFORE any project import.
 # Python 3.9 is UNSUPPORTED for hook functionality (repo requires 3.10+), but
 # must be GRACEFUL: allow + loud diagnostic, never a silent crash. This
-# pre-import fallback runs stdlib-only — it CANNOT build a SessionStartResult
-# (models isn't imported yet) — so it emits its diagnostic on the `systemMessage`
-# channel (the C2-smoke-verified allow-side carrier) + stderr. This is the
+# pre-import fallback runs stdlib-only (it CANNOT build a SessionStartResult,
+# models isn't imported yet), so it emits its diagnostic on the `systemMessage`
+# channel (the allow-side carrier) + stderr. This is the
 # intentional split from the post-import 3.10+ crash handler at the bottom of
 # the module, which CAN build a SessionStartResult and therefore emits via
 # SessionStart's documented hookSpecificOutput.additionalContext channel.
@@ -535,8 +535,8 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception as exc:  # noqa: BLE001 — hooks are fail-open;
-        # make the failure LOUD (smoke-verified channels), never silent.
+    except Exception as exc:  # noqa: BLE001. Hooks are fail-open;
+        # make the failure LOUD (stderr + systemMessage), never silent.
         _diag = (
             "[crew] SessionStart hook crashed (%s: %s) — continuing without "
             "state restore/cleanup for this session."

@@ -1538,7 +1538,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
     """Collapse the named per-seat ``<seat>.json`` result files into ONE markdown
     digest.
 
-    THREE modes over the same named-seats read (Decision-G):
+    THREE modes over the same named-seats read:
       * default (no flag) — a FAITHFUL ``render_panel`` concatenation, byte-
         identical to before this feature (the existing ``test_collect`` contract).
       * ``--group`` — the deduped GROUPED digest (``findings.render_digest``):
@@ -1659,7 +1659,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
         )
 
     if getattr(args, "group", False):
-        # GROUPED digest (Decision-G): the deduped "N/N seats flagged X" panel.
+        # GROUPED digest: the deduped "N/N seats flagged X" panel.
         # --full ALSO writes the byte-faithful render_panel sibling (the recovery
         # artifact + the advisory size denominator).
         text = findings.render_digest(results)
@@ -1858,7 +1858,7 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     call ``_fan_out``, ``_run_seat``, ``_run_cli``, or any provider ``.run()``.
     The per-seat ``crew run <seat>`` loop stays in the command markdown, where
     each seat is a SEPARATE, visible, individually-killable shell. Folding that
-    loop into ``_fan_out`` here is the EXACT regression Phase-2 reversed — it
+    loop into ``_fan_out`` here is the EXACT regression this design reverses: it
     re-hides every seat in one opaque thread pool and destroys per-shell
     killability. DO NOT add a run/fan-out call to this function.
 

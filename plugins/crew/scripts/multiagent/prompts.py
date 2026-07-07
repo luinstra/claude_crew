@@ -87,7 +87,7 @@ def _rubric_footer() -> str:
     VERDICT`` / ``## CRITERIA`` / ``## FINDINGS`` / ``## CONFIDENCE``) so the panel
     can dedup + group findings across seats. The schema is plain markdown — a seat
     that ignores it still reads fine, and its prose is rendered verbatim (never
-    dropped). The detail budget (Decision-F) keeps a [MINOR] to one line while
+    dropped). The detail budget keeps a [MINOR] to one line while
     letting a [BLOCKING] carry a short WHY:/FIX:.
     """
     return (

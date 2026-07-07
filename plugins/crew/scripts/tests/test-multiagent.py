@@ -4411,9 +4411,7 @@ def test_persist_seat_doc_sync():
     # IDENTICALLY (verbatim substring) across all three review-bearing docs.
     # Duplication is unavoidable (Claude Code command markdown has no include
     # mechanism), so this table is the sync guard — a phrase reworded in only
-    # ONE doc fails here instead of silently drifting. Audited 2026-07-02: all
-    # six already matched verbatim in all three docs (no drift found, so no
-    # reconciliation was needed this pass).
+    # ONE doc fails here instead of silently drifting.
     SENTINEL_PHRASES = [
         'crew" persist-seat',
         "The Task RESULT is the only completion signal",
@@ -4431,7 +4429,7 @@ def test_persist_seat_doc_sync():
         check(f"{rel} has NO hand-rolled six-field Write persistence",
               "the exact six fields" not in text, "absent", "STILL PRESENT")
 
-    # T3a REFERENCE-SPAWN guard (Phase 12b): the three review-bearing docs must
+    # REFERENCE-SPAWN guard: the three review-bearing docs must
     # spawn Task seats by REFERENCE to the staged prompt file — the seat Reads it
     # itself — NOT by pasting the staged prompt's contents inline. A drift back to
     # `prompt="<contents of …prompt-…>"` re-inflates every spawn and re-couples the
@@ -6381,7 +6379,7 @@ def test_collect_grouped():
               dig == render.render_panel(results) + "\n",
               "byte-faithful fallback", dig[:80])
 
-    # Claude-only branch (Decision-I): --seats opus,sonnet -> valid 2-seat digest.
+    # Claude-only branch: --seats opus,sonnet -> valid 2-seat digest.
     with tempfile.TemporaryDirectory() as td:
         stage(td, ["opus", "sonnet"])
         proc = _run_dispatcher(
@@ -6396,7 +6394,7 @@ def test_collect_grouped():
               (Path(td) / ".crew/reviews/sess/panel-full.md").exists(),
               "full sibling exists", "?")
 
-    # seat order (Decision-J): VERDICTS roster follows --seats order, full names.
+    # seat order: VERDICTS roster follows --seats order, full names.
     with tempfile.TemporaryDirectory() as td:
         order = ["sonnet", "codex", "opus"]
         stage(td, order)

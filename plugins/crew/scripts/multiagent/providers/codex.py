@@ -87,7 +87,7 @@ class CodexProvider(Provider):
             argv += ["--model", model]
         argv += ["--skip-git-repo-check", "-o", out_path]
 
-        # Workspace-write cwd pin (closes R13): codex inherits the engine process
+        # Workspace-write cwd pin: codex inherits the engine process
         # cwd by default, which can diverge from the guard's repo_dir. In write
         # mode pin the subprocess cwd to CLAUDE_WORKING_DIRECTORY (the SAME
         # expression cmd_dispatch uses for repo_dir) so the seat edits the tree
@@ -100,7 +100,7 @@ class CodexProvider(Provider):
         )
 
         try:
-            # Shared reaped runner (R3): start_new_session + SIGTERM→SIGKILL
+            # Shared reaped runner: start_new_session + SIGTERM→SIGKILL
             # killpg teardown on timeout so a hung codex can't orphan billable
             # grandchildren. Prompt via stdin (input_text), cwd preserved.
             result = run_reaped(argv, input_text=prompt, timeout=timeout, cwd=run_cwd)

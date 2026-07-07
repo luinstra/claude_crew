@@ -38,7 +38,7 @@ LOOP_PREFIXES = {
 
 
 def _refuse_future_schema(path: Path, status: str) -> None:
-    """Phase 5 refuse-to-touch contract, mirrored from the Stop hook: a state
+    """Refuse-to-touch contract, mirrored from the Stop hook: a state
     file written by a NEWER crew version is NEVER overwritten by a mutating CLI
     command. Exits nonzero with a loud one-line diagnostic; bytes untouched."""
     if status == LOAD_FUTURE_SCHEMA:
@@ -66,7 +66,7 @@ def _refuse_corrupt(path: Path, status: str) -> None:
 
 
 def _load_for_mutation(cls, path: Path):
-    """Load state for a mutate-in-place CLI command, honoring Phase 5's
+    """Load state for a mutate-in-place CLI command, honoring the
     refuse-to-touch contract (same as the Stop hook): a newer-schema file is
     NEVER overwritten; a corrupt file is not silently clobbered. Returns the
     loaded (OK/MISSING) state."""
@@ -249,7 +249,7 @@ def check_for_conflicts(session_id: str = ""):
 
     # A newer-schema file is treated as a conflict (refuse-to-touch): we cannot
     # parse it as our schema, so init must NOT clobber it — surface it as a
-    # blocking condition instead of silently overwriting (Phase 5 contract).
+    # blocking condition instead of silently overwriting (refuse-to-touch contract).
     bl_path = crew_dir / get_loop_filename("bl", session_id)
     bl_state, bl_status = BuildState.load_with_status(bl_path)
     if bl_status == LOAD_FUTURE_SCHEMA:
@@ -278,7 +278,7 @@ def check_for_conflicts(session_id: str = ""):
 def _resolve_init_text(args, inline_value, inline_flag_name):
     """Resolve a loop's task text from either the inline flag or ``-f`` file.
 
-    R5 + L6: ``-f`` keeps raw ``$ARGUMENTS`` OFF the shell line (the command
+    ``-f`` keeps raw ``$ARGUMENTS`` OFF the shell line (the command
     writes it to a file and passes the path). File read is UTF-8; missing file or
     a clash with the inline flag exits nonzero (2) with NO state file created.
     """
@@ -315,7 +315,7 @@ def cmd_init(args):
     canonical = LOOP_ALIASES[args.loop]
     path = get_state_path(args.loop, session_id)
 
-    # Phase 5 refuse-to-touch: never overwrite a newer-schema file (already
+    # Refuse-to-touch: never overwrite a newer-schema file (already
     # blocked as a conflict above), and set a corrupt one aside (mirroring the
     # Stop hook) before re-init so a fresh loop starts on clean state.
     _, target_status = LOOP_CLASSES[canonical].load_with_status(path)
@@ -405,7 +405,7 @@ def cmd_deactivate(args):
     # is found.
     path = _resolve_mutation_path(args.loop, session_id)
 
-    # Phase 5 refuse-to-touch: honor the same contract as the hook.
+    # Refuse-to-touch: honor the same contract as the hook.
     state = _load_for_mutation(cls, path)
 
     # Build dict with extra metadata

@@ -213,7 +213,7 @@ class CursorProvider(Provider):
             "--workspace", cwd, "--model", chosen_model, prompt,
         ]
         start = time.monotonic()
-        # Shared reaped runner (R3): start_new_session + SIGTERM→SIGKILL killpg
+        # Shared reaped runner: start_new_session + SIGTERM→SIGKILL killpg
         # teardown on timeout so a hung cursor agent can't orphan billable
         # grandchildren. OSError (launch failure) preserved as before.
         try:

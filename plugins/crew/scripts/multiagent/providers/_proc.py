@@ -1,6 +1,6 @@
 """Shared subprocess runner that reaps the whole process GROUP on timeout.
 
-R3: extracted verbatim from agy's proven ``start_new_session`` + ``_terminate``
+Extracted verbatim from agy's proven ``start_new_session`` + ``_terminate``
 pattern so codex and cursor reap orphaned grandchildren too. A timed-out seat's
 CLI commonly spawns its OWN children (billable API calls, MCP servers); killing
 only the direct child leaves those grandchildren running. ``start_new_session``

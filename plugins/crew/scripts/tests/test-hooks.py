@@ -118,8 +118,8 @@ def test_not_contains(name: str, script: Path, input_data: str, not_expected: st
 
 def main():
     # =========================================================================
-    # MODELS: HookResult.to_json() shape contract (direct unit assertions —
-    # the three shipped shapes, pinned by the 2026-07-06 C2 live smoke)
+    # MODELS: HookResult.to_json() shape contract (direct unit assertions of
+    # the three shipped shapes)
     # =========================================================================
     log_section("models.HookResult.to_json() shapes")
     from models import HookResult
@@ -394,8 +394,8 @@ def main():
                     f.unlink()
 
             # Test with no state - should allow stop
-            # Allow shape is the benign {} — asserts nothing about the
-            # ambiguous "continue" field (2026-07-06 C2 smoke).
+            # Allow shape is the benign {}; asserts nothing about the
+            # ambiguous "continue" field.
             test_equals(
                 "No state - allows stop",
                 persistent_mode,
@@ -408,7 +408,7 @@ def main():
                 '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
             )
 
-            # Block shape pinned by the 2026-07-06 C2 live smoke: the legacy
+            # Block shape is load-bearing: the legacy
             # {"continue": false} was proven INERT (hard-stopped the child
             # session); {"decision": "block", "reason": ...} is the honored,
             # load-bearing schema. Assert EXACTLY the shipped shape.
@@ -426,7 +426,7 @@ def main():
                 "Build Loop",
             )
 
-            # Phase 3 (C3): the first-fire nudge prescribes the multi-model
+            # The first-fire nudge prescribes the multi-model
             # panel flow, not the retired lone-advisor flow. Reset to
             # iteration 1 so the full recipe (not the terse variant) renders.
             (crew_dir / "build-state.json").write_text(
@@ -516,7 +516,7 @@ def main():
                 "Measure-Twice Loop",
             )
 
-            # Phase 3 (C3): measure-twice first-fire nudge prescribes the
+            # The measure-twice first-fire nudge prescribes the
             # panel flow, not the retired lone-advisor re-review.
             (crew_dir / "measure-twice-state.json").write_text(
                 '{"active": true, "task_description": "Design auth", "plan_file": ".crew/plans/auth.md", "iteration": 1, "max_iterations": 10}'
@@ -1801,7 +1801,7 @@ def main():
                 todo_file.unlink(missing_ok=True)
 
             # =========================================================================
-            # PHASE 5 (R1 + L1 + L2 + L3): STATE-FILE ROBUSTNESS
+            # STATE-FILE ROBUSTNESS
             # =========================================================================
             log_section("state robustness (atomic writes, corrupt/schema, adoption)")
 
@@ -1898,7 +1898,7 @@ def main():
                          "parseable JSON, iteration in {6,7}, no stray temp",
                          f"parseable={parseable}, iter={raced.get('iteration')}, stray={[s.name for s in race_stray]}")
 
-            # --- L1 adoption stamp ---
+            # --- adoption stamp ---
             for f in crew_dir.glob("*"):
                 if f.is_file():
                     f.unlink()
@@ -1999,7 +1999,7 @@ def main():
                     f.unlink()
 
             # =========================================================================
-            # PHASE 6 (R2): BOUNDED STACK DETECTION
+            # BOUNDED STACK DETECTION
             # =========================================================================
             log_section("stack detection (pruned bounded walk)")
 
@@ -2078,7 +2078,7 @@ def main():
                 log_fail("stack detect: same tree with default cap finds the deep .kt", "Kotlin", "not detected")
 
             # =========================================================================
-            # PHASE 8 (R5 + L6): LOOP INIT -f (task off the shell)
+            # LOOP INIT -f (task off the shell)
             # =========================================================================
             log_section("crew state init -f (task off the shell)")
 
@@ -2149,7 +2149,7 @@ def main():
                     f.unlink()
 
             # =========================================================================
-            # PHASE 4 (C4): PYTHON 3.9 IMPORT BOMB + LOUD FAIL-OPEN
+            # PYTHON 3.9 IMPORT BOMB + LOUD FAIL-OPEN
             # =========================================================================
             log_section("hooks: version guard + fail-open (C4)")
 
@@ -2181,7 +2181,7 @@ def main():
 
             # Behavioral: an unexpected in-hook crash fails OPEN (valid allow
             # JSON on stdout) and LOUD (diagnostic on stderr + the hook's own
-            # documented output channel: Stop uses the smoke-verified
+            # documented output channel: Stop uses
             # systemMessage; SessionStart uses its documented
             # hookSpecificOutput.additionalContext channel). Fault: a
             # non-string "directory" makes Path() raise TypeError inside

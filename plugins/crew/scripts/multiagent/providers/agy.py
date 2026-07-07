@@ -259,7 +259,7 @@ class AgyProvider(Provider):
 
         wall_clock = self.effective_timeout(timeout)
 
-        # Workspace-write cwd pin (closes R13): agy inherits the engine process
+        # Workspace-write cwd pin: agy inherits the engine process
         # cwd by default, which can diverge from the dispatch guard's repo_dir. In
         # write mode pin the subprocess cwd to CLAUDE_WORKING_DIRECTORY (the SAME
         # expression cmd_dispatch uses for repo_dir) so the seat edits the tree
@@ -271,7 +271,7 @@ class AgyProvider(Provider):
             else None
         )
 
-        # Shared reaped runner (R3): start_new_session + SIGTERM→SIGKILL killpg
+        # Shared reaped runner: start_new_session + SIGTERM→SIGKILL killpg
         # teardown on timeout. stdin is DEVNULL (input_text=None) — byte-identical
         # to agy's prior Popen(stdin=DEVNULL) invocation.
         result = run_reaped(argv, timeout=wall_clock, cwd=run_cwd)
