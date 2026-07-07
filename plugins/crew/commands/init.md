@@ -1,5 +1,5 @@
 ---
-description: Onboarding scaffolder for the crew ENGINE-TUNING config — detects which provider CLIs are installed, then writes a commented ~/.crew-config.toml (or .crew/config.toml with a leading --repo) with cost-safe defaults + honest `available` flags. Never clobbers an existing file silently.
+description: Onboarding scaffolder for the crew ENGINE-TUNING config (the .toml, NOT CLAUDE.md) — detects installed provider CLIs and writes a commented ~/.crew-config.toml (or .crew/config.toml with a leading --repo), never clobbering an existing file silently.
 argument-hint: "[--repo]"
 allowed-tools: Bash, Read
 ---

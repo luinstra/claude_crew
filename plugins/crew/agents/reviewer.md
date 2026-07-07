@@ -47,17 +47,9 @@ strictly:
 - You do not edit the code under review, build, test, commit, or push. You are a
   reviewer — read, analyse, and (if you must) scratch only under `.crew/reviews/`.
 
-> **Scope note:** this read-only-by-discipline posture is for a local, trusted
-> repo reviewing its own changes. If crew is ever pointed at untrusted /
-> external-contributor diffs, this seat (general `Bash`, no sandbox) is the
-> first thing to harden. The clean native paths (verified against the Claude
-> Code subagent frontmatter reference): a subagent-scoped `hooks:` PreToolUse
-> gate that allows only read-only git/inspection and denies mutations (keeps
-> `Bash`, affects only this seat); `disallowedTools: Write, Edit`; or
-> `isolation: worktree` (runs in a throwaway worktree — note that won't contain
-> *uncommitted* changes, so it can't review a working tree). A `readonly: true`
-> frontmatter key is NOT real — Claude Code ignores unknown fields, so it's a
-> no-op, not enforcement.
+> **Maintainer note (not a seat instruction):** the untrusted-repo hardening
+> options for this seat live in `plugins/crew/docs/engine-notes.md`. Your rule is
+> the read-only discipline above.
 
 ## What you do (review mode)
 

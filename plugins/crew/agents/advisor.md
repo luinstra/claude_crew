@@ -173,12 +173,9 @@ NEVER:
 - Make code changes yourself
 - Provide generic advice
 
-## Tool Availability
+## Optional MCP Tools
 
-**Core tools (always available):**
-- Read, Grep, Glob, WebSearch, WebFetch, Write, Bash (read-only by convention)
-
-**Optional MCP tools (when configured):**
+Beyond the granted core tools, when configured:
 - **JetBrains IDE MCP**: `mcp__jetbrains__*` - Symbol info, code analysis, file problems
 - **Docker MCP**: `mcp__MCP_DOCKER__*` - GitHub issues, PRs, code search
 

@@ -2,6 +2,7 @@
 
 > **Context:** Python state machine for persistence loops + the multi-model review engine
 > **Parent Guide:** [Project Root](../../../.claude/CLAUDE.md)
+> **Rationale / history / decision-gloss:** [docs/engine-notes.md](../docs/engine-notes.md) (NOT auto-loaded — the WHY behind these contracts)
 
 ## Quick Reference
 
@@ -36,35 +37,47 @@ their results into the same six-field shape the engine returns.
 
 ```
 multiagent/
-├── cli.py               # argparse entry: `review` | `council` | `debate` | `run` | `dispatch` (write-mode single-seat WORK delegation) | `render` (incl. `--stage-all`) | `seats` (incl. `--debate`: config-aware full debate panel) | `collect` (incl. `--group`/`--full`/`--report-unparsed`) | `repair-seat` (write the haiku repair to a seat's separate `repaired_output` field, never overwriting `output`) | `review-prep` | `persist-seat` (write ONE normalized Task-seat result to the session dir — engine-owned slug + six-field shape) | `doctor` (/crew:init provider probe) | `probe` (opt-in BILLABLE live seat smoke test — doctor proves a seat's CLI is installed, probe proves it actually returns usable output) | `scaffold-config` (/crew:init config generator) subcommands (reached via the bare `../crew` dispatcher)
+├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher) — subcommands: review | council | debate | run | dispatch | render (incl. --stage-all) | seats (incl. --debate) | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | doctor | probe | scaffold-config
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
-├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel + debate_panel ([debate].panel) + dispatch_seat ([dispatch].seat, validated vs known_seat_names()) + per-seat tuning + [panels] roster + seat `available`; per-repo>global>builtin; pure leaf, no cli/providers import; Python 3.11+ tomllib, else gracefully ignored)
+├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel, [debate].panel, [dispatch].seat validated vs known_seat_names(), per-seat tuning, [panels] roster, seat `available`); per-repo>global>builtin; pure leaf, no cli/providers import; Python 3.11+ tomllib, else gracefully ignored
 ├── render.py            # side-by-side panel + --json rendering (the faithful projection + raw-fallback)
 ├── findings.py          # PURE parser + complete-linkage grouping + grouped-digest renderer (no I/O, no model calls, never raises); powers `collect --group`
 └── providers/
     ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC (executor: run() + supports_workspace_write capability, fail-CLOSED/opt-in for /crew:dispatch), registry + known_seat_names()
     ├── codex.py         # CodexProvider — `codex exec - --sandbox read-only -o <tmp>`, prompt via stdin
     ├── cursor.py        # CursorProvider — the live `cursor-gpt`/`cursor-gemini`/`cursor-glm`/`cursor-auto`/`cursor-composer` seats; CURSOR_SEATS is the one-line-to-extend source of truth
-    └── agy.py           # AgyProvider (default panel) — `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions). Re-validated 2026-07-01: 3-run `crew probe agy` = pass/pass/pass (6–11s) — the CLI connects and follows instructions; historical empty/off-target REVIEWS were prompt-level, not a dead seat. Re-probe before any future demotion decision.
+    └── agy.py           # AgyProvider (default panel) — `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions)
 ```
+
+Per-subcommand one-liners (do NOT regress the behavior each names):
+- `review` / `council` — ad-hoc one-shot fan-out across subprocess seats (`_fan_out`).
+- `debate` — scaffold-only (see below); the round loop lives in debate.md.
+- `run <seat>` — run ONE subprocess seat; `--json` always exits 0 with the six-field result.
+- `dispatch` — write-mode single-seat WORK delegation (see below).
+- `render` — build/stage a seat prompt; `--stage-all` collapses N stages into one call.
+- `seats` — resolve/print a panel; `--debate` prints the config-aware full debate panel.
+- `collect` — fold per-seat `<seat>.json` into a digest; `--group`/`--full`/`--report-unparsed`.
+- `repair-seat` — write the haiku repair to a seat's SEPARATE `repaired_output` field, never overwriting `output`.
+- `review-prep` — resolve target + split panel + stage the shared prompt; runs NOTHING.
+- `persist-seat` — write ONE normalized Task-seat result to the session dir (engine-owned slug + six-field shape).
+- `doctor` — `/crew:init` provider probe (NON-billable: installed-CLI detection).
+- `probe` — opt-in BILLABLE live seat smoke test (doctor proves the CLI is installed; probe proves it returns usable output).
+- `scaffold-config` — `/crew:init` commented-config generator.
 
 Key contracts (do NOT regress):
 - **Six-field `ProviderResult`** (`name, model, ok, output, error, elapsed`) — the
   one shape every seat (subprocess AND normalized Task seat) returns.
 - **Provider = executor.** The `Provider` ABC's job is `run()` (invoke a CLI →
   `ProviderResult`). codex/agy/cursor-* are executors; opus/sonnet (Task seats) are NOT
-  providers — they're owned by the orchestrator. (This is the debate-validated
-  shape: we deliberately did NOT adopt the Enterprise fork's prompt-builder
-  `BaseProvider`/`TaskProvider`, which modelled non-executable Claude seats as
-  providers.)
+  providers — they're owned by the orchestrator. (WHY not model Claude seats as
+  providers → engine-notes.)
 - **One prompt builder; engine builds for all, executes only subprocess.**
   `prompts.build_prompt`/`council` is the SINGLE source of every seat's prompt.
   The engine EXECUTES only subprocess seats, but `render` BUILDS the prompt for
   ANY seat — including the Claude Task seats the orchestrator dispatches — so the
-  subprocess and Task prompts can never drift. (This *evolves* the older "the
-  engine only knows subprocess seats" contract.) The parity test in
+  subprocess and Task prompts can never drift. The parity test in
   `test-multiagent.py` asserts `render` output == `prompts.build_prompt(...)`.
 - **Modes** — `mode="review"` (rubric + APPROVED/REVISE) vs `mode="discuss"`
   (advisory council take, no verdict). `build_prompt` raises on an unknown mode.
@@ -96,10 +109,7 @@ Key contracts (do NOT regress):
   defines presets, or hardcodes a model pin (the engine still EXECUTES only the subprocess subset,
   skipped when empty).
 - The default panel is `codex + agy + cursor-auto/composer + opus + sonnet`; `cursor-gpt`,
-  `cursor-gemini`, and `cursor-glm` are registered but opt-in (codex already covers the GPT lineage, so
-  `cursor-gpt` isn't defaulted; `agy` covers the Gemini lineage flat-rate, so the metered
-  `cursor-gemini` is left opt-in; and `cursor-glm`'s glm-max draws on Cursor's shared premium MAX
-  allotment, so it's opt-in too — `cursor-auto` fills that slot from the cheap/dedicated bucket).
+  `cursor-gemini`, and `cursor-glm` are registered but opt-in (WHY each is opt-in → engine-notes).
 - When the user names NEITHER `--panel` nor `--seats`, the default panel NAME comes from `default_panel`
   (`config.py`, per-repo `.crew/config.toml` → global `~/.crew-config.toml`), falling back to the
   built-in `full`; precedence is CLI flag > per-repo config > global config > builtin (no env tier — the
@@ -107,9 +117,9 @@ Key contracts (do NOT regress):
 - `/crew:debate` honors config via a separate resolver: it cannot call `review-prep` (it resolves its
   panel in the command markdown), so `crew seats --debate` prints the FULL debate panel (subprocess AND
   Claude Task seats), applying the debate precedence `--seats`/`--panel` > `config.debate_panel()`
-  (`[debate].panel`) > `config.default_panel()` > built-in `full`. This is the lightest hook (extending
-  the existing `seats` subcommand, not a heavyweight `debate-prep` mirror of `review-prep`); note debate
-  adds the `debate_panel` tier that `review-prep` has no equivalent for.
+  (`[debate].panel`) > `config.default_panel()` > built-in `full`. Debate adds a `debate_panel` tier
+  that `review-prep` has no equivalent for (WHY `seats --debate` rather than a `debate-prep` mirror →
+  engine-notes).
 
 ### Availability filtering
 
@@ -216,11 +226,10 @@ Key contracts (do NOT regress):
   - **`--group`** — the deduped digest (`findings.render_digest`): a VERDICTS roster (every ran
     seat) + CRITERIA MATRIX + GROUPED FINDINGS (`M/N` agreement, N = findings-parsed seats only, `⚠
     SINGLETON` for lone dissents) + a RAW / UNPARSED SEATS section that renders any non-parseable
-    seat verbatim (Decision-C — a finding is NEVER dropped). Merge predicate (Decision-D): severity
-    is the only hard partition; within it, COMPLETE-LINKAGE clustering on `path_compatible AND
-    line_compatible AND jaccard>=0.5`. Falls back to exactly `render_panel` when NO seat is
-    findings-parsed. `--full <path>` ALSO writes the faithful sibling (the recovery artifact /
-    advisory size denominator).
+    seat verbatim (a finding is NEVER dropped). Merge predicate: severity is the only hard partition;
+    within it, COMPLETE-LINKAGE clustering on `path_compatible AND line_compatible AND jaccard>=0.5`.
+    Falls back to exactly `render_panel` when NO seat is findings-parsed. `--full <path>` ALSO writes
+    the faithful sibling (the recovery artifact / advisory size denominator).
   - **`--report-unparsed`** — prints ONLY the ran-but-non-findings-parsed seat names (the
     haiku-repair candidates); writes no digest.
 - **Per-seat haiku repair (orchestrator-side).** Between the seat fan-out and the grouped collect, the
@@ -272,23 +281,19 @@ Key contracts (do NOT regress):
   bare `scripts/crew-state.py` path, so ONE allowlist rule covers both engine and
   state. The dispatcher loads `crew-state.py` via `importlib` and swaps `sys.argv`
   around its no-arg `main()` (letting crew-state's own `SystemExit` propagate for
-  correct exit codes). WHY route it rather than ship a plugin-root `crew-state.py`
-  shim: `crew-state.py` does a bare `from models import …` with NO `sys.path`
-  guard — a plugin-root shim would put the plugin root (not `scripts/`) on
-  `sys.path[0]` and break that import. The `crew` dispatcher's guard already adds
-  `scripts/`, so the import resolves with NO edit to `crew-state.py`.
-- One engine-side affordance: `crew debate` is now **scaffold-only regardless of
-  `--seats`** — it ALWAYS writes the dir + `question.md` + an empty
-  `subprocess.json` (exit 0) and NEVER runs subprocess seats internally (the old
-  internal `_fan_out` branch was a killability split-brain vs. `review-prep`).
-  `--seats none`/`""` is the no-op default; a non-empty `--seats` (e.g. `codex`)
-  prints a one-line stderr advisory and still scaffolds (it does NOT execute the
-  seats). The single-round `/crew:debate` path uses this scaffold-only mode, then
-  fans seats out per-seat into individual `<seat>.json` files — the scaffold's
-  `subprocess.json` stays empty and unused. (It also still lets a Claude-only
-  `lite`/`solo` council get its log dir.) `review`/`council` are unchanged — they
-  still fan out via `_fan_out` and intentionally do NOT support empty seats
-  (they're pure fan-out; the orchestrator skips them).
+  correct exit codes). (WHY route it rather than ship a plugin-root shim →
+  engine-notes.)
+- `crew debate` is **scaffold-only regardless of `--seats`** — it ALWAYS writes
+  the dir + `question.md` + an empty `subprocess.json` (exit 0) and NEVER runs
+  subprocess seats internally. `--seats none`/`""` is the no-op default; a
+  non-empty `--seats` (e.g. `codex`) prints a one-line stderr advisory and still
+  scaffolds (it does NOT execute the seats). The single-round `/crew:debate` path
+  uses this scaffold-only mode, then fans seats out per-seat into individual
+  `<seat>.json` files — the scaffold's `subprocess.json` stays empty and unused.
+  (It also still lets a Claude-only `lite`/`solo` council get its log dir.)
+  `review`/`council` are unchanged — they still fan out via `_fan_out` and
+  intentionally do NOT support empty seats (they're pure fan-out; the orchestrator
+  skips them). (WHY scaffold-only → engine-notes.)
 - Two-tier config (env retired): tuning lives in TWO TOML files — per-repo
   `.crew/config.toml` and global `~/.crew-config.toml` (`config.py`, two memoized
   loaders). Knobs: `default_panel`, `[debate].panel`, `[dispatch].seat`

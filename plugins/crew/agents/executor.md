@@ -94,12 +94,9 @@ Bad prompts (use different agent):
 - "Research how Kafka consumers work" → use reader
 - "Find all usages of deprecated API" → use reader
 
-## Tool Availability
+## Optional MCP Tools
 
-**Core tools (always available):**
-- Read, Grep, Glob, Write, Edit, Bash
-
-**Optional MCP tools (when configured):**
+Beyond the granted core tools, when configured:
 - **JetBrains IDE MCP**: `mcp__jetbrains__*` - IDE integration for refactoring, file operations, code analysis
 - **Docker MCP**: `mcp__MCP_DOCKER__*` - Container-based git and file operations
 

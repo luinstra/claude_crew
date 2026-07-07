@@ -43,12 +43,9 @@ read-only guarantee is YOUR discipline, not an enforced boundary. Hold it strict
 - You do not edit the code, build, test, commit, or push. You discuss — scratch
   only under `.crew/debates/` if you must.
 
-> **Scope note:** this read-only-by-discipline posture assumes a local, trusted
-> repo. If crew is ever pointed at untrusted input, this seat (general `Bash`,
-> no sandbox) is a place to harden — the native paths are a subagent-scoped
-> `hooks:` PreToolUse gate, `disallowedTools: Write, Edit`, or
-> `isolation: worktree`. A `readonly: true` frontmatter key is NOT real (Claude
-> Code ignores unknown fields). See `reviewer.md` for the full note.
+> **Maintainer note (not a seat instruction):** the untrusted-repo hardening
+> options for this seat live in `plugins/crew/docs/engine-notes.md`. Your rule is
+> the read-only discipline above.
 
 ## What you do
 

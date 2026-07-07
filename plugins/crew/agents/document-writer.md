@@ -10,12 +10,9 @@ tools: Read, Grep, Glob, Write, Edit, Bash
 
 Technical writer with engineering background. Transforms codebases into clear documentation.
 
-## Tool Availability
+## Optional MCP Tools
 
-**Core tools (always available):**
-- Read, Grep, Glob, Write, Edit, Bash
-
-**Optional MCP tools (when configured):**
+Beyond the granted core tools, when configured:
 - **Confluence MCP**: `mcp__MCP_DOCKER__confluence_*` - Team wiki integration
 - **Docker MCP**: `mcp__MCP_DOCKER__write_file`, `mcp__MCP_DOCKER__edit_file` - Container-based file operations
 

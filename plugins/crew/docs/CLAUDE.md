@@ -83,7 +83,7 @@ Skills provide specialized guidance that activates automatically based on contex
 
 **Config:** `full` is the built-in default. A per-repo `.crew/config.toml` or global `~/.crew-config.toml` can set `default_panel`, redefine/add `[panels]` presets (usable via `--panel <name>`), mark seats `available = false` (drops an un-authed seat), or override per-command (`[debate].panel`, `[dispatch].seat`). Precedence: **CLI flag > per-repo config > global config > built-in** (per-repo wins over global; no env-var tier). Needs Python 3.11+; on 3.10 the files are gracefully ignored with a one-time stderr note. Review/build/measure-twice resolve their panel through `review-prep`; `/crew:debate` and `/crew:dispatch` have their own config-aware resolvers (`[debate].panel`, `[dispatch].seat`).
 
-**Onboarding:** `/crew:init` detects which provider CLIs are installed and writes a commented `~/.crew-config.toml` (or `.crew/config.toml` with a leading `--repo` — which seeds the per-repo file from an existing global `~/.crew-config.toml` verbatim, comments preserved, when one is present) with cost-safe defaults + honest per-seat `available` flags, never clobbering an existing file silently. (Distinct from `/crew:crew-config`, which copies this `CLAUDE.md`, not the engine-tuning `.toml`.)
+**Onboarding:** `/crew:init` detects which provider CLIs are installed and writes a commented config file, never clobbering an existing one silently. A fresh scaffold (`~/.crew-config.toml`, or `.crew/config.toml` with `--repo` when no global exists) gets cost-safe defaults + honest per-seat `available` flags; with `--repo` AND an existing global `~/.crew-config.toml`, the per-repo file is instead seeded from that global verbatim (comments preserved), then lightly adjusted. (Distinct from `/crew:crew-config`, which copies this `CLAUDE.md`, not the engine-tuning `.toml`.)
 
 ### Utilities
 
@@ -100,7 +100,7 @@ Skills provide specialized guidance that activates automatically based on contex
 
 | Command | Description |
 |---------|-------------|
-| `/crew:init` | Scaffold the engine-tuning config (`~/.crew-config.toml`, or `.crew/config.toml` with `--repo`) — detects provider CLIs, writes cost-safe commented defaults, never clobbers silently |
+| `/crew:init` | Scaffold the engine-tuning config (`~/.crew-config.toml`, or `.crew/config.toml` with `--repo`) — detects provider CLIs, writes commented cost-safe defaults (or seeds from an existing global when `--repo` finds one), never clobbers silently |
 | `/crew:crew-config` | Copy CLAUDE.md to current project |
 | `/crew:crew-config global` | Copy CLAUDE.md globally |
 

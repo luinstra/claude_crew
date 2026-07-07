@@ -1,5 +1,5 @@
 ---
-description: Crew-native multi-model debate on a question — single round (council) or multi-round with rebuttals; panel is config-aware (per-repo .crew/config.toml [debate].panel / default_panel, falling back to the built-in full = codex + agy + cursor-auto + cursor-composer + opus + sonnet); override with --panel/--seats
+description: Crew-native multi-model debate on a question — single round (council) or multi-round with rebuttals across a config-aware panel; override with --panel/--seats. Use for open-ended discussion, not plan/code review.
 argument-hint: "[--rounds N] [--panel ...] <question>"
 allowed-tools: Bash, Task, Read, Glob, Write
 ---
