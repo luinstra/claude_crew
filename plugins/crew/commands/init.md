@@ -67,6 +67,11 @@ stdout) and SHOW the detection table to the user — label each present subproce
   trivial prompt through each seat's real CLI and reports pass/degraded/fail/skipped.
   This is BILLABLE (it runs each seat's real CLI once), so ask before running it — never
   run it unprompted.
+  - **Exit-code contract** (a health check should branch on this, not just the status
+    text): `0` = at least one seat passed; `1` = a seat failed/degraded; `2` = usage
+    error OR every seat was skipped. Because `2` is overloaded (bad-usage AND
+    all-skipped), a caller that gets `2` must ALSO read the JSON to tell a real usage
+    error from an all-skipped (no-CLI-available) run.
 
 ## Step 3 — Short PREFERENCE interview (detect-then-CONFIRM)
 

@@ -69,28 +69,45 @@ def cleanup_stale_files(directory: Path) -> None:
     if not directory.is_dir():
         return
 
-    # Patterns for non-state crew files. The four `*-state.json.corrupt` /
-    # `*-state-*.json.corrupt` globs sweep the set-aside artifacts the Stop hook /
-    # crew-state CLI create when a state file can't be parsed (they end in
-    # `.corrupt`, so the `*.json` loop above never sees them) — otherwise
-    # `build-state.json.corrupt` accumulates forever. They are SCOPED to the EXACT
-    # backup names crew creates — the two forms are the legacy `build-state.json`
-    # and the session-scoped `build-state-<id>.json` (note the HYPHEN before the
-    # id) — so the globs are the exact name PLUS the hyphen-constrained id form,
-    # NOT a loose `build-state*.json.corrupt` that would also match a foreign
-    # `build-stateEVIL.json.corrupt`. An unrelated `*.corrupt` file the user parked
-    # in `~/.claude` or `.crew` is never deleted by cleanup.
-    # The context-snapshot globs cover BOTH the real artifact save-context.md
-    # writes (`.crew/context-snapshot.md`) and the `.restored.md` rename
-    # restore-context.md leaves behind (otherwise it accumulates forever) —
-    # the legacy `context-snapshot-*.json` glob never matched either. `.*.tmp`
-    # sweeps atomic-write temps (`atomic_write_json` names them
-    # `.<name>.XXXXXX.tmp`) orphaned by a crash before the `finally` cleanup.
+    # Patterns for non-state crew files. EVERY glob here MUST be anchored to a
+    # crew-specific literal or crew-prefixed pattern — this cleanup runs over BOTH
+    # the project `.crew/` AND the SHARED `~/.claude` root (a dir owned by ALL
+    # Claude Code tools), so a bare-suffix glob (`*.restored.md`, `.*.tmp`) would
+    # delete a FOREIGN tool's / a user's files. No bare-suffix globs.
+    #
+    # The four `*-state.json.corrupt` / `*-state-*.json.corrupt` globs sweep the
+    # set-aside artifacts the Stop hook / crew-state CLI create when a state file
+    # can't be parsed (they end in `.corrupt`, so the `*.json` loop above never
+    # sees them) — otherwise `build-state.json.corrupt` accumulates forever. They
+    # are SCOPED to the EXACT backup names crew creates — the two forms are the
+    # legacy `build-state.json` and the session-scoped `build-state-<id>.json`
+    # (note the HYPHEN before the id) — NOT a loose `build-state*.json.corrupt`
+    # that would also match a foreign `build-stateEVIL.json.corrupt`.
+    #
+    # The context-snapshot globs are EXACT literals only: `context-snapshot.md`
+    # (what save-context.md writes) and `context-snapshot.restored.md` (the rename
+    # restore-context.md leaves behind — otherwise it accumulates forever). NOT
+    # `context-snapshot*.md` (would match a user's `context-snapshot-notes.md`)
+    # nor a bare `*.restored.md` (would match ANY tool's restored file). The
+    # legacy `context-snapshot-*.json` glob is kept (crew-prefixed, `.json`-tailed;
+    # it never matched the real `.md` artifacts but harmlessly sweeps any old JSON
+    # snapshot).
+    #
+    # The temp globs match ONLY what `atomic_write_json` (models.py) produces:
+    # `tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp")` names each temp
+    # `.<state-filename>.<rand>.tmp` — already crew-anchored by the state filename,
+    # so approach (a) needs no generator change. We glob EXACTLY those anchored
+    # names (the two state kinds × legacy/`-<id>` forms), never a bare `.*.tmp`
+    # that would delete any hidden temp from any tool. These sweep atomic-write
+    # temps orphaned by a crash between mkstemp and os.replace (rare).
     non_state_patterns = [
         "context-snapshot-*.json",
-        "context-snapshot*.md",
-        "*.restored.md",
-        ".*.tmp",
+        "context-snapshot.md",
+        "context-snapshot.restored.md",
+        ".build-state.json.*.tmp",
+        ".build-state-*.json.*.tmp",
+        ".measure-twice-state.json.*.tmp",
+        ".measure-twice-state-*.json.*.tmp",
         "build-state.json.corrupt",
         "build-state-*.json.corrupt",
         "measure-twice-state.json.corrupt",

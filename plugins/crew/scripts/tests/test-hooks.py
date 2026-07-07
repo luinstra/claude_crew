@@ -1421,8 +1421,20 @@ def main():
             stale_snapshot.write_text("# old snapshot")
             orphan_tmp = crew_dir / ".build-state-x.json.abc123.tmp"
             orphan_tmp.write_text("orphaned atomic-write temp")
+            # FOREIGN files past the age threshold that share a bare suffix with
+            # crew's artifacts must be PRESERVED — the exact-name/anchored globs
+            # must NOT match them (mirrors the .corrupt prefix-collision negatives).
+            foreign_restored = crew_dir / "foo.restored.md"        # not context-snapshot.restored.md
+            foreign_restored.write_text("another tool's restored file")
+            foreign_snapshot = crew_dir / "context-snapshot-notes.md"  # user's notes, not the exact artifact
+            foreign_snapshot.write_text("user snapshot notes")
+            foreign_tmp = crew_dir / "random.tmp"                  # bare .tmp, no crew prefix
+            foreign_tmp.write_text("some tool's temp")
+            foreign_hidden_tmp = crew_dir / ".sometool.tmp"        # hidden bare .tmp, no crew prefix
+            foreign_hidden_tmp.write_text("some tool's hidden temp")
             snap_old_mtime = _time.time() - (8 * 86400)
-            for _sf in (stale_restored, stale_snapshot, orphan_tmp):
+            for _sf in (stale_restored, stale_snapshot, orphan_tmp,
+                        foreign_restored, foreign_snapshot, foreign_tmp, foreign_hidden_tmp):
                 os.utime(_sf, (snap_old_mtime, snap_old_mtime))
             # A live active loop from THIS pass must not be collateral.
             live_active = crew_dir / "build-state-liveL5.json"
@@ -1451,8 +1463,33 @@ def main():
                 log_fail("Cleanup preserves an active state file during the .md sweep",
                          "file exists", "file wrongly deleted")
 
+            if foreign_restored.exists():
+                log_pass("Cleanup preserves foreign foo.restored.md (not context-snapshot.restored.md)")
+            else:
+                log_fail("Cleanup preserves foreign foo.restored.md",
+                         "file exists", "file wrongly swept by bare *.restored.md glob")
+
+            if foreign_snapshot.exists():
+                log_pass("Cleanup preserves user context-snapshot-notes.md (not the exact artifact)")
+            else:
+                log_fail("Cleanup preserves user context-snapshot-notes.md",
+                         "file exists", "file wrongly swept by context-snapshot*.md glob")
+
+            if foreign_tmp.exists():
+                log_pass("Cleanup preserves foreign random.tmp (no crew prefix)")
+            else:
+                log_fail("Cleanup preserves foreign random.tmp",
+                         "file exists", "file wrongly swept by bare .*.tmp glob")
+
+            if foreign_hidden_tmp.exists():
+                log_pass("Cleanup preserves foreign .sometool.tmp (no crew prefix)")
+            else:
+                log_fail("Cleanup preserves foreign .sometool.tmp",
+                         "file exists", "file wrongly swept by bare .*.tmp glob")
+
             # Clean up
-            for f in list(crew_dir.glob("*.md")) + list(crew_dir.glob("*.tmp")) + list(crew_dir.glob("*-state*.json")):
+            for f in set(list(crew_dir.glob("*.md")) + list(crew_dir.glob("*.tmp"))
+                         + list(crew_dir.glob(".*.tmp")) + list(crew_dir.glob("*-state*.json"))):
                 f.unlink()
 
             # =========================================================================

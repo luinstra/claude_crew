@@ -601,6 +601,21 @@ The `session-start.py` hook cleans up stale state files on every session start:
 - **Inactive** state files older than **1 day**: deleted
 - **Active** state files older than **7 days**: force-deleted (safety limit for abandoned sessions)
 - Applies to `build-state-*` and `measure-twice-state-*` files
+- **Non-state artifacts older than 7 days** are also swept, but EVERY glob is
+  anchored to a crew-specific name (cleanup runs over the SHARED `~/.claude` root
+  too, so a bare-suffix glob would delete foreign files):
+  - context snapshots — the EXACT literals `context-snapshot.md` (save-context)
+    and `context-snapshot.restored.md` (the restore rename), plus the legacy
+    crew-prefixed `context-snapshot-*.json`. NOT `context-snapshot*.md` /
+    `*.restored.md` (those would match a user's `context-snapshot-notes.md` or any
+    tool's restored file).
+  - `.corrupt` set-aside backups — the exact + `-<id>` forms only (see the
+    crew-state schema section).
+  - atomic-write temp orphans — `atomic_write_json` names each temp
+    `.<state-filename>.<rand>.tmp` (mkstemp `prefix=f".{path.name}."`,
+    `suffix=".tmp"`), so the sweep globs exactly those anchored names
+    (`.build-state.json.*.tmp` / `.build-state-*.json.*.tmp` and the
+    measure-twice pair), NEVER a bare `.*.tmp`.
 
 ## Testing
 
