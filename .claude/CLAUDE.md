@@ -227,7 +227,7 @@ python plugins/crew/scripts/tests/test-hooks.py
 
 ### Code Comments Stay Repo-Local
 
-Comments are concise and reference only what's in the repo. State a non-obvious constraint or a "why" the code can't show, then stop — no restating the code or padding. Never cite a plan/phase/tier name or decision/ticket label ("Phase 5", "Decision-D", "the C2 smoke", "per the plan"), even if the task prompt uses that vocabulary — a future reader has only the repo, so those labels resolve to nothing. Translate the intent into repo-local terms instead.
+Comments are concise and reference only what's in the repo. State a non-obvious constraint or a "why" the code can't show, then stop, with no restating the code or padding. No em-dashes (use a colon, comma, or parentheses). Never cite a plan/phase/tier name or decision/ticket label ("Phase 5", "Decision-D", "the C2 smoke", "per the plan"), even if the task prompt uses that vocabulary, because a future reader has only the repo and those labels resolve to nothing.
 
 ### Command References Need Plugin Prefix
 
