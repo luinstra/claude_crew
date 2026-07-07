@@ -1,6 +1,6 @@
 ---
 name: git
-description: Use this skill for ANY git-related task. Activate immediately when the user mentions: commit, stash, rebase, squash, cherry-pick, merge, push, pull, branch, diff, blame, log, reset, conflict resolution, or commit messages. This includes asking to commit staged changes, writing or improving commit messages, squashing or reordering commits, rebasing onto main, managing git stashes (list/apply/pop/drop), cherry-picking specific commits, searching git history, resolving merge conflicts, or any other git version control operation. If the user's request involves git or version control in any way — even just "commit this" or "stash that" — use this skill. Do NOT use for CI/CD pipeline configuration, Docker, code refactoring, or general development tasks unless they specifically involve a git operation.
+description: Use for ANY git or version-control task. Triggers: commit, stash, rebase, squash, cherry-pick, merge, push, pull, branch, diff, blame, log, reset, conflict resolution, or commit messages — including committing staged changes, writing/improving commit messages, squashing/reordering commits, rebasing onto main, managing git stashes (list/apply/pop/drop), cherry-picking specific commits, searching git history, resolving merge conflicts, or "commit this"/"stash that". Do NOT use for CI/CD pipeline configuration, Docker, code refactoring, or general development tasks unless they specifically involve a git operation.
 ---
 
 # Git Skill

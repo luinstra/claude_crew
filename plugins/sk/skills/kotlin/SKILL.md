@@ -1,6 +1,6 @@
 ---
 name: kotlin
-description: Activate this skill whenever the user's request involves Kotlin code or Kotlin-specific concepts. This includes: writing or modifying .kt/.kts files; using data classes, copy(), sealed classes/interfaces, value classes, or @JvmInline; working with coroutines, async, structured concurrency, or suspend functions; handling nullability (e.g., ?., !!, requireNotNull, checkNotNull, elvis operator); writing extension functions; running or fixing detekt/spotless linting issues; converting Java patterns to idiomatic Kotlin; or discussing Kotlin best practices. Trigger even when "Kotlin" isn't explicitly mentioned — if the user references Kotlin-specific syntax like data class, sealed interface, value class, coroutineScope, or null-safety operators, this skill applies.
+description: Use whenever a request involves Kotlin code or Kotlin-specific concepts. Triggers: writing/modifying .kt/.kts files; data classes, copy(), sealed classes/interfaces, value classes, @JvmInline; coroutines, async, structured concurrency, suspend functions; nullability (?., !!, requireNotNull, checkNotNull, elvis operator); extension functions; detekt/spotless linting issues; converting Java patterns to idiomatic Kotlin; Kotlin best practices. Trigger even when "Kotlin" isn't explicitly mentioned — if the request references Kotlin-specific syntax like data class, sealed interface, value class, coroutineScope, or null-safety operators.
 ---
 
 # Kotlin Patterns

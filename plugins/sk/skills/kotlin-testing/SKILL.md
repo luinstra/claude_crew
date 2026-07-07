@@ -1,6 +1,6 @@
 ---
 name: kotlin-testing
-description: Use this skill any time the user wants to write, add, or modify tests in Kotlin. This includes unit tests, integration tests, mocking, verification, assertions, or test infrastructure. Trigger for any mention of: writing tests for a class or method, mocking dependencies, verifying arguments, capturing arguments with slots, soft assertions, test providers, Kotest, MockK, FunSpec, Testcontainers, DatabaseTest, TestIdProvider, TestDateTimeProvider, returnsMany, or flaky test fixes. Also trigger when the user says "add tests", "test this", "write a test for", or asks how to test any Kotlin code — even without naming a specific framework. This skill defines the project's required testing conventions and must be consulted before writing any test code.
+description: Use whenever writing, adding, or modifying tests in Kotlin — unit tests, integration tests, mocking, verification, assertions, or test infrastructure. Triggers: writing tests for a class or method, mocking dependencies, verifying arguments, capturing arguments with slots, soft assertions, test providers, Kotest, MockK, FunSpec, Testcontainers, DatabaseTest, TestIdProvider, TestDateTimeProvider, returnsMany, flaky test fixes, or "add tests"/"test this"/"write a test for" — even without naming a specific framework. Defines the project's required testing conventions and must be consulted before writing any test code.
 ---
 
 # Kotlin Testing Patterns
