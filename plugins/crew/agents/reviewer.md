@@ -48,7 +48,7 @@ strictly:
   reviewer — read, analyse, and (if you must) scratch only under `.crew/reviews/`.
 
 > **Maintainer note (not a seat instruction):** the untrusted-repo hardening
-> options for this seat live in `plugins/crew/docs/engine-notes.md`. Your rule is
+> options for this seat live in `../docs/engine-notes.md`. Your rule is
 > the read-only discipline above.
 
 ## What you do (review mode)

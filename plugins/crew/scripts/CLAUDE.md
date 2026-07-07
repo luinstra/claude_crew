@@ -94,8 +94,9 @@ Key contracts (do NOT regress):
   The Claude Task seats (`crew:reviewer` for review, `crew:panelist` for discuss)
   have `Read, Grep, Glob, Bash` and fetch the target the same way. Their `Bash` is
   read-only by CONVENTION (instructed to git diff/show/log + reads, never mutate)
-  — NOT sandbox-enforced; see `reviewer.md` for the honest posture + the native
-  enforcement paths if it's ever pointed at untrusted diffs.
+  — NOT sandbox-enforced; see `reviewer.md` for the honest posture, and
+  [docs/engine-notes.md](../docs/engine-notes.md) for the native enforcement
+  paths if it's ever pointed at untrusted diffs.
 - **`--out <file>`** writes results to a file so the call needs no shell redirect
   (stays permission-allowlistable).
 

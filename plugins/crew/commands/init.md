@@ -12,8 +12,10 @@ $ARGUMENTS
 > `~/.crew-config.toml` and the per-repo `.crew/config.toml` that the engine's
 > `config.py` loader reads (`default_panel`, `[debate].panel`, `[dispatch].seat`,
 > per-seat `model`/`available`, `[tuning].timeout`, `[panels]`). It DETECTS which
-> provider CLIs are installed, then writes a **commented** starter config with
-> cost-safe defaults so you discover the knobs without hand-authoring TOML.
+> provider CLIs are installed, then writes a **commented** starter config so you
+> discover the knobs without hand-authoring TOML. A fresh scaffold gets cost-safe
+> defaults; `--repo` with an existing global `~/.crew-config.toml` instead seeds the
+> per-repo file from that global verbatim (then lightly adjusts).
 
 > **Not to be confused with `/crew:crew-config`.** `/crew:crew-config` copies the
 > **`CLAUDE.md` operating-instructions doc** into `.claude/CLAUDE.md` (project) or
@@ -36,8 +38,10 @@ $ARGUMENTS
 
 `--repo` is recognized ONLY as the LEADING token of `$ARGUMENTS` (same place the other
 crew commands look for flags). With `--repo`, the scaffold targets the per-repo
-`.crew/config.toml` (seeded VERBATIM from the global `~/.crew-config.toml` if one
-exists). Without it, the scaffold targets the global `~/.crew-config.toml`.
+`.crew/config.toml`: if a global `~/.crew-config.toml` exists it is seeded VERBATIM
+from that global (then lightly adjusted); if no global exists it gets a fresh
+cost-safe-defaults scaffold. Without `--repo`, the scaffold targets the global
+`~/.crew-config.toml` with cost-safe defaults.
 
 ## Step 2 — Detect installed providers (`doctor`)
 
