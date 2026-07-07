@@ -237,6 +237,20 @@ def test_breaking_change_footer_anchoring():
         got = read_version(repo / "plugins" / "crew" / ".claude-plugin" / "plugin.json")
         check("BREAKING-CHANGE: (hyphen) footer → major", got == "1.0.0", "1.0.0", got)
 
+    # NEGATIVE: a `type!:` marker is a SUBJECT-line form — a BODY line shaped
+    # like `foo!: bar` (e.g. a pasted diff/changelog line) under a plain `fix:`
+    # subject must NOT false-trigger a major bump; it falls through to patch.
+    with tempfile.TemporaryDirectory() as td:
+        repo = make_repo(Path(td))
+        (repo / "plugins" / "crew" / "src.txt").write_text("v1\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m",
+             "fix: tidy imports\n\nDropped a pasted line:\nfoo!: bar was here")
+        run_hook(repo)
+        got = read_version(repo / "plugins" / "crew" / ".claude-plugin" / "plugin.json")
+        check("body line 'foo!: bar' under fix: subject → patch (not major)",
+              got == "0.40.1", "0.40.1", got)
+
 
 def test_skip_conditions():
     log_section("skip guards (already-bumped, [skip version])")

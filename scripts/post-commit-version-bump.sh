@@ -132,24 +132,33 @@ get_last_bump_commit() {
 }
 
 # Determine bump type from commits.
-# Scans the FULL message (%B, not %s) so a `BREAKING CHANGE:` footer/body — the
-# conventional-commit location for it — is actually detected, not just a `!:`
-# subject marker (the old %s scan made the BREAKING-CHANGE grep dead code).
+# The two major triggers live in DIFFERENT parts of a conventional commit, so
+# they are matched against different scopes:
+#   - `type!:` is a SUBJECT-line form → matched against %s (the subject only).
+#     Matching it over the full body would let a pasted diff/changelog line like
+#     `foo!: bar` false-trigger a major bump.
+#   - `BREAKING CHANGE:` is a FOOTER form → matched against %B (the full body),
+#     where the footer legitimately lives.
+# feat (minor) is likewise a subject-line marker → matched against %s.
 get_bump_type() {
     local last_bump="$1"
-    local commits
-    commits=$(git log "$last_bump"..HEAD --format="%B" 2>/dev/null || git log -20 --format="%B")
+    local subjects bodies
+    subjects=$(git log "$last_bump"..HEAD --format="%s" 2>/dev/null || git log -20 --format="%s")
+    bodies=$(git log "$last_bump"..HEAD --format="%B" 2>/dev/null || git log -20 --format="%B")
 
-    # Check for breaking changes (major). The BREAKING CHANGE arm is ANCHORED to
-    # the conventional-commits footer shape (`^BREAKING[ -]CHANGE:` — line start,
+    # Major: a `type!:` marker on a SUBJECT line, OR a `BREAKING CHANGE:` footer
+    # anywhere in the body. The BREAKING CHANGE arm is ANCHORED to the
+    # conventional-commits footer shape (`^BREAKING[ -]CHANGE:` — line start,
     # both the space and hyphen spellings, colon REQUIRED); grep scans the
     # multi-line %B per-line, so `^` matches a footer line. This stops a body
     # that merely mentions or negates the phrase ("this is NOT a BREAKING
-    # CHANGE", a pasted changelog line) from forcing a false MAJOR bump.
-    if echo "$commits" | grep -qE '^[a-z]+(\([^)]+\))?!:|^BREAKING[ -]CHANGE:'; then
+    # CHANGE", a pasted changelog line), or a body line shaped like `foo!: bar`,
+    # from forcing a false MAJOR bump.
+    if echo "$subjects" | grep -qE '^[a-z]+(\([^)]+\))?!:' \
+       || echo "$bodies" | grep -qE '^BREAKING[ -]CHANGE:'; then
         echo "major"
-    # Check for features (minor)
-    elif echo "$commits" | grep -qE '^feat(\([^)]+\))?:'; then
+    # Check for features (minor) — subject-line marker only.
+    elif echo "$subjects" | grep -qE '^feat(\([^)]+\))?:'; then
         echo "minor"
     else
         echo "patch"
