@@ -385,7 +385,9 @@ state = BuildState.load(state_file)
 
 # Modify and save
 state.iteration += 1
-state.save(state_file)  # Creates parent dirs, sets 0o600 permissions
+state.save(state_file)  # Atomic write via atomic_write_json: creates parent
+                        # dirs and writes the temp file 0600 FROM BIRTH
+                        # (tempfile.mkstemp), then os.replace — no chmod window.
 ```
 
 ### SessionStart Output Pattern
@@ -441,9 +443,17 @@ crew state show mt
 # Check if active (exit code 0=active, 1=inactive)
 crew state is-active bl --session-id abc123
 
-# Initialize a loop
+# Initialize a loop — inline text …
 crew state init bl --prompt "Fix the auth bug" --session-id abc123
 crew state init mt --task "Add user profiles" --auto-plan --session-id abc123
+
+# … OR spill the raw task to a UTF-8 file and pass -f, keeping $ARGUMENTS (which
+# may contain $(…)/backticks/quotes) OFF the shell line. -f maps to the loop's
+# text field and is mutually exclusive with --prompt/--task; a missing/unreadable
+# (incl. non-UTF-8) file exits nonzero with NO state file created. The loop
+# commands (build.md / measure-twice.md) Write the spill file then rm it after a
+# successful init — the L5 cleanup patterns do NOT cover these task files.
+crew state init bl -f .crew/task-bl-abc123.txt --session-id abc123
 
 # Check if this session has conflicts (other sessions ignored)
 crew state check-conflicts --session-id abc123
@@ -452,7 +462,10 @@ crew state check-conflicts --session-id abc123
 crew state set bl iteration 5 --session-id abc123
 crew state set mt last_verdict REVISE --session-id abc123
 
-# Deactivate
+# Deactivate — pass the SAME --session-id init used, so deactivate targets the
+# exact session-scoped file (init and deactivate/cancel of one loop MUST resolve
+# to the same file; cmd_deactivate additionally reuses the Stop hook's
+# find_session_state_file so an adopted legacy file is also turned off).
 crew state deactivate bl --reason "User cancelled" --session-id abc123
 ```
 
@@ -464,6 +477,21 @@ crew state deactivate bl --reason "User cancelled" --session-id abc123
 **Session-scoped filename pattern:**
 - `build-state-{session_id}.json`
 - `measure-twice-state-{session_id}.json`
+
+**Schema version + refuse-to-touch (L2 / Phase 5).** Every write stamps
+`"schema": SCHEMA_VERSION` (currently 1); an ABSENT `schema` loads as 1 (legacy
+files keep working). Reads classify a file via `read_state_json` /
+`load_with_status` into `LOAD_OK` / `LOAD_MISSING` / `LOAD_CORRUPT` /
+`LOAD_FUTURE_SCHEMA`. Every MUTATING path — the Stop hook AND the crew-state CLI
+(`init` / `set` / `increment` / `deactivate`) — honors the SAME contract:
+- **Newer schema** (`schema > SCHEMA_VERSION`): REFUSE to touch. The hook allows
+  stop with a loud diagnostic; the CLI exits nonzero, bytes untouched — a
+  downgrade must never clobber a live newer-format loop.
+- **Corrupt** (unparseable / non-object JSON): the Stop hook and `init` set the
+  file aside as `<name>.corrupt` (a one-time diagnostic; `init` then starts fresh
+  state), while `set` / `increment` / `deactivate` refuse (nonzero) rather than
+  silently overwrite. `*.corrupt` artifacts are swept by `session-start`
+  cleanup.
 
 **Loop aliases:**
 - `bl` = `build`
@@ -593,7 +621,7 @@ Tests cover:
 - [ ] Import models from `models.py`, don't duplicate dataclasses
 - [ ] Use `CLAUDE_PROJECT_DIR` env var for directory
 - [ ] Handle missing state files gracefully (return defaults)
-- [ ] Set file permissions to 0o600 for state files
+- [ ] Write state via `atomic_write_json` / `state.save` (0600-from-birth, atomic) — never hand-roll a write + chmod
 - [ ] Run `tests/test-hooks.py` after changes
 - [ ] Output valid JSON only (no print debugging to stdout)
 

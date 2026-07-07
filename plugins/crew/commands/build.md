@@ -454,9 +454,12 @@ Then go back to Step 2 to verify the revised work.
 
 When the panel's verdict is APPROVED (or REVISE with only [MINOR] issues):
 
-1. **Deactivate the loop:**
+1. **Deactivate the loop** — pass the SAME `--session-id` the init used (the
+   `[Session ID: …]` value, as a literal, NOT a `${CLAUDE_SESSION_ID}` shell
+   expansion), so deactivate targets the exact session-scoped state file that
+   init wrote (otherwise the scoped file stays active and keeps blocking Stop):
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" state deactivate bl --reason "Panel approved"
+"${CLAUDE_PLUGIN_ROOT}/crew" state deactivate bl --reason "Panel approved" --session-id <session-id>
 ```
 
 2. **Summarize what was accomplished** and let the user know the task is complete.

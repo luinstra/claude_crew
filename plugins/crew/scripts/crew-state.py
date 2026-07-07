@@ -2,6 +2,7 @@
 """Crew state management CLI for build and measure-twice persistence."""
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -11,7 +12,15 @@ from datetime import datetime
 from pathlib import Path
 
 # Import from models.py (same directory)
-from models import BuildState, MeasureTwiceState, atomic_write_json, SCHEMA_VERSION
+from models import (
+    BuildState,
+    MeasureTwiceState,
+    atomic_write_json,
+    SCHEMA_VERSION,
+    LOAD_CORRUPT,
+    LOAD_FUTURE_SCHEMA,
+)
+from state_discovery import find_session_state_file
 
 LOOP_ALIASES = {
     "build": "bl", "bl": "bl",
@@ -22,6 +31,50 @@ LOOP_CLASSES = {
     "bl": BuildState,
     "mt": MeasureTwiceState,
 }
+
+LOOP_PREFIXES = {
+    "bl": "build-state",
+    "mt": "measure-twice-state",
+}
+
+
+def _refuse_future_schema(path: Path, status: str) -> None:
+    """Phase 5 refuse-to-touch contract, mirrored from the Stop hook: a state
+    file written by a NEWER crew version is NEVER overwritten by a mutating CLI
+    command. Exits nonzero with a loud one-line diagnostic; bytes untouched."""
+    if status == LOAD_FUTURE_SCHEMA:
+        print(
+            f"Error: refusing to modify {path.name} — it was written by a newer "
+            f"crew version (state schema ahead of this install). Upgrade crew or "
+            f"remove the file manually.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _refuse_corrupt(path: Path, status: str) -> None:
+    """Mirror the hook's corrupt handling for mutate-in-place commands
+    (set/increment/deactivate): never silently overwrite an unparseable file as
+    if it were clean — emit a loud diagnostic and exit nonzero."""
+    if status == LOAD_CORRUPT:
+        print(
+            f"Error: {path.name} is corrupt (unparseable JSON) — refusing to "
+            f"overwrite it. Remove it or re-init the loop with /crew:build or "
+            f"/crew:measure-twice.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _load_for_mutation(cls, path: Path):
+    """Load state for a mutate-in-place CLI command, honoring Phase 5's
+    refuse-to-touch contract (same as the Stop hook): a newer-schema file is
+    NEVER overwritten; a corrupt file is not silently clobbered. Returns the
+    loaded (OK/MISSING) state."""
+    state, status = cls.load_with_status(path)
+    _refuse_future_schema(path, status)
+    _refuse_corrupt(path, status)
+    return state
 
 
 def get_loop_filename(canonical: str, session_id: str = "") -> str:
@@ -159,7 +212,7 @@ def cmd_set(args):
     session_id = resolve_session_id(args)
     path = get_state_path(args.loop, session_id)
     cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
-    state = cls.load(path)
+    state = _load_for_mutation(cls, path)
 
     if not hasattr(state, args.field):
         print(f"Error: {cls.__name__} has no field '{args.field}'", file=sys.stderr)
@@ -181,13 +234,28 @@ def check_for_conflicts(session_id: str = ""):
     project_dir = get_project_dir()
     crew_dir = project_dir / ".crew"
 
+    # A newer-schema file is treated as a conflict (refuse-to-touch): we cannot
+    # parse it as our schema, so init must NOT clobber it — surface it as a
+    # blocking condition instead of silently overwriting (Phase 5 contract).
     bl_path = crew_dir / get_loop_filename("bl", session_id)
-    bl_state = BuildState.load(bl_path)
+    bl_state, bl_status = BuildState.load_with_status(bl_path)
+    if bl_status == LOAD_FUTURE_SCHEMA:
+        return (
+            f"ERROR: {bl_path.name} was written by a newer crew version (state "
+            f"schema ahead of this install) — refusing to touch. Upgrade crew or "
+            f"remove the file manually."
+        )
     if bl_state.active:
         return "ERROR: build loop is already active. Run /crew:cancel-build first or let it complete."
 
     mt_path = crew_dir / get_loop_filename("mt", session_id)
-    mt_state = MeasureTwiceState.load(mt_path)
+    mt_state, mt_status = MeasureTwiceState.load_with_status(mt_path)
+    if mt_status == LOAD_FUTURE_SCHEMA:
+        return (
+            f"ERROR: {mt_path.name} was written by a newer crew version (state "
+            f"schema ahead of this install) — refusing to touch. Upgrade crew or "
+            f"remove the file manually."
+        )
     if mt_state.active:
         return "ERROR: measure-twice loop is already active. Run /crew:cancel-measure-twice first or let it complete."
 
@@ -213,7 +281,10 @@ def _resolve_init_text(args, inline_value, inline_flag_name):
         sys.exit(2)
     try:
         return p.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # A non-UTF-8 file raises UnicodeDecodeError (a ValueError, NOT an
+        # OSError) — catch it alongside OSError so a bad task file exits cleanly
+        # instead of tracebacking (mirrors cli.py dispatch's -f handling).
         print(f"Error: cannot read task file {file_path}: {exc}", file=sys.stderr)
         sys.exit(2)
 
@@ -231,9 +302,24 @@ def cmd_init(args):
     canonical = LOOP_ALIASES[args.loop]
     path = get_state_path(args.loop, session_id)
 
+    # Phase 5 refuse-to-touch: never overwrite a newer-schema file (already
+    # blocked as a conflict above), and set a corrupt one aside (mirroring the
+    # Stop hook) before re-init so a fresh loop starts on clean state.
+    _, target_status = LOOP_CLASSES[canonical].load_with_status(path)
+    _refuse_future_schema(path, target_status)
+    if target_status == LOAD_CORRUPT:
+        corrupt_path = path.with_name(path.name + ".corrupt")
+        with contextlib.suppress(OSError):
+            path.replace(corrupt_path)
+        print(
+            f"Warning: {path.name} was corrupt (unparseable JSON) — set aside as "
+            f"{corrupt_path.name}; continuing with fresh state.",
+            file=sys.stderr,
+        )
+
     if canonical == "bl":
         prompt = _resolve_init_text(args, args.prompt, "--prompt")
-        if not prompt:
+        if not prompt or not prompt.strip():
             print("Error: --prompt or -f required for build loop", file=sys.stderr)
             sys.exit(1)
         state = BuildState(
@@ -246,7 +332,7 @@ def cmd_init(args):
         )
     else:  # mt
         task = _resolve_init_text(args, args.task, "--task")
-        if not task:
+        if not task or not task.strip():
             print("Error: --task or -f required for measure-twice", file=sys.stderr)
             sys.exit(1)
 
@@ -282,9 +368,21 @@ def cmd_init(args):
 def cmd_deactivate(args):
     """Deactivate a loop with timestamp and optional reason."""
     session_id = resolve_session_id(args)
-    path = get_state_path(args.loop, session_id)
-    cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
-    state = cls.load(path)
+    canonical = LOOP_ALIASES[args.loop]
+    cls = LOOP_CLASSES[canonical]
+
+    # BLOCKING 1 (session-id symmetry): deactivate the SAME file the Stop hook
+    # would find — the session-scoped file if present, else an adoptable legacy
+    # file — so a loop init'd with a given session-id is always turned off
+    # against the file it wrote (never a stale legacy file while the scoped one
+    # keeps blocking). Fall back to the scoped path when nothing is found.
+    crew_dir = get_project_dir() / ".crew"
+    path = find_session_state_file(crew_dir, LOOP_PREFIXES[canonical], session_id)
+    if path is None:
+        path = get_state_path(args.loop, session_id)
+
+    # Phase 5 refuse-to-touch: honor the same contract as the hook.
+    state = _load_for_mutation(cls, path)
 
     # Build dict with extra metadata
     data = asdict(state)
@@ -307,7 +405,7 @@ def cmd_increment(args):
     session_id = resolve_session_id(args)
     path = get_state_path(args.loop, session_id)
     cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
-    state = cls.load(path)
+    state = _load_for_mutation(cls, path)
 
     state.iteration += 1
     state.save(path)

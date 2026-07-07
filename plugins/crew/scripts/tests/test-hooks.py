@@ -1042,6 +1042,60 @@ def main():
                 f.unlink()
 
             # =========================================================================
+            # BLOCKING 1: init/deactivate --session-id symmetry (no orphaned loop)
+            # =========================================================================
+            run_crew_state(
+                ["init", "bl", "--prompt", "sym task", "--session-id", "symS"], test_path)
+            scoped = crew_dir / "build-state-symS.json"
+            active_before = (
+                json.loads(scoped.read_text()).get("active") if scoped.exists() else None
+            )
+            _, _, deact_code = run_crew_state(
+                ["deactivate", "bl", "--reason", "done", "--session-id", "symS"], test_path)
+            still_active = []
+            for f in crew_dir.glob("*-state*.json"):
+                try:
+                    if json.loads(f.read_text()).get("active"):
+                        still_active.append(f.name)
+                except (OSError, json.JSONDecodeError):
+                    pass
+            if deact_code == 0 and active_before is True and not still_active:
+                log_pass("init/deactivate --session-id symmetry - scoped loop fully cleared")
+            else:
+                log_fail(
+                    "init/deactivate --session-id symmetry - scoped loop fully cleared",
+                    "scoped file inactive, zero active files",
+                    f"code={deact_code} active_before={active_before} still_active={still_active}")
+            for f in crew_dir.glob("*-state*.json"):
+                f.unlink()
+
+            # =========================================================================
+            # BLOCKING 2: mutating CLI refuses to touch a future-schema state file
+            # =========================================================================
+            future_bytes = (
+                b'{"active": true, "prompt": "newer", "iteration": 3, '
+                b'"max_iterations": 10, "session_id": "futS", "schema": 99}')
+            fut = crew_dir / "build-state-futS.json"
+            for mut in (
+                ["init", "bl", "--prompt", "x", "--session-id", "futS"],
+                ["set", "bl", "iteration", "5", "--session-id", "futS"],
+                ["increment", "bl", "iteration", "--session-id", "futS"],
+                ["deactivate", "bl", "--reason", "x", "--session-id", "futS"],
+            ):
+                fut.write_bytes(future_bytes)
+                _, err, code = run_crew_state(mut, test_path)
+                untouched = fut.read_bytes() == future_bytes
+                if code != 0 and untouched:
+                    log_pass(f"future-schema refuse ({mut[0]}) - nonzero exit, bytes untouched")
+                else:
+                    log_fail(
+                        f"future-schema refuse ({mut[0]}) - nonzero exit, bytes untouched",
+                        "nonzero + bytes untouched",
+                        f"code={code} untouched={untouched} err={err[:120]}")
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+
+            # =========================================================================
             # SESSION-SCOPED PERSISTENT MODE TESTS
             # =========================================================================
             log_section("persistent-mode.py (session-scoped)")

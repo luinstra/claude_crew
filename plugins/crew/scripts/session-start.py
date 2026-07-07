@@ -40,6 +40,8 @@ from models import (
     get_file_age_days,
     count_incomplete_todos,
     is_verbose,
+    read_state_json,
+    LOAD_OK,
 )
 from state_discovery import is_loop_state_file, is_active_state_file
 
@@ -67,9 +69,13 @@ def cleanup_stale_files(directory: Path) -> None:
     if not directory.is_dir():
         return
 
-    # Patterns for non-state crew files
+    # Patterns for non-state crew files. `*.corrupt` sweeps the set-aside
+    # artifacts the Stop hook / crew-state CLI create when a state file can't be
+    # parsed (they end in `.corrupt`, so the `*.json` loop above never sees
+    # them) — otherwise `build-state.json.corrupt` accumulates forever.
     non_state_patterns = [
         "context-snapshot-*.json",
+        "*.corrupt",
     ]
 
     now = time.time()
@@ -193,10 +199,16 @@ def detect_project_stack(directory: Path) -> list[str]:
     # **/*.kts) — detected in one walk. Exposed/Trino stay a root build-file read.
     found_kt = found_kts = found_gradle_kts = False
     visited = 0
+    capped = False
     for root, dirnames, filenames in os.walk(str(directory)):
         # Prune in-place so os.walk never descends into artifact/vendor dirs.
         dirnames[:] = [d for d in dirnames if d not in STACK_PRUNE_DIRS]
         for name in filenames:
+            # Check the cap INSIDE the file loop so one pathological directory
+            # can't be fully iterated before the ceiling fires.
+            if visited >= STACK_WALK_MAX_ENTRIES:
+                capped = True
+                break
             visited += 1
             if name.endswith(".gradle.kts"):
                 found_gradle_kts = True
@@ -207,7 +219,7 @@ def detect_project_stack(directory: Path) -> list[str]:
                 found_kt = True
             if found_kt and found_kts and found_gradle_kts:
                 break
-        if (found_kt and found_kts and found_gradle_kts) or visited >= STACK_WALK_MAX_ENTRIES:
+        if capped or (found_kt and found_kts and found_gradle_kts):
             break
 
     if found_kt or found_kts:
@@ -369,8 +381,13 @@ def build_session_status(
                 continue
 
             try:
-                with open(json_file) as f:
-                    data = json.load(f)
+                # Classify via the shared reader so a corrupt or NEWER-schema
+                # file is never reported as "Active" (the Stop hook refuses to
+                # honor those — surfacing a phantom active loop here would
+                # contradict it). Only LOAD_OK files are inspected.
+                data, load_status = read_state_json(json_file)
+                if load_status != LOAD_OK or data is None:
+                    continue
                 if not data.get("active", False):
                     continue
 

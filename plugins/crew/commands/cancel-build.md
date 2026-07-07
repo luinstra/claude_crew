@@ -9,10 +9,14 @@ The user has requested early exit from the build loop.
 
 ## MANDATORY ACTION
 
-Execute this command to fully cancel the build loop:
+Execute this command to fully cancel the build loop. Pass `--session-id` (the
+`[Session ID: …]` value injected this session, as a literal — NOT a
+`${CLAUDE_SESSION_ID}` shell expansion) so cancel deactivates the exact
+session-scoped state file the loop was init'd with; otherwise the scoped file
+stays active and keeps blocking Stop:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" state deactivate bl --reason "User cancelled via /crew:cancel-build"
+"${CLAUDE_PLUGIN_ROOT}/crew" state deactivate bl --reason "User cancelled via /crew:cancel-build" --session-id <session-id>
 ```
 
 ## After Running

@@ -72,7 +72,15 @@ def _handle_load_status(loop_file: Path, status: str):
         try:
             loop_file.replace(corrupt_path)
         except OSError:
-            pass
+            # Rename failed — never wedge the user in a permanent block loop.
+            # Try to delete the corrupt file so the next Stop allows; if THAT
+            # also fails, allow this Stop (fail-open) with the diagnostic on the
+            # allow side rather than blocking forever with no path to recovery.
+            try:
+                loop_file.unlink()
+            except OSError:
+                print(HookResult.allow_with_diagnostic(_corrupt_block_message(loop_file)).to_json())
+                return True
         print(HookResult.block(_corrupt_block_message(loop_file)).to_json())
         return True
     if status == LOAD_FUTURE_SCHEMA:
