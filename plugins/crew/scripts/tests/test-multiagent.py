@@ -21,6 +21,7 @@ Covers Step 1.7:
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -2526,6 +2527,32 @@ def test_dispatcher():
         badloop = _run_dispatcher(["state", "show", "xx"], cwd=td, timeout=30)
         check("crew state show <bad-loop> exits NONZERO (exit propagates)",
               badloop.returncode != 0, "nonzero", str(badloop.returncode))
+
+    # (a.6) Backend missing/corrupt (untested failure mode #9): a copy of
+    # plugins/crew/ with scripts/crew-state.py REMOVED must NOT raw-traceback —
+    # `crew state show bl` exits 2 with the graceful "state backend
+    # missing/corrupt … reinstall" line on stderr.
+    with tempfile.TemporaryDirectory() as td:
+        dst = Path(td) / "crew"
+        shutil.copytree(PLUGIN_ROOT, dst)
+        (dst / "scripts" / "crew-state.py").unlink()
+        crew_bin = dst / "crew"
+        try:
+            os.chmod(crew_bin, 0o755)
+        except OSError:
+            pass
+        proc = subprocess.run(
+            [str(crew_bin), "state", "show", "bl"],
+            capture_output=True, text=True, env=_neutral_env(),
+            cwd=td, timeout=30,
+        )
+        check("missing crew-state.py: exits 2 (graceful backend error)",
+              proc.returncode == 2, "2", f"{proc.returncode}: {proc.stderr[:150]}")
+        check("missing crew-state.py: emits the reinstall diagnostic",
+              "state backend missing/corrupt" in proc.stderr,
+              "reinstall diagnostic", proc.stderr[:150])
+        check("missing crew-state.py: NO raw traceback",
+              "Traceback" not in proc.stderr, "no traceback", proc.stderr[:150])
 
 
 def test_stage_all():
