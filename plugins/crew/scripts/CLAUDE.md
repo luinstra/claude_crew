@@ -490,8 +490,11 @@ files keep working). Reads classify a file via `read_state_json` /
 - **Corrupt** (unparseable / non-object JSON): the Stop hook and `init` set the
   file aside as `<name>.corrupt` (a one-time diagnostic; `init` then starts fresh
   state), while `set` / `increment` / `deactivate` refuse (nonzero) rather than
-  silently overwrite. `*.corrupt` artifacts are swept by `session-start`
-  cleanup.
+  silently overwrite. These set-aside artifacts are swept by `session-start`
+  cleanup, which is SCOPED to crew's own backup names — the
+  `build-state*.json.corrupt` and `measure-twice-state*.json.corrupt` globs (both
+  legacy and session-scoped forms) — so an unrelated `*.corrupt` file is never
+  deleted.
 
 **Loop aliases:**
 - `bl` = `build`

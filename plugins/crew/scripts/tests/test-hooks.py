@@ -1111,12 +1111,67 @@ def main():
                     fresh_ok = _d.get("active") is True and _d.get("prompt") == "fresh task"
                 except (OSError, json.JSONDecodeError):
                     fresh_ok = False
-            if code == 0 and aside.exists() and fresh_ok and "set aside" in err.lower():
+            # Assert the SUCCESS-path wording specifically: "set aside as <name>"
+            # plus the .corrupt filename, and NOT the "could not be set aside"
+            # failure phrasing (which also contains the substring "set aside").
+            err_l = err.lower()
+            note_ok = ("set aside as" in err_l
+                       and aside.name in err
+                       and "could not" not in err_l)
+            if code == 0 and aside.exists() and fresh_ok and note_ok:
                 log_pass("CLI init over corrupt file - set aside as .corrupt, fresh state written")
             else:
                 log_fail("CLI init over corrupt file - set aside as .corrupt, fresh state written",
-                         "exit 0, .corrupt exists, fresh active state, 'set aside' note",
-                         f"code={code} aside={aside.exists()} fresh={fresh_ok} err={err[:120]}")
+                         "exit 0, .corrupt exists, fresh active state, 'set aside as <name>' success note",
+                         f"code={code} aside={aside.exists()} fresh={fresh_ok} note_ok={note_ok} err={err[:120]}")
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+
+            # =========================================================================
+            # _resolve_mutation_path: set/increment with --session-id against an
+            # ADOPTED LEGACY (unsuffixed) state file mutate THAT file in place (via
+            # find_session_state_file), never a stray session-scoped path. The
+            # deactivate arm of this symmetry is covered above; this covers the
+            # set/increment verbs (the actual bug _resolve_mutation_path fixed).
+            # =========================================================================
+            legacy = crew_dir / "build-state.json"
+            scoped_stray = crew_dir / "build-state-legS.json"
+            # session_id:"" → adoptable by any session per find_session_state_file
+            legacy.write_text(
+                '{"active": true, "prompt": "legacy adopt", "iteration": 1, '
+                '"max_iterations": 10, "session_id": ""}'
+            )
+            _, _, set_code = run_crew_state(
+                ["set", "bl", "iteration", "7", "--session-id", "legS"], test_path)
+            legacy_after_set = json.loads(legacy.read_text())
+            set_ok = (
+                set_code == 0
+                and legacy_after_set.get("iteration") == 7
+                and not scoped_stray.exists()
+            )
+            if set_ok:
+                log_pass("set --session-id over adopted legacy file - mutates legacy in place, no stray scoped file")
+            else:
+                log_fail(
+                    "set --session-id over adopted legacy file - mutates legacy in place, no stray scoped file",
+                    "legacy iteration=7, no build-state-legS.json",
+                    f"code={set_code} legacy_iter={legacy_after_set.get('iteration')} stray={scoped_stray.exists()}")
+
+            _, _, inc_code = run_crew_state(
+                ["increment", "bl", "iteration", "--session-id", "legS"], test_path)
+            legacy_after_inc = json.loads(legacy.read_text())
+            inc_ok = (
+                inc_code == 0
+                and legacy_after_inc.get("iteration") == 8
+                and not scoped_stray.exists()
+            )
+            if inc_ok:
+                log_pass("increment --session-id over adopted legacy file - mutates legacy in place, no stray scoped file")
+            else:
+                log_fail(
+                    "increment --session-id over adopted legacy file - mutates legacy in place, no stray scoped file",
+                    "legacy iteration=8, no build-state-legS.json",
+                    f"code={inc_code} legacy_iter={legacy_after_inc.get('iteration')} stray={scoped_stray.exists()}")
             for f in crew_dir.glob("*-state*.json*"):
                 f.unlink()
 
