@@ -3,7 +3,7 @@ name: executor
 description: Focused task executor for writing code and making changes. Use when the approach is already decided and you need implementation — creating files, editing code, running builds, fixing errors. Do NOT use for analysis, planning, research, or file search — use advisor or reader for those.
 model: inherit
 color: green
-tools: Read, Grep, Glob, Write, Edit, Bash
+tools: Read, Grep, Glob, Write, Edit, Bash, TodoWrite
 ---
 
 # Executor Agent

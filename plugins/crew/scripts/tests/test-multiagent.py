@@ -5347,9 +5347,11 @@ def test_probe():
         check("probe unknown seat -> no JSON on stdout",
               proc.stdout.strip() == "", "empty stdout", proc.stdout[:120])
 
-        # 2. Absent CLI (codex not on the isolated PATH) -> status skipped, exit 0.
+        # 2. Absent CLI (codex not on the isolated PATH) -> status skipped, but
+        # since EVERY probed seat was skipped, exit 2 (all-skipped must NOT read
+        # as a healthy green — L4). The JSON still records the skipped status.
         proc = _run_cli(["probe", "codex"], env=env_empty, timeout=30)
-        check("probe absent CLI -> exit 0", proc.returncode == 0, "0",
+        check("probe all-skipped -> exit 2", proc.returncode == 2, "2",
               f"{proc.returncode}: {proc.stderr[:200]}")
         try:
             payload = json.loads(proc.stdout)
@@ -5397,6 +5399,25 @@ def test_probe():
         check("probe pass -> stdout is JSON-only (no extra lines)",
               proc.stdout.strip().startswith("{") and proc.stdout.strip().endswith("}"),
               "pure JSON", proc.stdout[:120])
+
+        # 7b. Mixed pass + skipped (codex present via env_pass, agy absent on the
+        # isolated PATH) -> exit 0. A skipped seat alongside a real pass is still
+        # healthy; only ALL-skipped (test 2) or any fail/degraded flips nonzero.
+        proc = _run_cli(["probe", "codex", "agy"], env=env_pass, timeout=30)
+        check("probe pass+skipped -> exit 0", proc.returncode == 0, "0",
+              f"{proc.returncode}: {proc.stderr[:200]}")
+        try:
+            payload = json.loads(proc.stdout)
+        except Exception as exc:
+            payload = None
+            check("probe pass+skipped stdout parses as JSON", False, "valid json",
+                  f"{exc}: {proc.stdout[:200]}")
+        if payload is not None:
+            check("probe pass+skipped -> codex pass, agy skipped",
+                  payload.get("codex", {}).get("status") == "pass"
+                  and payload.get("agy", {}).get("status") == "skipped",
+                  "codex=pass agy=skipped",
+                  f"codex={payload.get('codex')} agy={payload.get('agy')}")
 
         # 4. Fake codex that prints unrelated prose -> status degraded, exit 1.
         bins_degraded = d / "bin-degraded"; bins_degraded.mkdir()

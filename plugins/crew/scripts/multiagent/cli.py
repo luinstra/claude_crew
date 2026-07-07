@@ -2156,8 +2156,10 @@ def cmd_probe(args: argparse.Namespace) -> int:
     doctor answers "is the CLI installed?"; probe answers "does the seat
     actually return usable output?". Subprocess seats only — Task seats are
     orchestrator-dispatched and rejected with the same loud message cmd_run
-    uses. Exit 0 = every probed seat passed/skipped; 1 = any fail/degraded;
-    2 = usage error.
+    uses. Exit 0 = at least one seat passed and none failed/degraded;
+    1 = any fail/degraded; 2 = usage error OR every probed seat was skipped
+    (nothing actually passed — an all-skipped probe must NOT masquerade as a
+    healthy green to a scripted health check keying on the exit code).
     """
     names = list(known_seat_names()) if args.all else args.seats
     if not names:
@@ -2236,7 +2238,14 @@ def cmd_probe(args: argparse.Namespace) -> int:
         p.write_text(text + "\n", encoding="utf-8")
 
     print(text)
-    return 0 if all(v["status"] in ("pass", "skipped") for v in results.values()) else 1
+    statuses = [v["status"] for v in results.values()]
+    if any(s in ("fail", "degraded") for s in statuses):
+        return 1
+    if any(s == "pass" for s in statuses):
+        return 0
+    # No pass and no fail → every probed seat was skipped. A fully-skipped
+    # probe proved nothing ran; exit 2 so it can't read as a healthy green.
+    return 2
 
 
 # --- scaffold-config: template rendering -------------------------------------

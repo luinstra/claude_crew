@@ -1409,6 +1409,52 @@ def main():
             for f in crew_dir.glob("*.corrupt"):
                 f.unlink()
 
+            # --- L5: context-snapshot .md + .restored.md + orphaned .tmp sweep ---
+            # The real save-context artifact is `.crew/context-snapshot.md`, and
+            # restore renames it to `.crew/context-snapshot.restored.md`, which
+            # accumulated forever under the old `context-snapshot-*.json`-only
+            # pattern. A stale restored snapshot IS now swept; an ACTIVE state
+            # file in the same pass survives untouched.
+            stale_restored = crew_dir / "context-snapshot.restored.md"
+            stale_restored.write_text("# old restored snapshot")
+            stale_snapshot = crew_dir / "context-snapshot.md"
+            stale_snapshot.write_text("# old snapshot")
+            orphan_tmp = crew_dir / ".build-state-x.json.abc123.tmp"
+            orphan_tmp.write_text("orphaned atomic-write temp")
+            snap_old_mtime = _time.time() - (8 * 86400)
+            for _sf in (stale_restored, stale_snapshot, orphan_tmp):
+                os.utime(_sf, (snap_old_mtime, snap_old_mtime))
+            # A live active loop from THIS pass must not be collateral.
+            live_active = crew_dir / "build-state-liveL5.json"
+            live_active.write_text('{"active": true, "prompt": "current task", "session_id": "liveL5"}')
+
+            run_script(session_start, json.dumps({"directory": str(test_path)}))
+
+            if not stale_restored.exists():
+                log_pass("Cleanup sweeps stale context-snapshot.restored.md")
+            else:
+                log_fail("Cleanup sweeps stale context-snapshot.restored.md", "deleted", "still exists")
+
+            if not stale_snapshot.exists():
+                log_pass("Cleanup sweeps stale context-snapshot.md")
+            else:
+                log_fail("Cleanup sweeps stale context-snapshot.md", "deleted", "still exists")
+
+            if not orphan_tmp.exists():
+                log_pass("Cleanup sweeps orphaned atomic-write .tmp")
+            else:
+                log_fail("Cleanup sweeps orphaned atomic-write .tmp", "deleted", "still exists")
+
+            if live_active.exists():
+                log_pass("Cleanup preserves an active state file during the .md sweep")
+            else:
+                log_fail("Cleanup preserves an active state file during the .md sweep",
+                         "file exists", "file wrongly deleted")
+
+            # Clean up
+            for f in list(crew_dir.glob("*.md")) + list(crew_dir.glob("*.tmp")) + list(crew_dir.glob("*-state*.json")):
+                f.unlink()
+
             # =========================================================================
             # STALE TODO CLEANUP TESTS
             # =========================================================================

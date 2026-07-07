@@ -80,8 +80,17 @@ def cleanup_stale_files(directory: Path) -> None:
     # NOT a loose `build-state*.json.corrupt` that would also match a foreign
     # `build-stateEVIL.json.corrupt`. An unrelated `*.corrupt` file the user parked
     # in `~/.claude` or `.crew` is never deleted by cleanup.
+    # The context-snapshot globs cover BOTH the real artifact save-context.md
+    # writes (`.crew/context-snapshot.md`) and the `.restored.md` rename
+    # restore-context.md leaves behind (otherwise it accumulates forever) —
+    # the legacy `context-snapshot-*.json` glob never matched either. `.*.tmp`
+    # sweeps atomic-write temps (`atomic_write_json` names them
+    # `.<name>.XXXXXX.tmp`) orphaned by a crash before the `finally` cleanup.
     non_state_patterns = [
         "context-snapshot-*.json",
+        "context-snapshot*.md",
+        "*.restored.md",
+        ".*.tmp",
         "build-state.json.corrupt",
         "build-state-*.json.corrupt",
         "measure-twice-state.json.corrupt",
