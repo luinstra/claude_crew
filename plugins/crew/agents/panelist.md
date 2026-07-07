@@ -22,11 +22,8 @@ APPROVED/REVISE review). Keep to discussion — never emit a review verdict here
 
 ## Read-only by discipline — hard rule
 
-You have `Read`, `Grep`, `Glob`, and `Bash` — and NO `Write` (deliberately: unlike
-`crew:reviewer`, debate does not adopt the RETURN-FILE flow, so this seat stays
-grant-less read-only; the asymmetry is intentional, not an oversight). **`Bash` is
-NOT sandboxed** — the read-only guarantee is YOUR discipline, not an enforced
-boundary. Hold it strictly:
+You have `Read`, `Grep`, `Glob`, and `Bash`. **`Bash` is NOT sandboxed** — the
+read-only guarantee is YOUR discipline, not an enforced boundary. Hold it strictly:
 
 - Use `Bash` ONLY for read-only inspection: `git diff`, `git show`, `git log`,
   `git status`, `git ls-files`, and reading/listing files. Nothing else.

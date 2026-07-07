@@ -153,10 +153,9 @@ is synthesized from whichever seats succeed.
 
 > **`allowed-tools` scopes THIS orchestrator only.** It grants nothing to the seats
 > spawned below — seat tool access is governed per-seat by the reviewer agent
-> frontmatter (`Read, Grep, Glob, Bash, Write`) and the engine's sandbox flags.
-> (`Write` stays in `allowed-tools` ONLY for the never-choke fallback — writing a
-> temp file to feed `persist-seat -f`/`repair-seat -f` when a seat's RETURN-FILE is
-> missing/empty; the happy path persists the seat's own return file. Do not drop it.)
+> frontmatter (`Read, Grep, Glob, Bash`) and the engine's sandbox flags.
+> (`Write` stays in `allowed-tools` for the temp files that feed `persist-seat -f`
+> and `repair-seat -f` — do not drop it.)
 
 #### 3a — Fan out subprocess seats (one visible shell PER SEAT)
 
@@ -281,9 +280,8 @@ The staged prompt already states this is a **plan review**, tells the seat to re
 the plan at `[plan_file from state]` itself (reference mode), lists the criteria
 (clarity, testability, completeness, context), and asks for per-criterion PASS/FAIL +
 `[BLOCKING]`/`[MINOR]` findings + a one-line verdict. `crew:reviewer` has `Read, Grep,
-Glob, Bash` for exactly this plus `Write` scoped to `.crew/reviews/<session-id>/` for
-its return file. Because every seat's prompt comes from the one `render` source over
-the same plan target, the panel reviews a single identical plan.
+Glob, Bash` for exactly this. Because every seat's prompt comes from the one `render`
+source over the same plan target, the panel reviews a single identical plan.
 
 **Never choke on a Task-seat failure:** a `crew:reviewer` spawn that errors, times
 out, returns no usable block, or is reported missing/failed MUST NOT abort the review.
@@ -294,9 +292,7 @@ Task seat is treated identically to a failed subprocess seat.
 
 > **The Task RESULT is the only completion signal.** Each `Task(...)` RETURNS the
 > seat's final message as its tool result — that returned text IS the seat's review
-> *and* the proof it finished. It ends with two pinned lines — `VERDICT:
-> <APPROVED|REVISE|REJECT>` and `RETURN-FILE: .crew/reviews/<session-id>/return-<seat,
-> dot-stripped>.md` — above which it carries the full review block. Take `ok`/`output`
+> *and* the proof it finished. Take `ok`/`output`
 > from that returned result. **NEVER judge a seat by a proxy** (output-file byte size,
 > transcript length, a missed notification, elapsed time): those race the transcript
 > flush and have falsely declared a finished seat "dead", discarding a good review. A
@@ -322,21 +318,16 @@ results:
 A failed Task seat renders exactly like a failed subprocess seat. A skipped/unspawnable
 seat renders a clearly-marked skipped block and is excluded from the verdict math.
 
-**Persist each Task seat through the engine.** **Read the verdict from the `VERDICT:`
-line of the Task RESULT, and take the persist path from the `RETURN-FILE:` line** —
-the reviewer already wrote its review block to that file. For EACH entry in
-`task_seats` (never a hardcoded list), persist that file directly (no orchestrator
-Write on the happy path):
+**Persist each Task seat through the engine** (Decision-H). For EACH entry in
+`task_seats` (from the prep JSON — never a hardcoded list), write the seat's
+returned Task result to a temp file with the Write tool, then:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" persist-seat <seat> --session-id <session-id> --model "<task_seat_models[<seat>]>" -f .crew/reviews/<session-id>/return-<seat, dot-stripped>.md
+"${CLAUDE_PLUGIN_ROOT}/crew" persist-seat <seat> --session-id <session-id> --model "<task_seat_models[<seat>]>" -f <temp-file>
 ```
 
-- **Never-choke fallback:** if the `RETURN-FILE:` line is missing or the file is
-  empty, Write the seat's returned Task text to a temp file and `persist-seat -f`
-  THAT instead — a seat can degrade, but the round must not choke.
-- For a seat whose Task errored / returned no usable block, persist the failure
-  instead (never fabricate an ok result):
+For a seat whose Task errored / returned no usable block, persist the failure
+instead (never fabricate an ok result):
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" persist-seat <seat> --session-id <session-id> --model "<task_seat_models[<seat>]>" --failed --error "<one-line diagnostic>"

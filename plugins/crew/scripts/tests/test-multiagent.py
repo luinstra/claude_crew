@@ -4445,12 +4445,12 @@ def test_persist_seat_doc_sync():
         check(f"{rel} has NO inline-paste seat spawn",
               'prompt="<contents of' not in text, "absent", "STILL INLINE-PASTING")
 
-    # T3b RETURN-FILE flow guard (Phase 12c): the reviewer writes its own return
-    # file, the orchestrator persists it BY PATH (`persist-seat … -f
-    # .crew/reviews/<id>/return-…`), reads the verdict from the pinned `VERDICT:`
-    # line, and takes the persist path from the `RETURN-FILE:` line. These three
-    # phrases together pin the happy-path flow across all three docs (the
-    # orchestrator Write-temp-file step is now fallback-only).
+    # T3b (reviewer-writes-own-return-file) was REVERTED: an unvalidated
+    # model-returned RETURN-FILE path (traversal/injection) + stale-file risk
+    # outweighed the token saving. The reviewer returns its review block as the
+    # Task RESULT (pre-T3b behavior); the orchestrator Writes that to a temp file
+    # and `persist-seat -f`s it. This CONVERSE guard fails if the T3b happy-path
+    # flow creeps back into any of the three review-bearing docs.
     RETURN_FILE_MARKERS = [
         "RETURN-FILE:",                              # the pinned RESULT line
         "-f .crew/reviews/<session-id>/return-",     # persist-seat by path
@@ -4459,20 +4459,20 @@ def test_persist_seat_doc_sync():
     for rel in docs:
         text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
         for marker in RETURN_FILE_MARKERS:
-            check(f"{rel} has T3b RETURN-FILE flow: {marker!r}",
-                  marker in text, "present", "MISSING")
+            check(f"{rel} has NO reverted T3b RETURN-FILE flow: {marker!r}",
+                  marker not in text, "absent", "STILL PRESENT (T3b crept back?)")
 
-    # T3b grant/doc sync: reviewer.md's frontmatter tools line MUST include Write
-    # (the RETURN-FILE happy path is inexecutable without it); panelist.md must NOT
-    # (debate does not adopt RETURN-FILE — the asymmetry is deliberate).
+    # Grant/doc sync: BOTH panel Task seats are read-only by convention — neither
+    # reviewer.md nor panelist.md may grant Write on its frontmatter tools line
+    # (reviewer's T3b Write grant was reverted; panelist never had one).
     reviewer_line6 = (SCRIPT_DIR.parent / "agents/reviewer.md").read_text(
         encoding="utf-8").splitlines()[5]
-    check("reviewer.md:6 tools line grants Write (T3b happy path)",
-          reviewer_line6.startswith("tools:") and "Write" in reviewer_line6,
-          "tools line with Write", repr(reviewer_line6))
+    check("reviewer.md:6 tools line does NOT grant Write (read-only by convention)",
+          reviewer_line6.startswith("tools:") and "Write" not in reviewer_line6,
+          "tools line without Write", repr(reviewer_line6))
     panelist_line6 = (SCRIPT_DIR.parent / "agents/panelist.md").read_text(
         encoding="utf-8").splitlines()[5]
-    check("panelist.md:6 tools line does NOT grant Write (deliberate asymmetry)",
+    check("panelist.md:6 tools line does NOT grant Write (read-only by convention)",
           panelist_line6.startswith("tools:") and "Write" not in panelist_line6,
           "tools line without Write", repr(panelist_line6))
 
