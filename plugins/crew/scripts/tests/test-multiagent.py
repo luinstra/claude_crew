@@ -2528,8 +2528,8 @@ def test_dispatcher():
         check("crew state show <bad-loop> exits NONZERO (exit propagates)",
               badloop.returncode != 0, "nonzero", str(badloop.returncode))
 
-    # (a.6) Backend missing/corrupt (untested failure mode #9): a copy of
-    # plugins/crew/ with scripts/crew-state.py REMOVED must NOT raw-traceback —
+    # (a.6) Backend missing/corrupt: a copy of
+    # plugins/crew/ with scripts/crew-state.py REMOVED must NOT raw-traceback,
     # `crew state show bl` exits 2 with the graceful "state backend
     # missing/corrupt … reinstall" line on stderr.
     with tempfile.TemporaryDirectory() as td:
@@ -4443,11 +4443,11 @@ def test_persist_seat_doc_sync():
         check(f"{rel} has NO inline-paste seat spawn",
               'prompt="<contents of' not in text, "absent", "STILL INLINE-PASTING")
 
-    # T3b (reviewer-writes-own-return-file) was REVERTED: an unvalidated
+    # The reviewer-writes-own-return-file variant was REVERTED: an unvalidated
     # model-returned RETURN-FILE path (traversal/injection) + stale-file risk
     # outweighed the token saving. The reviewer returns its review block as the
-    # Task RESULT (pre-T3b behavior); the orchestrator Writes that to a temp file
-    # and `persist-seat -f`s it. This CONVERSE guard fails if the T3b happy-path
+    # Task RESULT (the pre-revert behavior); the orchestrator Writes that to a temp file
+    # and `persist-seat -f`s it. This CONVERSE guard fails if the reverted happy-path
     # flow creeps back into any of the three review-bearing docs.
     RETURN_FILE_MARKERS = [
         "RETURN-FILE:",                              # the pinned RESULT line
@@ -4462,7 +4462,7 @@ def test_persist_seat_doc_sync():
 
     # Grant/doc sync: BOTH panel Task seats are read-only by convention — neither
     # reviewer.md nor panelist.md may grant Write on its frontmatter tools line
-    # (reviewer's T3b Write grant was reverted; panelist never had one).
+    # (reviewer's return-file Write grant was reverted; panelist never had one).
     reviewer_line6 = (SCRIPT_DIR.parent / "agents/reviewer.md").read_text(
         encoding="utf-8").splitlines()[5]
     check("reviewer.md:6 tools line does NOT grant Write (read-only by convention)",
@@ -5392,7 +5392,7 @@ def test_probe():
 
         # 2. Absent CLI (codex not on the isolated PATH) -> status skipped, but
         # since EVERY probed seat was skipped, exit 2 (all-skipped must NOT read
-        # as a healthy green — L4). The JSON still records the skipped status.
+        # as a healthy green). The JSON still records the skipped status.
         proc = _run_cli(["probe", "codex"], env=env_empty, timeout=30)
         check("probe all-skipped -> exit 2", proc.returncode == 2, "2",
               f"{proc.returncode}: {proc.stderr[:200]}")
@@ -6857,11 +6857,11 @@ def test_persist_seat():
 
 
 def test_process_group_reaping():
-    """R3 (untested failure mode #6): a timed-out codex/cursor/agy seat reaps its
-    WHOLE process group so a billable grandchild is not orphaned. One case per
-    provider proves the shared _proc.run_reaped helper at all three call sites
-    (and exercises the extracted agy _terminate escalation)."""
-    log_section("provider process-group reaping (R3)")
+    """A timed-out codex/cursor/agy seat reaps its WHOLE process group so a
+    billable grandchild is not orphaned. One case per provider proves the shared
+    _proc.run_reaped helper at all three call sites (and exercises the extracted
+    agy _terminate escalation)."""
+    log_section("provider process-group reaping")
     import signal as _signal
     from multiagent.providers.cursor import CursorProvider
 

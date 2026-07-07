@@ -113,8 +113,8 @@ def get_state_path(loop: str, session_id: str = "") -> Path:
         sys.exit(1)
     project_dir = get_project_dir()
     crew_dir = project_dir / ".crew"
-    # L3: this is a READ-path helper — it must NOT create `.crew/`. Directory
-    # creation lives solely in the write path (atomic_write_json's own mkdir).
+    # read-path helper: must NOT create `.crew/`. Directory creation lives
+    # solely in the write path (atomic_write_json's own mkdir).
     return crew_dir / get_loop_filename(canonical, session_id)
 
 

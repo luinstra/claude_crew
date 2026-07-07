@@ -458,7 +458,7 @@ crew state init mt --task "Add user profiles" --auto-plan --session-id abc123
 # text field and is mutually exclusive with --prompt/--task; a missing/unreadable
 # (incl. non-UTF-8) file exits nonzero with NO state file created. The loop
 # commands (build.md / measure-twice.md) Write the spill file then rm it after a
-# successful init — the L5 cleanup patterns do NOT cover these task files.
+# successful init (the session-start orphan-cleanup patterns do NOT cover these task files).
 crew state init bl -f .crew/task-bl-abc123.txt --session-id abc123
 
 # Check if this session has conflicts (other sessions ignored)
@@ -520,7 +520,7 @@ class HookResult:
     reason: Optional[str]     # Block reason
     system_message: Optional[str]  # User-visible diagnostic (systemMessage, allow-side)
 
-# Usage (schema pinned by the 2026-07-06 C2 live smoke)
+# Usage (the load-bearing HookResult JSON shapes)
 HookResult.allow()                    # {}
 HookResult.allow("Info message")      # {"message": "..."}
 HookResult.allow_with_diagnostic("…") # {"systemMessage": "..."} (loud allow)

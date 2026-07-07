@@ -187,7 +187,7 @@ class SessionStartResult:
 # State Models
 # =============================================================================
 
-# Current on-disk state-file schema (L2). `load` treats an absent `schema` key
+# Current on-disk state-file schema. `load` treats an absent `schema` key
 # as 1 (legacy files keep working); a HIGHER value than this is a
 # newer-crew file that must be REFUSED, never rewritten (see LOAD_FUTURE_SCHEMA).
 SCHEMA_VERSION = 1

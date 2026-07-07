@@ -51,7 +51,7 @@ MAX_AGE_SECONDS = MAX_AGE_DAYS * 86400
 STALE_INACTIVE_DAYS = 1
 STALE_INACTIVE_SECONDS = STALE_INACTIVE_DAYS * 86400
 
-# R2: bound the stack-detection walk so it can't blow the 10s SessionStart hook
+# bound the stack-detection walk so it can't blow the 10s SessionStart hook
 # budget on a big tree. Canonical artifact/vendor dirs are pruned (real Kotlin
 # sources never live under them); the entry cap is a hard ceiling on files
 # visited. Both are module-level so tests can dial the cap down.
@@ -224,7 +224,7 @@ def cleanup_stale_todos(todos_dir: Path) -> None:
 def detect_project_stack(directory: Path) -> list[str]:
     """Detect project tech stack and return skill trigger hints.
 
-    R2: a single BOUNDED ``os.walk`` pass (pruned artifact dirs + an entry cap +
+    A single BOUNDED ``os.walk`` pass (pruned artifact dirs + an entry cap +
     early-exit once all extensions are seen) replaces three unbounded recursive
     globs, so a huge tree can't blow the 10s SessionStart hook budget. The hint
     output is behavior-identical to the old glob logic.
@@ -544,9 +544,9 @@ if __name__ == "__main__":
         )
         # models is importable here (top-of-module import succeeded before
         # main() ran). SessionStart's documented context channel is
-        # hookSpecificOutput.additionalContext (systemMessage is only
-        # C2-verified on the Stop allow-side), so emit the diagnostic the
-        # same way this hook emits its normal payload — plus stderr.
+        # hookSpecificOutput.additionalContext (systemMessage is honored on the
+        # Stop allow-side, not here), so emit the diagnostic the same way this
+        # hook emits its normal payload, plus stderr.
         print(SessionStartResult.with_context(_diag).to_json())
         print(_diag, file=sys.stderr)
         sys.exit(0)

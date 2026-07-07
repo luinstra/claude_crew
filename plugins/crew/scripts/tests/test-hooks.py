@@ -1409,7 +1409,7 @@ def main():
             for f in crew_dir.glob("*.corrupt"):
                 f.unlink()
 
-            # --- L5: context-snapshot .md + .restored.md + orphaned .tmp sweep ---
+            # --- context-snapshot .md + .restored.md + orphaned .tmp sweep ---
             # The real save-context artifact is `.crew/context-snapshot.md`, and
             # restore renames it to `.crew/context-snapshot.restored.md`, which
             # accumulated forever under the old `context-snapshot-*.json`-only
@@ -1982,7 +1982,7 @@ def main():
                          f"decision={payload_f.get('decision')}, sysmsg={payload_f.get('systemMessage','')[:60]!r}, "
                          f"bytes_equal={after_bytes == before_bytes}, renamed={renamed}")
 
-            # --- L3: read path does not create .crew/ ---
+            # --- read path does not create .crew/ ---
             for f in crew_dir.glob("*"):
                 if f.is_file():
                     f.unlink()
@@ -2151,7 +2151,7 @@ def main():
             # =========================================================================
             # PYTHON 3.9 IMPORT BOMB + LOUD FAIL-OPEN
             # =========================================================================
-            log_section("hooks: version guard + fail-open (C4)")
+            log_section("hooks: version guard + fail-open")
 
             session_start_path = SCRIPT_DIR / "session-start.py"
             state_discovery_path = SCRIPT_DIR / "state_discovery.py"
