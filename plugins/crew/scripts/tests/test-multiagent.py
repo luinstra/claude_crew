@@ -4431,6 +4431,51 @@ def test_persist_seat_doc_sync():
         check(f"{rel} has NO hand-rolled six-field Write persistence",
               "the exact six fields" not in text, "absent", "STILL PRESENT")
 
+    # T3a REFERENCE-SPAWN guard (Phase 12b): the three review-bearing docs must
+    # spawn Task seats by REFERENCE to the staged prompt file — the seat Reads it
+    # itself — NOT by pasting the staged prompt's contents inline. A drift back to
+    # `prompt="<contents of …prompt-…>"` re-inflates every spawn and re-couples the
+    # orchestrator to the prompt body; this catches that regression.
+    REF_SPAWN = "Read .crew/reviews/<session-id>/prompt-"
+    for rel in docs:
+        text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
+        check(f"{rel} spawns Task seats BY REFERENCE (T3a): {REF_SPAWN!r}",
+              REF_SPAWN in text, "present", "MISSING (drifted back to inline paste?)")
+        # CONVERSE: no inline-paste spawn survives.
+        check(f"{rel} has NO inline-paste seat spawn",
+              'prompt="<contents of' not in text, "absent", "STILL INLINE-PASTING")
+
+    # T3b RETURN-FILE flow guard (Phase 12c): the reviewer writes its own return
+    # file, the orchestrator persists it BY PATH (`persist-seat … -f
+    # .crew/reviews/<id>/return-…`), reads the verdict from the pinned `VERDICT:`
+    # line, and takes the persist path from the `RETURN-FILE:` line. These three
+    # phrases together pin the happy-path flow across all three docs (the
+    # orchestrator Write-temp-file step is now fallback-only).
+    RETURN_FILE_MARKERS = [
+        "RETURN-FILE:",                              # the pinned RESULT line
+        "-f .crew/reviews/<session-id>/return-",     # persist-seat by path
+        "Read the verdict from the",                 # the VERDICT: parse rule
+    ]
+    for rel in docs:
+        text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
+        for marker in RETURN_FILE_MARKERS:
+            check(f"{rel} has T3b RETURN-FILE flow: {marker!r}",
+                  marker in text, "present", "MISSING")
+
+    # T3b grant/doc sync: reviewer.md's frontmatter tools line MUST include Write
+    # (the RETURN-FILE happy path is inexecutable without it); panelist.md must NOT
+    # (debate does not adopt RETURN-FILE — the asymmetry is deliberate).
+    reviewer_line6 = (SCRIPT_DIR.parent / "agents/reviewer.md").read_text(
+        encoding="utf-8").splitlines()[5]
+    check("reviewer.md:6 tools line grants Write (T3b happy path)",
+          reviewer_line6.startswith("tools:") and "Write" in reviewer_line6,
+          "tools line with Write", repr(reviewer_line6))
+    panelist_line6 = (SCRIPT_DIR.parent / "agents/panelist.md").read_text(
+        encoding="utf-8").splitlines()[5]
+    check("panelist.md:6 tools line does NOT grant Write (deliberate asymmetry)",
+          panelist_line6.startswith("tools:") and "Write" not in panelist_line6,
+          "tools line without Write", repr(panelist_line6))
+
 
 # =============================================================================
 # /crew:dispatch — write-mode single-seat delegation

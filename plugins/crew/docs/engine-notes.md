@@ -72,6 +72,46 @@ review-bearing commands.
   severity, COMPLETE-LINKAGE clustering on
   `path_compatible AND line_compatible AND jaccard>=0.5`.
 
+## Review-bearing command decisions (labels moved out of the command docs)
+
+The `review`/`build`/`measure-twice` markdown used to carry these bare labels
+inline. The RULE each names is still stated in the command docs; only the label
+gloss lives here.
+
+- **Decision-H** — persist EACH normalized Task seat through `crew persist-seat`
+  (engine-owned dot-stripped slug + six-field shape), NOT a hand-rolled Write-tool
+  `<seat>.json`.
+- **Decision-I** — the WHOLE panel (subprocess AND Task seats) flows through ONE
+  grouped `collect`, including the Claude-only branch (subprocess seats empty),
+  which collects over the Task seats alone. There is NO "synthesize from raw Task
+  returns" path.
+- **Decision-J** — `<ran_seats>` order is `subprocess_seats` (resolved prep order)
+  THEN the dot-stripped `task_seats`.
+
+## T3a reference-spawn + T3b RETURN-FILE (why Task seats fetch/return by file)
+
+- **Reference-spawn (T3a).** The review-bearing commands spawn `crew:reviewer`
+  Task seats with a REFERENCE to the staged prompt file
+  (`Read .crew/reviews/<session-id>/prompt-<slug>.txt and follow it exactly`)
+  instead of pasting the staged prompt's contents inline — reference-not-payload
+  applied to Task seats (the reviewer has `Read`). build.md also passes the
+  executor summary as a PATH, not inline.
+- **RETURN-FILE (T3b).** The reviewer writes its OWN review block to
+  `.crew/reviews/<session-id>/return-<slug>.md` and ends its Task RESULT with two
+  pinned lines (`VERDICT:` / `RETURN-FILE:`). The orchestrator reads the verdict
+  from the `VERDICT:` line and `persist-seat -f`s the `RETURN-FILE:` path — so it
+  no longer Writes a temp file on the happy path (that Write is retained ONLY as
+  the never-choke fallback when the RETURN-FILE is missing/empty). The
+  "Task RESULT is the only completion signal" invariant stays literally true: the
+  RESULT carries completion + verdict; the file is body payload only.
+- **Reviewer `Write` grant is asymmetric with panelist.** `reviewer.md` gains
+  `Write` (path-scoped by convention to `.crew/reviews/<session-id>/`);
+  `panelist.md` does NOT — debate does not adopt RETURN-FILE, so its seats stay
+  grant-less read-only. The asymmetry is deliberate. The frontmatter grant is
+  GLOBAL (path-scoping is convention-only, same class as the Bash read-only
+  convention); the mitigation is the post-panel repo-state check + the live-smoke
+  `git status` assertion that no reviewer wrote outside `.crew/reviews/<id>/`.
+
 ## Reviewer / panelist seat — maintainer hardening note (moved from the agents)
 
 This applies to both `crew:reviewer` and `crew:panelist`. Their read-only-by-

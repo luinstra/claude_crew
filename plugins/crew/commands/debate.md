@@ -203,11 +203,15 @@ render line per Claude seat in the panel** — then dispatch the discuss seat
 "${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role fable -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-fable.txt
 ```
 
+Dispatch each seat **by reference** — point the panelist at its rendered file and
+let it `Read` it (reference, not payload; `crew:panelist` has `Read`), NOT the
+inlined contents:
+
 ```
-Task(subagent_type="crew:panelist", model="opus",   prompt="<contents of .crew/debates/<dir>/.prompt-opus.txt>")
-Task(subagent_type="crew:panelist", model="sonnet", prompt="<contents of .crew/debates/<dir>/.prompt-sonnet.txt>")
+Task(subagent_type="crew:panelist", model="opus",   prompt="You are the opus seat. Read .crew/debates/<dir>/.prompt-opus.txt and follow it exactly.")
+Task(subagent_type="crew:panelist", model="sonnet", prompt="You are the sonnet seat. Read .crew/debates/<dir>/.prompt-sonnet.txt and follow it exactly.")
 # opt-in fable — premium tier; only if it's in the panel:
-Task(subagent_type="crew:panelist", model="fable", prompt="<contents of .crew/debates/<dir>/.prompt-fable.txt>")
+Task(subagent_type="crew:panelist", model="fable", prompt="You are the fable seat. Read .crew/debates/<dir>/.prompt-fable.txt and follow it exactly.")
 ```
 
 (Review mode: render with `--mode review <target>` instead of `-f question`, and
@@ -284,8 +288,8 @@ and folds them in as injection-guarded DATA — on round 1 there is no prior):
 
 Render EVERY seat in the panel — subprocess AND task, including the opt-in
 `fable` Task seat when present — exactly as A3 renders one prompt per Claude
-seat; keep the render `-o` and the matching Task `prompt="<contents of …>"`
-pointed at the same file.
+seat; keep the render `-o` and the matching Task `Read .../.prompt-<seat>-r<n>.txt`
+reference pointed at the same file.
 
 Then run the round's seats (in parallel where possible):
 
@@ -300,11 +304,13 @@ Then run the round's seats (in parallel where possible):
   so a full version-locked id would be rejected at spawn). This is the SAME
   task-seat set and SAME pinning A3 uses, so single-round and multi-round stay
   in lockstep.
+  Dispatch each **by reference** (`crew:panelist` has `Read` — point it at the
+  rendered file, do NOT inline the contents):
   ```
-  Task(subagent_type="crew:panelist", model="opus",            prompt="<contents of .crew/debates/<run-id>/.prompt-opus-r<n>.txt>")
-  Task(subagent_type="crew:panelist", model="sonnet",          prompt="<contents of .crew/debates/<run-id>/.prompt-sonnet-r<n>.txt>")
+  Task(subagent_type="crew:panelist", model="opus",            prompt="You are the opus seat. Read .crew/debates/<run-id>/.prompt-opus-r<n>.txt and follow it exactly.")
+  Task(subagent_type="crew:panelist", model="sonnet",          prompt="You are the sonnet seat. Read .crew/debates/<run-id>/.prompt-sonnet-r<n>.txt and follow it exactly.")
   # opt-in fable — only if it's in the panel:
-  Task(subagent_type="crew:panelist", model="fable",           prompt="<contents of .crew/debates/<run-id>/.prompt-fable-r<n>.txt>")
+  Task(subagent_type="crew:panelist", model="fable",           prompt="You are the fable seat. Read .crew/debates/<run-id>/.prompt-fable-r<n>.txt and follow it exactly.")
   ```
   Use each Task's RETURNED result as its take and completion signal — never an output-file size or other proxy (see A3).
 
