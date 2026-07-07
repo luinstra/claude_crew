@@ -1096,6 +1096,63 @@ def main():
                 f.unlink()
 
             # =========================================================================
+            # CLI init over a CORRUPT state file: set aside as .corrupt, start fresh
+            # =========================================================================
+            corrupt_target = crew_dir / "build-state-corS.json"
+            corrupt_target.write_text('{"active": true, "prompt": "broken", trunc')  # invalid JSON
+            _, err, code = run_crew_state(
+                ["init", "bl", "--prompt", "fresh task", "--session-id", "corS"], test_path)
+            aside = crew_dir / "build-state-corS.json.corrupt"
+            fresh_ok = False
+            if corrupt_target.exists():
+                try:
+                    with open(corrupt_target) as _f:
+                        _d = json.load(_f)
+                    fresh_ok = _d.get("active") is True and _d.get("prompt") == "fresh task"
+                except (OSError, json.JSONDecodeError):
+                    fresh_ok = False
+            if code == 0 and aside.exists() and fresh_ok and "set aside" in err.lower():
+                log_pass("CLI init over corrupt file - set aside as .corrupt, fresh state written")
+            else:
+                log_fail("CLI init over corrupt file - set aside as .corrupt, fresh state written",
+                         "exit 0, .corrupt exists, fresh active state, 'set aside' note",
+                         f"code={code} aside={aside.exists()} fresh={fresh_ok} err={err[:120]}")
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+
+            # =========================================================================
+            # CLI init rejects whitespace-only task text (inline flag AND -f file)
+            # =========================================================================
+            # whitespace-only --prompt
+            _, err, code = run_crew_state(["init", "bl", "--prompt", "   \n\t "], test_path)
+            if code != 0 and not (crew_dir / "build-state.json").exists():
+                log_pass("CLI init bl - whitespace-only --prompt rejected (nonzero, no state file)")
+            else:
+                log_fail("CLI init bl - whitespace-only --prompt rejected",
+                         "nonzero, no state file", f"code={code} exists={(crew_dir / 'build-state.json').exists()}")
+
+            # whitespace-only --task (measure-twice)
+            _, err, code = run_crew_state(["init", "mt", "--task", "  \t\n", "--auto-plan"], test_path)
+            if code != 0 and not (crew_dir / "measure-twice-state.json").exists():
+                log_pass("CLI init mt - whitespace-only --task rejected (nonzero, no state file)")
+            else:
+                log_fail("CLI init mt - whitespace-only --task rejected",
+                         "nonzero, no state file", f"code={code} exists={(crew_dir / 'measure-twice-state.json').exists()}")
+
+            # whitespace-only -f file content
+            ws_file = crew_dir / "ws-task.txt"
+            ws_file.write_text("   \n\t  \n")
+            _, err, code = run_crew_state(["init", "bl", "-f", str(ws_file)], test_path)
+            if code != 0 and not (crew_dir / "build-state.json").exists():
+                log_pass("CLI init bl - whitespace-only -f content rejected (nonzero, no state file)")
+            else:
+                log_fail("CLI init bl - whitespace-only -f content rejected",
+                         "nonzero, no state file", f"code={code} exists={(crew_dir / 'build-state.json').exists()}")
+            ws_file.unlink(missing_ok=True)
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+
+            # =========================================================================
             # SESSION-SCOPED PERSISTENT MODE TESTS
             # =========================================================================
             log_section("persistent-mode.py (session-scoped)")
@@ -1241,6 +1298,40 @@ def main():
 
             # Clean up
             for f in crew_dir.glob("*-state*.json"):
+                f.unlink()
+
+            # --- .corrupt sweep is SCOPED to crew's own backups (not any *.corrupt) ---
+            # A crew state backup past the age threshold IS swept.
+            crew_corrupt = crew_dir / "build-state.json.corrupt"
+            crew_corrupt.write_text('{"active": true, "prompt": "broken", trunc')
+            mt_corrupt = crew_dir / "measure-twice-state-abc.json.corrupt"
+            mt_corrupt.write_text("not json at all")
+            # An UNRELATED *.corrupt file the user parked here must NOT be touched.
+            user_corrupt = crew_dir / "secrets.corrupt"
+            user_corrupt.write_text("user data crew never created")
+            old_corrupt_mtime = _time.time() - (8 * 86400)
+            for _cf in (crew_corrupt, mt_corrupt, user_corrupt):
+                os.utime(_cf, (old_corrupt_mtime, old_corrupt_mtime))
+
+            run_script(session_start, json.dumps({"directory": str(test_path)}))
+
+            if not crew_corrupt.exists():
+                log_pass("Cleanup sweeps stale build-state.json.corrupt backup")
+            else:
+                log_fail("Cleanup sweeps stale build-state.json.corrupt backup", "deleted", "still exists")
+
+            if not mt_corrupt.exists():
+                log_pass("Cleanup sweeps stale measure-twice-state-<id>.json.corrupt backup")
+            else:
+                log_fail("Cleanup sweeps stale measure-twice-state-<id>.json.corrupt backup", "deleted", "still exists")
+
+            if user_corrupt.exists():
+                log_pass("Cleanup preserves an unrelated user *.corrupt file (not crew's backup)")
+            else:
+                log_fail("Cleanup preserves an unrelated user *.corrupt file", "file exists", "file deleted")
+
+            # Clean up
+            for f in crew_dir.glob("*.corrupt"):
                 f.unlink()
 
             # =========================================================================

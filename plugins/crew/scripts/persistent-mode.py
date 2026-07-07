@@ -41,15 +41,32 @@ from models import (
 from state_discovery import find_session_state_file
 
 
-def _corrupt_block_message(loop_file: Path) -> str:
-    """One-time block diagnostic for an unparseable state file (never-choke:
-    the file is set aside as .corrupt so the NEXT Stop allows)."""
+def _corrupt_block_message(loop_file: Path, disposition: str) -> str:
+    """One-time diagnostic for an unparseable state file (never-choke: the file
+    is disposed of so the NEXT Stop allows). ``disposition`` describes what
+    actually happened to the file so the message never lies:
+    - ``"set_aside"`` — renamed to ``<name>.corrupt`` (the normal path).
+    - ``"deleted"``   — rename failed, so it was deleted (unlink fallback).
+    - ``"stuck"``     — both rename AND delete failed; the file is untouched.
+    """
+    if disposition == "set_aside":
+        fate = (
+            f"It has been set aside as `{loop_file.name}.corrupt`."
+        )
+    elif disposition == "deleted":
+        fate = (
+            "It could not be renamed, so the unreadable state file was deleted."
+        )
+    else:  # "stuck"
+        fate = (
+            "It could not be set aside or deleted (check permissions) — the "
+            "unreadable state file is still in place."
+        )
     return (
         f"[Crew - State File Corrupt]\n\n"
         f"The loop state file `{loop_file.name}` could not be parsed (corrupt "
-        f"JSON) — any active loop state is lost. It has been set aside as "
-        f"`{loop_file.name}.corrupt`. If a loop was active, re-init it with "
-        f"`/crew:build` or `/crew:measure-twice`."
+        f"JSON) — any active loop state is lost. {fate} If a loop was active, "
+        f"re-init it with `/crew:build` or `/crew:measure-twice`."
     )
 
 
@@ -71,6 +88,7 @@ def _handle_load_status(loop_file: Path, status: str):
         corrupt_path = loop_file.with_name(loop_file.name + ".corrupt")
         try:
             loop_file.replace(corrupt_path)
+            disposition = "set_aside"
         except OSError:
             # Rename failed — never wedge the user in a permanent block loop.
             # Try to delete the corrupt file so the next Stop allows; if THAT
@@ -78,10 +96,11 @@ def _handle_load_status(loop_file: Path, status: str):
             # allow side rather than blocking forever with no path to recovery.
             try:
                 loop_file.unlink()
+                disposition = "deleted"
             except OSError:
-                print(HookResult.allow_with_diagnostic(_corrupt_block_message(loop_file)).to_json())
+                print(HookResult.allow_with_diagnostic(_corrupt_block_message(loop_file, "stuck")).to_json())
                 return True
-        print(HookResult.block(_corrupt_block_message(loop_file)).to_json())
+        print(HookResult.block(_corrupt_block_message(loop_file, disposition)).to_json())
         return True
     if status == LOAD_FUTURE_SCHEMA:
         # Refuse to touch: bytes untouched, loud diagnostic, allow stop.

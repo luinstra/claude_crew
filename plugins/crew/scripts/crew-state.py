@@ -2,7 +2,6 @@
 """Crew state management CLI for build and measure-twice persistence."""
 
 import argparse
-import contextlib
 import json
 import os
 import re
@@ -207,10 +206,24 @@ def cmd_check_conflicts(args):
     # No conflicts - silent success
 
 
+def _resolve_mutation_path(loop: str, session_id: str) -> Path:
+    """Resolve the state file a mutating verb should touch — the SAME file
+    cmd_deactivate targets (the Stop hook's find_session_state_file, so an
+    adopted legacy file is mutated on its real path), falling back to the fresh
+    session-scoped path when nothing is found. Keeps set/increment/deactivate in
+    agreement about which file they write."""
+    canonical = LOOP_ALIASES[loop]
+    crew_dir = get_project_dir() / ".crew"
+    path = find_session_state_file(crew_dir, LOOP_PREFIXES[canonical], session_id)
+    if path is None:
+        path = get_state_path(loop, session_id)
+    return path
+
+
 def cmd_set(args):
     """Set a single field on a loop state."""
     session_id = resolve_session_id(args)
-    path = get_state_path(args.loop, session_id)
+    path = _resolve_mutation_path(args.loop, session_id)
     cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
     state = _load_for_mutation(cls, path)
 
@@ -309,13 +322,25 @@ def cmd_init(args):
     _refuse_future_schema(path, target_status)
     if target_status == LOAD_CORRUPT:
         corrupt_path = path.with_name(path.name + ".corrupt")
-        with contextlib.suppress(OSError):
+        renamed = True
+        try:
             path.replace(corrupt_path)
-        print(
-            f"Warning: {path.name} was corrupt (unparseable JSON) — set aside as "
-            f"{corrupt_path.name}; continuing with fresh state.",
-            file=sys.stderr,
-        )
+        except OSError:
+            # Rename failed — the fresh state.save() below will overwrite the
+            # unreadable file in place. Don't claim we "set it aside".
+            renamed = False
+        if renamed:
+            print(
+                f"Warning: {path.name} was corrupt (unparseable JSON) — set aside "
+                f"as {corrupt_path.name}; continuing with fresh state.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"Warning: {path.name} was corrupt (unparseable JSON) and could "
+                f"not be set aside — starting fresh over the unreadable file.",
+                file=sys.stderr,
+            )
 
     if canonical == "bl":
         prompt = _resolve_init_text(args, args.prompt, "--prompt")
@@ -375,11 +400,10 @@ def cmd_deactivate(args):
     # would find — the session-scoped file if present, else an adoptable legacy
     # file — so a loop init'd with a given session-id is always turned off
     # against the file it wrote (never a stale legacy file while the scoped one
-    # keeps blocking). Fall back to the scoped path when nothing is found.
-    crew_dir = get_project_dir() / ".crew"
-    path = find_session_state_file(crew_dir, LOOP_PREFIXES[canonical], session_id)
-    if path is None:
-        path = get_state_path(args.loop, session_id)
+    # keeps blocking). set/increment share this resolver so all mutating verbs
+    # agree on which file they touch. Fall back to the scoped path when nothing
+    # is found.
+    path = _resolve_mutation_path(args.loop, session_id)
 
     # Phase 5 refuse-to-touch: honor the same contract as the hook.
     state = _load_for_mutation(cls, path)
@@ -403,7 +427,7 @@ def cmd_increment(args):
         sys.exit(1)
 
     session_id = resolve_session_id(args)
-    path = get_state_path(args.loop, session_id)
+    path = _resolve_mutation_path(args.loop, session_id)
     cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
     state = _load_for_mutation(cls, path)
 
