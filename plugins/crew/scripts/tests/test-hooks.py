@@ -835,7 +835,7 @@ def main():
             for f in crew_dir.glob("*-state*.json"):
                 f.unlink()
             stdout, stderr, code = run_crew_state(["init", "bl"], test_path)
-            if code == 1 and "--prompt required" in stderr:
+            if code == 1 and "--prompt or -f required" in stderr:
                 log_pass("init bl without --prompt - exits with error")
             else:
                 log_fail("init bl without --prompt - exits with error", "exit 1 with error message", f"exit {code}, stderr: {stderr}")
@@ -1773,6 +1773,77 @@ def main():
                 log_pass("stack detect: same tree with default cap finds the deep .kt (cap was the cause)")
             else:
                 log_fail("stack detect: same tree with default cap finds the deep .kt", "Kotlin", "not detected")
+
+            # =========================================================================
+            # PHASE 8 (R5 + L6): LOOP INIT -f (task off the shell)
+            # =========================================================================
+            log_section("crew state init -f (task off the shell)")
+
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+
+            # bl: -f reads the file into `prompt`, flags preserved byte-for-byte.
+            p8_taskfile = crew_dir / "task-bl-p8.txt"
+            p8_taskfile.write_text("Fix the auth bug --panel full", encoding="utf-8")
+            _, stderr, code = run_crew_state(
+                ["init", "bl", "-f", str(p8_taskfile), "--session-id", "p8"], test_path)
+            if code == 0:
+                sj, _, _ = run_crew_state(["show", "bl", "--session-id", "p8", "--verbose"], test_path)
+                if '"prompt": "Fix the auth bug --panel full"' in sj:
+                    log_pass("init bl -f: reads file into prompt (flags preserved byte-for-byte)")
+                else:
+                    log_fail("init bl -f: reads file into prompt", "prompt from file", sj)
+            else:
+                log_fail("init bl -f: exit 0", "exit 0", f"exit {code}, stderr: {stderr}")
+
+            # mt: -f reads the file into `task_description`.
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            p8_mtfile = crew_dir / "task-mt-p8.txt"
+            p8_mtfile.write_text("Design the profile system", encoding="utf-8")
+            _, stderr, code = run_crew_state(
+                ["init", "mt", "-f", str(p8_mtfile), "--auto-plan", "--session-id", "p8m"], test_path)
+            if code == 0:
+                sj, _, _ = run_crew_state(["show", "mt", "--session-id", "p8m", "--verbose"], test_path)
+                if '"task_description": "Design the profile system"' in sj:
+                    log_pass("init mt -f: reads file into task_description")
+                else:
+                    log_fail("init mt -f: reads file into task_description", "task from file", sj)
+            else:
+                log_fail("init mt -f: exit 0", "exit 0", f"exit {code}, stderr: {stderr}")
+
+            # -f + inline flag together → clean error (exit 2), no state file.
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            p8_conflict = crew_dir / "task-conflict.txt"
+            p8_conflict.write_text("x", encoding="utf-8")
+            _, stderr, code = run_crew_state(
+                ["init", "bl", "--prompt", "inline", "-f", str(p8_conflict), "--session-id", "p8c"], test_path)
+            if code == 2 and "not both" in stderr and not (crew_dir / "build-state-p8c.json").exists():
+                log_pass("init bl -f + --prompt together: clean error (exit 2), no state file")
+            else:
+                log_fail("init bl -f + --prompt together: clean error", "exit 2, 'not both', no file",
+                         f"exit {code}, stderr={stderr!r}, file={(crew_dir / 'build-state-p8c.json').exists()}")
+
+            # Missing file → clean nonzero exit, no state file.
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            _, stderr, code = run_crew_state(
+                ["init", "bl", "-f", str(crew_dir / "nope.txt"), "--session-id", "p8x"], test_path)
+            if code != 0 and "not found" in stderr and not (crew_dir / "build-state-p8x.json").exists():
+                log_pass("init bl -f missing file: clean nonzero exit, no state file created")
+            else:
+                log_fail("init bl -f missing file: clean nonzero exit, no state file",
+                         "nonzero, 'not found', no file",
+                         f"exit {code}, stderr={stderr!r}, file={(crew_dir / 'build-state-p8x.json').exists()}")
+
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
 
             # =========================================================================
             # PHASE 4 (C4): PYTHON 3.9 IMPORT BOMB + LOUD FAIL-OPEN

@@ -38,9 +38,10 @@ override a user's configured default.
   flag and let `review-prep` apply the configured/built-in default.
 
 Below, **"the task"** means `$ARGUMENTS` with these panel flags removed — use it
-as the requirements / design-doc path. Keep the raw `$ARGUMENTS` (flags included)
-only in the `crew state … --task` so the panel survives across iterations. A
-one-seat panel is fine — synthesis / never-choke handle any count down to one.
+as the requirements / design-doc path. The raw `$ARGUMENTS` (flags included) is
+preserved byte-for-byte via the `-f` spill file below (Phase 2 Step 1) so the
+panel survives across iterations. A one-seat panel is fine — synthesis /
+never-choke handle any count down to one.
 
 ## How This Works
 
@@ -83,14 +84,32 @@ When the user says "create the plan", "generate the plan", or "I'm ready" — **
 
 ### Step 1: Activate the Loop
 
+**Spill the task to a file and pass `-f` — NEVER inline.** Write the raw
+`$ARGUMENTS` to `.crew/task-mt-<session-id>.txt` with the **Write tool** (which
+writes the exact bytes — no shell is involved — and creates the `.crew/` parent
+dir automatically). A `--task "$ARGUMENTS"` value containing `$(…)`, `$VAR`,
+backticks, or `"` would be expanded or mangled by the shell when the Bash tool
+runs the command, so the task NEVER goes on the command line. Then init the loop,
+substituting your actual session id (the `[Session ID: …]` value) for
+`<session-id>` as a literal `--session-id` value, NEVER a `${CLAUDE_SESSION_ID}`
+shell expansion:
+
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" state init mt --task "$ARGUMENTS" --auto-plan
+"${CLAUDE_PLUGIN_ROOT}/crew" state init mt -f .crew/task-mt-<session-id>.txt --session-id <session-id> --auto-plan
+```
+
+Immediately after a successful init, remove the spill file (its own Bash call —
+no chaining). The `session-start` L5 cleanup patterns do NOT cover these task
+files, so this rm step is their sole owner:
+
+```bash
+rm -f .crew/task-mt-<session-id>.txt
 ```
 
 Then get the state to find the plan file path:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" state show mt
+"${CLAUDE_PLUGIN_ROOT}/crew" state show mt --session-id <session-id>
 ```
 
 ### Step 2: Generate Initial Plan

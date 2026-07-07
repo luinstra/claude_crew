@@ -37,14 +37,33 @@ global `~/.crew-config.toml` > built-in **full**; no env tier). Do NOT hardcode
   flag and let `review-prep` apply the configured/built-in default.
 
 Below, **"the task"** means `$ARGUMENTS` with these panel flags removed — use it
-wherever a step references the task. Keep the raw `$ARGUMENTS` (flags included)
-only in the `crew state … --prompt` so the panel survives across iterations. A
-one-seat panel is fine — synthesis / never-choke handle any count down to one.
+wherever a step references the task. The raw `$ARGUMENTS` (flags included) is
+preserved byte-for-byte via the `-f` spill file below so the panel survives
+across iterations. A one-seat panel is fine — synthesis / never-choke handle any
+count down to one.
 
 ## MANDATORY: Activate the Loop
 
+**Spill the task to a file and pass `-f` — NEVER inline.** Write the raw
+`$ARGUMENTS` to `.crew/task-bl-<session-id>.txt` with the **Write tool** (which
+writes the exact bytes — no shell is involved — and creates the `.crew/` parent
+dir automatically). A positional/`--prompt "$ARGUMENTS"` value containing
+`$(…)`, `$VAR`, backticks, or `"` would be expanded or mangled by the shell when
+the Bash tool runs the command, so the task NEVER goes on the command line. Then
+init the loop, substituting your actual session id (the `[Session ID: …]` value)
+for `<session-id>` as a literal `--session-id` value, NEVER a
+`${CLAUDE_SESSION_ID}` shell expansion:
+
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" state init bl --prompt "$ARGUMENTS"
+"${CLAUDE_PLUGIN_ROOT}/crew" state init bl -f .crew/task-bl-<session-id>.txt --session-id <session-id>
+```
+
+Immediately after a successful init, remove the spill file (its own Bash call —
+no chaining). The `session-start` L5 cleanup patterns do NOT cover these task
+files, so this rm step is their sole owner:
+
+```bash
+rm -f .crew/task-bl-<session-id>.txt
 ```
 
 ## How This Works

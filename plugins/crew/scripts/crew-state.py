@@ -194,6 +194,30 @@ def check_for_conflicts(session_id: str = ""):
     return None
 
 
+def _resolve_init_text(args, inline_value, inline_flag_name):
+    """Resolve a loop's task text from either the inline flag or ``-f`` file.
+
+    R5 + L6: ``-f`` keeps raw ``$ARGUMENTS`` OFF the shell line (the command
+    writes it to a file and passes the path). File read is UTF-8; missing file or
+    a clash with the inline flag exits nonzero (2) with NO state file created.
+    """
+    file_path = getattr(args, "task_file", None)
+    if not file_path:
+        return inline_value
+    if inline_value:
+        print(f"Error: pass either {inline_flag_name} or -f, not both", file=sys.stderr)
+        sys.exit(2)
+    p = Path(file_path)
+    if not p.is_file():
+        print(f"Error: task file not found: {file_path}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        return p.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"Error: cannot read task file {file_path}: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+
 def cmd_init(args):
     """Initialize a loop with default state."""
     session_id = resolve_session_id(args)
@@ -208,25 +232,27 @@ def cmd_init(args):
     path = get_state_path(args.loop, session_id)
 
     if canonical == "bl":
-        if not args.prompt:
-            print("Error: --prompt required for build loop", file=sys.stderr)
+        prompt = _resolve_init_text(args, args.prompt, "--prompt")
+        if not prompt:
+            print("Error: --prompt or -f required for build loop", file=sys.stderr)
             sys.exit(1)
         state = BuildState(
             active=True,
-            prompt=args.prompt,
+            prompt=prompt,
             iteration=1,
             max_iterations=args.max_iterations or 10,
             completion_promise="DONE",
             session_id=session_id,
         )
     else:  # mt
-        if not args.task:
-            print("Error: --task required for measure-twice", file=sys.stderr)
+        task = _resolve_init_text(args, args.task, "--task")
+        if not task:
+            print("Error: --task or -f required for measure-twice", file=sys.stderr)
             sys.exit(1)
 
         # Auto-derive plan file from task if --auto-plan is set
         if args.auto_plan:
-            plan_name = slugify(args.task)
+            plan_name = slugify(task)
             plan_file = f".crew/plans/{plan_name}.md"
             # Ensure plans directory exists
             plans_dir = get_project_dir() / ".crew" / "plans"
@@ -239,7 +265,7 @@ def cmd_init(args):
 
         state = MeasureTwiceState(
             active=True,
-            task_description=args.task,
+            task_description=task,
             plan_file=plan_file,
             iteration=1,
             max_iterations=args.max_iterations or 10,
@@ -325,6 +351,11 @@ def main():
     p_init.add_argument("loop", choices=list(LOOP_ALIASES.keys()))
     p_init.add_argument("--prompt", help="Task prompt (for build loop)")
     p_init.add_argument("--task", help="Task description (for measure-twice)")
+    p_init.add_argument(
+        "-f", "--prompt-file", "--task-file", dest="task_file",
+        help="Read the loop's task text from a UTF-8 file (keeps raw $ARGUMENTS "
+             "off the shell); mutually exclusive with --prompt/--task",
+    )
     p_init.add_argument("--plan-file", help="Plan file path (for measure-twice)")
     p_init.add_argument("--auto-plan", action="store_true", help="Auto-derive plan file from task (for measure-twice)")
     p_init.add_argument("--max-iterations", type=int, help="Override max iterations")
