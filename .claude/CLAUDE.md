@@ -27,8 +27,13 @@ type(scope): description
 | Commit Type | Version Bump | Example |
 |-------------|--------------|---------|
 | `feat:` | **minor** (0.1.0 → 0.2.0) | `feat: add new agent for code review` |
-| `feat!:` or `BREAKING CHANGE` | **major** (0.1.0 → 1.0.0) | `feat!: change state file format` |
+| `type!:` subject **or** `BREAKING CHANGE:` footer | **major** (0.1.0 → 1.0.0) | `feat!: change state file format` |
 | `fix:`, `chore:`, `docs:`, etc. | **patch** (0.1.0 → 0.1.1) | `fix: correct command prefix in docs` |
+
+> **Major bump triggers are precise:** the `!:` marker is only honored on the
+> commit **subject** line (`type!:` / `type(scope)!:`), and `BREAKING CHANGE:`
+> must be a **footer** (line start, colon). A bare prose mention of "breaking
+> change" in the body no longer forces a major bump.
 
 ### Common Types
 
@@ -194,12 +199,17 @@ Claude works → session continues
     ↓
 Claude tries to stop → Stop hook reads state → blocks if loop active
     ↓
-Loop complete → crew state deactivate → JSON deleted
+Loop complete → crew state deactivate → JSON kept with active: false
 ```
 
+State files are **session-scoped** and are **not deleted** on deactivate — the
+loop is turned off in place by flipping `active: false` (plus a `completed_at`
+timestamp), so the record survives for inspection. `session-start` cleanup later
+sweeps inactive files older than a day.
+
 **State files** (in project's `.crew/`):
-- `build-state.json` — Active build loop
-- `measure-twice-state.json` — Active measure-twice loop
+- `build-state-<session-id>.json` — Build loop (legacy unsuffixed `build-state.json` still read)
+- `measure-twice-state-<session-id>.json` — Measure-twice loop (legacy unsuffixed still read)
 - `context-snapshot.md` — Saved context
 
 ## Testing
