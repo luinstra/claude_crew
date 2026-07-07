@@ -115,6 +115,15 @@ cd project
 ./gradlew build
 ```
 
+## Code Comments
+
+Concise and repo-local. A comment earns its place by stating a non-obvious constraint or a "why" the code can't show — then stops. Don't restate the code, narrate the next line, or pad the reasoning.
+
+Never reference anything outside the repository — no plan/phase/tier names or decision/ticket labels ("Phase 5", "Decision-D", "the C2 smoke", "per the plan"), **even when your task prompt uses that vocabulary**. A future reader has only the repo, so those labels resolve to nothing. Translate the intent into repo-local terms:
+
+- Good: `# refuse to overwrite a newer-schema file — a downgrade must not clobber a live loop`
+- Bad: `# Phase 5 refuse-to-touch contract, mirrored from the Stop hook`
+
 ## Style
 
 - Start immediately. No "I'll help you with..." preamble.
