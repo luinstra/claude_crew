@@ -140,8 +140,13 @@ get_bump_type() {
     local commits
     commits=$(git log "$last_bump"..HEAD --format="%B" 2>/dev/null || git log -20 --format="%B")
 
-    # Check for breaking changes (major)
-    if echo "$commits" | grep -qE '^[a-z]+(\([^)]+\))?!:|BREAKING CHANGE'; then
+    # Check for breaking changes (major). The BREAKING CHANGE arm is ANCHORED to
+    # the conventional-commits footer shape (`^BREAKING[ -]CHANGE:` — line start,
+    # both the space and hyphen spellings, colon REQUIRED); grep scans the
+    # multi-line %B per-line, so `^` matches a footer line. This stops a body
+    # that merely mentions or negates the phrase ("this is NOT a BREAKING
+    # CHANGE", a pasted changelog line) from forcing a false MAJOR bump.
+    if echo "$commits" | grep -qE '^[a-z]+(\([^)]+\))?!:|^BREAKING[ -]CHANGE:'; then
         echo "major"
     # Check for features (minor)
     elif echo "$commits" | grep -qE '^feat(\([^)]+\))?:'; then

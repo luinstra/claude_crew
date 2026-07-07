@@ -199,6 +199,45 @@ def test_bump_types():
                   expect, f"{got} rc={proc.returncode} err={proc.stderr[:150]}")
 
 
+def test_breaking_change_footer_anchoring():
+    log_section("BREAKING CHANGE footer anchoring (no false major)")
+
+    # NEGATIVE: a body that merely MENTIONS the phrase without the footer colon
+    # must NOT trigger a major bump — it should fall through to the fix→patch arm.
+    with tempfile.TemporaryDirectory() as td:
+        repo = make_repo(Path(td))
+        (repo / "plugins" / "crew" / "src.txt").write_text("v1\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m",
+             "fix: tidy up\n\nNote: this is NOT a BREAKING CHANGE, just a cleanup.")
+        run_hook(repo)
+        got = read_version(repo / "plugins" / "crew" / ".claude-plugin" / "plugin.json")
+        check("mention without footer colon → patch (not major)", got == "0.40.1",
+              "0.40.1", got)
+
+    # POSITIVE: a real `BREAKING CHANGE:` footer still forces a major bump.
+    with tempfile.TemporaryDirectory() as td:
+        repo = make_repo(Path(td))
+        (repo / "plugins" / "crew" / "src.txt").write_text("v1\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m",
+             "refactor: rework state\n\nBREAKING CHANGE: state file format changed.")
+        run_hook(repo)
+        got = read_version(repo / "plugins" / "crew" / ".claude-plugin" / "plugin.json")
+        check("real BREAKING CHANGE: footer → major", got == "1.0.0", "1.0.0", got)
+
+    # POSITIVE: the hyphen spelling `BREAKING-CHANGE:` footer also forces major.
+    with tempfile.TemporaryDirectory() as td:
+        repo = make_repo(Path(td))
+        (repo / "plugins" / "crew" / "src.txt").write_text("v1\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m",
+             "refactor: rework state\n\nBREAKING-CHANGE: state file format changed.")
+        run_hook(repo)
+        got = read_version(repo / "plugins" / "crew" / ".claude-plugin" / "plugin.json")
+        check("BREAKING-CHANGE: (hyphen) footer → major", got == "1.0.0", "1.0.0", got)
+
+
 def test_skip_conditions():
     log_section("skip guards (already-bumped, [skip version])")
 
@@ -458,6 +497,7 @@ def main():
         sys.exit(1)
 
     test_bump_types()
+    test_breaking_change_footer_anchoring()
     test_skip_conditions()
     test_baseline_not_poisoned_by_body()
     test_git_state_guards()
