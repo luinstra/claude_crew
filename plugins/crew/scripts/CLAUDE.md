@@ -491,10 +491,12 @@ files keep working). Reads classify a file via `read_state_json` /
   file aside as `<name>.corrupt` (a one-time diagnostic; `init` then starts fresh
   state), while `set` / `increment` / `deactivate` refuse (nonzero) rather than
   silently overwrite. These set-aside artifacts are swept by `session-start`
-  cleanup, which is SCOPED to crew's own backup names — the
-  `build-state*.json.corrupt` and `measure-twice-state*.json.corrupt` globs (both
-  legacy and session-scoped forms) — so an unrelated `*.corrupt` file is never
-  deleted.
+  cleanup, which is SCOPED to crew's own backup names via exact-plus-hyphen globs
+  — `build-state.json.corrupt` / `build-state-*.json.corrupt` and
+  `measure-twice-state.json.corrupt` / `measure-twice-state-*.json.corrupt` (the
+  legacy exact name and the session-scoped `-<id>` form only) — so neither an
+  unrelated `*.corrupt` file nor a prefix-collision like
+  `build-stateEVIL.json.corrupt` is ever deleted.
 
 **Loop aliases:**
 - `bl` = `build`

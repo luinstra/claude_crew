@@ -69,18 +69,23 @@ def cleanup_stale_files(directory: Path) -> None:
     if not directory.is_dir():
         return
 
-    # Patterns for non-state crew files. The two `*-state*.json.corrupt` globs
-    # sweep the set-aside artifacts the Stop hook / crew-state CLI create when a
-    # state file can't be parsed (they end in `.corrupt`, so the `*.json` loop
-    # above never sees them) — otherwise `build-state.json.corrupt` accumulates
-    # forever. They are SCOPED to the exact backup names crew creates (both the
-    # legacy `build-state.json.corrupt` and session-scoped
-    # `build-state-<id>.json.corrupt` forms) so an unrelated `*.corrupt` file the
-    # user parked in `~/.claude` or `.crew` is never deleted by cleanup.
+    # Patterns for non-state crew files. The four `*-state.json.corrupt` /
+    # `*-state-*.json.corrupt` globs sweep the set-aside artifacts the Stop hook /
+    # crew-state CLI create when a state file can't be parsed (they end in
+    # `.corrupt`, so the `*.json` loop above never sees them) — otherwise
+    # `build-state.json.corrupt` accumulates forever. They are SCOPED to the EXACT
+    # backup names crew creates — the two forms are the legacy `build-state.json`
+    # and the session-scoped `build-state-<id>.json` (note the HYPHEN before the
+    # id) — so the globs are the exact name PLUS the hyphen-constrained id form,
+    # NOT a loose `build-state*.json.corrupt` that would also match a foreign
+    # `build-stateEVIL.json.corrupt`. An unrelated `*.corrupt` file the user parked
+    # in `~/.claude` or `.crew` is never deleted by cleanup.
     non_state_patterns = [
         "context-snapshot-*.json",
-        "build-state*.json.corrupt",
-        "measure-twice-state*.json.corrupt",
+        "build-state.json.corrupt",
+        "build-state-*.json.corrupt",
+        "measure-twice-state.json.corrupt",
+        "measure-twice-state-*.json.corrupt",
     ]
 
     now = time.time()

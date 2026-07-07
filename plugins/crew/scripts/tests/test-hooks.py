@@ -1364,8 +1364,16 @@ def main():
             # An UNRELATED *.corrupt file the user parked here must NOT be touched.
             user_corrupt = crew_dir / "secrets.corrupt"
             user_corrupt.write_text("user data crew never created")
+            # PREFIX-COLLISION: names that share the `build-state` prefix but are
+            # NOT one of crew's two backup forms (legacy `build-state.json` or
+            # session-scoped `build-state-<id>.json`) must survive — a loose
+            # `build-state*.json.corrupt` glob would have wrongly swept these.
+            prefix_evil = crew_dir / "build-stateevil.json.corrupt"
+            prefix_evil.write_text("foreign file sharing the build-state prefix")
+            prefix_backup = crew_dir / "build-statebackup.json.corrupt"
+            prefix_backup.write_text("another non-crew prefix collision")
             old_corrupt_mtime = _time.time() - (8 * 86400)
-            for _cf in (crew_corrupt, mt_corrupt, user_corrupt):
+            for _cf in (crew_corrupt, mt_corrupt, user_corrupt, prefix_evil, prefix_backup):
                 os.utime(_cf, (old_corrupt_mtime, old_corrupt_mtime))
 
             run_script(session_start, json.dumps({"directory": str(test_path)}))
@@ -1384,6 +1392,18 @@ def main():
                 log_pass("Cleanup preserves an unrelated user *.corrupt file (not crew's backup)")
             else:
                 log_fail("Cleanup preserves an unrelated user *.corrupt file", "file exists", "file deleted")
+
+            if prefix_evil.exists():
+                log_pass("Cleanup preserves build-stateevil.json.corrupt (prefix collision, not crew's -<id> form)")
+            else:
+                log_fail("Cleanup preserves build-stateevil.json.corrupt (prefix collision)",
+                         "file exists", "file wrongly swept by loose glob")
+
+            if prefix_backup.exists():
+                log_pass("Cleanup preserves build-statebackup.json.corrupt (prefix collision, not crew's -<id> form)")
+            else:
+                log_fail("Cleanup preserves build-statebackup.json.corrupt (prefix collision)",
+                         "file exists", "file wrongly swept by loose glob")
 
             # Clean up
             for f in crew_dir.glob("*.corrupt"):
