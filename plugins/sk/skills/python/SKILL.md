@@ -1,6 +1,6 @@
 ---
 name: python
-description: Use this skill for any Python programming task. Activate whenever the user is writing, reviewing, or refactoring Python code — including exception handling (bare except, try/except patterns), logging (replacing print() with the logging module), data modeling (dataclasses, Pydantic BaseModel, choosing between dicts and classes), file path operations (pathlib, os.path conversion), type hints, enums, pattern matching, string formatting, and comprehensions. Also activate for Python project setup and tooling: uv dependency management, pyproject.toml configuration, ruff linting/formatting, and pytest. Trigger on mentions of Python libraries like pydantic, httpx, or any .py file work. If the user mentions Python idioms, refactoring Python code, or any Python ecosystem tool, use this skill.
+description: Use for any Python programming task — writing, reviewing, or refactoring Python code. Triggers: exception handling (bare except, try/except patterns), logging (replacing print() with the logging module), data modeling (dataclasses, Pydantic BaseModel, dicts vs classes), file path operations (pathlib, os.path conversion), type hints, enums, pattern matching, string formatting, comprehensions; project setup and tooling — uv dependency management, pyproject.toml configuration, ruff linting/formatting, pytest; libraries like pydantic, httpx, or any .py file work. Also Python idioms, refactoring Python code, or any Python ecosystem tool.
 ---
 
 # Python Patterns

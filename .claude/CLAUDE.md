@@ -27,8 +27,13 @@ type(scope): description
 | Commit Type | Version Bump | Example |
 |-------------|--------------|---------|
 | `feat:` | **minor** (0.1.0 → 0.2.0) | `feat: add new agent for code review` |
-| `feat!:` or `BREAKING CHANGE` | **major** (0.1.0 → 1.0.0) | `feat!: change state file format` |
+| `type!:` subject **or** `BREAKING CHANGE:` footer | **major** (0.1.0 → 1.0.0) | `feat!: change state file format` |
 | `fix:`, `chore:`, `docs:`, etc. | **patch** (0.1.0 → 0.1.1) | `fix: correct command prefix in docs` |
+
+> **Major bump triggers are precise:** the `!:` marker is only honored on the
+> commit **subject** line (`type!:` / `type(scope)!:`), and `BREAKING CHANGE:`
+> must be a **footer** (line start, colon). A bare prose mention of "breaking
+> change" in the body no longer forces a major bump.
 
 ### Common Types
 
@@ -78,6 +83,8 @@ git commit -m "ci: update workflow permissions"
 |---------|---------|
 | `/plugin` | Install plugin from current directory (run from `plugins/crew/` or `plugins/sk/`) |
 | `python plugins/crew/scripts/tests/test-hooks.py` | Run hook unit tests |
+| `python plugins/crew/scripts/tests/test-multiagent.py` | Run the multi-model engine + dispatcher tests |
+| `python plugins/crew/scripts/tests/test-version-bump.py` | Run the post-commit version-bump hardening tests |
 | `"${CLAUDE_PLUGIN_ROOT}/crew" state show bl` | Debug build loop state (via the bare dispatcher) |
 
 ### Install Git Hook (Required for Contributors)
@@ -192,12 +199,17 @@ Claude works → session continues
     ↓
 Claude tries to stop → Stop hook reads state → blocks if loop active
     ↓
-Loop complete → crew state deactivate → JSON deleted
+Loop complete → crew state deactivate → JSON kept with active: false
 ```
 
+State files are **session-scoped** and are **not deleted** on deactivate — the
+loop is turned off in place by flipping `active: false` (plus a `completed_at`
+timestamp), so the record survives for inspection. `session-start` cleanup later
+sweeps inactive files older than a day.
+
 **State files** (in project's `.crew/`):
-- `build-state.json` — Active build loop
-- `measure-twice-state.json` — Active measure-twice loop
+- `build-state-<session-id>.json` — Build loop (legacy unsuffixed `build-state.json` still read)
+- `measure-twice-state-<session-id>.json` — Measure-twice loop (legacy unsuffixed still read)
 - `context-snapshot.md` — Saved context
 
 ## Testing
@@ -212,6 +224,10 @@ python plugins/crew/scripts/tests/test-hooks.py
 ```
 
 ## Key Patterns
+
+### Code Comments Stay Repo-Local
+
+Comments are concise and reference only what's in the repo. State a non-obvious constraint or a "why" the code can't show, then stop, with no restating the code or padding. No em-dashes (use a colon, comma, or parentheses). Never cite a plan/phase/tier name or decision/ticket label ("Phase 5", "Decision-D", "the C2 smoke", "per the plan"), even if the task prompt uses that vocabulary, because a future reader has only the repo and those labels resolve to nothing.
 
 ### Command References Need Plugin Prefix
 
@@ -241,12 +257,17 @@ Python hooks must output valid JSON:
 ```python
 from models import HookResult
 
-# Allow the action
+# Allow the action — emits {}
 print(HookResult.allow().to_json())
 
-# Block with message
+# Allow with a loud user-visible diagnostic — emits {"systemMessage": "..."}
+print(HookResult.allow_with_diagnostic("Hook degraded: ...").to_json())
+
+# Block with reason — emits {"decision": "block", "reason": "..."}
 print(HookResult.block("Reason to block").to_json())
 ```
+
+**Note:** SessionStart crash diagnostics belong on `SessionStartResult.with_context()` (the `hookSpecificOutput.additionalContext` channel), distinct from Stop's `HookResult.allow_with_diagnostic()` (the `systemMessage` channel). The one exception is SessionStart's pre-import 3.9 version-guard fallback, which is stdlib-only and can't build a `SessionStartResult`, so it emits `systemMessage`.
 
 ## Common Mistakes
 

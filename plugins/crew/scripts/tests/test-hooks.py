@@ -6,6 +6,7 @@ Run from project root: python3 plugins/crew/scripts/tests/test-hooks.py
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -116,6 +117,52 @@ def test_not_contains(name: str, script: Path, input_data: str, not_expected: st
 
 
 def main():
+    # =========================================================================
+    # MODELS: HookResult.to_json() shape contract (direct unit assertions of
+    # the three shipped shapes)
+    # =========================================================================
+    log_section("models.HookResult.to_json() shapes")
+    from models import HookResult
+
+    _allow_json = HookResult.allow().to_json()
+    if _allow_json == "{}":
+        log_pass("HookResult.allow() -> {}")
+    else:
+        log_fail("HookResult.allow() -> {}", "{}", _allow_json)
+
+    _diag_json = HookResult.allow_with_diagnostic("hook degraded").to_json()
+    if json.loads(_diag_json) == {"systemMessage": "hook degraded"}:
+        log_pass('HookResult.allow_with_diagnostic() -> {"systemMessage": ...}')
+    else:
+        log_fail('HookResult.allow_with_diagnostic() -> {"systemMessage": ...}',
+                 '{"systemMessage": "hook degraded"}', _diag_json)
+
+    _block_json = HookResult.block("Must continue").to_json()
+    if json.loads(_block_json) == {"decision": "block", "reason": "Must continue"}:
+        log_pass('HookResult.block() -> {"decision": "block", "reason": ...}')
+    else:
+        log_fail('HookResult.block() -> {"decision": "block", "reason": ...}',
+                 '{"decision": "block", "reason": "Must continue"}', _block_json)
+
+    # SessionStart uses its OWN diagnostic/context channel —
+    # hookSpecificOutput.additionalContext — NOT systemMessage. This is the
+    # channel the 3.10+ crash handler (session-start.py bottom) emits on; the
+    # 3.9 pre-import version-guard fallback emits systemMessage instead only
+    # because it's stdlib-only and can't build this object.
+    from models import SessionStartResult
+    _ctx_json = SessionStartResult.with_context("restored context").to_json()
+    if json.loads(_ctx_json) == {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": "restored context",
+        }
+    }:
+        log_pass('SessionStartResult.with_context() -> {"hookSpecificOutput": {...additionalContext...}}')
+    else:
+        log_fail('SessionStartResult.with_context() -> {"hookSpecificOutput": {...additionalContext...}}',
+                 '{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "restored context"}}',
+                 _ctx_json)
+
     # Global-state isolation: every subprocess env pins HOME to _NEUTRAL_HOME
     # (see _neutral_env), so the scripts under test can never read from — or
     # clean up — the developer's real ~/.claude. This replaces the old
@@ -295,19 +342,19 @@ def main():
                 "Build Loop Active",
             )
 
-            # Build loop nudge: "Continue until advisor verifies" present in both modes
+            # Build loop restore banner: panel wording present in both modes
             test_contains(
-                "SessionStart (terse) - 'Continue until advisor verifies' nudge present",
+                "SessionStart (terse) - panel completion nudge present",
                 session_start,
                 json.dumps({"directory": str(test_path)}),
-                "Continue until advisor verifies",
+                "Continue until the multi-model panel approves completion",
             )
             output_bl_v = run_script_verbose(session_start, json.dumps({"directory": str(test_path)}))
-            if "Continue until advisor verifies" in output_bl_v:
-                log_pass("SessionStart (verbose) - 'Continue until advisor verifies' nudge present")
+            if "Continue until the multi-model panel approves completion" in output_bl_v:
+                log_pass("SessionStart (verbose) - panel completion nudge present")
             else:
-                log_fail("SessionStart (verbose) - 'Continue until advisor verifies' nudge present",
-                         "contains 'Continue until advisor verifies'", output_bl_v[:300])
+                log_fail("SessionStart (verbose) - panel completion nudge present",
+                         "contains 'Continue until the multi-model panel approves completion'", output_bl_v[:300])
 
             # Clean up build loop state for next test
             (crew_dir / "build-state.json").unlink()
@@ -324,12 +371,12 @@ def main():
                 "Measure-Twice Loop Active",
             )
 
-            # Measure-twice nudge: "Continue until advisor approves the plan" present
+            # Measure-twice restore banner: panel wording present
             test_contains(
-                "SessionStart (terse) - 'Continue until advisor approves the plan' nudge present",
+                "SessionStart (terse) - 'Continue until the panel approves the plan' nudge present",
                 session_start,
                 json.dumps({"directory": str(test_path)}),
-                "Continue until advisor approves the plan",
+                "Continue until the panel approves the plan",
             )
 
             # Clean up measure-twice state for next test
@@ -343,14 +390,17 @@ def main():
 
             # Clean test directory
             for f in crew_dir.glob("*"):
-                f.unlink()
+                if f.is_file():
+                    f.unlink()
 
             # Test with no state - should allow stop
+            # Allow shape is the benign {}; asserts nothing about the
+            # ambiguous "continue" field.
             test_equals(
                 "No state - allows stop",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                '{"continue": true}',
+                '{}',
             )
 
             # Test with active build loop
@@ -358,11 +408,15 @@ def main():
                 '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
             )
 
+            # Block shape is load-bearing: the legacy
+            # {"continue": false} was proven INERT (hard-stopped the child
+            # session); {"decision": "block", "reason": ...} is the honored,
+            # load-bearing schema. Assert EXACTLY the shipped shape.
             test_contains(
                 "Active build loop - blocks stop",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                '"continue": false',
+                '"decision": "block", "reason":',
             )
 
             test_contains(
@@ -370,6 +424,62 @@ def main():
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
                 "Build Loop",
+            )
+
+            # The first-fire nudge prescribes the multi-model
+            # panel flow, not the retired lone-advisor flow. Reset to
+            # iteration 1 so the full recipe (not the terse variant) renders.
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
+            )
+            test_contains(
+                "Build loop nudge - prescribes panel (review-prep)",
+                persistent_mode,
+                json.dumps({"directory": str(test_path)}),
+                "review-prep",
+            )
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
+            )
+            test_not_contains(
+                "Build loop nudge - no lone-advisor recipe",
+                persistent_mode,
+                json.dumps({"directory": str(test_path)}),
+                "Spawn advisor",
+            )
+
+            # The nudge's copy-pasteable command must not end in a bare
+            # `--session-id` when session_id is empty, and must render the
+            # flag with its value when one is present.
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
+            )
+            test_not_contains(
+                "Build loop nudge - no bare --session-id when session_id empty",
+                persistent_mode,
+                json.dumps({"directory": str(test_path)}),
+                "--session-id",
+            )
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
+            )
+            test_contains(
+                "Build loop nudge - renders --session-id with value",
+                persistent_mode,
+                json.dumps({"directory": str(test_path), "session_id": "s9"}),
+                "--session-id s9",
+            )
+            # A session_id carrying a space/shell metacharacter must be
+            # shlex.quote'd in the copy-pasteable nudge (complements the spaced
+            # plan-path test) — an unquoted value would split/execute.
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
+            )
+            test_contains(
+                "Build loop nudge - shell-quotes session_id with metacharacter",
+                persistent_mode,
+                json.dumps({"directory": str(test_path), "session_id": "s x;rm"}),
+                "--session-id 's x;rm'",
             )
 
             # Test with inactive build loop
@@ -381,7 +491,7 @@ def main():
                 "Inactive build loop - allows stop",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                '{"continue": true}',
+                '{}',
             )
 
             # Clean up build loop state
@@ -396,7 +506,7 @@ def main():
                 "Active measure-twice loop - blocks stop",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                '"continue": false',
+                '"decision": "block", "reason":',
             )
 
             test_contains(
@@ -404,6 +514,56 @@ def main():
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
                 "Measure-Twice Loop",
+            )
+
+            # The measure-twice first-fire nudge prescribes the
+            # panel flow, not the retired lone-advisor re-review.
+            (crew_dir / "measure-twice-state.json").write_text(
+                '{"active": true, "task_description": "Design auth", "plan_file": ".crew/plans/auth.md", "iteration": 1, "max_iterations": 10}'
+            )
+            test_contains(
+                "Measure-twice nudge - prescribes panel (review-prep)",
+                persistent_mode,
+                json.dumps({"directory": str(test_path)}),
+                "review-prep",
+            )
+            (crew_dir / "measure-twice-state.json").write_text(
+                '{"active": true, "task_description": "Design auth", "plan_file": ".crew/plans/auth.md", "iteration": 1, "max_iterations": 10}'
+            )
+            test_not_contains(
+                "Measure-twice nudge - no lone-advisor recipe",
+                persistent_mode,
+                json.dumps({"directory": str(test_path)}),
+                "Spawn advisor",
+            )
+
+            # A plan path with spaces (or shell metacharacters) must be
+            # shell-quoted in the suggested review-prep command — an unquoted
+            # path splits/executes when the orchestrator copies the command.
+            (crew_dir / "measure-twice-state.json").write_text(json.dumps({
+                "active": True, "task_description": "Design auth",
+                "plan_file": ".crew/plans/auth plan.md",
+                "iteration": 1, "max_iterations": 10,
+            }))
+            test_contains(
+                "Measure-twice nudge - shell-quotes spaced plan path",
+                persistent_mode,
+                json.dumps({"directory": str(test_path)}),
+                "review-prep '.crew/plans/auth plan.md'",
+            )
+
+            # The measure-twice nudge renders the same shlex.quote'd session_flag
+            # as the build loop — a spaced/metacharacter session_id is quoted.
+            (crew_dir / "measure-twice-state.json").write_text(json.dumps({
+                "active": True, "task_description": "Design auth",
+                "plan_file": ".crew/plans/auth.md",
+                "iteration": 1, "max_iterations": 10,
+            }))
+            test_contains(
+                "Measure-twice nudge - shell-quotes session_id with metacharacter",
+                persistent_mode,
+                json.dumps({"directory": str(test_path), "session_id": "s x;rm"}),
+                "--session-id 's x;rm'",
             )
 
             # Test with inactive measure-twice loop
@@ -415,7 +575,7 @@ def main():
                 "Inactive measure-twice loop - allows stop",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                '{"continue": true}',
+                '{}',
             )
 
             # Test priority: build loop takes precedence over measure-twice
@@ -443,18 +603,19 @@ def main():
             log_section("persistent-mode.py (terse/verbose)")
 
             for f in crew_dir.glob("*"):
-                f.unlink()
+                if f.is_file():
+                    f.unlink()
 
             # iteration=1 (first Stop fire): display reads "1/N", full recipe present
             (crew_dir / "build-state.json").write_text(
                 '{"active": true, "prompt": "Fix auth bug", "iteration": 1, "max_iterations": 10}'
             )
             out_terse_iter1 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
-            if "When complete:" in out_terse_iter1:
+            if "verify via the multi-model panel" in out_terse_iter1:
                 log_pass("Terse mode + iteration 1 (bl): full recipe present")
             else:
                 log_fail("Terse mode + iteration 1 (bl): full recipe present",
-                         "contains 'When complete:'", out_terse_iter1[:300])
+                         "contains 'verify via the multi-model panel'", out_terse_iter1[:300])
 
             # First Stop fire displays "Iteration 1/10" (display-then-increment)
             if "Iteration 1/10" in out_terse_iter1:
@@ -465,11 +626,11 @@ def main():
 
             # State now has iteration=2. Terse second fire: recipe absent
             out_terse_iter2 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
-            if "When complete:" not in out_terse_iter2:
+            if "verify via the multi-model panel" not in out_terse_iter2:
                 log_pass("Terse mode + iteration 2 (bl): recipe absent")
             else:
                 log_fail("Terse mode + iteration 2 (bl): recipe absent",
-                         "does NOT contain 'When complete:'", out_terse_iter2[:300])
+                         "does NOT contain 'verify via the multi-model panel'", out_terse_iter2[:300])
 
             if "cancel-build" not in out_terse_iter2:
                 log_pass("Terse mode + iteration 2 (bl): cancel-build absent")
@@ -486,11 +647,11 @@ def main():
 
             # Verbose mode (state now iteration=3): full recipe present despite iteration>1
             out_verbose_iter3 = run_script_verbose(persistent_mode, json.dumps({"directory": str(test_path)}))
-            if "When complete:" in out_verbose_iter3:
+            if "verify via the multi-model panel" in out_verbose_iter3:
                 log_pass("Verbose mode + iteration 3 (bl): full recipe present")
             else:
                 log_fail("Verbose mode + iteration 3 (bl): full recipe present",
-                         "contains 'When complete:'", out_verbose_iter3[:300])
+                         "contains 'verify via the multi-model panel'", out_verbose_iter3[:300])
 
             # Safety cap: exactly max_iterations nudges. State is at iteration=4 now.
             # Run 7 more terse nudges → display 4/10..10/10, leaving iteration=11.
@@ -674,7 +835,7 @@ def main():
             for f in crew_dir.glob("*-state*.json"):
                 f.unlink()
             stdout, stderr, code = run_crew_state(["init", "bl"], test_path)
-            if code == 1 and "--prompt required" in stderr:
+            if code == 1 and "--prompt or -f required" in stderr:
                 log_pass("init bl without --prompt - exits with error")
             else:
                 log_fail("init bl without --prompt - exits with error", "exit 1 with error message", f"exit {code}, stderr: {stderr}")
@@ -881,6 +1042,280 @@ def main():
                 f.unlink()
 
             # =========================================================================
+            # BLOCKING 1: init/deactivate --session-id symmetry (no orphaned loop)
+            # =========================================================================
+            run_crew_state(
+                ["init", "bl", "--prompt", "sym task", "--session-id", "symS"], test_path)
+            scoped = crew_dir / "build-state-symS.json"
+            active_before = (
+                json.loads(scoped.read_text()).get("active") if scoped.exists() else None
+            )
+            _, _, deact_code = run_crew_state(
+                ["deactivate", "bl", "--reason", "done", "--session-id", "symS"], test_path)
+            still_active = []
+            for f in crew_dir.glob("*-state*.json"):
+                try:
+                    if json.loads(f.read_text()).get("active"):
+                        still_active.append(f.name)
+                except (OSError, json.JSONDecodeError):
+                    pass
+            if deact_code == 0 and active_before is True and not still_active:
+                log_pass("init/deactivate --session-id symmetry - scoped loop fully cleared")
+            else:
+                log_fail(
+                    "init/deactivate --session-id symmetry - scoped loop fully cleared",
+                    "scoped file inactive, zero active files",
+                    f"code={deact_code} active_before={active_before} still_active={still_active}")
+            for f in crew_dir.glob("*-state*.json"):
+                f.unlink()
+
+            # =========================================================================
+            # BLOCKING 2: mutating CLI refuses to touch a future-schema state file
+            # =========================================================================
+            future_bytes = (
+                b'{"active": true, "prompt": "newer", "iteration": 3, '
+                b'"max_iterations": 10, "session_id": "futS", "schema": 99}')
+            fut = crew_dir / "build-state-futS.json"
+            for mut in (
+                ["init", "bl", "--prompt", "x", "--session-id", "futS"],
+                ["set", "bl", "iteration", "5", "--session-id", "futS"],
+                ["increment", "bl", "iteration", "--session-id", "futS"],
+                ["deactivate", "bl", "--reason", "x", "--session-id", "futS"],
+            ):
+                fut.write_bytes(future_bytes)
+                _, err, code = run_crew_state(mut, test_path)
+                untouched = fut.read_bytes() == future_bytes
+                if code != 0 and untouched:
+                    log_pass(f"future-schema refuse ({mut[0]}) - nonzero exit, bytes untouched")
+                else:
+                    log_fail(
+                        f"future-schema refuse ({mut[0]}) - nonzero exit, bytes untouched",
+                        "nonzero + bytes untouched",
+                        f"code={code} untouched={untouched} err={err[:120]}")
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+
+            # =========================================================================
+            # CLI init over a CORRUPT state file: set aside as .corrupt, start fresh
+            # =========================================================================
+            corrupt_target = crew_dir / "build-state-corS.json"
+            corrupt_target.write_text('{"active": true, "prompt": "broken", trunc')  # invalid JSON
+            _, err, code = run_crew_state(
+                ["init", "bl", "--prompt", "fresh task", "--session-id", "corS"], test_path)
+            aside = crew_dir / "build-state-corS.json.corrupt"
+            fresh_ok = False
+            if corrupt_target.exists():
+                try:
+                    with open(corrupt_target) as _f:
+                        _d = json.load(_f)
+                    fresh_ok = _d.get("active") is True and _d.get("prompt") == "fresh task"
+                except (OSError, json.JSONDecodeError):
+                    fresh_ok = False
+            # Assert the SUCCESS-path wording specifically: "set aside as <name>"
+            # plus the .corrupt filename, and NOT the "could not be set aside"
+            # failure phrasing (which also contains the substring "set aside").
+            err_l = err.lower()
+            note_ok = ("set aside as" in err_l
+                       and aside.name in err
+                       and "could not" not in err_l)
+            if code == 0 and aside.exists() and fresh_ok and note_ok:
+                log_pass("CLI init over corrupt file - set aside as .corrupt, fresh state written")
+            else:
+                log_fail("CLI init over corrupt file - set aside as .corrupt, fresh state written",
+                         "exit 0, .corrupt exists, fresh active state, 'set aside as <name>' success note",
+                         f"code={code} aside={aside.exists()} fresh={fresh_ok} note_ok={note_ok} err={err[:120]}")
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+
+            # =========================================================================
+            # _resolve_loop_path: set/increment with --session-id against an
+            # ADOPTED LEGACY (unsuffixed) state file mutate THAT file in place (via
+            # find_session_state_file), never a stray session-scoped path. The
+            # deactivate arm of this symmetry is covered above; this covers the
+            # set/increment verbs (the actual bug _resolve_loop_path fixed) plus
+            # the read verbs (show/is-active must report the adopted file too).
+            # =========================================================================
+            legacy = crew_dir / "build-state.json"
+            scoped_stray = crew_dir / "build-state-legS.json"
+            # session_id:"" → adoptable by any session per find_session_state_file
+            legacy.write_text(
+                '{"active": true, "prompt": "legacy adopt", "iteration": 1, '
+                '"max_iterations": 10, "session_id": ""}'
+            )
+            _, _, set_code = run_crew_state(
+                ["set", "bl", "iteration", "7", "--session-id", "legS"], test_path)
+            legacy_after_set = json.loads(legacy.read_text())
+            set_ok = (
+                set_code == 0
+                and legacy_after_set.get("iteration") == 7
+                and not scoped_stray.exists()
+            )
+            if set_ok:
+                log_pass("set --session-id over adopted legacy file - mutates legacy in place, no stray scoped file")
+            else:
+                log_fail(
+                    "set --session-id over adopted legacy file - mutates legacy in place, no stray scoped file",
+                    "legacy iteration=7, no build-state-legS.json",
+                    f"code={set_code} legacy_iter={legacy_after_set.get('iteration')} stray={scoped_stray.exists()}")
+
+            _, _, inc_code = run_crew_state(
+                ["increment", "bl", "iteration", "--session-id", "legS"], test_path)
+            legacy_after_inc = json.loads(legacy.read_text())
+            inc_ok = (
+                inc_code == 0
+                and legacy_after_inc.get("iteration") == 8
+                and not scoped_stray.exists()
+            )
+            if inc_ok:
+                log_pass("increment --session-id over adopted legacy file - mutates legacy in place, no stray scoped file")
+            else:
+                log_fail(
+                    "increment --session-id over adopted legacy file - mutates legacy in place, no stray scoped file",
+                    "legacy iteration=8, no build-state-legS.json",
+                    f"code={inc_code} legacy_iter={legacy_after_inc.get('iteration')} stray={scoped_stray.exists()}")
+
+            # show/is-active must resolve the SAME adopted file: reporting
+            # inactive while Stop still adopts the legacy loop would tell the
+            # user there is nothing to cancel when there is.
+            show_out, _, show_code = run_crew_state(
+                ["show", "bl", "--session-id", "legS"], test_path)
+            if show_code == 0 and "active=true" in show_out and "legacy adopt" in show_out:
+                log_pass("show --session-id over adopted legacy file - reports the adopted loop")
+            else:
+                log_fail("show --session-id over adopted legacy file - reports the adopted loop",
+                         "active=true with legacy task text",
+                         f"code={show_code} out={show_out[:120]}")
+
+            _, _, ia_code = run_crew_state(
+                ["is-active", "bl", "--session-id", "legS"], test_path)
+            if ia_code == 0:
+                log_pass("is-active --session-id over adopted legacy file - exits 0 (active)")
+            else:
+                log_fail("is-active --session-id over adopted legacy file - exits 0 (active)",
+                         "exit 0", f"exit {ia_code}")
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+
+            # =========================================================================
+            # check_for_conflicts resolves through find_session_state_file: init with
+            # --session-id must refuse while an ADOPTABLE legacy loop is still active.
+            # Otherwise a scoped file is created, every later verb prefers it, and the
+            # legacy loop is orphaned permanently active. An inactive legacy file must
+            # NOT block a fresh scoped init.
+            # =========================================================================
+            legacy.write_text(
+                '{"active": true, "prompt": "legacy adopt", "iteration": 1, '
+                '"max_iterations": 10, "session_id": ""}'
+            )
+            _, err, code = run_crew_state(
+                ["init", "bl", "--prompt", "new scoped", "--session-id", "legS"], test_path)
+            if code == 1 and "build loop is already active" in err and not scoped_stray.exists():
+                log_pass("init --session-id vs active adoptable legacy - refused, no scoped file")
+            else:
+                log_fail("init --session-id vs active adoptable legacy - refused, no scoped file",
+                         "exit 1 with bl conflict, no build-state-legS.json",
+                         f"code={code} stray={scoped_stray.exists()} err={err[:120]}")
+
+            legacy.write_text(
+                '{"active": false, "prompt": "legacy done", "iteration": 1, '
+                '"max_iterations": 10, "session_id": ""}'
+            )
+            _, err, code = run_crew_state(
+                ["init", "bl", "--prompt", "new scoped", "--session-id", "legS"], test_path)
+            if code == 0 and scoped_stray.exists():
+                log_pass("init --session-id vs inactive legacy - proceeds on scoped path")
+            else:
+                log_fail("init --session-id vs inactive legacy - proceeds on scoped path",
+                         "exit 0 and build-state-legS.json created",
+                         f"code={code} scoped={scoped_stray.exists()} err={err[:120]}")
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+
+            # An INACTIVE scoped leftover must not hide an ACTIVE adoptable
+            # legacy file: the two candidates are checked independently, so a
+            # finished scoped loop cannot shadow a live legacy one into orphanhood.
+            scoped_stray.write_text(
+                '{"active": false, "prompt": "finished scoped", "iteration": 3, '
+                '"max_iterations": 10, "session_id": "legS"}'
+            )
+            legacy.write_text(
+                '{"active": true, "prompt": "legacy adopt", "iteration": 1, '
+                '"max_iterations": 10, "session_id": ""}'
+            )
+            _, err, code = run_crew_state(
+                ["init", "bl", "--prompt", "new scoped", "--session-id", "legS"], test_path)
+            if code == 1 and "build loop is already active" in err:
+                log_pass("init --session-id vs active legacy behind stale scoped - refused")
+            else:
+                log_fail("init --session-id vs active legacy behind stale scoped - refused",
+                         "exit 1 with bl conflict",
+                         f"code={code} err={err[:120]}")
+
+            # An active legacy file owned by a DIFFERENT session is NOT
+            # adoptable and must not block this session's init.
+            legacy.write_text(
+                '{"active": true, "prompt": "someone else", "iteration": 1, '
+                '"max_iterations": 10, "session_id": "otherSession"}'
+            )
+            _, err, code = run_crew_state(
+                ["init", "bl", "--prompt", "new scoped", "--session-id", "legS"], test_path)
+            scoped_after = json.loads(scoped_stray.read_text())
+            if code == 0 and scoped_after.get("active") is True:
+                log_pass("init --session-id vs other-session legacy - proceeds (not adoptable)")
+            else:
+                log_fail("init --session-id vs other-session legacy - proceeds (not adoptable)",
+                         "exit 0, scoped file re-initialized active",
+                         f"code={code} active={scoped_after.get('active')} err={err[:120]}")
+
+            # A legacy file holding valid-but-non-object JSON (the corrupt
+            # category) is not adoptable and must not traceback the conflict
+            # check; scoped init proceeds.
+            scoped_stray.unlink(missing_ok=True)
+            legacy.write_text('[]')
+            _, err, code = run_crew_state(
+                ["init", "bl", "--prompt", "new scoped", "--session-id", "legS"], test_path)
+            if code == 0 and scoped_stray.exists() and "Traceback" not in err:
+                log_pass("init --session-id vs non-object legacy JSON - proceeds, no traceback")
+            else:
+                log_fail("init --session-id vs non-object legacy JSON - proceeds, no traceback",
+                         "exit 0, scoped file created, no traceback",
+                         f"code={code} scoped={scoped_stray.exists()} err={err[:120]}")
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+
+            # =========================================================================
+            # CLI init rejects whitespace-only task text (inline flag AND -f file)
+            # =========================================================================
+            # whitespace-only --prompt
+            _, err, code = run_crew_state(["init", "bl", "--prompt", "   \n\t "], test_path)
+            if code != 0 and not (crew_dir / "build-state.json").exists():
+                log_pass("CLI init bl - whitespace-only --prompt rejected (nonzero, no state file)")
+            else:
+                log_fail("CLI init bl - whitespace-only --prompt rejected",
+                         "nonzero, no state file", f"code={code} exists={(crew_dir / 'build-state.json').exists()}")
+
+            # whitespace-only --task (measure-twice)
+            _, err, code = run_crew_state(["init", "mt", "--task", "  \t\n", "--auto-plan"], test_path)
+            if code != 0 and not (crew_dir / "measure-twice-state.json").exists():
+                log_pass("CLI init mt - whitespace-only --task rejected (nonzero, no state file)")
+            else:
+                log_fail("CLI init mt - whitespace-only --task rejected",
+                         "nonzero, no state file", f"code={code} exists={(crew_dir / 'measure-twice-state.json').exists()}")
+
+            # whitespace-only -f file content
+            ws_file = crew_dir / "ws-task.txt"
+            ws_file.write_text("   \n\t  \n")
+            _, err, code = run_crew_state(["init", "bl", "-f", str(ws_file)], test_path)
+            if code != 0 and not (crew_dir / "build-state.json").exists():
+                log_pass("CLI init bl - whitespace-only -f content rejected (nonzero, no state file)")
+            else:
+                log_fail("CLI init bl - whitespace-only -f content rejected",
+                         "nonzero, no state file", f"code={code} exists={(crew_dir / 'build-state.json').exists()}")
+            ws_file.unlink(missing_ok=True)
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+
+            # =========================================================================
             # SESSION-SCOPED PERSISTENT MODE TESTS
             # =========================================================================
             log_section("persistent-mode.py (session-scoped)")
@@ -894,7 +1329,7 @@ def main():
                 "Stop hook s1 - blocks when s1 has active loop",
                 persistent_mode,
                 json.dumps({"directory": str(test_path), "session_id": "s1"}),
-                '"continue": false',
+                '"decision": "block", "reason":',
             )
 
             # Stop hook with session_id=s2 allows
@@ -902,7 +1337,7 @@ def main():
                 "Stop hook s2 - allows when only s1 has active loop",
                 persistent_mode,
                 json.dumps({"directory": str(test_path), "session_id": "s2"}),
-                '{"continue": true}',
+                '{}',
             )
 
             # Stop hook with empty session_id only checks legacy files
@@ -910,7 +1345,7 @@ def main():
                 "Stop hook no session - allows (no legacy file)",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                '{"continue": true}',
+                '{}',
             )
 
             # File with no session_id is claimed by session that has one
@@ -922,7 +1357,7 @@ def main():
                 "Stop hook session claims file (no session_id in file)",
                 persistent_mode,
                 json.dumps({"directory": str(test_path), "session_id": "any-session"}),
-                '"continue": false',
+                '"decision": "block", "reason":',
             )
 
             # Clean up
@@ -1026,6 +1461,143 @@ def main():
 
             # Clean up
             for f in crew_dir.glob("*-state*.json"):
+                f.unlink()
+
+            # --- .corrupt sweep is SCOPED to crew's own backups (not any *.corrupt) ---
+            # A crew state backup past the age threshold IS swept.
+            crew_corrupt = crew_dir / "build-state.json.corrupt"
+            crew_corrupt.write_text('{"active": true, "prompt": "broken", trunc')
+            mt_corrupt = crew_dir / "measure-twice-state-abc.json.corrupt"
+            mt_corrupt.write_text("not json at all")
+            # An UNRELATED *.corrupt file the user parked here must NOT be touched.
+            user_corrupt = crew_dir / "secrets.corrupt"
+            user_corrupt.write_text("user data crew never created")
+            # PREFIX-COLLISION: names that share the `build-state` prefix but are
+            # NOT one of crew's two backup forms (legacy `build-state.json` or
+            # session-scoped `build-state-<id>.json`) must survive — a loose
+            # `build-state*.json.corrupt` glob would have wrongly swept these.
+            prefix_evil = crew_dir / "build-stateevil.json.corrupt"
+            prefix_evil.write_text("foreign file sharing the build-state prefix")
+            prefix_backup = crew_dir / "build-statebackup.json.corrupt"
+            prefix_backup.write_text("another non-crew prefix collision")
+            old_corrupt_mtime = _time.time() - (8 * 86400)
+            for _cf in (crew_corrupt, mt_corrupt, user_corrupt, prefix_evil, prefix_backup):
+                os.utime(_cf, (old_corrupt_mtime, old_corrupt_mtime))
+
+            run_script(session_start, json.dumps({"directory": str(test_path)}))
+
+            if not crew_corrupt.exists():
+                log_pass("Cleanup sweeps stale build-state.json.corrupt backup")
+            else:
+                log_fail("Cleanup sweeps stale build-state.json.corrupt backup", "deleted", "still exists")
+
+            if not mt_corrupt.exists():
+                log_pass("Cleanup sweeps stale measure-twice-state-<id>.json.corrupt backup")
+            else:
+                log_fail("Cleanup sweeps stale measure-twice-state-<id>.json.corrupt backup", "deleted", "still exists")
+
+            if user_corrupt.exists():
+                log_pass("Cleanup preserves an unrelated user *.corrupt file (not crew's backup)")
+            else:
+                log_fail("Cleanup preserves an unrelated user *.corrupt file", "file exists", "file deleted")
+
+            if prefix_evil.exists():
+                log_pass("Cleanup preserves build-stateevil.json.corrupt (prefix collision, not crew's -<id> form)")
+            else:
+                log_fail("Cleanup preserves build-stateevil.json.corrupt (prefix collision)",
+                         "file exists", "file wrongly swept by loose glob")
+
+            if prefix_backup.exists():
+                log_pass("Cleanup preserves build-statebackup.json.corrupt (prefix collision, not crew's -<id> form)")
+            else:
+                log_fail("Cleanup preserves build-statebackup.json.corrupt (prefix collision)",
+                         "file exists", "file wrongly swept by loose glob")
+
+            # Clean up
+            for f in crew_dir.glob("*.corrupt"):
+                f.unlink()
+
+            # --- context-snapshot .md + .restored.md + orphaned .tmp sweep ---
+            # The real save-context artifact is `.crew/context-snapshot.md`, and
+            # restore renames it to `.crew/context-snapshot.restored.md`, which
+            # accumulated forever under the old `context-snapshot-*.json`-only
+            # pattern. A stale restored snapshot IS now swept; an ACTIVE state
+            # file in the same pass survives untouched.
+            stale_restored = crew_dir / "context-snapshot.restored.md"
+            stale_restored.write_text("# old restored snapshot")
+            stale_snapshot = crew_dir / "context-snapshot.md"
+            stale_snapshot.write_text("# old snapshot")
+            orphan_tmp = crew_dir / ".build-state-x.json.abc123.tmp"
+            orphan_tmp.write_text("orphaned atomic-write temp")
+            # FOREIGN files past the age threshold that share a bare suffix with
+            # crew's artifacts must be PRESERVED — the exact-name/anchored globs
+            # must NOT match them (mirrors the .corrupt prefix-collision negatives).
+            foreign_restored = crew_dir / "foo.restored.md"        # not context-snapshot.restored.md
+            foreign_restored.write_text("another tool's restored file")
+            foreign_snapshot = crew_dir / "context-snapshot-notes.md"  # user's notes, not the exact artifact
+            foreign_snapshot.write_text("user snapshot notes")
+            foreign_tmp = crew_dir / "random.tmp"                  # bare .tmp, no crew prefix
+            foreign_tmp.write_text("some tool's temp")
+            foreign_hidden_tmp = crew_dir / ".sometool.tmp"        # hidden bare .tmp, no crew prefix
+            foreign_hidden_tmp.write_text("some tool's hidden temp")
+            snap_old_mtime = _time.time() - (8 * 86400)
+            for _sf in (stale_restored, stale_snapshot, orphan_tmp,
+                        foreign_restored, foreign_snapshot, foreign_tmp, foreign_hidden_tmp):
+                os.utime(_sf, (snap_old_mtime, snap_old_mtime))
+            # A live active loop from THIS pass must not be collateral.
+            live_active = crew_dir / "build-state-liveL5.json"
+            live_active.write_text('{"active": true, "prompt": "current task", "session_id": "liveL5"}')
+
+            run_script(session_start, json.dumps({"directory": str(test_path)}))
+
+            if not stale_restored.exists():
+                log_pass("Cleanup sweeps stale context-snapshot.restored.md")
+            else:
+                log_fail("Cleanup sweeps stale context-snapshot.restored.md", "deleted", "still exists")
+
+            if not stale_snapshot.exists():
+                log_pass("Cleanup sweeps stale context-snapshot.md")
+            else:
+                log_fail("Cleanup sweeps stale context-snapshot.md", "deleted", "still exists")
+
+            if not orphan_tmp.exists():
+                log_pass("Cleanup sweeps orphaned atomic-write .tmp")
+            else:
+                log_fail("Cleanup sweeps orphaned atomic-write .tmp", "deleted", "still exists")
+
+            if live_active.exists():
+                log_pass("Cleanup preserves an active state file during the .md sweep")
+            else:
+                log_fail("Cleanup preserves an active state file during the .md sweep",
+                         "file exists", "file wrongly deleted")
+
+            if foreign_restored.exists():
+                log_pass("Cleanup preserves foreign foo.restored.md (not context-snapshot.restored.md)")
+            else:
+                log_fail("Cleanup preserves foreign foo.restored.md",
+                         "file exists", "file wrongly swept by bare *.restored.md glob")
+
+            if foreign_snapshot.exists():
+                log_pass("Cleanup preserves user context-snapshot-notes.md (not the exact artifact)")
+            else:
+                log_fail("Cleanup preserves user context-snapshot-notes.md",
+                         "file exists", "file wrongly swept by context-snapshot*.md glob")
+
+            if foreign_tmp.exists():
+                log_pass("Cleanup preserves foreign random.tmp (no crew prefix)")
+            else:
+                log_fail("Cleanup preserves foreign random.tmp",
+                         "file exists", "file wrongly swept by bare .*.tmp glob")
+
+            if foreign_hidden_tmp.exists():
+                log_pass("Cleanup preserves foreign .sometool.tmp (no crew prefix)")
+            else:
+                log_fail("Cleanup preserves foreign .sometool.tmp",
+                         "file exists", "file wrongly swept by bare .*.tmp glob")
+
+            # Clean up
+            for f in set(list(crew_dir.glob("*.md")) + list(crew_dir.glob("*.tmp"))
+                         + list(crew_dir.glob(".*.tmp")) + list(crew_dir.glob("*-state*.json"))):
                 f.unlink()
 
             # =========================================================================
@@ -1331,10 +1903,480 @@ def main():
                     "Incomplete todos do NOT block stop (no active loop)",
                     persistent_mode,
                     json.dumps({"directory": str(test_path), "session_id": test_session_id}),
-                    '{"continue": true}',
+                    '{}',
                 )
             finally:
                 todo_file.unlink(missing_ok=True)
+
+            # =========================================================================
+            # STATE-FILE ROBUSTNESS
+            # =========================================================================
+            log_section("state robustness (atomic writes, corrupt/schema, adoption)")
+
+            import stat as _stat
+
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+
+            # --- 0600-at-create + schema stamp (no chmod window) ---
+            p5_state = crew_dir / "build-state.json"
+            models_module.BuildState(active=True, prompt="p5", iteration=1).save(p5_state)
+            mode = _stat.S_IMODE(os.stat(p5_state).st_mode)
+            if mode == 0o600:
+                log_pass("save() creates state file 0600 (no chmod window)")
+            else:
+                log_fail("save() creates state file 0600", "0o600", oct(mode))
+
+            with open(p5_state) as f:
+                _saved = json.load(f)
+            if _saved.get("schema") == 1:
+                log_pass("save() stamps schema:1")
+            else:
+                log_fail("save() stamps schema:1", "1", str(_saved.get("schema")))
+
+            # --- Atomicity: crash between temp-write and os.replace ---
+            # A monkeypatched os.replace records the TEMP file's mode (proving
+            # it is 0600 too) then raises: the original must stay intact and
+            # the finally-cleanup must leave no stray temp.
+            orig_content = p5_state.read_text()
+            _temp_modes = []
+            _saved_replace = models_module.os.replace
+
+            def _capture_then_boom(src, dst):
+                try:
+                    _temp_modes.append(_stat.S_IMODE(os.stat(src).st_mode))
+                except OSError:
+                    _temp_modes.append(None)
+                raise RuntimeError("simulated crash before replace")
+
+            models_module.os.replace = _capture_then_boom
+            try:
+                try:
+                    models_module.atomic_write_json(p5_state, {"active": False, "clobbered": True})
+                except RuntimeError:
+                    pass
+            finally:
+                models_module.os.replace = _saved_replace
+
+            after_content = p5_state.read_text()
+            stray = list(crew_dir.glob(".build-state.json.*.tmp"))
+            if after_content == orig_content and not stray:
+                log_pass("atomic write: crash before replace leaves original intact + no stray temp")
+            else:
+                log_fail("atomic write: crash before replace leaves original intact + no stray temp",
+                         "original bytes, zero temp files",
+                         f"changed={after_content != orig_content}, stray={[s.name for s in stray]}")
+
+            if _temp_modes and _temp_modes[0] == 0o600:
+                log_pass("atomic write: temp file is 0600 by construction")
+            else:
+                log_fail("atomic write: temp file is 0600 by construction", "0o600",
+                         oct(_temp_modes[0]) if _temp_modes and _temp_modes[0] is not None else str(_temp_modes))
+
+            # --- Concurrent increment: no torn state, unique temps ---
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            run_crew_state(["init", "bl", "--prompt", "race"], test_path)
+            run_crew_state(["set", "bl", "iteration", "5"], test_path)
+            _race_procs = [
+                subprocess.Popen(
+                    [sys.executable, str(crew_state), "increment", "bl", "iteration"],
+                    cwd=test_path,
+                    env={**_neutral_env(), "CLAUDE_PROJECT_DIR": str(test_path)},
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                for _ in range(2)
+            ]
+            for pr in _race_procs:
+                pr.wait()
+            try:
+                with open(crew_dir / "build-state.json") as f:
+                    raced = json.load(f)
+                parseable = True
+            except (OSError, json.JSONDecodeError):
+                raced, parseable = {}, False
+            race_stray = list(crew_dir.glob(".build-state.json.*.tmp"))
+            # Lost update is accepted (both may read 5 → 6); corruption is not.
+            if parseable and raced.get("iteration") in (6, 7) and not race_stray:
+                log_pass("concurrent increment: final JSON parseable, valid state, no temp collision")
+            else:
+                log_fail("concurrent increment: final JSON parseable, valid state, no temp collision",
+                         "parseable JSON, iteration in {6,7}, no stray temp",
+                         f"parseable={parseable}, iter={raced.get('iteration')}, stray={[s.name for s in race_stray]}")
+
+            # --- adoption stamp ---
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "legacy", "iteration": 1, "max_iterations": 10}'
+            )
+            run_script(persistent_mode, json.dumps({"directory": str(test_path), "session_id": "s1"}))
+            with open(crew_dir / "build-state.json") as f:
+                stamped = json.load(f)
+            if stamped.get("session_id") == "s1":
+                log_pass("adoption stamp: legacy file gains the hook's session_id")
+            else:
+                log_fail("adoption stamp: legacy file gains the hook's session_id", "s1", str(stamped.get("session_id")))
+
+            out_s2 = run_script(persistent_mode, json.dumps({"directory": str(test_path), "session_id": "s2"}))
+            if out_s2 == "{}":
+                log_pass("adoption stamp: a second, different session no longer co-adopts (allows)")
+            else:
+                log_fail("adoption stamp: a second, different session no longer co-adopts (allows)", "{}", out_s2[:200])
+
+            # --- Corrupt ≠ missing: one-time block + .corrupt rename + next Stop allows ---
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            corrupt_file = crew_dir / "build-state.json"
+            corrupt_file.write_text('{"active": true, "prompt": "broken", trunc')  # invalid JSON
+            out_corrupt = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            payload_c = json.loads(out_corrupt)
+            if payload_c.get("decision") == "block" and "corrupt" in payload_c.get("reason", "").lower():
+                log_pass("corrupt state → one-time block with diagnostic (not silent allow)")
+            else:
+                log_fail("corrupt state → one-time block with diagnostic", "decision:block + corrupt reason", out_corrupt[:200])
+
+            if (crew_dir / "build-state.json.corrupt").exists() and not corrupt_file.exists():
+                log_pass("corrupt state → file set aside as .corrupt")
+            else:
+                log_fail("corrupt state → file set aside as .corrupt", ".corrupt exists, original gone",
+                         f"corrupt_exists={(crew_dir / 'build-state.json.corrupt').exists()}, orig_exists={corrupt_file.exists()}")
+
+            out_corrupt2 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if out_corrupt2 == "{}":
+                log_pass("corrupt state → second Stop allows (never loops forever)")
+            else:
+                log_fail("corrupt state → second Stop allows", "{}", out_corrupt2[:200])
+
+            # --- Schema: absent loads as v1 ---
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "noschema", "iteration": 1, "max_iterations": 10}'
+            )
+            out_noschema = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if json.loads(out_noschema).get("decision") == "block":
+                log_pass("absent schema loads as v1 → active loop still blocks")
+            else:
+                log_fail("absent schema loads as v1 → active loop still blocks", "decision:block", out_noschema[:200])
+
+            # --- Higher schema: refuse to touch (bytes untouched, NOT renamed) ---
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            future_file = crew_dir / "build-state.json"
+            future_file.write_text(
+                '{"active": true, "prompt": "newer", "iteration": 1, "max_iterations": 10, "schema": 99}'
+            )
+            before_bytes = future_file.read_bytes()
+            out_future = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            payload_f = json.loads(out_future)
+            after_bytes = future_file.read_bytes()
+            renamed = (crew_dir / "build-state.json.corrupt").exists()
+            if ("decision" not in payload_f
+                    and "newer crew" in payload_f.get("systemMessage", "")
+                    and after_bytes == before_bytes
+                    and not renamed
+                    and future_file.exists()):
+                log_pass("higher schema (99) → refuse to touch: bytes untouched, not renamed, loud allow diagnostic")
+            else:
+                log_fail("higher schema (99) → refuse to touch",
+                         "allow + systemMessage, bytes identical, no .corrupt rename",
+                         f"decision={payload_f.get('decision')}, sysmsg={payload_f.get('systemMessage','')[:60]!r}, "
+                         f"bytes_equal={after_bytes == before_bytes}, renamed={renamed}")
+
+            # --- read path does not create .crew/ ---
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            p5_empty = test_path / "p5-empty-proj"
+            p5_empty.mkdir()
+            run_crew_state(["show", "bl"], p5_empty)
+            if not (p5_empty / ".crew").exists():
+                log_pass("crew state show in empty dir does not create .crew/")
+            else:
+                log_fail("crew state show in empty dir does not create .crew/", "no .crew/", ".crew/ created")
+
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+
+            # =========================================================================
+            # BOUNDED STACK DETECTION
+            # =========================================================================
+            log_section("stack detection (pruned bounded walk)")
+
+            detect_project_stack = ss_module.detect_project_stack
+
+            # Prune proven: a .kt ONLY under a pruned dir is NOT detected.
+            p6_prune = test_path / "p6-prune"
+            (p6_prune / "node_modules" / "pkg" / "src").mkdir(parents=True)
+            (p6_prune / "node_modules" / "pkg" / "src" / "Buried.kt").write_text("class X")
+            if "Kotlin" not in detect_project_stack(p6_prune):
+                log_pass("stack detect: .kt only under a pruned dir (node_modules) is NOT detected")
+            else:
+                log_fail("stack detect: .kt only under a pruned dir is NOT detected", "no Kotlin", "Kotlin detected")
+
+            # Hit: a .kt in a real source dir IS detected.
+            p6_hit = test_path / "p6-hit"
+            (p6_hit / "src" / "main").mkdir(parents=True)
+            (p6_hit / "src" / "main" / "App.kt").write_text("class A")
+            if "Kotlin" in detect_project_stack(p6_hit):
+                log_pass("stack detect: .kt in a real source dir IS detected")
+            else:
+                log_fail("stack detect: .kt in a real source dir IS detected", "Kotlin", "not detected")
+
+            # Parity: a .gradle.kts yields BOTH Kotlin and Gradle (old globs did).
+            p6_gradle = test_path / "p6-gradle"
+            p6_gradle.mkdir()
+            (p6_gradle / "settings.gradle.kts").write_text('rootProject.name = "x"')
+            gh = detect_project_stack(p6_gradle)
+            if "Kotlin" in gh and "Gradle" in gh:
+                log_pass("stack detect: a .gradle.kts yields both Kotlin and Gradle (glob parity)")
+            else:
+                log_fail("stack detect: a .gradle.kts yields both Kotlin and Gradle", "Kotlin+Gradle", str(gh))
+
+            # Wall-clock bound: a deep/wide decoy under node_modules + one real
+            # .kt returns well under the hook budget because the decoy is pruned.
+            p6_wall = test_path / "p6-wall"
+            (p6_wall / "src").mkdir(parents=True)
+            (p6_wall / "src" / "Main.kt").write_text("class M")
+            _decoy = p6_wall / "node_modules"
+            for _i in range(40):
+                _d = _decoy / f"pkg{_i}" / "deep" / "deeper"
+                _d.mkdir(parents=True)
+                for _j in range(20):
+                    (_d / f"f{_j}.js").write_text("x")
+            _t0 = _time.perf_counter()
+            wall_hints = detect_project_stack(p6_wall)
+            _elapsed = _time.perf_counter() - _t0
+            if "Kotlin" in wall_hints and _elapsed < 2.0:
+                log_pass(f"stack detect: pruned walk returns fast on a big decoy tree ({_elapsed:.3f}s)")
+            else:
+                log_fail("stack detect: pruned walk returns fast on a big decoy tree",
+                         "Kotlin + < 2s", f"hints={wall_hints}, elapsed={_elapsed:.3f}s")
+
+            # Entry-cap: a low cap halts the walk before it descends to a deep
+            # .kt (root's plain files exhaust the budget first) — proves the cap.
+            p6_cap = test_path / "p6-cap"
+            p6_cap.mkdir()
+            for _j in range(10):
+                (p6_cap / f"plain{_j}.txt").write_text("x")
+            _sub = p6_cap / "sub"
+            _sub.mkdir()
+            (_sub / "Deep.kt").write_text("class D")
+            _saved_cap = ss_module.STACK_WALK_MAX_ENTRIES
+            ss_module.STACK_WALK_MAX_ENTRIES = 5
+            try:
+                capped = detect_project_stack(p6_cap)
+            finally:
+                ss_module.STACK_WALK_MAX_ENTRIES = _saved_cap
+            if "Kotlin" not in capped:
+                log_pass("stack detect: entry cap halts the walk before a deep .kt (bounded)")
+            else:
+                log_fail("stack detect: entry cap halts the walk before a deep .kt", "no Kotlin (cap hit)", str(capped))
+            if "Kotlin" in detect_project_stack(p6_cap):
+                log_pass("stack detect: same tree with default cap finds the deep .kt (cap was the cause)")
+            else:
+                log_fail("stack detect: same tree with default cap finds the deep .kt", "Kotlin", "not detected")
+
+            # =========================================================================
+            # LOOP INIT -f (task off the shell)
+            # =========================================================================
+            log_section("crew state init -f (task off the shell)")
+
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+
+            # bl: -f reads the file into `prompt`, flags preserved byte-for-byte.
+            p8_taskfile = crew_dir / "task-bl-p8.txt"
+            p8_taskfile.write_text("Fix the auth bug --panel full", encoding="utf-8")
+            _, stderr, code = run_crew_state(
+                ["init", "bl", "-f", str(p8_taskfile), "--session-id", "p8"], test_path)
+            if code == 0:
+                sj, _, _ = run_crew_state(["show", "bl", "--session-id", "p8", "--verbose"], test_path)
+                if '"prompt": "Fix the auth bug --panel full"' in sj:
+                    log_pass("init bl -f: reads file into prompt (flags preserved byte-for-byte)")
+                else:
+                    log_fail("init bl -f: reads file into prompt", "prompt from file", sj)
+            else:
+                log_fail("init bl -f: exit 0", "exit 0", f"exit {code}, stderr: {stderr}")
+
+            # mt: -f reads the file into `task_description`.
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            p8_mtfile = crew_dir / "task-mt-p8.txt"
+            p8_mtfile.write_text("Design the profile system", encoding="utf-8")
+            _, stderr, code = run_crew_state(
+                ["init", "mt", "-f", str(p8_mtfile), "--auto-plan", "--session-id", "p8m"], test_path)
+            if code == 0:
+                sj, _, _ = run_crew_state(["show", "mt", "--session-id", "p8m", "--verbose"], test_path)
+                if '"task_description": "Design the profile system"' in sj:
+                    log_pass("init mt -f: reads file into task_description")
+                else:
+                    log_fail("init mt -f: reads file into task_description", "task from file", sj)
+            else:
+                log_fail("init mt -f: exit 0", "exit 0", f"exit {code}, stderr: {stderr}")
+
+            # -f + inline flag together → clean error (exit 2), no state file.
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            p8_conflict = crew_dir / "task-conflict.txt"
+            p8_conflict.write_text("x", encoding="utf-8")
+            _, stderr, code = run_crew_state(
+                ["init", "bl", "--prompt", "inline", "-f", str(p8_conflict), "--session-id", "p8c"], test_path)
+            if code == 2 and "not both" in stderr and not (crew_dir / "build-state-p8c.json").exists():
+                log_pass("init bl -f + --prompt together: clean error (exit 2), no state file")
+            else:
+                log_fail("init bl -f + --prompt together: clean error", "exit 2, 'not both', no file",
+                         f"exit {code}, stderr={stderr!r}, file={(crew_dir / 'build-state-p8c.json').exists()}")
+
+            # Missing file → clean nonzero exit, no state file.
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+            _, stderr, code = run_crew_state(
+                ["init", "bl", "-f", str(crew_dir / "nope.txt"), "--session-id", "p8x"], test_path)
+            if code != 0 and "not found" in stderr and not (crew_dir / "build-state-p8x.json").exists():
+                log_pass("init bl -f missing file: clean nonzero exit, no state file created")
+            else:
+                log_fail("init bl -f missing file: clean nonzero exit, no state file",
+                         "nonzero, 'not found', no file",
+                         f"exit {code}, stderr={stderr!r}, file={(crew_dir / 'build-state-p8x.json').exists()}")
+
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+
+            # =========================================================================
+            # PYTHON 3.9 IMPORT BOMB + LOUD FAIL-OPEN
+            # =========================================================================
+            log_section("hooks: version guard + fail-open")
+
+            session_start_path = SCRIPT_DIR / "session-start.py"
+            state_discovery_path = SCRIPT_DIR / "state_discovery.py"
+
+            # Static: state_discovery carries the __future__ import (the
+            # `-> Path | None` annotation is a def-time TypeError on 3.9
+            # without it).
+            sd_src = state_discovery_path.read_text()
+            if "from __future__ import annotations" in sd_src:
+                log_pass("state_discovery.py has `from __future__ import annotations`")
+            else:
+                log_fail("state_discovery.py has `from __future__ import annotations`",
+                         "__future__ import present", "absent")
+
+            # Static: the stdlib-only version guard appears textually BEFORE
+            # the first project import in both hook entry points.
+            for hook_path in (persistent_mode, session_start_path):
+                src = hook_path.read_text()
+                guard_idx = src.find("sys.version_info < (3, 10)")
+                import_idx = src.find("from models import")
+                if 0 <= guard_idx < import_idx:
+                    log_pass(f"{hook_path.name}: version guard precedes project imports")
+                else:
+                    log_fail(f"{hook_path.name}: version guard precedes project imports",
+                             "guard before `from models import`",
+                             f"guard_idx={guard_idx}, import_idx={import_idx}")
+
+            # Behavioral: an unexpected in-hook crash fails OPEN (valid allow
+            # JSON on stdout) and LOUD (diagnostic on stderr + the hook's own
+            # documented output channel: Stop uses
+            # systemMessage; SessionStart uses its documented
+            # hookSpecificOutput.additionalContext channel). Fault: a
+            # non-string "directory" makes Path() raise TypeError inside
+            # main().
+            for hook_path in (persistent_mode, session_start_path):
+                crash_env = _neutral_env()
+                crash_env.pop("CLAUDE_PROJECT_DIR", None)  # force the stdin fault path
+                proc = subprocess.run(
+                    [sys.executable, str(hook_path)],
+                    input='{"directory": 123}',
+                    capture_output=True, text=True, cwd=SCRIPT_DIR, env=crash_env,
+                )
+                name = f"{hook_path.name}: crash fails open + loud"
+                try:
+                    payload = json.loads(proc.stdout.strip())
+                except (json.JSONDecodeError, ValueError):
+                    payload = None
+                if isinstance(payload, dict):
+                    if hook_path.name == "session-start.py":
+                        hso = payload.get("hookSpecificOutput", {})
+                        diag = hso.get("additionalContext", "") if isinstance(hso, dict) else ""
+                    else:
+                        diag = payload.get("systemMessage", "")
+                else:
+                    diag = ""
+                if (
+                    proc.returncode == 0
+                    and isinstance(payload, dict)
+                    and "decision" not in payload
+                    and "crashed" in diag
+                    and "[crew]" in proc.stderr
+                ):
+                    log_pass(name)
+                else:
+                    log_fail(name,
+                             "rc 0, allow JSON with loud diagnostic field, stderr diagnostic",
+                             f"rc={proc.returncode} stdout={proc.stdout[:150]!r} stderr={proc.stderr[:150]!r}")
+
+            # Real-interpreter test (skip if no Python 3.9 available): both
+            # hook entry points are visible no-ops on 3.9 (allow + loud
+            # diagnostic, exit 0), and state_discovery imports cleanly.
+            py39 = None
+            for candidate in ("python3.9", "/usr/bin/python3"):
+                cand_path = shutil.which(candidate) if candidate == "python3.9" else candidate
+                if not cand_path or not Path(cand_path).exists():
+                    continue
+                ver = subprocess.run([cand_path, "-c", "import sys; print(sys.version_info[:2])"],
+                                     capture_output=True, text=True)
+                if ver.returncode == 0 and ver.stdout.strip() == "(3, 9)":
+                    py39 = cand_path
+                    break
+            if py39 is None:
+                print(f"{YELLOW}~ SKIP{NC}: no Python 3.9 interpreter found (real-interpreter guard test)")
+            else:
+                imp = subprocess.run(
+                    [py39, "-c", "import state_discovery"],
+                    capture_output=True, text=True, cwd=SCRIPT_DIR,
+                )
+                if imp.returncode == 0:
+                    log_pass("python3.9 imports state_discovery (annotations lazy)")
+                else:
+                    log_fail("python3.9 imports state_discovery",
+                             "rc 0", f"rc={imp.returncode} stderr={imp.stderr[:200]!r}")
+
+                for hook_path in (persistent_mode, session_start_path):
+                    proc = subprocess.run(
+                        [py39, str(hook_path)],
+                        input=json.dumps({"directory": str(test_path)}),
+                        capture_output=True, text=True, cwd=SCRIPT_DIR, env=_neutral_env(),
+                    )
+                    name = f"{hook_path.name} on 3.9: visible no-op (allow + diagnostic)"
+                    try:
+                        payload = json.loads(proc.stdout.strip())
+                    except (json.JSONDecodeError, ValueError):
+                        payload = None
+                    if (
+                        proc.returncode == 0
+                        and isinstance(payload, dict)
+                        and "decision" not in payload
+                        and "unsupported" in payload.get("systemMessage", "")
+                        and "[crew]" in proc.stderr
+                    ):
+                        log_pass(name)
+                    else:
+                        log_fail(name,
+                                 "rc 0, allow JSON + systemMessage, stderr diagnostic",
+                                 f"rc={proc.returncode} stdout={proc.stdout[:150]!r} stderr={proc.stderr[:150]!r}")
 
     finally:
         # Nothing to restore — isolation is the neutral HOME, not a mutation

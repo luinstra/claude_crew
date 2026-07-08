@@ -9,7 +9,7 @@ A Claude Code plugin for persistence, specialized agents, and tech-stack guidanc
 
 ## What It Does
 
-- **Persistence** — Don't stop until work is complete (build loops, todo continuation)
+- **Persistence** — Don't stop until work is complete (build & measure-twice loops)
 - **Specialized Agents** — Delegate to focused agents for specific tasks
 - **Tech-Stack Skills** — Auto-injected guidance for Kotlin, Exposed, Gradle, Trino (via `sk` plugin)
 - **Session Restoration** — Resume where you left off after restarts
@@ -77,9 +77,11 @@ To avoid permission prompts for loop state management, add this to your Claude C
 
 ```json
 {
-  "allowedPrompts": [
-    "Bash(*/crew *)"
-  ]
+  "permissions": {
+    "allow": [
+      "Bash(*/crew *)"
+    ]
+  }
 }
 ```
 
@@ -87,7 +89,9 @@ This allows the plugin-root `crew` dispatcher to run without confirmation. A
 single `*/crew *` rule covers BOTH the review/debate engine (`crew render`,
 `crew run`, `crew seats`, `crew debate`) AND loop state management
 (`crew state …`, used by `/crew:build`, `/crew:measure-twice`, and their cancel
-commands).
+commands). A project-relative variant proven in live use is
+`Bash(plugins/crew/crew:*)`, which matches the dispatcher invoked by its
+repo-relative path.
 
 > **Migrating from an older install?** Earlier versions invoked
 > `…/scripts/multiagent/cli.py` and `…/scripts/crew-state.py` directly. The
@@ -137,7 +141,7 @@ For non-trivial work, use the **plan → execute** workflow to keep your main co
 4. **Execute** — `/crew:execute` to implement via executor agent
 5. **Verify** — Check results, iterate if needed
 
-For work requiring verification before declaring "done," use `/crew:build` instead — it won't let you stop until an advisor approves completion.
+For work requiring verification before declaring "done," use `/crew:build` instead — it won't let you stop until the multi-model review panel approves completion.
 
 ## Commands
 
@@ -357,16 +361,14 @@ Need to read an image/PDF?   → reader
 
 Skills auto-inject guidance when Claude detects relevant keywords in the conversation.
 
-### crew plugin (core)
-
-| Skill | Triggers On | Provides |
-|-------|-------------|----------|
-| **git** | Git commits, branching | Commit style, atomic commits |
+All skills ship in the **sk plugin** (the `crew` plugin ships no skills).
 
 ### sk plugin (tech-stack)
 
 | Skill | Triggers On | Provides |
 |-------|-------------|----------|
+| **git** | Git commits, branching, rebase, stash, cherry-pick, history | Commit style, atomic commits, rebase/conflict handling |
+| **python** | Python code, exceptions, logging, dataclasses, pathlib, uv/ruff/pytest | Python idioms, project tooling patterns |
 | **kotlin** | Kotlin code, data classes, null safety | Kotlin patterns (null safety, data classes, extensions) |
 | **kotlin-testing** | Tests, Kotest, MockK, TestIdProvider | Test utilities, DatabaseTest, Testcontainers patterns |
 | **exposed** | Exposed ORM, database queries | Repository patterns, transaction handling |
@@ -381,18 +383,21 @@ Hooks run automatically at specific points in the session.
 
 | Hook | When | What It Does |
 |------|------|--------------|
-| **SessionStart** | Session begins | Restores build loop / measure-twice state, saved context, pending todos |
-| **Stop** | Claude tries to stop | Enforces build loop / measure-twice continuation, todo completion |
+| **SessionStart** | Session begins | Restores build loop / measure-twice state and saved context |
+| **Stop** | Claude tries to stop | Enforces build loop / measure-twice continuation |
 
 ### Persistence Behavior
 
-When a build loop, measure-twice loop, or incomplete todos exist:
+When a build loop or measure-twice loop is active:
 1. Claude attempts to stop
 2. The Stop hook intercepts
 3. Claude is reminded to continue working
 4. Loop continues until truly complete
 
-Priority order: build loop → measure-twice → todos
+Priority order: build loop → measure-twice
+
+Generic todo continuation is not enforced by the Stop hook — Claude Code handles
+that natively.
 
 To exit early: `/crew:cancel-build` or `/crew:cancel-measure-twice`
 
@@ -425,7 +430,7 @@ claude-crew/
 │   │   ├── scripts/
 │   │   │   ├── crew-state.py       # Loop state CLI
 │   │   │   ├── models.py           # Dataclasses for JSON structures
-│   │   │   ├── persistent-mode.py  # Build loop + todo enforcement
+│   │   │   ├── persistent-mode.py  # Build + measure-twice loop enforcement
 │   │   │   ├── session-start.py    # State restoration
 │   │   │   └── tests/              # Test suite (test-hooks.py, test-multiagent.py, fixtures/)
 │   │   └── docs/
@@ -449,10 +454,16 @@ The plugin creates state files in `.crew/`:
 
 | File | Purpose |
 |------|---------|
-| `.crew/build-state.json` | Active build loop state |
-| `.crew/measure-twice-state.json` | Active measure-twice loop state |
+| `.crew/build-state-<session-id>.json` | Build loop state (session-scoped) |
+| `.crew/measure-twice-state-<session-id>.json` | Measure-twice loop state (session-scoped) |
 | `.crew/context-snapshot.md` | Saved context (via /crew:save-context) |
 | `.crew/plans/*.md` | Generated plans |
+
+State files are session-scoped (`-<session-id>` suffix) so concurrent sessions
+don't collide; a legacy unsuffixed `.crew/build-state.json` is still read for
+backward compatibility. Cancelling a loop **deactivates in place** (sets
+`"active": false`) rather than deleting the file — session-start cleanup sweeps
+inactive files after a day.
 
 ## Customization
 
@@ -485,11 +496,11 @@ The plugin creates state files in `.crew/`:
 
 **Build loop won't stop**
 - Run `/crew:cancel-build`
-- Or delete `.crew/build-state.json`
+- Or delete the session's `.crew/build-state-<session-id>.json`
 
 **Measure-twice loop won't stop**
 - Run `/crew:cancel-measure-twice`
-- Or delete `.crew/measure-twice-state.json`
+- Or delete the session's `.crew/measure-twice-state-<session-id>.json`
 
 **Skills not activating**
 - Check the skill's `description` matches conversation keywords

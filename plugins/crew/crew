@@ -44,9 +44,22 @@ if __name__ == "__main__":
         import importlib.util
 
         _cs_path = Path(__file__).resolve().parent / "scripts" / "crew-state.py"
-        spec = importlib.util.spec_from_file_location("crew_state", str(_cs_path))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # scripts/ on sys.path → `from models import` works
+        # Graceful backend-missing/corrupt error (untested failure mode #9): a
+        # missing file or a broken load must NOT raw-traceback — emit ONE stderr
+        # line and exit 2. crew-state's OWN SystemExit (argparse/usage) is raised
+        # only AFTER a clean load, so it still propagates below.
+        try:
+            if not _cs_path.is_file():
+                raise FileNotFoundError(_cs_path)
+            spec = importlib.util.spec_from_file_location("crew_state", str(_cs_path))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)  # scripts/ on sys.path → `from models import` works
+        except Exception:
+            print(
+                f"crew: state backend missing/corrupt at {_cs_path} — reinstall the crew plugin",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
         saved = sys.argv
         sys.argv = ["crew-state.py", *sys.argv[2:]]  # strip the "state" token
         try:

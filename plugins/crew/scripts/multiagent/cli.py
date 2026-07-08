@@ -1538,7 +1538,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
     """Collapse the named per-seat ``<seat>.json`` result files into ONE markdown
     digest.
 
-    THREE modes over the same named-seats read (Decision-G):
+    THREE modes over the same named-seats read:
       * default (no flag) — a FAITHFUL ``render_panel`` concatenation, byte-
         identical to before this feature (the existing ``test_collect`` contract).
       * ``--group`` — the deduped GROUPED digest (``findings.render_digest``):
@@ -1659,7 +1659,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
         )
 
     if getattr(args, "group", False):
-        # GROUPED digest (Decision-G): the deduped "N/N seats flagged X" panel.
+        # GROUPED digest: the deduped "N/N seats flagged X" panel.
         # --full ALSO writes the byte-faithful render_panel sibling (the recovery
         # artifact + the advisory size denominator).
         text = findings.render_digest(results)
@@ -1858,7 +1858,7 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     call ``_fan_out``, ``_run_seat``, ``_run_cli``, or any provider ``.run()``.
     The per-seat ``crew run <seat>`` loop stays in the command markdown, where
     each seat is a SEPARATE, visible, individually-killable shell. Folding that
-    loop into ``_fan_out`` here is the EXACT regression Phase-2 reversed — it
+    loop into ``_fan_out`` here is the EXACT regression this design reverses: it
     re-hides every seat in one opaque thread pool and destroys per-shell
     killability. DO NOT add a run/fan-out call to this function.
 
@@ -2156,8 +2156,10 @@ def cmd_probe(args: argparse.Namespace) -> int:
     doctor answers "is the CLI installed?"; probe answers "does the seat
     actually return usable output?". Subprocess seats only — Task seats are
     orchestrator-dispatched and rejected with the same loud message cmd_run
-    uses. Exit 0 = every probed seat passed/skipped; 1 = any fail/degraded;
-    2 = usage error.
+    uses. Exit 0 = at least one seat passed and none failed/degraded;
+    1 = any fail/degraded; 2 = usage error OR every probed seat was skipped
+    (nothing actually passed — an all-skipped probe must NOT masquerade as a
+    healthy green to a scripted health check keying on the exit code).
     """
     names = list(known_seat_names()) if args.all else args.seats
     if not names:
@@ -2236,7 +2238,14 @@ def cmd_probe(args: argparse.Namespace) -> int:
         p.write_text(text + "\n", encoding="utf-8")
 
     print(text)
-    return 0 if all(v["status"] in ("pass", "skipped") for v in results.values()) else 1
+    statuses = [v["status"] for v in results.values()]
+    if any(s in ("fail", "degraded") for s in statuses):
+        return 1
+    if any(s == "pass" for s in statuses):
+        return 0
+    # No pass and no fail → every probed seat was skipped. A fully-skipped
+    # probe proved nothing ran; exit 2 so it can't read as a healthy green.
+    return 2
 
 
 # --- scaffold-config: template rendering -------------------------------------

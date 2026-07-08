@@ -10,7 +10,7 @@ allowed-tools: Task, Read, Glob
 
 ### Step 0: Consider Workspace Isolation
 
-For multi-file features or significant changes, consider suggesting `/superpowers:using-git-worktrees` to work in an isolated workspace — especially if the main branch needs to stay clean during development.
+For multi-file features or significant changes, consider working in an isolated git worktree — especially if the main branch needs to stay clean during development.
 
 ### Step 1: Check for Plan File
 

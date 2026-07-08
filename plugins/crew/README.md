@@ -25,4 +25,4 @@ See the [project README](../../README.md) and [user guide](../../docs/CLAUDE.md)
 
 ## Development
 
-See [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) for the development guide and [`scripts/CLAUDE.md`](./scripts/CLAUDE.md) for the state machine internals.
+See [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) for the development guide, [`scripts/CLAUDE.md`](./scripts/CLAUDE.md) for the state machine internals, and [`docs/engine-notes.md`](./docs/engine-notes.md) for the rationale/history behind the engine contracts.

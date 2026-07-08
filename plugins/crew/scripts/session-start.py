@@ -4,7 +4,30 @@ Claude Crew Session Start Hook
 Restores persistent mode states and injects plugin integration guidance.
 """
 
+# --- Version guard: stdlib-only, 3.9-parseable, BEFORE any project import.
+# Python 3.9 is UNSUPPORTED for hook functionality (repo requires 3.10+), but
+# must be GRACEFUL: allow + loud diagnostic, never a silent crash. This
+# pre-import fallback runs stdlib-only (it CANNOT build a SessionStartResult,
+# models isn't imported yet), so it emits its diagnostic on the `systemMessage`
+# channel (the allow-side carrier) + stderr. This is the
+# intentional split from the post-import 3.10+ crash handler at the bottom of
+# the module, which CAN build a SessionStartResult and therefore emits via
+# SessionStart's documented hookSpecificOutput.additionalContext channel.
 import json
+import sys
+
+if sys.version_info < (3, 10):
+    _DIAG = (
+        "[crew] SessionStart hook disabled: Python %d.%d is unsupported (crew "
+        "hooks require Python 3.10+). State restore and cleanup skipped — fix "
+        "the hook interpreter (e.g. install python3 >= 3.10 on PATH)."
+        % sys.version_info[:2]
+    )
+    print(json.dumps({"systemMessage": _DIAG}))
+    print(_DIAG, file=sys.stderr)
+    sys.exit(0)
+
+import os
 import re
 import shutil
 import time
@@ -17,6 +40,8 @@ from models import (
     get_file_age_days,
     count_incomplete_todos,
     is_verbose,
+    read_state_json,
+    LOAD_OK,
 )
 from state_discovery import is_loop_state_file, is_active_state_file
 
@@ -25,6 +50,13 @@ MAX_AGE_DAYS = 7
 MAX_AGE_SECONDS = MAX_AGE_DAYS * 86400
 STALE_INACTIVE_DAYS = 1
 STALE_INACTIVE_SECONDS = STALE_INACTIVE_DAYS * 86400
+
+# bound the stack-detection walk so it can't blow the 10s SessionStart hook
+# budget on a big tree. Canonical artifact/vendor dirs are pruned (real Kotlin
+# sources never live under them); the entry cap is a hard ceiling on files
+# visited. Both are module-level so tests can dial the cap down.
+STACK_PRUNE_DIRS = {".git", "node_modules", "build", ".venv", "venv", ".gradle", "dist", "target"}
+STACK_WALK_MAX_ENTRIES = 20_000
 
 
 def cleanup_stale_files(directory: Path) -> None:
@@ -37,9 +69,49 @@ def cleanup_stale_files(directory: Path) -> None:
     if not directory.is_dir():
         return
 
-    # Patterns for non-state crew files
+    # Patterns for non-state crew files. EVERY glob here MUST be anchored to a
+    # crew-specific literal or crew-prefixed pattern — this cleanup runs over BOTH
+    # the project `.crew/` AND the SHARED `~/.claude` root (a dir owned by ALL
+    # Claude Code tools), so a bare-suffix glob (`*.restored.md`, `.*.tmp`) would
+    # delete a FOREIGN tool's / a user's files. No bare-suffix globs.
+    #
+    # The four `*-state.json.corrupt` / `*-state-*.json.corrupt` globs sweep the
+    # set-aside artifacts the Stop hook / crew-state CLI create when a state file
+    # can't be parsed (they end in `.corrupt`, so the `*.json` loop above never
+    # sees them) — otherwise `build-state.json.corrupt` accumulates forever. They
+    # are SCOPED to the EXACT backup names crew creates — the two forms are the
+    # legacy `build-state.json` and the session-scoped `build-state-<id>.json`
+    # (note the HYPHEN before the id) — NOT a loose `build-state*.json.corrupt`
+    # that would also match a foreign `build-stateEVIL.json.corrupt`.
+    #
+    # The context-snapshot globs are EXACT literals only: `context-snapshot.md`
+    # (what save-context.md writes) and `context-snapshot.restored.md` (the rename
+    # restore-context.md leaves behind — otherwise it accumulates forever). NOT
+    # `context-snapshot*.md` (would match a user's `context-snapshot-notes.md`)
+    # nor a bare `*.restored.md` (would match ANY tool's restored file). The
+    # legacy `context-snapshot-*.json` glob is kept (crew-prefixed, `.json`-tailed;
+    # it never matched the real `.md` artifacts but harmlessly sweeps any old JSON
+    # snapshot).
+    #
+    # The temp globs match ONLY what `atomic_write_json` (models.py) produces:
+    # `tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp")` names each temp
+    # `.<state-filename>.<rand>.tmp` — already crew-anchored by the state filename,
+    # so approach (a) needs no generator change. We glob EXACTLY those anchored
+    # names (the two state kinds × legacy/`-<id>` forms), never a bare `.*.tmp`
+    # that would delete any hidden temp from any tool. These sweep atomic-write
+    # temps orphaned by a crash between mkstemp and os.replace (rare).
     non_state_patterns = [
         "context-snapshot-*.json",
+        "context-snapshot.md",
+        "context-snapshot.restored.md",
+        ".build-state.json.*.tmp",
+        ".build-state-*.json.*.tmp",
+        ".measure-twice-state.json.*.tmp",
+        ".measure-twice-state-*.json.*.tmp",
+        "build-state.json.corrupt",
+        "build-state-*.json.corrupt",
+        "measure-twice-state.json.corrupt",
+        "measure-twice-state-*.json.corrupt",
     ]
 
     now = time.time()
@@ -150,18 +222,45 @@ def cleanup_stale_todos(todos_dir: Path) -> None:
 
 
 def detect_project_stack(directory: Path) -> list[str]:
-    """Detect project tech stack and return skill trigger hints."""
+    """Detect project tech stack and return skill trigger hints.
+
+    A single BOUNDED ``os.walk`` pass (pruned artifact dirs + an entry cap +
+    early-exit once all extensions are seen) replaces three unbounded recursive
+    globs, so a huge tree can't blow the 10s SessionStart hook budget. The hint
+    output is behavior-identical to the old glob logic.
+    """
     hints = []
 
-    # Kotlin: .kt, .kts files → triggers sk:kotlin
-    kt_files = list(directory.glob("**/*.kt"))[:1]  # Just check if any exist
-    kts_files = list(directory.glob("**/*.kts"))[:1]
-    if kt_files or kts_files:
-        hints.append("Kotlin")
+    # Kotlin (.kt / .kts) and Gradle Kotlin DSL (.gradle.kts, which ALSO matches
+    # **/*.kts) — detected in one walk. Exposed/Trino stay a root build-file read.
+    found_kt = found_kts = found_gradle_kts = False
+    visited = 0
+    capped = False
+    for root, dirnames, filenames in os.walk(str(directory)):
+        # Prune in-place so os.walk never descends into artifact/vendor dirs.
+        dirnames[:] = [d for d in dirnames if d not in STACK_PRUNE_DIRS]
+        for name in filenames:
+            # Check the cap INSIDE the file loop so one pathological directory
+            # can't be fully iterated before the ceiling fires.
+            if visited >= STACK_WALK_MAX_ENTRIES:
+                capped = True
+                break
+            visited += 1
+            if name.endswith(".gradle.kts"):
+                found_gradle_kts = True
+                found_kts = True  # .gradle.kts also matched the old **/*.kts glob
+            elif name.endswith(".kts"):
+                found_kts = True
+            elif name.endswith(".kt"):
+                found_kt = True
+            if found_kt and found_kts and found_gradle_kts:
+                break
+        if capped or (found_kt and found_kts and found_gradle_kts):
+            break
 
-    # Gradle Kotlin DSL → triggers sk:gradle
-    gradle_kts = list(directory.glob("**/*.gradle.kts"))[:1]
-    if gradle_kts:
+    if found_kt or found_kts:
+        hints.append("Kotlin")
+    if found_gradle_kts:
         hints.append("Gradle")
 
     # Exposed ORM: check build files for exposed dependency → triggers sk:exposed
@@ -318,8 +417,13 @@ def build_session_status(
                 continue
 
             try:
-                with open(json_file) as f:
-                    data = json.load(f)
+                # Classify via the shared reader so a corrupt or NEWER-schema
+                # file is never reported as "Active" (the Stop hook refuses to
+                # honor those — surfacing a phantom active loop here would
+                # contradict it). Only LOAD_OK files are inspected.
+                data, load_status = read_state_json(json_file)
+                if load_status != LOAD_OK or data is None:
+                    continue
                 if not data.get("active", False):
                     continue
 
@@ -339,7 +443,7 @@ def build_session_status(
                         this_session_loops.append(
                             f"[Build Loop Active - {iteration}/{max_iter}]\n"
                             f"Task: {prompt}\n"
-                            f"Continue until advisor verifies and approves completion."
+                            f"Continue until the multi-model panel approves completion."
                         )
                     else:
                         other_session_loops.append(
@@ -355,7 +459,7 @@ def build_session_status(
                             f"[Measure-Twice Loop Active - {iteration}/{max_iter}]\n"
                             f"Task: {task}\n"
                             f"Plan: {plan}\n"
-                            f"Continue until advisor approves the plan."
+                            f"Continue until the panel approves the plan."
                         )
                     else:
                         other_session_loops.append(
@@ -429,4 +533,20 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001. Hooks are fail-open;
+        # make the failure LOUD (stderr + systemMessage), never silent.
+        _diag = (
+            "[crew] SessionStart hook crashed (%s: %s) — continuing without "
+            "state restore/cleanup for this session."
+            % (exc.__class__.__name__, exc)
+        )
+        # models is importable here (top-of-module import succeeded before
+        # main() ran). SessionStart's documented context channel is
+        # hookSpecificOutput.additionalContext (systemMessage is honored on the
+        # Stop allow-side, not here), so emit the diagnostic the same way this
+        # hook emits its normal payload, plus stderr.
+        print(SessionStartResult.with_context(_diag).to_json())
+        print(_diag, file=sys.stderr)
+        sys.exit(0)

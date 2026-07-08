@@ -1,5 +1,5 @@
 ---
-description: Onboarding scaffolder for the crew ENGINE-TUNING config — detects which provider CLIs are installed, then writes a commented ~/.crew-config.toml (or .crew/config.toml with a leading --repo) with cost-safe defaults + honest `available` flags. Never clobbers an existing file silently.
+description: Onboarding scaffolder for the crew ENGINE-TUNING config (the .toml, NOT CLAUDE.md) — detects installed provider CLIs and writes a commented ~/.crew-config.toml (or .crew/config.toml with a leading --repo), never clobbering an existing file silently.
 argument-hint: "[--repo]"
 allowed-tools: Bash, Read
 ---
@@ -12,8 +12,10 @@ $ARGUMENTS
 > `~/.crew-config.toml` and the per-repo `.crew/config.toml` that the engine's
 > `config.py` loader reads (`default_panel`, `[debate].panel`, `[dispatch].seat`,
 > per-seat `model`/`available`, `[tuning].timeout`, `[panels]`). It DETECTS which
-> provider CLIs are installed, then writes a **commented** starter config with
-> cost-safe defaults so you discover the knobs without hand-authoring TOML.
+> provider CLIs are installed, then writes a **commented** starter config so you
+> discover the knobs without hand-authoring TOML. A fresh scaffold gets cost-safe
+> defaults; `--repo` with an existing global `~/.crew-config.toml` instead seeds the
+> per-repo file from that global verbatim (then lightly adjusts).
 
 > **Not to be confused with `/crew:crew-config`.** `/crew:crew-config` copies the
 > **`CLAUDE.md` operating-instructions doc** into `.claude/CLAUDE.md` (project) or
@@ -36,8 +38,10 @@ $ARGUMENTS
 
 `--repo` is recognized ONLY as the LEADING token of `$ARGUMENTS` (same place the other
 crew commands look for flags). With `--repo`, the scaffold targets the per-repo
-`.crew/config.toml` (seeded VERBATIM from the global `~/.crew-config.toml` if one
-exists). Without it, the scaffold targets the global `~/.crew-config.toml`.
+`.crew/config.toml`: if a global `~/.crew-config.toml` exists it is seeded VERBATIM
+from that global (then lightly adjusted); if no global exists it gets a fresh
+cost-safe-defaults scaffold. Without `--repo`, the scaffold targets the global
+`~/.crew-config.toml` with cost-safe defaults.
 
 ## Step 2 — Detect installed providers (`doctor`)
 
@@ -67,6 +71,11 @@ stdout) and SHOW the detection table to the user — label each present subproce
   trivial prompt through each seat's real CLI and reports pass/degraded/fail/skipped.
   This is BILLABLE (it runs each seat's real CLI once), so ask before running it — never
   run it unprompted.
+  - **Exit-code contract** (a health check should branch on this, not just the status
+    text): `0` = at least one seat passed; `1` = a seat failed/degraded; `2` = usage
+    error OR every seat was skipped. Because `2` is overloaded (bad-usage AND
+    all-skipped), a caller that gets `2` must ALSO read the JSON to tell a real usage
+    error from an all-skipped (no-CLI-available) run.
 
 ## Step 3 — Short PREFERENCE interview (detect-then-CONFIRM)
 
@@ -131,9 +140,9 @@ command -v diff && diff -u <target> <target>.new
 
 ## Step 6 — What's next
 
-Point the user at the knobs: the full config reference lives in `docs/CLAUDE.md`; per-seat
-tuning (`model`, codex `reasoning_effort`, agy `print_timeout`, `[tuning].timeout`) and
-`[panels]` rosters are commented in the file they just got. For the project
+Point the user at the knobs: the commented config file they just got is the reference —
+per-seat tuning (`model`, codex `reasoning_effort`, agy `print_timeout`, `[tuning].timeout`)
+and `[panels]` rosters are documented inline. For the project
 operating-instructions doc (a different file), mention `/crew:crew-config`.
 
 ---

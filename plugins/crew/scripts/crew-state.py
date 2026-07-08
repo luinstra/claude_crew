@@ -11,7 +11,15 @@ from datetime import datetime
 from pathlib import Path
 
 # Import from models.py (same directory)
-from models import BuildState, MeasureTwiceState
+from models import (
+    BuildState,
+    MeasureTwiceState,
+    atomic_write_json,
+    SCHEMA_VERSION,
+    LOAD_CORRUPT,
+    LOAD_FUTURE_SCHEMA,
+)
+from state_discovery import find_adoptable_legacy, find_session_state_file
 
 LOOP_ALIASES = {
     "build": "bl", "bl": "bl",
@@ -22,6 +30,50 @@ LOOP_CLASSES = {
     "bl": BuildState,
     "mt": MeasureTwiceState,
 }
+
+LOOP_PREFIXES = {
+    "bl": "build-state",
+    "mt": "measure-twice-state",
+}
+
+
+def _refuse_future_schema(path: Path, status: str) -> None:
+    """Refuse-to-touch contract, mirrored from the Stop hook: a state
+    file written by a NEWER crew version is NEVER overwritten by a mutating CLI
+    command. Exits nonzero with a loud one-line diagnostic; bytes untouched."""
+    if status == LOAD_FUTURE_SCHEMA:
+        print(
+            f"Error: refusing to modify {path.name} — it was written by a newer "
+            f"crew version (state schema ahead of this install). Upgrade crew or "
+            f"remove the file manually.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _refuse_corrupt(path: Path, status: str) -> None:
+    """Mirror the hook's corrupt handling for mutate-in-place commands
+    (set/increment/deactivate): never silently overwrite an unparseable file as
+    if it were clean — emit a loud diagnostic and exit nonzero."""
+    if status == LOAD_CORRUPT:
+        print(
+            f"Error: {path.name} is corrupt (unparseable JSON) — refusing to "
+            f"overwrite it. Remove it or re-init the loop with /crew:build or "
+            f"/crew:measure-twice.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _load_for_mutation(cls, path: Path):
+    """Load state for a mutate-in-place CLI command, honoring the
+    refuse-to-touch contract (same as the Stop hook): a newer-schema file is
+    NEVER overwritten; a corrupt file is not silently clobbered. Returns the
+    loaded (OK/MISSING) state."""
+    state, status = cls.load_with_status(path)
+    _refuse_future_schema(path, status)
+    _refuse_corrupt(path, status)
+    return state
 
 
 def get_loop_filename(canonical: str, session_id: str = "") -> str:
@@ -61,7 +113,8 @@ def get_state_path(loop: str, session_id: str = "") -> Path:
         sys.exit(1)
     project_dir = get_project_dir()
     crew_dir = project_dir / ".crew"
-    crew_dir.mkdir(parents=True, exist_ok=True)
+    # read-path helper: must NOT create `.crew/`. Directory creation lives
+    # solely in the write path (atomic_write_json's own mkdir).
     return crew_dir / get_loop_filename(canonical, session_id)
 
 
@@ -118,7 +171,7 @@ def _compact_show(state, canonical: str) -> str:
 def cmd_show(args):
     """Show current state of a loop."""
     session_id = resolve_session_id(args)
-    path = get_state_path(args.loop, session_id)
+    path = _resolve_loop_path(args.loop, session_id)
     canonical = LOOP_ALIASES[args.loop]
     cls = LOOP_CLASSES[canonical]
     state = cls.load(path)
@@ -133,7 +186,7 @@ def cmd_show(args):
 def cmd_is_active(args):
     """Check if a loop is active. Exit 0 if active, exit 1 if not."""
     session_id = resolve_session_id(args)
-    path = get_state_path(args.loop, session_id)
+    path = _resolve_loop_path(args.loop, session_id)
     cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
     state = cls.load(path)
     sys.exit(0 if state.active else 1)
@@ -153,12 +206,26 @@ def cmd_check_conflicts(args):
     # No conflicts - silent success
 
 
+def _resolve_loop_path(loop: str, session_id: str) -> Path:
+    """Resolve the state file this session's loop verbs target — the SAME file
+    the Stop hook resolves (find_session_state_file, so an adopted legacy file
+    is read and mutated on its real path), falling back to the fresh
+    session-scoped path when nothing is found. Keeps show/is-active and
+    set/increment/deactivate in agreement about which file the loop lives in."""
+    canonical = LOOP_ALIASES[loop]
+    crew_dir = get_project_dir() / ".crew"
+    path = find_session_state_file(crew_dir, LOOP_PREFIXES[canonical], session_id)
+    if path is None:
+        path = get_state_path(loop, session_id)
+    return path
+
+
 def cmd_set(args):
     """Set a single field on a loop state."""
     session_id = resolve_session_id(args)
-    path = get_state_path(args.loop, session_id)
+    path = _resolve_loop_path(args.loop, session_id)
     cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
-    state = cls.load(path)
+    state = _load_for_mutation(cls, path)
 
     if not hasattr(state, args.field):
         print(f"Error: {cls.__name__} has no field '{args.field}'", file=sys.stderr)
@@ -174,23 +241,74 @@ def cmd_set(args):
 def check_for_conflicts(session_id: str = ""):
     """Check if this session already has an active loop. Returns error message or None.
 
-    Session-scoped: checks for *-state-{session_id}.json files across BOTH loop types.
-    A different session's active loop is NOT a conflict.
+    Session-scoped: checks BOTH loop types on the SAME path the Stop hook and
+    mutating verbs resolve (find_session_state_file), so an adoptable legacy
+    unsuffixed file counts too. A different session's active loop is NOT a conflict.
     """
     project_dir = get_project_dir()
     crew_dir = project_dir / ".crew"
 
-    bl_path = crew_dir / get_loop_filename("bl", session_id)
-    bl_state = BuildState.load(bl_path)
-    if bl_state.active:
-        return "ERROR: build loop is already active. Run /crew:cancel-build first or let it complete."
-
-    mt_path = crew_dir / get_loop_filename("mt", session_id)
-    mt_state = MeasureTwiceState.load(mt_path)
-    if mt_state.active:
-        return "ERROR: measure-twice loop is already active. Run /crew:cancel-measure-twice first or let it complete."
+    checks = (
+        ("bl", BuildState,
+         "ERROR: build loop is already active. Run /crew:cancel-build first or let it complete."),
+        ("mt", MeasureTwiceState,
+         "ERROR: measure-twice loop is already active. Run /crew:cancel-measure-twice first or let it complete."),
+    )
+    for canonical, cls, active_msg in checks:
+        # Check the scoped target AND any adoptable legacy file INDEPENDENTLY:
+        # init must not ignore an active legacy loop that other verbs and
+        # sessions would still adopt (that would orphan it as a permanently
+        # active file), and find_session_state_file cannot be used here because
+        # it prefers the scoped file even when it is an inactive leftover,
+        # which would hide an active legacy loop behind a finished one.
+        candidates = [crew_dir / get_loop_filename(canonical, session_id)]
+        if session_id:
+            legacy = find_adoptable_legacy(
+                crew_dir, LOOP_PREFIXES[canonical], session_id)
+            if legacy is not None:
+                candidates.append(legacy)
+        for path in candidates:
+            state, status = cls.load_with_status(path)
+            # A newer-schema file is treated as a conflict (refuse-to-touch): we
+            # cannot parse it as our schema, so init must NOT clobber it, and we
+            # surface it as a blocking condition instead of silently overwriting.
+            if status == LOAD_FUTURE_SCHEMA:
+                return (
+                    f"ERROR: {path.name} was written by a newer crew version (state "
+                    f"schema ahead of this install) — refusing to touch. Upgrade crew or "
+                    f"remove the file manually."
+                )
+            if state.active:
+                return active_msg
 
     return None
+
+
+def _resolve_init_text(args, inline_value, inline_flag_name):
+    """Resolve a loop's task text from either the inline flag or ``-f`` file.
+
+    ``-f`` keeps raw ``$ARGUMENTS`` OFF the shell line (the command
+    writes it to a file and passes the path). File read is UTF-8; missing file or
+    a clash with the inline flag exits nonzero (2) with NO state file created.
+    """
+    file_path = getattr(args, "task_file", None)
+    if not file_path:
+        return inline_value
+    if inline_value:
+        print(f"Error: pass either {inline_flag_name} or -f, not both", file=sys.stderr)
+        sys.exit(2)
+    p = Path(file_path)
+    if not p.is_file():
+        print(f"Error: task file not found: {file_path}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        return p.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # A non-UTF-8 file raises UnicodeDecodeError (a ValueError, NOT an
+        # OSError) — catch it alongside OSError so a bad task file exits cleanly
+        # instead of tracebacking (mirrors cli.py dispatch's -f handling).
+        print(f"Error: cannot read task file {file_path}: {exc}", file=sys.stderr)
+        sys.exit(2)
 
 
 def cmd_init(args):
@@ -206,26 +324,55 @@ def cmd_init(args):
     canonical = LOOP_ALIASES[args.loop]
     path = get_state_path(args.loop, session_id)
 
+    # Refuse-to-touch: never overwrite a newer-schema file (already
+    # blocked as a conflict above), and set a corrupt one aside (mirroring the
+    # Stop hook) before re-init so a fresh loop starts on clean state.
+    _, target_status = LOOP_CLASSES[canonical].load_with_status(path)
+    _refuse_future_schema(path, target_status)
+    if target_status == LOAD_CORRUPT:
+        corrupt_path = path.with_name(path.name + ".corrupt")
+        renamed = True
+        try:
+            path.replace(corrupt_path)
+        except OSError:
+            # Rename failed — the fresh state.save() below will overwrite the
+            # unreadable file in place. Don't claim we "set it aside".
+            renamed = False
+        if renamed:
+            print(
+                f"Warning: {path.name} was corrupt (unparseable JSON) — set aside "
+                f"as {corrupt_path.name}; continuing with fresh state.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"Warning: {path.name} was corrupt (unparseable JSON) and could "
+                f"not be set aside — starting fresh over the unreadable file.",
+                file=sys.stderr,
+            )
+
     if canonical == "bl":
-        if not args.prompt:
-            print("Error: --prompt required for build loop", file=sys.stderr)
+        prompt = _resolve_init_text(args, args.prompt, "--prompt")
+        if not prompt or not prompt.strip():
+            print("Error: --prompt or -f required for build loop", file=sys.stderr)
             sys.exit(1)
         state = BuildState(
             active=True,
-            prompt=args.prompt,
+            prompt=prompt,
             iteration=1,
             max_iterations=args.max_iterations or 10,
             completion_promise="DONE",
             session_id=session_id,
         )
     else:  # mt
-        if not args.task:
-            print("Error: --task required for measure-twice", file=sys.stderr)
+        task = _resolve_init_text(args, args.task, "--task")
+        if not task or not task.strip():
+            print("Error: --task or -f required for measure-twice", file=sys.stderr)
             sys.exit(1)
 
         # Auto-derive plan file from task if --auto-plan is set
         if args.auto_plan:
-            plan_name = slugify(args.task)
+            plan_name = slugify(task)
             plan_file = f".crew/plans/{plan_name}.md"
             # Ensure plans directory exists
             plans_dir = get_project_dir() / ".crew" / "plans"
@@ -238,7 +385,7 @@ def cmd_init(args):
 
         state = MeasureTwiceState(
             active=True,
-            task_description=args.task,
+            task_description=task,
             plan_file=plan_file,
             iteration=1,
             max_iterations=args.max_iterations or 10,
@@ -255,22 +402,31 @@ def cmd_init(args):
 def cmd_deactivate(args):
     """Deactivate a loop with timestamp and optional reason."""
     session_id = resolve_session_id(args)
-    path = get_state_path(args.loop, session_id)
-    cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
-    state = cls.load(path)
+    canonical = LOOP_ALIASES[args.loop]
+    cls = LOOP_CLASSES[canonical]
+
+    # BLOCKING 1 (session-id symmetry): deactivate the SAME file the Stop hook
+    # would find — the session-scoped file if present, else an adoptable legacy
+    # file — so a loop init'd with a given session-id is always turned off
+    # against the file it wrote (never a stale legacy file while the scoped one
+    # keeps blocking). set/increment share this resolver so all mutating verbs
+    # agree on which file they touch. Fall back to the scoped path when nothing
+    # is found.
+    path = _resolve_loop_path(args.loop, session_id)
+
+    # Refuse-to-touch: honor the same contract as the hook.
+    state = _load_for_mutation(cls, path)
 
     # Build dict with extra metadata
     data = asdict(state)
+    data["schema"] = SCHEMA_VERSION
     data["active"] = False
     data["completed_at"] = datetime.now().isoformat()
     if args.reason:
         data["reason"] = args.reason
 
-    # Write directly (bypass .save() to include extra fields)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-    os.chmod(path, 0o600)
+    # Write directly (bypass .save() to include extra fields), atomically + 0600.
+    atomic_write_json(path, data)
 
 
 def cmd_increment(args):
@@ -280,9 +436,9 @@ def cmd_increment(args):
         sys.exit(1)
 
     session_id = resolve_session_id(args)
-    path = get_state_path(args.loop, session_id)
+    path = _resolve_loop_path(args.loop, session_id)
     cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
-    state = cls.load(path)
+    state = _load_for_mutation(cls, path)
 
     state.iteration += 1
     state.save(path)
@@ -326,6 +482,11 @@ def main():
     p_init.add_argument("loop", choices=list(LOOP_ALIASES.keys()))
     p_init.add_argument("--prompt", help="Task prompt (for build loop)")
     p_init.add_argument("--task", help="Task description (for measure-twice)")
+    p_init.add_argument(
+        "-f", "--prompt-file", "--task-file", dest="task_file",
+        help="Read the loop's task text from a UTF-8 file (keeps raw $ARGUMENTS "
+             "off the shell); mutually exclusive with --prompt/--task",
+    )
     p_init.add_argument("--plan-file", help="Plan file path (for measure-twice)")
     p_init.add_argument("--auto-plan", action="store_true", help="Auto-derive plan file from task (for measure-twice)")
     p_init.add_argument("--max-iterations", type=int, help="Override max iterations")

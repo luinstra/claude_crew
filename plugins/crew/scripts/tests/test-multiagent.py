@@ -21,6 +21,7 @@ Covers Step 1.7:
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -2527,6 +2528,32 @@ def test_dispatcher():
         check("crew state show <bad-loop> exits NONZERO (exit propagates)",
               badloop.returncode != 0, "nonzero", str(badloop.returncode))
 
+    # (a.6) Backend missing/corrupt: a copy of
+    # plugins/crew/ with scripts/crew-state.py REMOVED must NOT raw-traceback,
+    # `crew state show bl` exits 2 with the graceful "state backend
+    # missing/corrupt … reinstall" line on stderr.
+    with tempfile.TemporaryDirectory() as td:
+        dst = Path(td) / "crew"
+        shutil.copytree(PLUGIN_ROOT, dst)
+        (dst / "scripts" / "crew-state.py").unlink()
+        crew_bin = dst / "crew"
+        try:
+            os.chmod(crew_bin, 0o755)
+        except OSError:
+            pass
+        proc = subprocess.run(
+            [str(crew_bin), "state", "show", "bl"],
+            capture_output=True, text=True, env=_neutral_env(),
+            cwd=td, timeout=30,
+        )
+        check("missing crew-state.py: exits 2 (graceful backend error)",
+              proc.returncode == 2, "2", f"{proc.returncode}: {proc.stderr[:150]}")
+        check("missing crew-state.py: emits the reinstall diagnostic",
+              "state backend missing/corrupt" in proc.stderr,
+              "reinstall diagnostic", proc.stderr[:150])
+        check("missing crew-state.py: NO raw traceback",
+              "Traceback" not in proc.stderr, "no traceback", proc.stderr[:150])
+
 
 def test_stage_all():
     log_section("render --stage-all (N labeled files in one call)")
@@ -4384,9 +4411,7 @@ def test_persist_seat_doc_sync():
     # IDENTICALLY (verbatim substring) across all three review-bearing docs.
     # Duplication is unavoidable (Claude Code command markdown has no include
     # mechanism), so this table is the sync guard — a phrase reworded in only
-    # ONE doc fails here instead of silently drifting. Audited 2026-07-02: all
-    # six already matched verbatim in all three docs (no drift found, so no
-    # reconciliation was needed this pass).
+    # ONE doc fails here instead of silently drifting.
     SENTINEL_PHRASES = [
         'crew" persist-seat',
         "The Task RESULT is the only completion signal",
@@ -4403,6 +4428,51 @@ def test_persist_seat_doc_sync():
                   phrase in text, "present", "MISSING")
         check(f"{rel} has NO hand-rolled six-field Write persistence",
               "the exact six fields" not in text, "absent", "STILL PRESENT")
+
+    # REFERENCE-SPAWN guard: the three review-bearing docs must
+    # spawn Task seats by REFERENCE to the staged prompt file — the seat Reads it
+    # itself — NOT by pasting the staged prompt's contents inline. A drift back to
+    # `prompt="<contents of …prompt-…>"` re-inflates every spawn and re-couples the
+    # orchestrator to the prompt body; this catches that regression.
+    REF_SPAWN = "Read .crew/reviews/<session-id>/prompt-"
+    for rel in docs:
+        text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
+        check(f"{rel} spawns Task seats BY REFERENCE: {REF_SPAWN!r}",
+              REF_SPAWN in text, "present", "MISSING (drifted back to inline paste?)")
+        # CONVERSE: no inline-paste spawn survives.
+        check(f"{rel} has NO inline-paste seat spawn",
+              'prompt="<contents of' not in text, "absent", "STILL INLINE-PASTING")
+
+    # The reviewer-writes-own-return-file variant was REVERTED: an unvalidated
+    # model-returned RETURN-FILE path (traversal/injection) + stale-file risk
+    # outweighed the token saving. The reviewer returns its review block as the
+    # Task RESULT (the pre-revert behavior); the orchestrator Writes that to a temp file
+    # and `persist-seat -f`s it. This CONVERSE guard fails if the reverted happy-path
+    # flow creeps back into any of the three review-bearing docs.
+    RETURN_FILE_MARKERS = [
+        "RETURN-FILE:",                              # the pinned RESULT line
+        "-f .crew/reviews/<session-id>/return-",     # persist-seat by path
+        "Read the verdict from the",                 # the VERDICT: parse rule
+    ]
+    for rel in docs:
+        text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
+        for marker in RETURN_FILE_MARKERS:
+            check(f"{rel} has NO reverted RETURN-FILE flow: {marker!r}",
+                  marker not in text, "absent", "STILL PRESENT (return-file flow crept back?)")
+
+    # Grant/doc sync: BOTH panel Task seats are read-only by convention — neither
+    # reviewer.md nor panelist.md may grant Write on its frontmatter tools line
+    # (reviewer's return-file Write grant was reverted; panelist never had one).
+    reviewer_line6 = (SCRIPT_DIR.parent / "agents/reviewer.md").read_text(
+        encoding="utf-8").splitlines()[5]
+    check("reviewer.md:6 tools line does NOT grant Write (read-only by convention)",
+          reviewer_line6.startswith("tools:") and "Write" not in reviewer_line6,
+          "tools line without Write", repr(reviewer_line6))
+    panelist_line6 = (SCRIPT_DIR.parent / "agents/panelist.md").read_text(
+        encoding="utf-8").splitlines()[5]
+    check("panelist.md:6 tools line does NOT grant Write (read-only by convention)",
+          panelist_line6.startswith("tools:") and "Write" not in panelist_line6,
+          "tools line without Write", repr(panelist_line6))
 
 
 # =============================================================================
@@ -5320,9 +5390,11 @@ def test_probe():
         check("probe unknown seat -> no JSON on stdout",
               proc.stdout.strip() == "", "empty stdout", proc.stdout[:120])
 
-        # 2. Absent CLI (codex not on the isolated PATH) -> status skipped, exit 0.
+        # 2. Absent CLI (codex not on the isolated PATH) -> status skipped, but
+        # since EVERY probed seat was skipped, exit 2 (all-skipped must NOT read
+        # as a healthy green). The JSON still records the skipped status.
         proc = _run_cli(["probe", "codex"], env=env_empty, timeout=30)
-        check("probe absent CLI -> exit 0", proc.returncode == 0, "0",
+        check("probe all-skipped -> exit 2", proc.returncode == 2, "2",
               f"{proc.returncode}: {proc.stderr[:200]}")
         try:
             payload = json.loads(proc.stdout)
@@ -5370,6 +5442,25 @@ def test_probe():
         check("probe pass -> stdout is JSON-only (no extra lines)",
               proc.stdout.strip().startswith("{") and proc.stdout.strip().endswith("}"),
               "pure JSON", proc.stdout[:120])
+
+        # 7b. Mixed pass + skipped (codex present via env_pass, agy absent on the
+        # isolated PATH) -> exit 0. A skipped seat alongside a real pass is still
+        # healthy; only ALL-skipped (test 2) or any fail/degraded flips nonzero.
+        proc = _run_cli(["probe", "codex", "agy"], env=env_pass, timeout=30)
+        check("probe pass+skipped -> exit 0", proc.returncode == 0, "0",
+              f"{proc.returncode}: {proc.stderr[:200]}")
+        try:
+            payload = json.loads(proc.stdout)
+        except Exception as exc:
+            payload = None
+            check("probe pass+skipped stdout parses as JSON", False, "valid json",
+                  f"{exc}: {proc.stdout[:200]}")
+        if payload is not None:
+            check("probe pass+skipped -> codex pass, agy skipped",
+                  payload.get("codex", {}).get("status") == "pass"
+                  and payload.get("agy", {}).get("status") == "skipped",
+                  "codex=pass agy=skipped",
+                  f"codex={payload.get('codex')} agy={payload.get('agy')}")
 
         # 4. Fake codex that prints unrelated prose -> status degraded, exit 1.
         bins_degraded = d / "bin-degraded"; bins_degraded.mkdir()
@@ -6288,7 +6379,7 @@ def test_collect_grouped():
               dig == render.render_panel(results) + "\n",
               "byte-faithful fallback", dig[:80])
 
-    # Claude-only branch (Decision-I): --seats opus,sonnet -> valid 2-seat digest.
+    # Claude-only branch: --seats opus,sonnet -> valid 2-seat digest.
     with tempfile.TemporaryDirectory() as td:
         stage(td, ["opus", "sonnet"])
         proc = _run_dispatcher(
@@ -6303,7 +6394,7 @@ def test_collect_grouped():
               (Path(td) / ".crew/reviews/sess/panel-full.md").exists(),
               "full sibling exists", "?")
 
-    # seat order (Decision-J): VERDICTS roster follows --seats order, full names.
+    # seat order: VERDICTS roster follows --seats order, full names.
     with tempfile.TemporaryDirectory() as td:
         order = ["sonnet", "codex", "opus"]
         stage(td, order)
@@ -6765,6 +6856,94 @@ def test_persist_seat():
               f"exists={(Path(td) / '.crew').exists()}")
 
 
+def test_process_group_reaping():
+    """A timed-out codex/cursor/agy seat reaps its WHOLE process group so a
+    billable grandchild is not orphaned. One case per provider proves the shared
+    _proc.run_reaped helper at all three call sites (and exercises the extracted
+    agy _terminate escalation)."""
+    log_section("provider process-group reaping")
+    import signal as _signal
+    from multiagent.providers.cursor import CursorProvider
+
+    # Fake CLI: spawns a sleeping grandchild in the SAME process group (no
+    # start_new_session), records both PIDs, then hangs. Only a process-GROUP
+    # kill reaps the grandchild; killing the direct child alone would orphan it.
+    fake_hang = """
+    import os, sys, subprocess, time, json
+    PIDFILE = {pidfile!r}
+    gc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    with open(PIDFILE, "w") as f:
+        json.dump({{"parent": os.getpid(), "grandchild": gc.pid}}, f)
+        f.flush()
+    time.sleep(120)
+    """
+
+    def _pid_alive(pid):
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    def _run_case(seat, binname, invoke, *, timeout, config_toml=None):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            pidfile = d / "pids.json"
+            make_fake_bin(d, binname, fake_hang.format(pidfile=str(pidfile)))
+            env_path = os.environ["PATH"]
+            os.environ["PATH"] = str(d) + os.pathsep + env_path
+            ctx = project_config(config_toml) if config_toml else None
+            try:
+                if ctx is not None:
+                    ctx.__enter__()
+                res = invoke(timeout)
+            finally:
+                os.environ["PATH"] = env_path
+                if ctx is not None:
+                    ctx.__exit__(None, None, None)
+
+            gc_pid = None
+            if pidfile.exists():
+                try:
+                    gc_pid = json.loads(pidfile.read_text()).get("grandchild")
+                except (OSError, json.JSONDecodeError):
+                    gc_pid = None
+
+            check(f"{seat}: timed-out run -> ok=False with timeout error",
+                  res.ok is False and bool(res.error) and "timed out" in res.error.lower(),
+                  "ok=False 'timed out'", f"ok={res.ok} error={res.error!r}")
+
+            reaped = False
+            if gc_pid is not None:
+                for _ in range(80):  # up to ~8s (SIGTERM kills promptly)
+                    if not _pid_alive(gc_pid):
+                        reaped = True
+                        break
+                    time.sleep(0.1)
+                if not reaped:
+                    try:
+                        os.kill(gc_pid, _signal.SIGKILL)  # avoid leaking the leak
+                    except OSError:
+                        pass
+            check(f"{seat}: grandchild reaped on timeout (no orphaned process)",
+                  gc_pid is not None and reaped,
+                  "grandchild PID dead", f"gc_pid={gc_pid} reaped={reaped}")
+
+    # codex / cursor pass the caller timeout straight through.
+    _run_case("codex", "codex",
+              lambda t: CodexProvider().run("PROMPT", timeout=t), timeout=2)
+    _run_case("cursor", "agent",
+              lambda t: CursorProvider("cursor-test", "some-model").run("PROMPT", timeout=t),
+              timeout=2)
+    # agy's wall-clock floor = print_timeout + grace; pin print_timeout low so the
+    # kill fires fast (mirrors the existing agy hang test).
+    _run_case("agy", "agy",
+              lambda t: AgyProvider().run("PROMPT", timeout=t),
+              timeout=1, config_toml='[seats.agy]\nprint_timeout = "1s"\n')
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -6780,6 +6959,7 @@ def main():
     test_agy_oversized()
     test_agy_run()
     test_agy_is_available()
+    test_process_group_reaping()
     test_render()
     test_prompts()
     test_targets()

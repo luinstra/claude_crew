@@ -1,5 +1,5 @@
 ---
-description: Delegate a WORK task to ONE non-Claude seat in write mode (default seat codex; the seat edits the working tree and leaves changes UNCOMMITTED + UNSTAGED for you to review). Override the seat with a leading --seat <name>.
+description: Delegate a WORK task to ONE non-Claude seat in write mode (default codex) — the seat edits the working tree and leaves changes UNCOMMITTED + UNSTAGED for you to review. Override with a leading --seat <name>. Use for delegated edits, not read-only review.
 argument-hint: "[--seat <name>] <task description>"
 allowed-tools: Bash, Read, Glob, Write
 ---

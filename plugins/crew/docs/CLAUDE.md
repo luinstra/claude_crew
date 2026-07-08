@@ -63,52 +63,27 @@ Skills provide specialized guidance that activates automatically based on contex
 
 | Command | Description |
 |---------|-------------|
-| `/crew:build "task"` | Start verified persistence loop — requires a multi-model panel to approve before completion |
+| `/crew:build "task"` | Verified persistence loop — a multi-model panel must approve before completion |
 | `/crew:cancel-build` | Exit an active build loop |
-| `/crew:measure-twice "task"` | Start self-refining plan loop — a multi-model panel reviews until approved |
+| `/crew:measure-twice "task"` | Self-refining plan loop — a panel reviews until approved |
 | `/crew:cancel-measure-twice` | Exit an active measure-twice loop |
-| `/crew:plan "description"` | Start planning session |
+| `/crew:plan "description"` | Start a planning session |
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (saves context) |
-| `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (codex + agy + cursor-auto + cursor-composer + opus + sonnet) → `APPROVED`/`REVISE` verdict |
-| `/crew:debate "question"` | Crew-native multi-model debate (codex + agy + cursor-auto + cursor-composer + opus + sonnet) — single-round council by default, or `--rounds N` for a multi-round debate with rebuttals; synthesized into agreement/disagreement/recommendation (self-contained, no external plugin) |
-| `/crew:dispatch "[--seat <name>] <task>"` | Delegate a WORK task to ONE non-Claude seat (default `codex`; override with a leading `--seat`) in WRITE mode — the seat edits the working tree and leaves changes UNCOMMITTED + UNSTAGED on the same branch for you to review (keep / revert / pipe into `/crew:review`). A HEAD/staged/branch guard surfaces any commit/stage/branch made against instruction |
+| `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff → `APPROVED`/`REVISE` verdict |
+| `/crew:debate "question"` | Multi-model debate — single-round council by default, or `--rounds N` for rebuttals; synthesized into agreement/disagreement/recommendation |
+| `/crew:dispatch "[--seat <name>] <task>"` | Delegate a WORK task to ONE non-Claude seat (default `codex`) in WRITE mode — edits left UNCOMMITTED + UNSTAGED on the same branch to review (keep / revert / pipe into `/crew:review`); a HEAD/staged/branch guard surfaces any commit/stage/branch made against instruction |
 
-**Panel size (build / measure-twice / review / debate):** start the argument with
-`--panel full` (default — codex + agy + cursor-auto + cursor-composer +
-opus + sonnet), `--panel lite` (opus + sonnet), `--panel solo` (opus),
-`--panel quick` (codex + sonnet — the cheapest cross-model pair, good for
-routine diffs), `--panel cursor` (all Cursor models — gpt/gemini/glm/auto/composer, no codex/Claude), or
-`--seats codex,opus` (any subset of
-`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-auto, cursor-composer, opus, sonnet, fable`; `cursor-gpt`,
-`cursor-gemini`, and `cursor-glm` are opt-in — codex covers the GPT lineage, agy covers the Gemini lineage flat-rate; `fable` is an opt-in premium-tier Claude voice, `model="fable"`). Not every change needs the full panel — e.g.
-`/crew:build --panel lite "fix the bug"`.
+**Panel size (build / measure-twice / review / debate):** prefix the argument with a panel flag. Not every change needs the full panel — e.g. `/crew:build --panel lite "fix the bug"`.
+- `--panel full` (default): codex + agy + cursor-auto + cursor-composer + opus + sonnet
+- `--panel lite`: opus + sonnet
+- `--panel solo`: opus
+- `--panel quick`: codex + sonnet (cheapest cross-model pair, good for routine diffs)
+- `--panel cursor`: all Cursor models (gpt/gemini/glm/auto/composer, no codex/Claude)
+- `--seats codex,opus`: any subset of `codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-auto, cursor-composer, opus, sonnet, fable` (`cursor-gpt`, `cursor-gemini`, `cursor-glm`, and `fable` are opt-in)
 
-`full` is the **built-in** default. An optional per-repo `.crew/config.toml`
-`default_panel` overrides it when you name no panel; a global
-`~/.crew-config.toml` adds a machine-wide tier below it. Resolution is per-key:
-**CLI flag > per-repo config > global config > built-in** (no environment-variable
-tier). Either config file can also carry a `[panels]`
-**roster** (redefine a built-in preset or add a custom one, usable via
-`--panel <name>`) and per-seat `available = false` (drops an un-authed seat from
-any panel; an explicitly-named unavailable seat is skipped with a one-time note,
-and an all-unavailable panel falls back to the unfiltered set) — set them in
-`~/.crew-config.toml` machine-wide or in `.crew/config.toml` per-repo, where the
-per-repo value wins. `/crew:debate`
-honors config too, with its own `[debate].panel` override (precedence
-`--panel`/`--seats` > `[debate].panel` > `default_panel` > built-in `full`) — so
-debates can default fuller than reviews. `/crew:dispatch` reads `[dispatch].seat`
-for its default seat (validated against the known seats — a panel name or group
-token like `cursor` is rejected; falls back to the built-in `codex`, and an
-explicit `--seat` overrides). Needs Python 3.11+; on 3.10 the files
-are gracefully ignored with a one-time stderr note.
+**Config:** `full` is the built-in default. A per-repo `.crew/config.toml` or global `~/.crew-config.toml` can set `default_panel`, redefine/add `[panels]` presets (usable via `--panel <name>`), mark seats `available = false` (drops an un-authed seat), or override per-command (`[debate].panel`, `[dispatch].seat`). Precedence: **CLI flag > per-repo config > global config > built-in** (per-repo wins over global; no env-var tier). Needs Python 3.11+; on 3.10 the files are gracefully ignored with a one-time stderr note. Review/build/measure-twice resolve their panel through `review-prep`; `/crew:debate` and `/crew:dispatch` have their own config-aware resolvers (`[debate].panel`, `[dispatch].seat`).
 
-**Onboarding:** `/crew:init` is the config-onboarding entry point — it detects which
-provider CLIs are installed (non-billable: PATH checks + Cursor's one local identity
-probe), then writes a commented `~/.crew-config.toml` (or `.crew/config.toml` with a
-leading `--repo`, seeded verbatim from the global) with cost-safe defaults + honest
-per-seat `available` flags, never clobbering an existing file silently. (Not to be
-confused with `/crew:crew-config`, which copies the `CLAUDE.md` instructions doc, not
-the engine-tuning `.toml`.)
+**Onboarding:** `/crew:init` detects which provider CLIs are installed and writes a commented config file, never clobbering an existing one silently. A fresh scaffold (`~/.crew-config.toml`, or `.crew/config.toml` with `--repo` when no global exists) gets cost-safe defaults + honest per-seat `available` flags; with `--repo` AND an existing global `~/.crew-config.toml`, the per-repo file is instead seeded from that global verbatim (comments preserved), then lightly adjusted. (Distinct from `/crew:crew-config`, which copies this `CLAUDE.md`, not the engine-tuning `.toml`.)
 
 ### Utilities
 
@@ -125,7 +100,7 @@ the engine-tuning `.toml`.)
 
 | Command | Description |
 |---------|-------------|
-| `/crew:init` | Scaffold the engine-tuning config (`~/.crew-config.toml`, or `.crew/config.toml` with `--repo`) — detects provider CLIs, writes cost-safe commented defaults, never clobbers silently |
+| `/crew:init` | Scaffold the engine-tuning config (`~/.crew-config.toml`, or `.crew/config.toml` with `--repo`) — detects provider CLIs, writes commented cost-safe defaults (or seeds from an existing global when `--repo` finds one), never clobbers silently |
 | `/crew:crew-config` | Copy CLAUDE.md to current project |
 | `/crew:crew-config global` | Copy CLAUDE.md globally |
 
@@ -159,18 +134,7 @@ For tasks requiring multi-model panel verification before completion:
 
 ## Background Task Execution
 
-For long-running operations, use `run_in_background: true`:
-
-**Run in Background:**
-- ./gradlew build, ./gradlew test
-- npm install, pip install, cargo build
-- docker build, docker pull
-- git clone, git fetch
-
-**Run Blocking:**
-- git status, ls, pwd
-- Quick file reads
-- Simple commands
+Use `run_in_background: true` for long-running operations (`./gradlew build`/`test`, `npm`/`pip`/`cargo` installs, `docker build`/`pull`, `git clone`/`fetch`). Run quick commands blocking (`git status`, `ls`, `pwd`, file reads).
 
 ## Completion Checklist
 

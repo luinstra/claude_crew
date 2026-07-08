@@ -6,12 +6,22 @@
 #
 # This script runs after each commit and:
 # - Skips if the commit is already a version bump
+# - Skips on a detached HEAD or any in-progress rebase/merge/cherry-pick
 # - Analyzes commits since last bump to determine bump type
 # - Bumps marketplace version if marketplace-level files changed
 # - Bumps plugin versions only for plugins with changes
 #
-
-set -e
+# Hardening: NO `set -e`. Version reads happen BEFORE any file is touched;
+# a failure there aborts with a byte-identical tree. Every json file is
+# byte-snapshotted before rewrite, and ANY failure after the first rewrite
+# un-stages the paths (`git reset`) and restores each file from its snapshot,
+# so a failed bump leaves neither a mutated working tree NOR a dirty index.
+# Version read goes through python3/json (argv-only, UTF-8) so it never assumes a
+# single "version" key; the WRITE is a surgical, format-preserving substitution
+# of only that one version value — so the first hardened bump is a clean 1-line
+# diff (no reformat of hand-authored inline arrays, and it locates
+# marketplace.json's nested metadata.version, which a top-level ["version"] can't).
+#
 
 # Colors for output
 RED='\033[0;31m'
@@ -25,6 +35,28 @@ success() { echo -e "${GREEN}[version-bump]${NC} $1"; }
 warn() { echo -e "${YELLOW}[version-bump]${NC} $1"; }
 error() { echo -e "${RED}[version-bump]${NC} $1"; }
 
+# --- Git-state guards (skip cleanly, never partial-mutate) -------------------
+
+# Detached HEAD → no branch to advance; skip.
+if ! git symbolic-ref -q HEAD >/dev/null 2>&1; then
+    exit 0
+fi
+
+# In-progress rebase / cherry-pick / merge → the post-commit fires per replayed
+# commit; a bump mid-op would corrupt the sequence. Skip until the op finishes.
+_git_dir=$(git rev-parse --git-dir 2>/dev/null || echo ".git")
+if [ -d "$_git_dir/rebase-merge" ] || [ -d "$_git_dir/rebase-apply" ] \
+   || [ -f "$_git_dir/CHERRY_PICK_HEAD" ] || [ -f "$_git_dir/MERGE_HEAD" ]; then
+    exit 0
+fi
+
+# python3 is REQUIRED for the safe read/write path; without it, do nothing
+# rather than fall back to a fragile grep/sed mutation.
+if ! command -v python3 >/dev/null 2>&1; then
+    warn "python3 not found — skipping version bump (never partial-mutate)"
+    exit 0
+fi
+
 # Skip if this commit is already a version bump (prevents infinite loop)
 LAST_MSG=$(git log -1 --format="%s")
 if [[ "$LAST_MSG" == "chore: bump version"* ]]; then
@@ -37,10 +69,61 @@ if [[ "$LAST_MSG" == *"[skip version]"* ]] || [[ "$LAST_MSG" == *"[no bump]"* ]]
     exit 0
 fi
 
-# Get the last version bump commit
+# --- python3 JSON read/write helpers (argv-only, format-stable) --------------
+#
+# json.load is used to READ the current version robustly (kills the grep
+# single-key assumption). The WRITE is a surgical, format-PRESERVING regex
+# substitution of exactly that one version value — NOT a full json.dump, which
+# would reformat hand-authored inline arrays (crew/plugin.json's `keywords`) and
+# cannot even locate marketplace.json's version (it lives at metadata.version,
+# not top-level). Only the version line changes; every other byte is preserved.
+
+# Read the version from a json file (top-level "version", else metadata.version).
+# Prints the version, or exits 1 if neither is present.
+read_version() {
+    local file="$1"
+    python3 -c 'import json,sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+v = d.get("version")
+if v is None:
+    v = d.get("metadata", {}).get("version") if isinstance(d.get("metadata"), dict) else None
+if v is None:
+    sys.exit(1)
+print(v)' "$file"
+}
+
+# Rewrite ONLY the single version value in place, preserving all other bytes.
+# argv[1]=path, argv[2]=new version. Exits 1 if the version key can't be located
+# or the exact-value substitution doesn't match exactly once.
+write_version() {
+    local file="$1"
+    local newver="$2"
+    python3 -c 'import json,re,sys
+path, newver = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as f:
+    text = f.read()
+d = json.loads(text)
+cur = d.get("version")
+if cur is None:
+    cur = d.get("metadata", {}).get("version") if isinstance(d.get("metadata"), dict) else None
+if cur is None:
+    sys.exit(1)
+pat = re.compile(r"(\"version\"\s*:\s*\")" + re.escape(cur) + r"(\")")
+new_text, n = pat.subn(r"\g<1>" + newver + r"\g<2>", text, count=1)
+if n != 1:
+    sys.exit(1)
+with open(path, "w", encoding="utf-8") as f:
+    f.write(new_text)' "$file" "$newver"
+}
+
+# --- Baseline (subject-anchored, not body-matched) ---------------------------
+
+# Get the last version bump commit. Anchors on the SUBJECT line so a commit whose
+# BODY merely mentions "chore: bump version" can't poison the baseline.
 get_last_bump_commit() {
     local commit
-    commit=$(git log --oneline --grep="chore: bump version" -1 --format="%H" 2>/dev/null || echo "")
+    commit=$(git log --format="%H%x09%s" 2>/dev/null \
+        | awk -F'\t' '$2 ~ /^chore: bump version/ {print $1; exit}')
     if [ -z "$commit" ]; then
         # No previous bump, use first commit or HEAD~50
         commit=$(git rev-list --max-parents=0 HEAD 2>/dev/null || git rev-parse HEAD~50 2>/dev/null || echo "HEAD~20")
@@ -48,17 +131,34 @@ get_last_bump_commit() {
     echo "$commit"
 }
 
-# Determine bump type from commits
+# Determine bump type from commits.
+# The two major triggers live in DIFFERENT parts of a conventional commit, so
+# they are matched against different scopes:
+#   - `type!:` is a SUBJECT-line form → matched against %s (the subject only).
+#     Matching it over the full body would let a pasted diff/changelog line like
+#     `foo!: bar` false-trigger a major bump.
+#   - `BREAKING CHANGE:` is a FOOTER form → matched against %B (the full body),
+#     where the footer legitimately lives.
+# feat (minor) is likewise a subject-line marker → matched against %s.
 get_bump_type() {
     local last_bump="$1"
-    local commits
-    commits=$(git log --oneline "$last_bump"..HEAD --format="%s" 2>/dev/null || git log --oneline -20 --format="%s")
+    local subjects bodies
+    subjects=$(git log "$last_bump"..HEAD --format="%s" 2>/dev/null || git log -20 --format="%s")
+    bodies=$(git log "$last_bump"..HEAD --format="%B" 2>/dev/null || git log -20 --format="%B")
 
-    # Check for breaking changes (major)
-    if echo "$commits" | grep -qE '^[a-z]+(\([^)]+\))?!:|BREAKING CHANGE'; then
+    # Major: a `type!:` marker on a SUBJECT line, OR a `BREAKING CHANGE:` footer
+    # anywhere in the body. The BREAKING CHANGE arm is ANCHORED to the
+    # conventional-commits footer shape (`^BREAKING[ -]CHANGE:` — line start,
+    # both the space and hyphen spellings, colon REQUIRED); grep scans the
+    # multi-line %B per-line, so `^` matches a footer line. This stops a body
+    # that merely mentions or negates the phrase ("this is NOT a BREAKING
+    # CHANGE", a pasted changelog line), or a body line shaped like `foo!: bar`,
+    # from forcing a false MAJOR bump.
+    if echo "$subjects" | grep -qE '^[a-z]+(\([^)]+\))?!:' \
+       || echo "$bodies" | grep -qE '^BREAKING[ -]CHANGE:'; then
         echo "major"
-    # Check for features (minor)
-    elif echo "$commits" | grep -qE '^feat(\([^)]+\))?:'; then
+    # Check for features (minor) — subject-line marker only.
+    elif echo "$subjects" | grep -qE '^feat(\([^)]+\))?:'; then
         echo "minor"
     else
         echo "patch"
@@ -69,6 +169,10 @@ get_bump_type() {
 bump_version() {
     local current="$1"
     local bump_type="$2"
+
+    # No `set -e` here: a non-semver input would otherwise flow a mangled
+    # version string into write_version, so refuse it up front.
+    [[ "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
 
     local major minor patch
     major=$(echo "$current" | cut -d. -f1)
@@ -126,7 +230,54 @@ has_directory_changes() {
     [ -n "$changes" ]
 }
 
-# Main logic
+# --- Snapshot-restore rollback infrastructure --------------------------------
+#
+# SNAP_PATHS / SNAP_FILES are parallel arrays: SNAP_FILES[i] is the json path
+# that was snapshotted to the temp file SNAP_PATHS[i] (its exact pre-rewrite
+# bytes). A failure after ANY rewrite restores every snapshot AND un-stages the
+# tracked paths, then aborts — leaving the working tree AND index untouched.
+SNAP_PATHS=()
+SNAP_FILES=()
+
+cleanup_snapshots() {
+    local snap
+    for snap in "${SNAP_PATHS[@]}"; do
+        [ -n "$snap" ] && rm -f "$snap"
+    done
+}
+trap cleanup_snapshots EXIT
+
+snapshot_file() {
+    local file="$1"
+    local snap
+    snap=$(mktemp) || return 1
+    cat "$file" > "$snap" || { rm -f "$snap"; return 1; }
+    SNAP_PATHS+=("$snap")
+    SNAP_FILES+=("$file")
+}
+
+# Restore every snapshotted file from its byte-snapshot (NOT git checkout, so an
+# unrelated pre-existing unstaged edit in these files is preserved) AND un-stage
+# the three json paths so a failed bump leaves nothing staged.
+rollback() {
+    local i
+    for ((i = 0; i < ${#SNAP_FILES[@]}; i++)); do
+        cat "${SNAP_PATHS[$i]}" > "${SNAP_FILES[$i]}"
+    done
+    git reset -q HEAD -- \
+        .claude-plugin/marketplace.json \
+        plugins/crew/.claude-plugin/plugin.json \
+        plugins/sk/.claude-plugin/plugin.json 2>/dev/null || true
+}
+
+fail() {
+    error "$1"
+    rollback
+    cleanup_snapshots
+    exit 1
+}
+
+# --- Main logic --------------------------------------------------------------
 main() {
     info "Checking for version bumps..."
 
@@ -138,93 +289,103 @@ main() {
     bump_type=$(get_bump_type "$last_bump")
     info "Bump type from commits: $bump_type"
 
-    local bumped_marketplace=false
-    local bumped_crew=false
-    local bumped_sk=false
-    local commit_parts=""
+    # Decide WHICH files bump, and READ all current versions FIRST — any read
+    # failure aborts before a single byte is written (byte-identical tree).
+    local do_marketplace=false do_crew=false do_sk=false
+    local mp_current="" mp_new="" crew_current="" crew_new="" sk_current="" sk_new=""
+    local mp_json=".claude-plugin/marketplace.json"
+    local crew_json="plugins/crew/.claude-plugin/plugin.json"
+    local sk_json="plugins/sk/.claude-plugin/plugin.json"
 
-    # Check marketplace-level changes
-    local marketplace_changed=false
-    if has_substantive_changes ".claude-plugin/marketplace.json" "$last_bump"; then
-        marketplace_changed=true
-    elif git diff --name-only "$last_bump"..HEAD -- 'README.md' 'docs/' 2>/dev/null | grep -q .; then
-        marketplace_changed=true
-    fi
-
-    if [ "$marketplace_changed" = true ]; then
-        local current new
-        current=$(grep -o '"version": *"[^"]*"' .claude-plugin/marketplace.json | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+')
-        new=$(bump_version "$current" "$bump_type")
-
-        if [ "$current" != "$new" ]; then
-            sed -i.bak "s/\"version\": *\"$current\"/\"version\": \"$new\"/" .claude-plugin/marketplace.json
-            rm -f .claude-plugin/marketplace.json.bak
-            success "Marketplace: $current -> $new"
-            bumped_marketplace=true
-            commit_parts="marketplace $current -> $new"
-        fi
+    # marketplace: substantive marketplace.json change OR README/docs change
+    if has_substantive_changes "$mp_json" "$last_bump" \
+       || git diff --name-only "$last_bump"..HEAD -- 'README.md' 'docs/' 2>/dev/null | grep -q .; then
+        do_marketplace=true
+        mp_current=$(read_version "$mp_json") || fail "cannot read version from $mp_json"
+        mp_new=$(bump_version "$mp_current" "$bump_type") || fail "cannot bump non-semver marketplace version '$mp_current'"
     else
         info "No marketplace-level changes"
     fi
 
-    # Check crew plugin
     if has_directory_changes "plugins/crew" "$last_bump"; then
-        local plugin_json="plugins/crew/.claude-plugin/plugin.json"
-        local current new
-        current=$(grep -o '"version": *"[^"]*"' "$plugin_json" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+')
-        new=$(bump_version "$current" "$bump_type")
-
-        if [ "$current" != "$new" ]; then
-            sed -i.bak "s/\"version\": *\"$current\"/\"version\": \"$new\"/" "$plugin_json"
-            rm -f "$plugin_json.bak"
-            success "crew: $current -> $new"
-            bumped_crew=true
-            if [ -n "$commit_parts" ]; then
-                commit_parts="$commit_parts, crew $current -> $new"
-            else
-                commit_parts="crew $current -> $new"
-            fi
-        fi
+        do_crew=true
+        crew_current=$(read_version "$crew_json") || fail "cannot read version from $crew_json"
+        crew_new=$(bump_version "$crew_current" "$bump_type") || fail "cannot bump non-semver crew version '$crew_current'"
     else
         info "No crew plugin changes"
     fi
 
-    # Check sk plugin
     if has_directory_changes "plugins/sk" "$last_bump"; then
-        local plugin_json="plugins/sk/.claude-plugin/plugin.json"
-        local current new
-        current=$(grep -o '"version": *"[^"]*"' "$plugin_json" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+')
-        new=$(bump_version "$current" "$bump_type")
-
-        if [ "$current" != "$new" ]; then
-            sed -i.bak "s/\"version\": *\"$current\"/\"version\": \"$new\"/" "$plugin_json"
-            rm -f "$plugin_json.bak"
-            success "sk: $current -> $new"
-            bumped_sk=true
-            if [ -n "$commit_parts" ]; then
-                commit_parts="$commit_parts, sk $current -> $new"
-            else
-                commit_parts="sk $current -> $new"
-            fi
-        fi
+        do_sk=true
+        sk_current=$(read_version "$sk_json") || fail "cannot read version from $sk_json"
+        sk_new=$(bump_version "$sk_current" "$bump_type") || fail "cannot bump non-semver sk version '$sk_current'"
     else
         info "No sk plugin changes"
     fi
 
-    # Commit if anything was bumped
-    if [ "$bumped_marketplace" = true ] || [ "$bumped_crew" = true ] || [ "$bumped_sk" = true ]; then
-        git add .claude-plugin/marketplace.json
-        git add plugins/crew/.claude-plugin/plugin.json
-        git add plugins/sk/.claude-plugin/plugin.json
-
-        # Only commit if there are staged changes
-        if ! git diff --cached --quiet; then
-            git commit --no-verify -m "chore: bump version ($commit_parts)"
-            success "Version bump committed! Ready to push."
-        fi
-    else
+    if [ "$do_marketplace" != true ] && [ "$do_crew" != true ] && [ "$do_sk" != true ]; then
         info "No version changes needed"
+        return 0
     fi
+
+    # Snapshot every file we are about to rewrite BEFORE touching any of them.
+    local commit_parts=""
+    if [ "$do_marketplace" = true ] && [ "$mp_current" != "$mp_new" ]; then
+        snapshot_file "$mp_json" || fail "cannot snapshot $mp_json"
+    fi
+    if [ "$do_crew" = true ] && [ "$crew_current" != "$crew_new" ]; then
+        snapshot_file "$crew_json" || fail "cannot snapshot $crew_json"
+    fi
+    if [ "$do_sk" = true ] && [ "$sk_current" != "$sk_new" ]; then
+        snapshot_file "$sk_json" || fail "cannot snapshot $sk_json"
+    fi
+
+    # Apply the rewrites; ANY failure rolls every snapshot back + un-stages.
+    # bumped_paths collects ONLY the files actually rewritten, so `git add` can't
+    # accidentally stage an unrelated unstaged edit in a NON-bumped json file.
+    local bumped_paths=()
+    if [ "$do_marketplace" = true ] && [ "$mp_current" != "$mp_new" ]; then
+        write_version "$mp_json" "$mp_new" || fail "cannot write version to $mp_json"
+        success "Marketplace: $mp_current -> $mp_new"
+        commit_parts="marketplace $mp_current -> $mp_new"
+        bumped_paths+=("$mp_json")
+    fi
+    if [ "$do_crew" = true ] && [ "$crew_current" != "$crew_new" ]; then
+        write_version "$crew_json" "$crew_new" || fail "cannot write version to $crew_json"
+        success "crew: $crew_current -> $crew_new"
+        if [ -n "$commit_parts" ]; then
+            commit_parts="$commit_parts, crew $crew_current -> $crew_new"
+        else
+            commit_parts="crew $crew_current -> $crew_new"
+        fi
+        bumped_paths+=("$crew_json")
+    fi
+    if [ "$do_sk" = true ] && [ "$sk_current" != "$sk_new" ]; then
+        write_version "$sk_json" "$sk_new" || fail "cannot write version to $sk_json"
+        success "sk: $sk_current -> $sk_new"
+        if [ -n "$commit_parts" ]; then
+            commit_parts="$commit_parts, sk $sk_current -> $sk_new"
+        else
+            commit_parts="sk $sk_current -> $sk_new"
+        fi
+        bumped_paths+=("$sk_json")
+    fi
+
+    if [ -z "$commit_parts" ] || [ ${#bumped_paths[@]} -eq 0 ]; then
+        info "No version changes needed"
+        return 0
+    fi
+
+    # Stage + commit. A failure at either step rolls back (restores bytes AND
+    # un-stages) so nothing is left half-applied.
+    git add "${bumped_paths[@]}" || fail "git add failed"
+    if git diff --cached --quiet; then
+        info "No staged version changes to commit"
+        return 0
+    fi
+    git commit --no-verify -m "chore: bump version ($commit_parts)" \
+        || fail "git commit failed"
+    success "Version bump committed! Ready to push."
 }
 
 main "$@"
