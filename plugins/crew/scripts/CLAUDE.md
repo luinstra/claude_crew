@@ -484,7 +484,7 @@ crew state deactivate bl --reason "User cancelled" --session-id abc123
 - `build-state-{session_id}.json`
 - `measure-twice-state-{session_id}.json`
 
-**Schema version + refuse-to-touch (L2 / Phase 5).** Every write stamps
+**Schema version + refuse-to-touch.** Every write stamps
 `"schema": SCHEMA_VERSION` (currently 1); an ABSENT `schema` loads as 1 (legacy
 files keep working). Reads classify a file via `read_state_json` /
 `load_with_status` into `LOAD_OK` / `LOAD_MISSING` / `LOAD_CORRUPT` /
@@ -527,8 +527,8 @@ HookResult.allow_with_diagnostic("…") # {"systemMessage": "..."} (loud allow)
 HookResult.block("Must continue")    # {"decision": "block", "reason": "..."}
 ```
 
-> **Do NOT emit `{"continue": false}` to block a Stop.** The 2026-07-06 C2
-> live smoke proved it INERT for blocking — Claude Code honors it as a
+> **Do NOT emit `{"continue": false}` to block a Stop.** A two-layer live
+> smoke proved it INERT for blocking — Claude Code honors it as a
 > HARD-STOP directive (the child session terminated at the first stop
 > attempt). `{"decision": "block", "reason": ...}` is the load-bearing,
 > smoke-verified blocking shape.

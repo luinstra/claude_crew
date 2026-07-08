@@ -4437,7 +4437,7 @@ def test_persist_seat_doc_sync():
     REF_SPAWN = "Read .crew/reviews/<session-id>/prompt-"
     for rel in docs:
         text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
-        check(f"{rel} spawns Task seats BY REFERENCE (T3a): {REF_SPAWN!r}",
+        check(f"{rel} spawns Task seats BY REFERENCE: {REF_SPAWN!r}",
               REF_SPAWN in text, "present", "MISSING (drifted back to inline paste?)")
         # CONVERSE: no inline-paste spawn survives.
         check(f"{rel} has NO inline-paste seat spawn",
@@ -4457,8 +4457,8 @@ def test_persist_seat_doc_sync():
     for rel in docs:
         text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
         for marker in RETURN_FILE_MARKERS:
-            check(f"{rel} has NO reverted T3b RETURN-FILE flow: {marker!r}",
-                  marker not in text, "absent", "STILL PRESENT (T3b crept back?)")
+            check(f"{rel} has NO reverted RETURN-FILE flow: {marker!r}",
+                  marker not in text, "absent", "STILL PRESENT (return-file flow crept back?)")
 
     # Grant/doc sync: BOTH panel Task seats are read-only by convention — neither
     # reviewer.md nor panelist.md may grant Write on its frontmatter tools line
