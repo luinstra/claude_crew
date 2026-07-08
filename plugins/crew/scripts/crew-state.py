@@ -19,7 +19,7 @@ from models import (
     LOAD_CORRUPT,
     LOAD_FUTURE_SCHEMA,
 )
-from state_discovery import find_session_state_file
+from state_discovery import find_adoptable_legacy, find_session_state_file
 
 LOOP_ALIASES = {
     "build": "bl", "bl": "bl",
@@ -255,24 +255,31 @@ def check_for_conflicts(session_id: str = ""):
          "ERROR: measure-twice loop is already active. Run /crew:cancel-measure-twice first or let it complete."),
     )
     for canonical, cls, active_msg in checks:
-        # Resolve the same file every other verb would touch: init must not
-        # ignore an active legacy loop that Stop/deactivate would still adopt
-        # (that would orphan it as a permanently-active file).
-        path = find_session_state_file(crew_dir, LOOP_PREFIXES[canonical], session_id)
-        if path is None:
-            path = crew_dir / get_loop_filename(canonical, session_id)
-        state, status = cls.load_with_status(path)
-        # A newer-schema file is treated as a conflict (refuse-to-touch): we
-        # cannot parse it as our schema, so init must NOT clobber it, and we
-        # surface it as a blocking condition instead of silently overwriting.
-        if status == LOAD_FUTURE_SCHEMA:
-            return (
-                f"ERROR: {path.name} was written by a newer crew version (state "
-                f"schema ahead of this install) — refusing to touch. Upgrade crew or "
-                f"remove the file manually."
-            )
-        if state.active:
-            return active_msg
+        # Check the scoped target AND any adoptable legacy file INDEPENDENTLY:
+        # init must not ignore an active legacy loop that other verbs and
+        # sessions would still adopt (that would orphan it as a permanently
+        # active file), and find_session_state_file cannot be used here because
+        # it prefers the scoped file even when it is an inactive leftover,
+        # which would hide an active legacy loop behind a finished one.
+        candidates = [crew_dir / get_loop_filename(canonical, session_id)]
+        if session_id:
+            legacy = find_adoptable_legacy(
+                crew_dir, LOOP_PREFIXES[canonical], session_id)
+            if legacy is not None:
+                candidates.append(legacy)
+        for path in candidates:
+            state, status = cls.load_with_status(path)
+            # A newer-schema file is treated as a conflict (refuse-to-touch): we
+            # cannot parse it as our schema, so init must NOT clobber it, and we
+            # surface it as a blocking condition instead of silently overwriting.
+            if status == LOAD_FUTURE_SCHEMA:
+                return (
+                    f"ERROR: {path.name} was written by a newer crew version (state "
+                    f"schema ahead of this install) — refusing to touch. Upgrade crew or "
+                    f"remove the file manually."
+                )
+            if state.active:
+                return active_msg
 
     return None
 

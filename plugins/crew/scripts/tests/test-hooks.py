@@ -1210,6 +1210,44 @@ def main():
             for f in crew_dir.glob("*-state*.json*"):
                 f.unlink()
 
+            # An INACTIVE scoped leftover must not hide an ACTIVE adoptable
+            # legacy file: the two candidates are checked independently, so a
+            # finished scoped loop cannot shadow a live legacy one into orphanhood.
+            scoped_stray.write_text(
+                '{"active": false, "prompt": "finished scoped", "iteration": 3, '
+                '"max_iterations": 10, "session_id": "legS"}'
+            )
+            legacy.write_text(
+                '{"active": true, "prompt": "legacy adopt", "iteration": 1, '
+                '"max_iterations": 10, "session_id": ""}'
+            )
+            _, err, code = run_crew_state(
+                ["init", "bl", "--prompt", "new scoped", "--session-id", "legS"], test_path)
+            if code == 1 and "build loop is already active" in err:
+                log_pass("init --session-id vs active legacy behind stale scoped - refused")
+            else:
+                log_fail("init --session-id vs active legacy behind stale scoped - refused",
+                         "exit 1 with bl conflict",
+                         f"code={code} err={err[:120]}")
+
+            # An active legacy file owned by a DIFFERENT session is NOT
+            # adoptable and must not block this session's init.
+            legacy.write_text(
+                '{"active": true, "prompt": "someone else", "iteration": 1, '
+                '"max_iterations": 10, "session_id": "otherSession"}'
+            )
+            _, err, code = run_crew_state(
+                ["init", "bl", "--prompt", "new scoped", "--session-id", "legS"], test_path)
+            scoped_after = json.loads(scoped_stray.read_text())
+            if code == 0 and scoped_after.get("active") is True:
+                log_pass("init --session-id vs other-session legacy - proceeds (not adoptable)")
+            else:
+                log_fail("init --session-id vs other-session legacy - proceeds (not adoptable)",
+                         "exit 0, scoped file re-initialized active",
+                         f"code={code} active={scoped_after.get('active')} err={err[:120]}")
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+
             # =========================================================================
             # CLI init rejects whitespace-only task text (inline flag AND -f file)
             # =========================================================================

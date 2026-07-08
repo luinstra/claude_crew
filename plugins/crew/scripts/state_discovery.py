@@ -23,6 +23,31 @@ def is_loop_state_file(filename: str) -> bool:
     )
 
 
+def find_adoptable_legacy(
+    crew_dir: Path,
+    loop_prefix: str,
+    session_id: str,
+) -> Path | None:
+    """Return the legacy unsuffixed state file if THIS session may adopt it.
+
+    Adoptable when the file exists and its recorded session_id is empty
+    (written by a pre-scoping version) or equals this session's id.
+    An unreadable or unparseable file is not adoptable.
+    """
+    legacy_path = crew_dir / f"{loop_prefix}.json"
+    if not legacy_path.is_file():
+        return None
+    try:
+        with open(legacy_path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    file_session = data.get("session_id", "")
+    if file_session == session_id or file_session == "":
+        return legacy_path
+    return None
+
+
 def find_session_state_file(
     crew_dir: Path,
     loop_prefix: str,
@@ -38,17 +63,7 @@ def find_session_state_file(
         scoped_path = crew_dir / f"{loop_prefix}-{session_id}.json"
         if scoped_path.is_file():
             return scoped_path
-        legacy_path = crew_dir / f"{loop_prefix}.json"
-        if legacy_path.is_file():
-            try:
-                with open(legacy_path) as f:
-                    data = json.load(f)
-                file_session = data.get("session_id", "")
-                if file_session == session_id or file_session == "":
-                    return legacy_path
-            except (OSError, json.JSONDecodeError):
-                pass
-        return None
+        return find_adoptable_legacy(crew_dir, loop_prefix, session_id)
     else:
         legacy_path = crew_dir / f"{loop_prefix}.json"
         if legacy_path.is_file():
