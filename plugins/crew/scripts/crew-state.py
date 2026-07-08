@@ -241,36 +241,38 @@ def cmd_set(args):
 def check_for_conflicts(session_id: str = ""):
     """Check if this session already has an active loop. Returns error message or None.
 
-    Session-scoped: checks for *-state-{session_id}.json files across BOTH loop types.
-    A different session's active loop is NOT a conflict.
+    Session-scoped: checks BOTH loop types on the SAME path the Stop hook and
+    mutating verbs resolve (find_session_state_file), so an adoptable legacy
+    unsuffixed file counts too. A different session's active loop is NOT a conflict.
     """
     project_dir = get_project_dir()
     crew_dir = project_dir / ".crew"
 
-    # A newer-schema file is treated as a conflict (refuse-to-touch): we cannot
-    # parse it as our schema, so init must NOT clobber it — surface it as a
-    # blocking condition instead of silently overwriting (refuse-to-touch contract).
-    bl_path = crew_dir / get_loop_filename("bl", session_id)
-    bl_state, bl_status = BuildState.load_with_status(bl_path)
-    if bl_status == LOAD_FUTURE_SCHEMA:
-        return (
-            f"ERROR: {bl_path.name} was written by a newer crew version (state "
-            f"schema ahead of this install) — refusing to touch. Upgrade crew or "
-            f"remove the file manually."
-        )
-    if bl_state.active:
-        return "ERROR: build loop is already active. Run /crew:cancel-build first or let it complete."
-
-    mt_path = crew_dir / get_loop_filename("mt", session_id)
-    mt_state, mt_status = MeasureTwiceState.load_with_status(mt_path)
-    if mt_status == LOAD_FUTURE_SCHEMA:
-        return (
-            f"ERROR: {mt_path.name} was written by a newer crew version (state "
-            f"schema ahead of this install) — refusing to touch. Upgrade crew or "
-            f"remove the file manually."
-        )
-    if mt_state.active:
-        return "ERROR: measure-twice loop is already active. Run /crew:cancel-measure-twice first or let it complete."
+    checks = (
+        ("bl", BuildState,
+         "ERROR: build loop is already active. Run /crew:cancel-build first or let it complete."),
+        ("mt", MeasureTwiceState,
+         "ERROR: measure-twice loop is already active. Run /crew:cancel-measure-twice first or let it complete."),
+    )
+    for canonical, cls, active_msg in checks:
+        # Resolve the same file every other verb would touch: init must not
+        # ignore an active legacy loop that Stop/deactivate would still adopt
+        # (that would orphan it as a permanently-active file).
+        path = find_session_state_file(crew_dir, LOOP_PREFIXES[canonical], session_id)
+        if path is None:
+            path = crew_dir / get_loop_filename(canonical, session_id)
+        state, status = cls.load_with_status(path)
+        # A newer-schema file is treated as a conflict (refuse-to-touch): we
+        # cannot parse it as our schema, so init must NOT clobber it, and we
+        # surface it as a blocking condition instead of silently overwriting.
+        if status == LOAD_FUTURE_SCHEMA:
+            return (
+                f"ERROR: {path.name} was written by a newer crew version (state "
+                f"schema ahead of this install) — refusing to touch. Upgrade crew or "
+                f"remove the file manually."
+            )
+        if state.active:
+            return active_msg
 
     return None
 

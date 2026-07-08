@@ -1176,6 +1176,41 @@ def main():
                 f.unlink()
 
             # =========================================================================
+            # check_for_conflicts resolves through find_session_state_file: init with
+            # --session-id must refuse while an ADOPTABLE legacy loop is still active.
+            # Otherwise a scoped file is created, every later verb prefers it, and the
+            # legacy loop is orphaned permanently active. An inactive legacy file must
+            # NOT block a fresh scoped init.
+            # =========================================================================
+            legacy.write_text(
+                '{"active": true, "prompt": "legacy adopt", "iteration": 1, '
+                '"max_iterations": 10, "session_id": ""}'
+            )
+            _, err, code = run_crew_state(
+                ["init", "bl", "--prompt", "new scoped", "--session-id", "legS"], test_path)
+            if code == 1 and "build loop is already active" in err and not scoped_stray.exists():
+                log_pass("init --session-id vs active adoptable legacy - refused, no scoped file")
+            else:
+                log_fail("init --session-id vs active adoptable legacy - refused, no scoped file",
+                         "exit 1 with bl conflict, no build-state-legS.json",
+                         f"code={code} stray={scoped_stray.exists()} err={err[:120]}")
+
+            legacy.write_text(
+                '{"active": false, "prompt": "legacy done", "iteration": 1, '
+                '"max_iterations": 10, "session_id": ""}'
+            )
+            _, err, code = run_crew_state(
+                ["init", "bl", "--prompt", "new scoped", "--session-id", "legS"], test_path)
+            if code == 0 and scoped_stray.exists():
+                log_pass("init --session-id vs inactive legacy - proceeds on scoped path")
+            else:
+                log_fail("init --session-id vs inactive legacy - proceeds on scoped path",
+                         "exit 0 and build-state-legS.json created",
+                         f"code={code} scoped={scoped_stray.exists()} err={err[:120]}")
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+
+            # =========================================================================
             # CLI init rejects whitespace-only task text (inline flag AND -f file)
             # =========================================================================
             # whitespace-only --prompt
