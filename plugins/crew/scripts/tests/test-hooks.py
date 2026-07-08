@@ -1266,6 +1266,20 @@ def main():
                 log_fail("init --session-id vs other-session legacy - proceeds (not adoptable)",
                          "exit 0, scoped file re-initialized active",
                          f"code={code} active={scoped_after.get('active')} err={err[:120]}")
+
+            # A legacy file holding valid-but-non-object JSON (the corrupt
+            # category) is not adoptable and must not traceback the conflict
+            # check; scoped init proceeds.
+            scoped_stray.unlink(missing_ok=True)
+            legacy.write_text('[]')
+            _, err, code = run_crew_state(
+                ["init", "bl", "--prompt", "new scoped", "--session-id", "legS"], test_path)
+            if code == 0 and scoped_stray.exists() and "Traceback" not in err:
+                log_pass("init --session-id vs non-object legacy JSON - proceeds, no traceback")
+            else:
+                log_fail("init --session-id vs non-object legacy JSON - proceeds, no traceback",
+                         "exit 0, scoped file created, no traceback",
+                         f"code={code} scoped={scoped_stray.exists()} err={err[:120]}")
             for f in crew_dir.glob("*-state*.json*"):
                 f.unlink()
 

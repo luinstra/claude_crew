@@ -42,6 +42,10 @@ def find_adoptable_legacy(
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
+    # Valid-but-non-object JSON (e.g. a bare list) is the corrupt category,
+    # not an adoptable state file; without this guard .get() would traceback.
+    if not isinstance(data, dict):
+        return None
     file_session = data.get("session_id", "")
     if file_session == session_id or file_session == "":
         return legacy_path
