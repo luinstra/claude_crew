@@ -1128,11 +1128,12 @@ def main():
                 f.unlink()
 
             # =========================================================================
-            # _resolve_mutation_path: set/increment with --session-id against an
+            # _resolve_loop_path: set/increment with --session-id against an
             # ADOPTED LEGACY (unsuffixed) state file mutate THAT file in place (via
             # find_session_state_file), never a stray session-scoped path. The
             # deactivate arm of this symmetry is covered above; this covers the
-            # set/increment verbs (the actual bug _resolve_mutation_path fixed).
+            # set/increment verbs (the actual bug _resolve_loop_path fixed) plus
+            # the read verbs (show/is-active must report the adopted file too).
             # =========================================================================
             legacy = crew_dir / "build-state.json"
             scoped_stray = crew_dir / "build-state-legS.json"
@@ -1172,6 +1173,26 @@ def main():
                     "increment --session-id over adopted legacy file - mutates legacy in place, no stray scoped file",
                     "legacy iteration=8, no build-state-legS.json",
                     f"code={inc_code} legacy_iter={legacy_after_inc.get('iteration')} stray={scoped_stray.exists()}")
+
+            # show/is-active must resolve the SAME adopted file: reporting
+            # inactive while Stop still adopts the legacy loop would tell the
+            # user there is nothing to cancel when there is.
+            show_out, _, show_code = run_crew_state(
+                ["show", "bl", "--session-id", "legS"], test_path)
+            if show_code == 0 and "active=true" in show_out and "legacy adopt" in show_out:
+                log_pass("show --session-id over adopted legacy file - reports the adopted loop")
+            else:
+                log_fail("show --session-id over adopted legacy file - reports the adopted loop",
+                         "active=true with legacy task text",
+                         f"code={show_code} out={show_out[:120]}")
+
+            _, _, ia_code = run_crew_state(
+                ["is-active", "bl", "--session-id", "legS"], test_path)
+            if ia_code == 0:
+                log_pass("is-active --session-id over adopted legacy file - exits 0 (active)")
+            else:
+                log_fail("is-active --session-id over adopted legacy file - exits 0 (active)",
+                         "exit 0", f"exit {ia_code}")
             for f in crew_dir.glob("*-state*.json*"):
                 f.unlink()
 

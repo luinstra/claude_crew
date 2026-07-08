@@ -171,7 +171,7 @@ def _compact_show(state, canonical: str) -> str:
 def cmd_show(args):
     """Show current state of a loop."""
     session_id = resolve_session_id(args)
-    path = get_state_path(args.loop, session_id)
+    path = _resolve_loop_path(args.loop, session_id)
     canonical = LOOP_ALIASES[args.loop]
     cls = LOOP_CLASSES[canonical]
     state = cls.load(path)
@@ -186,7 +186,7 @@ def cmd_show(args):
 def cmd_is_active(args):
     """Check if a loop is active. Exit 0 if active, exit 1 if not."""
     session_id = resolve_session_id(args)
-    path = get_state_path(args.loop, session_id)
+    path = _resolve_loop_path(args.loop, session_id)
     cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
     state = cls.load(path)
     sys.exit(0 if state.active else 1)
@@ -206,12 +206,12 @@ def cmd_check_conflicts(args):
     # No conflicts - silent success
 
 
-def _resolve_mutation_path(loop: str, session_id: str) -> Path:
-    """Resolve the state file a mutating verb should touch — the SAME file
-    cmd_deactivate targets (the Stop hook's find_session_state_file, so an
-    adopted legacy file is mutated on its real path), falling back to the fresh
-    session-scoped path when nothing is found. Keeps set/increment/deactivate in
-    agreement about which file they write."""
+def _resolve_loop_path(loop: str, session_id: str) -> Path:
+    """Resolve the state file this session's loop verbs target — the SAME file
+    the Stop hook resolves (find_session_state_file, so an adopted legacy file
+    is read and mutated on its real path), falling back to the fresh
+    session-scoped path when nothing is found. Keeps show/is-active and
+    set/increment/deactivate in agreement about which file the loop lives in."""
     canonical = LOOP_ALIASES[loop]
     crew_dir = get_project_dir() / ".crew"
     path = find_session_state_file(crew_dir, LOOP_PREFIXES[canonical], session_id)
@@ -223,7 +223,7 @@ def _resolve_mutation_path(loop: str, session_id: str) -> Path:
 def cmd_set(args):
     """Set a single field on a loop state."""
     session_id = resolve_session_id(args)
-    path = _resolve_mutation_path(args.loop, session_id)
+    path = _resolve_loop_path(args.loop, session_id)
     cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
     state = _load_for_mutation(cls, path)
 
@@ -412,7 +412,7 @@ def cmd_deactivate(args):
     # keeps blocking). set/increment share this resolver so all mutating verbs
     # agree on which file they touch. Fall back to the scoped path when nothing
     # is found.
-    path = _resolve_mutation_path(args.loop, session_id)
+    path = _resolve_loop_path(args.loop, session_id)
 
     # Refuse-to-touch: honor the same contract as the hook.
     state = _load_for_mutation(cls, path)
@@ -436,7 +436,7 @@ def cmd_increment(args):
         sys.exit(1)
 
     session_id = resolve_session_id(args)
-    path = _resolve_mutation_path(args.loop, session_id)
+    path = _resolve_loop_path(args.loop, session_id)
     cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
     state = _load_for_mutation(cls, path)
 
