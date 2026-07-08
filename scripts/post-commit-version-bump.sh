@@ -11,10 +11,10 @@
 # - Bumps marketplace version if marketplace-level files changed
 # - Bumps plugin versions only for plugins with changes
 #
-# Hardening (R4): NO `set -e`. Version reads happen BEFORE any file is touched;
+# Hardening: NO `set -e`. Version reads happen BEFORE any file is touched;
 # a failure there aborts with a byte-identical tree. Every json file is
 # byte-snapshotted before rewrite, and ANY failure after the first rewrite
-# un-stages the paths (`git reset`) and restores each file from its snapshot —
+# un-stages the paths (`git reset`) and restores each file from its snapshot,
 # so a failed bump leaves neither a mutated working tree NOR a dirty index.
 # Version read goes through python3/json (argv-only, UTF-8) so it never assumes a
 # single "version" key; the WRITE is a surgical, format-preserving substitution
@@ -170,6 +170,10 @@ bump_version() {
     local current="$1"
     local bump_type="$2"
 
+    # No `set -e` here: a non-semver input would otherwise flow a mangled
+    # version string into write_version, so refuse it up front.
+    [[ "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+
     local major minor patch
     major=$(echo "$current" | cut -d. -f1)
     minor=$(echo "$current" | cut -d. -f2)
@@ -298,7 +302,7 @@ main() {
        || git diff --name-only "$last_bump"..HEAD -- 'README.md' 'docs/' 2>/dev/null | grep -q .; then
         do_marketplace=true
         mp_current=$(read_version "$mp_json") || fail "cannot read version from $mp_json"
-        mp_new=$(bump_version "$mp_current" "$bump_type")
+        mp_new=$(bump_version "$mp_current" "$bump_type") || fail "cannot bump non-semver marketplace version '$mp_current'"
     else
         info "No marketplace-level changes"
     fi
@@ -306,7 +310,7 @@ main() {
     if has_directory_changes "plugins/crew" "$last_bump"; then
         do_crew=true
         crew_current=$(read_version "$crew_json") || fail "cannot read version from $crew_json"
-        crew_new=$(bump_version "$crew_current" "$bump_type")
+        crew_new=$(bump_version "$crew_current" "$bump_type") || fail "cannot bump non-semver crew version '$crew_current'"
     else
         info "No crew plugin changes"
     fi
@@ -314,7 +318,7 @@ main() {
     if has_directory_changes "plugins/sk" "$last_bump"; then
         do_sk=true
         sk_current=$(read_version "$sk_json") || fail "cannot read version from $sk_json"
-        sk_new=$(bump_version "$sk_current" "$bump_type")
+        sk_new=$(bump_version "$sk_current" "$bump_type") || fail "cannot bump non-semver sk version '$sk_current'"
     else
         info "No sk plugin changes"
     fi
