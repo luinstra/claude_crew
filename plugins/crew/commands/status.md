@@ -5,14 +5,17 @@ allowed-tools: Bash
 
 ## Current Crew Status
 
-Check the state of active loops by running these commands:
+Check the state of active loops by running these commands. Pass `--session-id`
+(the `[Session ID: …]` value injected this session, as a literal, NOT a
+`${CLAUDE_SESSION_ID}` shell expansion) so show reports THIS session's loop
+rather than a legacy or other-session state file:
 
 ```bash
 # Check build loop
-"${CLAUDE_PLUGIN_ROOT}/crew" state show bl --verbose
+"${CLAUDE_PLUGIN_ROOT}/crew" state show bl --verbose --session-id <session-id>
 
 # Check measure-twice loop
-"${CLAUDE_PLUGIN_ROOT}/crew" state show mt --verbose
+"${CLAUDE_PLUGIN_ROOT}/crew" state show mt --verbose --session-id <session-id>
 ```
 
 ### Report Format
