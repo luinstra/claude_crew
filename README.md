@@ -190,11 +190,11 @@ For work requiring verification before declaring "done," use `/crew:build` inste
 synthesizes one verdict. The default panel is
 **codex + agy + cursor-auto + cursor-composer + opus + sonnet**:
 the `codex`, `agy`, and `cursor-*` seats run via the bundled `multiagent` engine
-(`plugins/crew/scripts/multiagent/`) — `cursor-gpt`, `cursor-gemini`, and
-`cursor-glm` are opt-in via
+(`plugins/crew/scripts/multiagent/`) — `cursor-gpt`, `cursor-gemini`,
+`cursor-glm`, and `cursor-grok` are opt-in via
 `--seats` (codex covers the GPT lineage; agy covers the Gemini lineage flat-rate;
-glm-max draws on Cursor's
-shared premium MAX allotment, so cursor-auto takes its default slot from the
+glm-max and grok-4.5-xhigh draw on Cursor's
+shared premium MAX allotment, so cursor-auto takes the default slot from the
 cheap/dedicated bucket) — while
 the two Claude voices are the
 `crew:reviewer` agent spawned at `model: opus` and `model: sonnet`. It dispatches
@@ -213,11 +213,13 @@ succeed, and only an all-seats-failed panel skips the verdict.
   expands to every registered `cursor-*` seat) — a pure cross-model Cursor panel,
   no codex and no opus/sonnet Task seats
 - `--seats <list>` — an explicit subset of
-  `codex,agy,cursor-gpt,cursor-gemini,cursor-glm,cursor-auto,cursor-composer,opus,sonnet,fable`
+  `codex,agy,cursor-gpt,cursor-gemini,cursor-glm,cursor-grok,cursor-auto,cursor-composer,opus,sonnet,fable`
   (e.g. `/crew:build --seats codex,opus "fix the bug"`). `cursor-gpt`,
-  `cursor-gemini`, and `cursor-glm` are opt-in — they work via `--seats` (or
+  `cursor-gemini`, `cursor-glm`, and `cursor-grok` are opt-in — they work via
+  `--seats` (or
   `--panel cursor`) but are not in the default panel; `codex` already covers the
-  GPT lineage and `agy` covers the Gemini lineage flat-rate. `fable` is an
+  GPT lineage, `agy` covers the Gemini lineage flat-rate, and glm-max and
+  grok-4.5-xhigh draw Cursor's shared premium MAX allotment. `fable` is an
   opt-in Claude voice on the premium Mythos-class tier (`model="fable"`) — in no
   default panel so routine reviews never silently spend it; add it explicitly
   for the hardest calls (falls back to the inherited model if Fable isn't on
@@ -323,7 +325,8 @@ launcher run directly via its shebang + exec bit — no `python` prefix, no
 ```
 
 `run <seat>` accepts any subprocess seat (`codex`, `agy`, `cursor-gpt`,
-`cursor-gemini`, `cursor-glm`, `cursor-auto`, `cursor-composer`), plus `-m/--model`,
+`cursor-gemini`, `cursor-glm`, `cursor-grok`, `cursor-auto`, `cursor-composer`),
+plus `-m/--model`,
 `-s/--sandbox read-only|workspace-write`, `--timeout N`, and `--json` (emits the
 same six-field result). It reuses the exact provider classes the review panel
 uses, so ANSI-stripping, agy auth-banner detection, timeout floors, and config

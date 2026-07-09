@@ -74,7 +74,8 @@ from multiagent.providers import (
 # from the default to keep the default off the premium bucket. `cursor-auto`
 # (Cursor's auto model routing) is defaulted in its place — auto bills from
 # Cursor's cheap/dedicated bucket (like composer), so no default crew panel touches
-# the premium allotment.
+# the premium allotment. `cursor-grok` is opt-in for the same reason as
+# `cursor-glm`: grok-4.5-xhigh draws that same shared premium MAX allotment.
 # This tuple is the BUILTIN subprocess fallback. Any name here must be a
 # registered subprocess seat (see providers/__init__._build_registry); unknown
 # names are dropped. The configured default panel (config.default_panel() +
@@ -2053,7 +2054,7 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
 
 # Premium-bucket / opt-in cursor seats — emitted available=false (unless the user
 # opts one back in) so no default crew panel touches the premium allotment.
-_PREMIUM_OFF_SEATS = ("cursor-glm", "cursor-gpt", "cursor-gemini")
+_PREMIUM_OFF_SEATS = ("cursor-glm", "cursor-gpt", "cursor-gemini", "cursor-grok")
 
 # Honest task-seat diagnostics (subscription-backed; not CLI-detectable).
 _TASK_SEAT_DIAGS = {
@@ -2073,7 +2074,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     The ``agent`` binary is identical across every ``cursor-*`` seat, so the
     cursor identity probe runs EXACTLY ONCE — the single result is fanned to all
     cursor seats (calling each one's ``is_available()`` would spawn
-    ``agent --version`` up to 5x). codex/agy keep their own pure-``which`` checks.
+    ``agent --version`` up to 6x). codex/agy keep their own pure-``which`` checks.
 
     NON-BILLABLE: no metered/network call. stdout carries ONLY the JSON; every
     diagnostic/error goes to stderr. File-write destination follows the D1 matrix
@@ -2261,6 +2262,7 @@ def _premium_comment(seat: str) -> str:
         "cursor-glm": "opt-in (draws Cursor's shared premium MAX allotment)",
         "cursor-gpt": "opt-in (codex already covers the GPT lineage)",
         "cursor-gemini": "opt-in (agy covers the Gemini lineage flat-rate)",
+        "cursor-grok": "opt-in (draws Cursor's shared premium MAX allotment)",
     }.get(seat, "opt-in")
 
 

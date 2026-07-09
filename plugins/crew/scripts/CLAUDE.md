@@ -29,8 +29,8 @@ scripts/
 
 The engine that powers `/crew:review`, `/crew:debate`, and the review steps of
 `/crew:build` and `/crew:measure-twice`. It drives **subprocess seats** only —
-the external CLIs `codex` + `agy` + `cursor-gpt`/`cursor-gemini`/`cursor-glm`/`cursor-auto`/`cursor-composer`
-(`cursor-gpt`/`cursor-gemini`/`cursor-glm` opt-in via `--seats`). The **Claude seats** (opus/sonnet) are NOT
+the external CLIs `codex` + `agy` + `cursor-gpt`/`cursor-gemini`/`cursor-glm`/`cursor-grok`/`cursor-auto`/`cursor-composer`
+(`cursor-gpt`/`cursor-gemini`/`cursor-glm`/`cursor-grok` opt-in via `--seats`). The **Claude seats** (opus/sonnet) are NOT
 in here: they're spawned by the orchestrating command as `crew:reviewer` Task
 subagents (in-session, on the subscription), and the orchestrator normalizes
 their results into the same six-field shape the engine returns.
@@ -47,7 +47,7 @@ multiagent/
 └── providers/
     ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC (executor: run() + supports_workspace_write capability, fail-CLOSED/opt-in for /crew:dispatch), registry + known_seat_names()
     ├── codex.py         # CodexProvider — `codex exec - --sandbox read-only -o <tmp>`, prompt via stdin
-    ├── cursor.py        # CursorProvider — the live `cursor-gpt`/`cursor-gemini`/`cursor-glm`/`cursor-auto`/`cursor-composer` seats; CURSOR_SEATS is the one-line-to-extend source of truth
+    ├── cursor.py        # CursorProvider — the live `cursor-gpt`/`cursor-gemini`/`cursor-glm`/`cursor-grok`/`cursor-auto`/`cursor-composer` seats; CURSOR_SEATS is the one-line-to-extend source of truth
     └── agy.py           # AgyProvider (default panel) — `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions)
 ```
 
@@ -110,7 +110,7 @@ Key contracts (do NOT regress):
   defines presets, or hardcodes a model pin (the engine still EXECUTES only the subprocess subset,
   skipped when empty).
 - The default panel is `codex + agy + cursor-auto/composer + opus + sonnet`; `cursor-gpt`,
-  `cursor-gemini`, and `cursor-glm` are registered but opt-in (WHY each is opt-in → engine-notes).
+  `cursor-gemini`, `cursor-glm`, and `cursor-grok` are registered but opt-in (WHY each is opt-in → engine-notes).
 - When the user names NEITHER `--panel` nor `--seats`, the default panel NAME comes from `default_panel`
   (`config.py`, per-repo `.crew/config.toml` → global `~/.crew-config.toml`), falling back to the
   built-in `full`; precedence is CLI flag > per-repo config > global config > builtin (no env tier — the
@@ -138,7 +138,7 @@ Key contracts (do NOT regress):
 ### Group tokens & staging
 
 - `--panel cursor` = `--seats cursor` (ALL Cursor seats incl.
-  cursor-gpt/cursor-gemini/cursor-glm/cursor-auto, no codex/Claude).
+  cursor-gpt/cursor-gemini/cursor-glm/cursor-grok/cursor-auto/cursor-composer, no codex/Claude).
 - The engine itself only knows subprocess seats, and its subprocess-seat allowlist is registry-derived
   via `known_seat_names()` (no hardcoded codex/agy list). The `cursor` GROUP TOKEN (in `--seats` and
   `[panels]` rosters) expands to every registered `cursor-*` seat via `_expand_seat_groups`, so it grows
@@ -319,7 +319,7 @@ Key contracts (do NOT regress):
     `{subprocess, task}` JSON map (the `task` block in `sorted(TASK_SEAT_NAMES)` order →
     deterministic). NON-billable: codex/agy `is_available()` are pure `shutil.which`;
     Cursor's local `agent --version` identity probe runs EXACTLY ONCE and is fanned to
-    every `cursor-*` seat (not 5×). Takes `--session-id` (writes
+    every `cursor-*` seat (not 6×). Takes `--session-id` (writes
     `.crew/reviews/<id>/doctor.json`) and `-o` (override path; `-o` wins over the session
     path); with NEITHER, no file is written. The JSON is ALWAYS printed to stdout (no
     `--json` flag — output is always JSON).

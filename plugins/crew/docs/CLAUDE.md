@@ -78,8 +78,8 @@ Skills provide specialized guidance that activates automatically based on contex
 - `--panel lite`: opus + sonnet
 - `--panel solo`: opus
 - `--panel quick`: codex + sonnet (cheapest cross-model pair, good for routine diffs)
-- `--panel cursor`: all Cursor models (gpt/gemini/glm/auto/composer, no codex/Claude)
-- `--seats codex,opus`: any subset of `codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-auto, cursor-composer, opus, sonnet, fable` (`cursor-gpt`, `cursor-gemini`, `cursor-glm`, and `fable` are opt-in)
+- `--panel cursor`: all Cursor models (gpt/gemini/glm/grok/auto/composer, no codex/Claude)
+- `--seats codex,opus`: any subset of `codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-grok, cursor-auto, cursor-composer, opus, sonnet, fable` (`cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`, and `fable` are opt-in)
 
 **Config:** `full` is the built-in default. A per-repo `.crew/config.toml` or global `~/.crew-config.toml` can set `default_panel`, redefine/add `[panels]` presets (usable via `--panel <name>`), mark seats `available = false` (drops an un-authed seat), or override per-command (`[debate].panel`, `[dispatch].seat`). Precedence: **CLI flag > per-repo config > global config > built-in** (per-repo wins over global; no env-var tier). Needs Python 3.11+; on 3.10 the files are gracefully ignored with a one-time stderr note. Review/build/measure-twice resolve their panel through `review-prep`; `/crew:debate` and `/crew:dispatch` have their own config-aware resolvers (`[debate].panel`, `[dispatch].seat`).
 

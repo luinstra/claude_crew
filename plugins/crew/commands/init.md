@@ -90,10 +90,12 @@ Ask ONLY what detection can't infer. Keep it short:
    Either a subprocess seat OR a Claude task seat is a valid correction target; explicit
    correction beats detection.
 2. **`default_panel`** (default `full`).
-3. **Premium-seat add-back** — `cursor-glm` / `cursor-gpt` / `cursor-gemini` draw the
+3. **Premium-seat add-back** — `cursor-glm` / `cursor-gpt` / `cursor-gemini` /
+   `cursor-grok` draw the
    premium/metered buckets, so they default OFF. Offer them as opt-IN `--add-seat` only,
    with that cost note. (`codex` covers the GPT lineage; `agy` covers the Gemini lineage
-   flat-rate; `cursor-glm`'s glm-max draws Cursor's shared premium MAX allotment.)
+   flat-rate; `cursor-glm`'s glm-max and `cursor-grok`'s grok-4.5-xhigh draw Cursor's
+   shared premium MAX allotment.)
 4. **`[dispatch].seat`** — the default `/crew:dispatch` WRITE seat (default `codex`;
    must be a subprocess seat).
 

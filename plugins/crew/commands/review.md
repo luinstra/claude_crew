@@ -31,8 +31,8 @@ user's configured default.
   `codex,sonnet`, the cheapest cross-model pair; `<custom>` = any `[panels]`
   roster in per-repo/global config). `--seats <comma-list>` — an explicit subset
   of any registered seat (e.g. `--seats codex,opus`); `--seats` wins if both are
-  given. `cursor-gemini`, `cursor-glm`, `cursor-gpt`, and `fable` (a premium-tier
-  Claude voice, `model="fable"`) are opt-in — add via `--seats`.
+  given. `cursor-gemini`, `cursor-glm`, `cursor-gpt`, `cursor-grok`, and `fable`
+  (a premium-tier Claude voice, `model="fable"`) are opt-in — add via `--seats`.
 - **The engine resolves the preset — the orchestrator does NOT.** `review-prep`
   (Step 3) resolves `--panel`/`--seats` into `subprocess_seats` (the
   `codex`/`agy`/`cursor-*` entries), `task_seats` (the Claude voices), and

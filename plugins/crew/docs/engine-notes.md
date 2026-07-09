@@ -31,13 +31,16 @@ decision.
 ## Why the default panel leaves some cursor seats opt-in
 
 The default panel is `codex + agy + cursor-auto/composer + opus + sonnet`.
-`cursor-gpt`, `cursor-gemini`, and `cursor-glm` are registered but opt-in:
+`cursor-gpt`, `cursor-gemini`, `cursor-glm`, and `cursor-grok` are registered
+but opt-in:
 
 - `cursor-gpt` — codex already covers the GPT lineage, so it isn't defaulted.
 - `cursor-gemini` — `agy` covers the Gemini lineage flat-rate, so the metered
   `cursor-gemini` is left opt-in.
 - `cursor-glm` — glm-max draws on Cursor's shared premium MAX allotment, so it's
   opt-in too; `cursor-auto` fills that slot from the cheap/dedicated bucket.
+- `cursor-grok` — grok-4.5-xhigh draws that same shared premium MAX allotment,
+  so it's opt-in for the same reason as `cursor-glm`.
 
 ## Why the debate panel uses `seats --debate`, not a `debate-prep` mirror
 

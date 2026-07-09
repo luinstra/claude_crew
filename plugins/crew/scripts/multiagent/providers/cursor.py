@@ -54,6 +54,7 @@ CURSOR_SEATS: dict[str, str] = {
     "cursor-gpt":      "gpt-5.5-extra-high",
     "cursor-gemini":   "gemini-3.1-pro",
     "cursor-glm":      "glm-5.2-max",
+    "cursor-grok":     "grok-4.5-xhigh",
     "cursor-auto":     "auto",
     "cursor-composer": "composer-2.5",
 }
@@ -111,8 +112,9 @@ class CursorProvider(Provider):
 
     Pinned to one model. Multiple named instances (see ``CURSOR_SEATS``) run as
     distinct seats — ``cursor-auto`` and ``cursor-composer`` are the default
-    cursor model-seats; ``cursor-gpt``, ``cursor-gemini``, and ``cursor-glm`` are
-    registered but opt-in (via ``--seats`` / ``--panel cursor``).
+    cursor model-seats; ``cursor-gpt``, ``cursor-gemini``, ``cursor-glm``, and
+    ``cursor-grok`` are registered but opt-in (via ``--seats`` / ``--panel
+    cursor``).
     """
 
     # EXPLICIT opt-in (fail-CLOSED ABC default is False): cursor honors

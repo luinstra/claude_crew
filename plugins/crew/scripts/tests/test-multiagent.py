@@ -709,6 +709,10 @@ def test_registry():
     check("each cursor seat is a DISTINCT model (no closure late-binding bug)",
           len({get_provider(s)._default_model for s in CURSOR_SEATS}) == len(CURSOR_SEATS),
           "all distinct models", str([get_provider(s)._default_model for s in CURSOR_SEATS]))
+    # The opt-in premium grok seat's model pin (verified via `agent models`).
+    check("CURSOR_SEATS pins cursor-grok to grok-4.5-xhigh",
+          CURSOR_SEATS.get("cursor-grok") == "grok-4.5-xhigh",
+          "grok-4.5-xhigh", str(CURSOR_SEATS.get("cursor-grok")))
 
 
 # =============================================================================
@@ -5322,7 +5326,7 @@ def test_doctor():
         check("doctor stdout is JSON-only (no extra lines)",
               proc.stdout.strip().startswith("{") and proc.stdout.strip().endswith("}"),
               "pure JSON", proc.stdout[:120])
-        # the cursor binary was probed AT MOST ONCE (not 5x).
+        # the cursor binary was probed AT MOST ONCE (not once per cursor-* seat).
         n_agent = agent_calls.read_text().count("x") if agent_calls.exists() else 0
         check("doctor probes the cursor binary AT MOST ONCE (fanned to all cursor-* seats)",
               n_agent <= 1, "<=1 probe", str(n_agent))
@@ -5695,7 +5699,8 @@ def test_scaffold_config():
         det = Path(proj) / "doctor.json"
         write_det(det, absent=["agy"],
                   present=["codex", "cursor-auto", "cursor-composer",
-                           "cursor-glm", "cursor-gpt", "cursor-gemini"])
+                           "cursor-glm", "cursor-gpt", "cursor-gemini",
+                           "cursor-grok"])
         rc, out, err = run(["scaffold-config", "--out", "-", "--detection", str(det),
                             "--disable-seat", "opus"])
         parsed = _toml.loads(out)
@@ -5707,6 +5712,9 @@ def test_scaffold_config():
         check("detection: premium cursor-glm -> available=false (cost-safe)",
               seats_tbl.get("cursor-glm", {}).get("available") is False,
               "glm false", str(seats_tbl.get("cursor-glm")))
+        check("detection: premium cursor-grok -> available=false (cost-safe)",
+              seats_tbl.get("cursor-grok", {}).get("available") is False,
+              "grok false", str(seats_tbl.get("cursor-grok")))
         check("detection: --disable-seat opus (TASK seat) -> [seats.opus].available=false",
               seats_tbl.get("opus", {}).get("available") is False, "opus false", str(seats_tbl.get("opus")))
         # the opus-disabled output loads clean via the real loader.

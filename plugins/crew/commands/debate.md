@@ -24,13 +24,15 @@ $ARGUMENTS
   `codex,sonnet` (the cheapest cross-model pair, good for routine questions) ·
   `--panel cursor` =
   all Cursor model-seats (`--seats cursor`, which the engine expands to every
-  registered cursor-* seat — cursor-gpt, cursor-gemini, cursor-glm, cursor-auto,
+  registered cursor-* seat — cursor-gpt, cursor-gemini, cursor-glm, cursor-grok,
+  cursor-auto,
   cursor-composer, and any future ones); a pure cross-model Cursor panel — NO
   codex, NO opus/sonnet Task seats · `--seats <list>` =
   an explicit comma-list of any registered seat
-  (`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-auto, cursor-composer, opus, sonnet`;
-  `cursor-gpt`, `cursor-gemini`, and `cursor-glm` are opt-in — work via `--seats …` / `--panel cursor`
-  but are not in the default panel; `codex` covers the GPT lineage and `agy` covers the Gemini lineage flat-rate).
+  (`codex, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-grok, cursor-auto, cursor-composer, opus, sonnet`;
+  `cursor-gpt`, `cursor-gemini`, `cursor-glm`, and `cursor-grok` are opt-in — work via `--seats …` / `--panel cursor`
+  but are not in the default panel; `codex` covers the GPT lineage, `agy` covers the Gemini lineage flat-rate,
+  and glm-max and grok-4.5-xhigh draw Cursor's shared premium MAX allotment).
   `--panel <name>` also accepts any **custom roster** defined under `[panels]`
   in per-repo or global config (e.g. `--panel nightly`). `--seats` wins over `--panel`.
 - **Config-aware default** — when you name NEITHER `--panel` NOR `--seats`, the
