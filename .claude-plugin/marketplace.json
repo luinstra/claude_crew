@@ -7,7 +7,7 @@
     "email": "luinstra@gmail.com"
   },
   "metadata": {
-    "version": "0.19.3",
+    "version": "0.20.0",
     "pluginRoot": "./plugins"
   },
   "plugins": [
