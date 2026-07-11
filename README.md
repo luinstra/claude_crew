@@ -152,7 +152,7 @@ For work requiring verification before declaring "done," use `/crew:build` inste
 | `/crew:plan "description"` | Start a planning session with the advisor agent |
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (keeps main context clean) |
 | `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (natural-language dispatch) → `APPROVED`/`REVISE` verdict |
-| `/crew:debate "question"` | Crew-native council — single-round multi-model take on a question (codex + codex-luna + agy + cursor-auto + cursor-composer + opus + sonnet), synthesized into agreement/disagreement/recommendation |
+| `/crew:debate "question"` | Crew-native council — single-round multi-model take on a question (the default review panel), synthesized into agreement/disagreement/recommendation |
 | `/crew:dispatch "[--seat <name>] <task>"` | Delegate a WORK task to ONE non-Claude seat (default `codex`) in write mode — it edits the working tree and leaves changes UNCOMMITTED + UNSTAGED for you to review (keep / revert / pipe into `/crew:review`) |
 | `/crew:build "task"` | Start a persistence loop — Claude won't stop until task is verified complete |
 | `/crew:cancel-build` | Exit an active build loop early |
@@ -187,48 +187,61 @@ For work requiring verification before declaring "done," use `/crew:build` inste
 ### Multi-Model Review
 
 `/crew:review` fans the same review prompt across a panel of models and
-synthesizes one verdict. The default panel is
-**codex + codex-luna + agy + cursor-auto + cursor-composer + opus + sonnet**:
-the `codex`/`codex-luna`, `agy`, and `cursor-*` seats run via the bundled `multiagent` engine
-(`plugins/crew/scripts/multiagent/`) — the two codex seats are distinct OpenAI
-voices (`gpt-5.6-sol` and `gpt-5.6-luna`) on the one codex CLI; `cursor-gpt`, `cursor-gemini`,
-`cursor-glm`, and `cursor-grok` are opt-in via
-`--seats` (codex covers the GPT lineage; agy covers the Gemini lineage flat-rate;
-glm-max and grok-4.5-xhigh draw on Cursor's
-shared premium MAX allotment, so cursor-auto takes the default slot from the
-cheap/dedicated bucket) — while
-the two Claude voices are the
-`crew:reviewer` agent spawned at `model: opus` and `model: sonnet`. It dispatches
-plan-vs-code from natural language and reports `APPROVED`/`REVISE` with
-`[BLOCKING]`/`[MINOR]` findings. A skipped or failed seat (any kind) is reported
-but never sinks the panel — the verdict is synthesized from whichever seats
-succeed, and only an all-seats-failed panel skips the verdict.
+synthesizes one verdict. The built-in default panel and the presets:
+
+<!-- seat-roster:default -->
+- Default panel: `codex`, `codex-luna`, `agy`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`
+<!-- seat-roster:preset:lite -->
+- `--panel lite`: `opus`, `sonnet`
+<!-- seat-roster:preset:solo -->
+- `--panel solo`: `opus`
+<!-- seat-roster:preset:quick -->
+- `--panel quick`: `codex`, `sonnet`
+<!-- seat-roster:opt-in -->
+- Opt-in external seats (add via `--seats`): `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`
+<!-- seat-roster:task-opt-in -->
+- Opt-in Claude voice (add via `--seats`): `fable`
+<!-- seat-roster:all -->
+- Every registered seat: `codex`, `codex-luna`, `agy`, `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`, `fable`
+
+These lines document the BUILT-IN roster; a configured `default_panel`/`[panels]`
+override changes what actually runs. `"${CLAUDE_PLUGIN_ROOT}/crew" seats` prints
+the resolved AVAILABLE external-CLI seats (the Claude Task voices complete the
+panel and are not listed there).
+
+The external-CLI seats run via the bundled `multiagent` engine
+(`plugins/crew/scripts/multiagent/`): the two codex seats are distinct OpenAI
+voices (`gpt-5.6-sol` and `gpt-5.6-luna`) on the one codex CLI, while the two
+Claude voices are the `crew:reviewer` agent spawned at `model: opus`
+and `model: sonnet`. It dispatches plan-vs-code from natural language and reports
+`APPROVED`/`REVISE` with `[BLOCKING]`/`[MINOR]` findings. A skipped or failed
+seat (any kind) is reported but never sinks the panel: the verdict is synthesized
+from whichever seats succeed, and only an all-seats-failed panel skips the
+verdict.
+
+**Why some seats are opt-in.** `codex` already covers the GPT lineage and `agy`
+covers the Gemini lineage flat-rate, so the premium cursor seats stay off the
+default: their `glm-max` and `grok-4.5-xhigh` models draw on Cursor's shared
+premium MAX allotment, so the cheap/dedicated `cursor-auto` takes the default
+slot. `fable` is a premium Mythos-class Claude voice, in no built-in default panel so
+routine reviews never silently spend it; add it explicitly for the hardest calls
+(falls back to the inherited model if Fable isn't on your plan).
 
 **Choosing the panel.** `/crew:review`, `/crew:debate`, `/crew:build`, and
 `/crew:measure-twice` all accept panel flags at the start of their argument:
 
-- `--panel full` = `codex,codex-luna,agy,cursor-auto,cursor-composer,opus,sonnet`
-  (the default) · `--panel lite` = `opus,sonnet` · `--panel solo` = `opus` ·
-  `--panel quick` = `codex,sonnet` (the cheapest cross-model pair)
+- `--panel full` = the default panel listed above · `--panel lite`/`solo`/`quick`
+  as listed above (`quick` is the cheapest cross-model pair)
 - `--panel cursor` = all Cursor model-seats (`--seats cursor`, which the engine
   expands to every registered `cursor-*` seat) — a pure cross-model Cursor panel,
-  no codex and no opus/sonnet Task seats
-- `--seats <list>` — an explicit subset of
-  `codex,codex-luna,agy,cursor-gpt,cursor-gemini,cursor-glm,cursor-grok,cursor-auto,cursor-composer,opus,sonnet,fable`
-  (e.g. `/crew:build --seats codex,opus "fix the bug"`). `cursor-gpt`,
-  `cursor-gemini`, `cursor-glm`, and `cursor-grok` are opt-in — they work via
-  `--seats` (or
-  `--panel cursor`) but are not in the default panel; `codex` already covers the
-  GPT lineage, `agy` covers the Gemini lineage flat-rate, and glm-max and
-  grok-4.5-xhigh draw Cursor's shared premium MAX allotment. `fable` is an
-  opt-in Claude voice on the premium Mythos-class tier (`model="fable"`) — in no
-  default panel so routine reviews never silently spend it; add it explicitly
-  for the hardest calls (falls back to the inherited model if Fable isn't on
-  your plan).
+  no codex and no Claude Task seats
+- `--seats <list>` — an explicit subset of the registered seats listed above
+  (e.g. `/crew:build --seats codex,opus "fix the bug"`). The opt-in seats work
+  via `--seats` (or `--panel cursor`) but are never in a built-in default panel
 
 Not every change needs the full panel — `lite` (the two Claude voices, no
-external CLI), `quick` (codex + sonnet, cross-model at low cost) for routine
-diffs, or a single seat is plenty for routine work.
+external CLI), `quick` (the cheapest cross-model pair) for routine diffs, or a
+single seat is plenty for routine work.
 
 #### Per-repo config
 
@@ -325,9 +338,8 @@ launcher run directly via its shebang + exec bit — no `python` prefix, no
 "${CLAUDE_PLUGIN_ROOT}/crew" run codex "summarize this"
 ```
 
-`run <seat>` accepts any subprocess seat (`codex`, `codex-luna`, `agy`, `cursor-gpt`,
-`cursor-gemini`, `cursor-glm`, `cursor-grok`, `cursor-auto`, `cursor-composer`),
-plus `-m/--model`,
+`run <seat>` accepts any registered subprocess seat (the non-Claude seats in the
+panel section above), plus `-m/--model`,
 `-s/--sandbox read-only|workspace-write`, `--timeout N`, and `--json` (emits the
 same six-field result). It reuses the exact provider classes the review panel
 uses, so ANSI-stripping, agy auth-banner detection, timeout floors, and config

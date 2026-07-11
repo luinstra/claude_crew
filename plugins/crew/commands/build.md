@@ -17,15 +17,16 @@ let `review-prep` apply the configured default (precedence CLI flag > per-repo
 tier). Do NOT hardcode `--panel full` — it would override a user's configured
 default.
 
-- `--panel full|lite|solo|cursor|quick|<custom>` — a named preset (`quick` =
-  `codex,sonnet`, the cheapest cross-model pair; `<custom>` = any `[panels]`
-  roster in per-repo/global config). `--seats <comma-list>` — an explicit subset
-  of any registered seat (e.g. `--seats codex,opus`); `--seats` wins if both are
-  given. `cursor-gemini`, `cursor-glm`, `cursor-gpt`, `cursor-grok`, and `fable`
-  (a premium-tier Claude voice, `model="fable"`) are opt-in — add via `--seats`.
+- `--panel full|lite|solo|cursor|quick|<custom>` — a named preset (`quick` = the
+  cheapest cross-model pair; `<custom>` = any `[panels]` roster in per-repo/global
+  config). `--seats <comma-list>` — an explicit subset of any registered seat
+  (e.g. `--seats codex,opus`); `--seats` wins if both are given.
+  Some registered seats are opt-in and not in the built-in default panel
+  (premium cursor model-seats; the `fable` Claude voice): pass their exact names
+  via `--seats`. The full seat census is `crew doctor` / the README panel table.
 - **The engine resolves the preset — the orchestrator does NOT.** `review-prep`
-  (Step 2a) resolves `--panel`/`--seats` into `subprocess_seats` (the
-  `codex`/`codex-luna`/`agy`/`cursor-*` entries), `task_seats` (the Claude voices), and
+  (Step 2a) resolves `--panel`/`--seats` into `subprocess_seats` (the external-CLI
+  entries), `task_seats` (the Claude voices), and
   `task_seat_models` (each Task seat's model pin). The orchestrator never defines
   presets, classifies seat names, or hardcodes a model pin — pass the flag through
   and read the JSON. **Pass `--panel`/`--seats` ONLY when the user named a panel
@@ -101,14 +102,15 @@ When executor reports complete, verify the work with a multi-model panel over th
 **working-tree diff**, and synthesize the results into the existing verdict. Two
 seat kinds:
 
-- **subprocess seats** — the `codex`/`codex-luna`/`agy`/`cursor-*` entries of the resolved
+- **subprocess seats** — the external-CLI entries of the resolved
   panel, via the Python engine.
 - **task seats** — the `opus`/`sonnet` entries, each a `crew:reviewer` spawned via
   the Task tool (in-session, on the subscription — no `claude -p`, no API key).
 
-The panel is whatever the flags resolved to (default **codex + codex-luna + agy + cursor-auto +
-cursor-composer + opus + sonnet**); only fan out the seats in that list. A
-failed/skipped seat NEVER aborts the verification (see "Synthesize" below) — the
+The panel is whatever the flags resolved to (the configured default panel:
+`review-prep`'s JSON is the roster of record for this run); only fan out the
+seats in that list. A failed/skipped seat NEVER aborts the verification (see
+"Synthesize" below) — the
 verdict is synthesized from whichever seats succeed.
 
 > **`allowed-tools` scopes THIS orchestrator only.** It grants nothing to the seats

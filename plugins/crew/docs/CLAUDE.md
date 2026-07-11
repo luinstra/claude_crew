@@ -74,12 +74,10 @@ Skills provide specialized guidance that activates automatically based on contex
 | `/crew:dispatch "[--seat <name>] <task>"` | Delegate a WORK task to ONE non-Claude seat (default `codex`) in WRITE mode — edits left UNCOMMITTED + UNSTAGED on the same branch to review (keep / revert / pipe into `/crew:review`); a HEAD/staged/branch guard surfaces any commit/stage/branch made against instruction |
 
 **Panel size (build / measure-twice / review / debate):** prefix the argument with a panel flag. Not every change needs the full panel — e.g. `/crew:build --panel lite "fix the bug"`.
-- `--panel full` (default): codex + codex-luna + agy + cursor-auto + cursor-composer + opus + sonnet
-- `--panel lite`: opus + sonnet
-- `--panel solo`: opus
-- `--panel quick`: codex + sonnet (cheapest cross-model pair, good for routine diffs)
-- `--panel cursor`: all Cursor models (gpt/gemini/glm/grok/auto/composer, no codex/Claude)
-- `--seats codex,opus`: any subset of `codex, codex-luna, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-grok, cursor-auto, cursor-composer, opus, sonnet, fable` (`cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`, and `fable` are opt-in)
+- No flag: the configured `default_panel` (or built-in `full` if unset); `"${CLAUDE_PLUGIN_ROOT}/crew" seats` prints its available external-CLI seats (the Claude voices complete it). `--panel full` selects the `full` preset, which a `[panels].full` config entry can redefine; print any preset's resolved roster with `"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --panel <name>`.
+- `--panel lite`: the two Claude voices · `--panel solo`: one Claude voice · `--panel quick`: the cheapest cross-model pair (good for routine diffs)
+- `--panel cursor`: every registered Cursor model-seat (no codex, no Claude)
+- `--seats codex,opus`: any subset of the registered seats (some are opt-in and never in a built-in default panel); list every seat with `"${CLAUDE_PLUGIN_ROOT}/crew" doctor`
 
 **Config:** `full` is the built-in default. A per-repo `.crew/config.toml` or global `~/.crew-config.toml` can set `default_panel`, redefine/add `[panels]` presets (usable via `--panel <name>`), mark seats `available = false` (drops an un-authed seat), or override per-command (`[debate].panel`, `[dispatch].seat`). Precedence: **CLI flag > per-repo config > global config > built-in** (per-repo wins over global; no env-var tier). Needs Python 3.11+; on 3.10 the files are gracefully ignored with a one-time stderr note. Review/build/measure-twice resolve their panel through `review-prep`; `/crew:debate` and `/crew:dispatch` have their own config-aware resolvers (`[debate].panel`, `[dispatch].seat`).
 

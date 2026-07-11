@@ -90,12 +90,10 @@ Ask ONLY what detection can't infer. Keep it short:
    Either a subprocess seat OR a Claude task seat is a valid correction target; explicit
    correction beats detection.
 2. **`default_panel`** (default `full`).
-3. **Premium-seat add-back** — `cursor-glm` / `cursor-gpt` / `cursor-gemini` /
-   `cursor-grok` draw the
-   premium/metered buckets, so they default OFF. Offer them as opt-IN `--add-seat` only,
-   with that cost note. (`codex` covers the GPT lineage; `agy` covers the Gemini lineage
-   flat-rate; `cursor-glm`'s glm-max and `cursor-grok`'s grok-4.5-xhigh draw Cursor's
-   shared premium MAX allotment.)
+<!-- seat-roster:premium-add-back -->
+3. **Premium-seat add-back**: `cursor-glm`, `cursor-gpt`, `cursor-gemini`, `cursor-grok`
+   draw the premium/metered buckets, so they default OFF. Offer them as opt-IN
+   `--add-seat` only, with that cost note (per-seat WHY → engine-notes).
 4. **`[dispatch].seat`** — the default `/crew:dispatch` WRITE seat (default `codex`;
    must be a subprocess seat).
 
@@ -149,6 +147,6 @@ operating-instructions doc (a different file), mention `/crew:crew-config`.
 
 ---
 
-Subscription safety: `doctor` drives only `is_available()` (codex/codex-luna/agy = PATH check; cursor
-= one local `agent --version` identity probe) — no `claude -p`, no Anthropic API, no
+Subscription safety: `doctor` drives only `is_available()` (a PATH check per
+external CLI; cursor = one local `agent --version` identity probe) — no `claude -p`, no Anthropic API, no
 metered/network call. `scaffold-config` makes no probe at all.

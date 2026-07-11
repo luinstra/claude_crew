@@ -529,15 +529,15 @@ def test_default_seats():
     # The BUILTIN fallback (registry-filtered) — no config, no env (retired).
     with project_config("", write_file=False):
         seats = _default_subprocess_seats()
-        check("builtin subprocess fallback == codex + agy + cursor-auto/composer",
+        check("builtin subprocess fallback == codex + codex-luna + agy + cursor-auto/composer",
               seats == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"],
-              "['codex', 'agy', 'cursor-auto', 'cursor-composer']", str(seats))
+              "['codex', 'codex-luna', 'agy', 'cursor-auto', 'cursor-composer']", str(seats))
         # No --seats -> the CONFIGURED default panel (here: built-in full) drives
         # _resolve_seats; opus/sonnet (Task seats) drop via the registry filter.
         resolved = _resolve_seats(None)
         check("_resolve_seats(None) -> builtin full's subprocess subset",
               resolved == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"],
-              "['codex', 'agy', 'cursor-auto', 'cursor-composer']", str(resolved))
+              "['codex', 'codex-luna', 'agy', 'cursor-auto', 'cursor-composer']", str(resolved))
         # The 'cursor' group token expands on the --seats path (the env path is gone).
         seats = _resolve_seats("cursor")
         check("--seats cursor expands to all cursor-* seats",
@@ -4512,6 +4512,7 @@ def test_persist_seat_doc_sync():
         "Wait-for-BOTH barrier.",
         "`repair-seat` is **non-destructive**",
         "Never choke — synthesize from whatever succeeded.",
+        "Some registered seats are opt-in and not in the built-in default panel",
     ]
 
     for rel in docs:
@@ -4566,6 +4567,420 @@ def test_persist_seat_doc_sync():
     check("panelist.md:6 tools line does NOT grant Write (read-only by convention)",
           panelist_line6.startswith("tools:") and "Write" not in panelist_line6,
           "tools line without Write", repr(panelist_line6))
+
+
+# =============================================================================
+# Roster doc-sync — every surviving seat enumeration equals registry truth
+# =============================================================================
+#
+# ONE seat-name charset, defined ONCE, serves ALL roster matching (parse,
+# ratchet, run-tokenizer). There is no other matching mechanism. The lookaround
+# form (below) is used for counting: NEVER \b, because regex \b treats "-" as a
+# boundary, so \bcodex\b matches inside "codex-luna" and a 3-name line would
+# count as 4 (the repo's earlier BSD-grep hyphen lesson). re.escape keeps a
+# future dotted seat name literal.
+import re as _roster_re  # noqa: E402
+
+_SEAT_CHARS = "A-Za-z0-9._-"
+_ROSTER_TOKEN_RE = _roster_re.compile(rf"^[{_SEAT_CHARS}]+$")
+_ROSTER_MARKER_RE = _roster_re.compile(r"^<!-- seat-roster:(\S+) -->$")
+
+# The pinned prose spans (LOCATORS + SENTINELs are the only deliberate substring
+# mechanisms; roster CONTENT is always token-parsed and compared exactly).
+_ROSTER_BUILTIN_SPAN = "These lines document the BUILT-IN roster"
+_ROSTER_OPT_SENTINEL = "Some registered seats are opt-in and not in the built-in default panel"
+_ROSTER_REVIEW_DOCS = [
+    "plugins/crew/commands/review.md",
+    "plugins/crew/commands/build.md",
+    "plugins/crew/commands/measure-twice.md",
+]
+# Canonical docs that carry the built-in-vs-runtime explanatory sentence. init.md
+# is the narrow anchored exception (premium-add-back only); it carries no sentence.
+_ROSTER_SENTENCE_DOCS = ["README.md", "plugins/crew/scripts/CLAUDE.md"]
+
+# Expected (file, kind) anchor pairs. Any seat-roster: marker in the scan set
+# that is NOT one of these (unknown kind, duplicate, or a marker in a
+# non-canonical file) is a failure — no marker can mint an unintended exemption.
+_ROSTER_EXPECTED = {
+    "README.md": {"default", "preset:lite", "preset:solo", "preset:quick",
+                  "opt-in", "task-opt-in", "all"},
+    "plugins/crew/scripts/CLAUDE.md": {"default", "opt-in", "task-opt-in"},
+    "plugins/crew/commands/init.md": {"premium-add-back"},
+}
+
+
+def _roster_repo_root() -> Path:
+    # SCRIPT_DIR is plugins/crew/scripts/; three parents up is the repo root
+    # (where README.md lives). Same convention as test_persist_seat_doc_sync,
+    # which reads relative to SCRIPT_DIR.parent (plugins/crew/).
+    return SCRIPT_DIR.parent.parent.parent
+
+
+def _roster_unwrap(tok: str) -> str:
+    """Repeatedly strip BALANCED wrapper pairs — `` `x` `` and ``**x**`` ONLY,
+    the two the grammar permits. An UNBALANCED/mismatched wrapper is left in
+    place, so the downstream charset gate rejects it (never silently cleaned)."""
+    while True:
+        if len(tok) >= 2 and tok[0] == "`" and tok[-1] == "`":
+            tok = tok[1:-1]
+            continue
+        if len(tok) >= 4 and tok.startswith("**") and tok.endswith("**"):
+            tok = tok[2:-2]
+            continue
+        return tok
+
+
+def _roster_parse_line(line: str):
+    """Implement the grammar's `roster` production EXACTLY. Returns
+    ``(tokens, None)`` on success (empty list for the bare ``(none)`` literal),
+    or ``(None, err)`` on any grammar violation."""
+    if ":" not in line:
+        return None, "no colon on roster line"
+    remainder = line.split(":", 1)[1].strip()
+    # Compare the BARE literal BEFORE any unwrapping: a wrapped `(none)` is a
+    # grammar violation (the drill has a wrapped-(none) rejection case).
+    if remainder == "(none)":
+        return [], None
+    if not remainder:
+        return None, "empty roster after colon"
+    tokens = []
+    for piece in remainder.split(", "):  # the EXACT separator; a bare "," fails
+        unwrapped = _roster_unwrap(piece)
+        if not _ROSTER_TOKEN_RE.match(unwrapped):
+            return None, f"bad roster token {piece!r}"
+        tokens.append(unwrapped)
+    return tokens, None
+
+
+def _roster_max_run(line: str) -> int:
+    """Longest run of consecutive seat-name-charset tokens, WRAPPER- and
+    BOUNDARY-aware (the stale-mix backstop). Split on the run separators, strip
+    one leading label prefix + trailing punctuation per piece, reuse the shared
+    unwrap; a piece that is not a charset token ENDS the current run (prose words
+    break runs, so sentences never accumulate)."""
+    best = cur = 0
+    for piece in _roster_re.split(r", | \+ |/", line):
+        p = piece
+        if ":" in p:                       # strip one leading <label>: prefix
+            p = p.split(":", 1)[1]
+        p = p.strip().rstrip(".,;:!?)").strip()
+        if _ROSTER_TOKEN_RE.match(_roster_unwrap(p)):
+            cur += 1
+            best = max(best, cur)
+        else:
+            cur = 0
+    return best
+
+
+def _roster_scan_files(root: Path):
+    """Ratchet scan set: README.md + EVERY .md under plugins/crew/ (glob-derived,
+    so a NEW doc location is covered the day it appears) + the multiagent package
+    docstring file. Non-doc .py files stay out (they legitimately hold code-truth
+    seat literals)."""
+    files = []
+    readme = root / "README.md"
+    if readme.exists():
+        files.append(readme)
+    crew = root / "plugins" / "crew"
+    files.extend(sorted(crew.rglob("*.md")))
+    init = crew / "scripts" / "multiagent" / "__init__.py"
+    if init.exists():
+        files.append(init)
+    return files
+
+
+def _roster_compare(kind, tokens, truths):
+    """Compare parsed tokens to code truth per the kind table. Sequence-kinds
+    (default/preset:*) demand exact order; set-kinds demand set equality AND
+    equal length (so a duplicate or a stale/missing name both fail)."""
+    got = "[" + ", ".join(tokens) + "]"
+    FULL, OPT_SUB, OPT_TASK, PREMIUM, ALL_SEATS, presets = truths
+    if kind == "default":
+        want = list(FULL)
+        return tokens == want, f"sequence {want}", got
+    if kind.startswith("preset:"):
+        want = list(presets[kind.split(":", 1)[1]])
+        return tokens == want, f"sequence {want}", got
+    if kind == "opt-in":
+        want = OPT_SUB
+    elif kind == "task-opt-in":
+        want = OPT_TASK
+    elif kind == "premium-add-back":
+        want = list(PREMIUM)
+    elif kind == "all":
+        want = sorted(ALL_SEATS)
+    else:
+        return False, "a known kind", f"unknown kind {kind}"
+    ok = set(tokens) == set(want) and len(tokens) == len(want)
+    return ok, f"set+length {sorted(want)}", got
+
+
+def _roster_scan(root: Path, report):
+    """Parts 1 + 3 against docs under ``root``. ``report(label, cond, want, got)``
+    receives every assertion (``check`` for the live run; a collector for the
+    drill), and EVERY label embeds the file (and line for the ratchet), so a
+    drift fails NAMING THE FILE. No roster-CONTENT comparison here is a substring
+    check: rosters are token-parsed and compared exactly. The two deliberate
+    substring uses are LOCATORS (finding markers) and the pinned prose spans."""
+    from multiagent import seats
+    from multiagent.cli import _DEFAULT_SUBPROCESS_PANEL, _PREMIUM_OFF_SEATS
+    from multiagent.providers import known_seat_names
+
+    FULL = seats.PANEL_PRESETS["full"]
+    known = known_seat_names()
+    OPT_SUB = [n for n in known if n not in set(_DEFAULT_SUBPROCESS_PANEL)]
+    OPT_TASK = sorted(seats.TASK_SEAT_NAMES - set(FULL))
+    ALL_SEATS = set(known) | set(seats.TASK_SEAT_NAMES)
+    UNIVERSE = ALL_SEATS
+    truths = (FULL, OPT_SUB, OPT_TASK, _PREMIUM_OFF_SEATS, ALL_SEATS, seats.PANEL_PRESETS)
+
+    scan_files = _roster_scan_files(root)
+    file_lines = {}
+    for path in scan_files:
+        relf = str(path.relative_to(root))
+        file_lines[relf] = path.read_text(encoding="utf-8").splitlines()
+
+    # --- Part 1: marker integrity (runs FIRST, before any comparison) --------
+    found = {}          # (relf, kind) -> count
+    anchor_at = {}      # (relf, kind) -> marker line index (first occurrence)
+    for relf, lines in file_lines.items():
+        for i, ln in enumerate(lines):
+            if "seat-roster:" not in ln:        # LOCATOR (deliberate substring)
+                continue
+            m = _ROSTER_MARKER_RE.match(ln)
+            if not m:
+                report(f"{relf}:{i + 1} malformed seat-roster marker", False,
+                       "exact '<!-- seat-roster:<kind> -->' alone on its line", repr(ln))
+                continue
+            kind = m.group(1)
+            if kind not in _ROSTER_EXPECTED.get(relf, set()):
+                report(f"{relf}:{kind} unexpected seat-roster marker", False,
+                       "an expected (file, kind) pair", f"{relf}:{kind} at line {i + 1}")
+                continue
+            key = (relf, kind)
+            found[key] = found.get(key, 0) + 1
+            if key not in anchor_at:
+                anchor_at[key] = i
+
+    for relf, kinds in _ROSTER_EXPECTED.items():
+        for kind in sorted(kinds):
+            cnt = found.get((relf, kind), 0)
+            report(f"{relf}:{kind} marker present exactly once",
+                   cnt == 1, "exactly 1 marker", f"{cnt}")
+
+    # --- Part 1: per-anchor parse + comparison -------------------------------
+    for relf, kinds in _ROSTER_EXPECTED.items():
+        for kind in sorted(kinds):
+            key = (relf, kind)
+            if found.get(key, 0) != 1:
+                continue
+            lines = file_lines[relf]
+            midx = anchor_at[key]
+            if midx + 1 >= len(lines):
+                report(f"{relf}:{kind} roster line present after marker",
+                       False, "a roster line immediately after the marker", "EOF")
+                continue
+            tokens, err = _roster_parse_line(lines[midx + 1])
+            if err:
+                report(f"{relf}:{kind} roster line grammar", False,
+                       "valid roster grammar", f"{err} | {lines[midx + 1]!r}")
+                continue
+            ok, want, got = _roster_compare(kind, tokens, truths)
+            report(f"{relf}:{kind} roster == code truth", ok, want, got)
+
+    # --- Part 1: built-in-vs-runtime explanatory sentence (pinned span) ------
+    for relf in _ROSTER_SENTENCE_DOCS:
+        text = "\n".join(file_lines.get(relf, []))
+        report(f"{relf} carries built-in-vs-runtime sentence span",
+               _ROSTER_BUILTIN_SPAN in text, f"contains {_ROSTER_BUILTIN_SPAN!r}", "MISSING")
+
+    # --- Part 3: enumeration ratchet -----------------------------------------
+    # Exempt = marker lines + the ONE roster line after each VALID marker; nothing
+    # else. Intervening rationale prose IS scanned (forcing it under threshold).
+    exempt = set()
+    for (relf, kind), midx in anchor_at.items():
+        exempt.add((relf, midx))
+        exempt.add((relf, midx + 1))
+    name_pats = [
+        (n, _roster_re.compile(
+            rf"(?<![{_SEAT_CHARS}]){_roster_re.escape(n)}(?![{_SEAT_CHARS}])"))
+        for n in UNIVERSE
+    ]
+    for relf, lines in file_lines.items():
+        for i, ln in enumerate(lines):
+            if (relf, i) in exempt:
+                continue
+            present = {n for n, pat in name_pats if pat.search(ln)}
+            if len(present) >= 4:
+                report(f"{relf}:{i + 1} enumerates >= 4 seats", False,
+                       "< 4 distinct seat names", f"{relf}:{i + 1}: {ln.strip()}")
+            elif len(present) >= 3 and _roster_max_run(ln) >= 4:
+                # Stale-mix: a stale/unknown name riding a roster of current ones.
+                report(f"{relf}:{i + 1} stale-mix token run >= 4", False,
+                       "no >= 4 token run on a 3+ current-name line",
+                       f"{relf}:{i + 1}: {ln.strip()}")
+
+
+def _roster_sentinel_scan(root: Path, report):
+    """The pinned opt-in sentinel across the three review-bearing docs (the same
+    phrase test_persist_seat_doc_sync's SENTINEL_PHRASES enforces on the live
+    tree; reused HERE only so the drill's rewording case is reproducible)."""
+    for relf in _ROSTER_REVIEW_DOCS:
+        p = root / relf
+        text = p.read_text(encoding="utf-8") if p.exists() else ""
+        report(f"{relf} carries pinned opt-in sentinel",
+               _ROSTER_OPT_SENTINEL in text, "sentinel present", "MISSING")
+
+
+def _roster_check_scaffold(FULL):
+    """Part 2: token-parse the GENERATED scaffold roster, not the cli.py source
+    line (which carries the Python string suffix). Run the generator exactly as
+    test_scaffold_config does, assert EXACTLY ONE 'Cost-safe built-in full' line,
+    and compare its token SEQUENCE+LENGTH to PANEL_PRESETS['full']."""
+    from contextlib import redirect_stdout, redirect_stderr
+    from io import StringIO
+    from multiagent import cli, seats as _seats
+    from multiagent.providers import known_seat_names
+
+    with crew_config() as proj:
+        det = Path(proj) / "doctor.json"
+        det.write_text(json.dumps({
+            "subprocess": {n: {"available": True, "diag": ""} for n in known_seat_names()},
+            "task": {n: {"available": True, "diag": ""}
+                     for n in sorted(_seats.TASK_SEAT_NAMES)},
+        }))
+        args = cli.build_parser().parse_args(
+            ["scaffold-config", "--out", "-", "--detection", str(det)])
+        out, err = StringIO(), StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            args.func(args)
+        gen = out.getvalue()
+
+    matches = [ln for ln in gen.splitlines() if "Cost-safe built-in full" in ln]
+    check("Part 2: scaffold emits exactly ONE 'Cost-safe built-in full' line",
+          len(matches) == 1, "exactly 1", f"{len(matches)} lines")
+    if len(matches) != 1:
+        return
+    rhs = matches[0].split("=", 1)[1].strip().rstrip(".").strip()
+    tokens = [t.strip() for t in rhs.split("+")]
+    check("Part 2: scaffold roster tokens pass the seat charset",
+          all(_ROSTER_TOKEN_RE.match(t) for t in tokens), "all charset tokens", str(tokens))
+    check("Part 2: scaffold roster == PANEL_PRESETS['full'] (sequence + length)",
+          tokens == list(FULL), f"sequence {list(FULL)}", str(tokens))
+
+
+def _roster_drill(root: Path):
+    """Reproducible mutation drill (env-gated on CREW_ROSTER_DRILL=1; a no-op skip
+    otherwise). Copies the scanned docs into a temp tree, applies each mutation
+    case, reruns the parse/ratchet/sentinel logic against the copies, and asserts
+    every case fails NAMING THE RIGHT FILE. The case list is the one tuple below
+    (count-free everywhere else: adding a case needs no prose update)."""
+    if os.environ.get("CREW_ROSTER_DRILL") != "1":
+        print("  (roster mutation drill skipped; set CREW_ROSTER_DRILL=1 to run)")
+        return
+    log_section("roster mutation drill (each case must fail naming its file)")
+
+    def mutate_roster_line(text, kind, fn):
+        lines = text.splitlines()
+        for i, ln in enumerate(lines):
+            if ln.strip() == f"<!-- seat-roster:{kind} -->":
+                lines[i + 1] = fn(lines[i + 1])
+                break
+        out = "\n".join(lines)
+        return out + "\n" if text.endswith("\n") else out
+
+    def append_line(text, extra):
+        sep = "" if text.endswith("\n") else "\n"
+        return text + sep + extra + "\n"
+
+    CASES = [
+        ("seat swap on README default line", "README.md",
+         lambda t: mutate_roster_line(t, "default",
+             lambda l: l.replace("`codex-luna`", "`cursor-zzz`", 1))),
+        ("stale name on scripts/CLAUDE.md opt-in line",
+         "plugins/crew/scripts/CLAUDE.md",
+         lambda t: mutate_roster_line(t, "opt-in",
+             lambda l: l.rstrip() + ", `cursor-stale`")),
+        ("fake 4-name line in build.md", "plugins/crew/commands/build.md",
+         lambda t: append_line(t, "Panel seats: codex, codex-luna, agy, cursor-auto")),
+        ("unanchored wrapped 3-current+1-stale run", "plugins/crew/commands/review.md",
+         lambda t: append_line(t, "`codex`, `agy`, `sonnet`, `stale-seat`")),
+        ("labeled+punctuated 3-current+1-stale run",
+         "plugins/crew/commands/measure-twice.md",
+         lambda t: append_line(t, "Seats: codex, agy, sonnet, stale-seat.")),
+        ("wrapped (none) on an anchored roster line", "README.md",
+         lambda t: mutate_roster_line(t, "opt-in",
+             lambda l: l.split(":", 1)[0] + ": `(none)`")),
+        ("reworded opt-in sentinel in build.md", "plugins/crew/commands/build.md",
+         lambda t: t.replace(_ROSTER_OPT_SENTINEL, "Some seats are optional")),
+        ("bare-comma separator on README default line", "README.md",
+         lambda t: mutate_roster_line(t, "default",
+             lambda l: l.replace("`, `", "`,`", 1))),
+        ("unbalanced-backtick wrapper on README default line", "README.md",
+         lambda t: mutate_roster_line(t, "default",
+             lambda l: l.replace("`codex`", "`codex", 1))),
+    ]
+
+    scan_files = _roster_scan_files(root)
+    passed = 0
+    for label, target_rel, fn in CASES:
+        with tempfile.TemporaryDirectory() as td:
+            troot = Path(td)
+            for p in scan_files:
+                dst = troot / p.relative_to(root)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+            tgt = troot / target_rel
+            tgt.write_text(fn(tgt.read_text(encoding="utf-8")), encoding="utf-8")
+
+            failures = []
+
+            def collect(lbl, cond, want="", got=""):
+                if not cond:
+                    failures.append(lbl)
+
+            _roster_scan(troot, collect)
+            _roster_sentinel_scan(troot, collect)
+
+            named = [f for f in failures if target_rel in f]
+            check(f"drill: {label} -> failure naming {target_rel}",
+                  bool(named), f"a failure naming {target_rel}", f"failures={failures}")
+            if named:
+                passed += 1
+    print(f"  roster drill: {passed}/{len(CASES)} cases named-file failures")
+
+
+def test_roster_doc_sync():
+    log_section("roster doc-sync (anchored rosters == registry truth; enumeration ratchet)")
+    from multiagent import seats
+    from multiagent.cli import _DEFAULT_SUBPROCESS_PANEL
+    from multiagent.providers import known_seat_names
+
+    root = _roster_repo_root()
+    FULL = seats.PANEL_PRESETS["full"]
+    known = known_seat_names()
+    OPT_SUB = [n for n in known if n not in set(_DEFAULT_SUBPROCESS_PANEL)]
+    ALL_SEATS = set(known) | set(seats.TASK_SEAT_NAMES)
+
+    # --- Part 0: derivation self-checks (a wrong truth can't agree with a wrong
+    # doc). The opt-in set derived from _DEFAULT_SUBPROCESS_PANEL must equal the
+    # one derived from FULL (re-proving full's subprocess subset covers the
+    # builtin fallback), and FULL must live inside the universe.
+    check("Part 0: OPT_SUB (from _DEFAULT_SUBPROCESS_PANEL) == known - FULL",
+          set(OPT_SUB) == set(known) - set(FULL),
+          str(sorted(set(known) - set(FULL))), str(sorted(set(OPT_SUB))))
+    check("Part 0: set(FULL) <= ALL_SEATS",
+          set(FULL) <= ALL_SEATS, "FULL subset of ALL_SEATS",
+          f"{sorted(set(FULL) - ALL_SEATS)} outside ALL_SEATS")
+
+    # --- Parts 1 + 3: anchored rosters + enumeration ratchet (file-naming) ----
+    _roster_scan(root, check)
+
+    # --- Part 2: generated-scaffold roster (token-parsed, not substring) ------
+    _roster_check_scaffold(FULL)
+
+    # --- Reproducible mutation drill (env-gated) ------------------------------
+    _roster_drill(root)
 
 
 # =============================================================================
@@ -7091,6 +7506,7 @@ def main():
     test_catalog_registry_disjoint()
     test_no_dotkept_staged_filename()
     test_persist_seat_doc_sync()
+    test_roster_doc_sync()
     test_doctor()
     test_probe()
     test_scaffold_config()

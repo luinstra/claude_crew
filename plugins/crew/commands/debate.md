@@ -18,23 +18,17 @@ $ARGUMENTS
 - **Rounds** — `--rounds N` (1–5, default **1**). `--rounds 1` is a single-round
   council; `N>1` runs a multi-round debate where each round sees the prior
   round's positions and may rebut/revise.
-- **Panel** — `--panel full` =
-  `codex,codex-luna,agy,cursor-auto,cursor-composer,opus,sonnet` (the built-in fallback) ·
-  `--panel lite` = `opus,sonnet` · `--panel solo` = `opus` · `--panel quick` =
-  `codex,sonnet` (the cheapest cross-model pair, good for routine questions) ·
-  `--panel cursor` =
-  all Cursor model-seats (`--seats cursor`, which the engine expands to every
-  registered cursor-* seat — cursor-gpt, cursor-gemini, cursor-glm, cursor-grok,
-  cursor-auto,
-  cursor-composer, and any future ones); a pure cross-model Cursor panel — NO
-  codex, NO opus/sonnet Task seats · `--seats <list>` =
-  an explicit comma-list of any registered seat
-  (`codex, codex-luna, agy, cursor-gpt, cursor-gemini, cursor-glm, cursor-grok, cursor-auto, cursor-composer, opus, sonnet`;
-  `cursor-gpt`, `cursor-gemini`, `cursor-glm`, and `cursor-grok` are opt-in — work via `--seats …` / `--panel cursor`
-  but are not in the default panel; `codex` covers the GPT lineage, `agy` covers the Gemini lineage flat-rate,
-  and glm-max and grok-4.5-xhigh draw Cursor's shared premium MAX allotment).
-  `--panel <name>` also accepts any **custom roster** defined under `[panels]`
-  in per-repo or global config (e.g. `--panel nightly`). `--seats` wins over `--panel`.
+- **Panel** — `--panel <name>` = a named preset: `full` = the built-in default,
+  `lite` = the two Claude voices, `solo` = one, `quick` = the cheapest
+  cross-model pair, `cursor` = every registered cursor-* seat (the engine expands
+  the group, so it grows with the registry; a pure cross-model Cursor panel, no
+  codex, no Claude). Print any preset's resolved roster with
+  `"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --panel <name>`. `--seats <list>` =
+  an explicit comma-list of any registered seat (e.g. `--seats codex,opus`); some
+  seats are opt-in and never in a built-in default panel, so pass their exact names via
+  `--seats`. `--panel <name>` also accepts any **custom roster** defined under
+  `[panels]` in per-repo or global config (e.g. `--panel nightly`). `--seats`
+  wins over `--panel`.
 - **Config-aware default** — when you name NEITHER `--panel` NOR `--seats`, the
   panel is NOT hard-`full`: it is resolved by the engine from config across two
   tiers — per-repo `.crew/config.toml` then global `~/.crew-config.toml` (see the
@@ -85,7 +79,7 @@ choice wins (`--seats` over `--panel`):
 
 `seats --debate` prints the FULL resolved panel — one seat per line, group
 tokens (`cursor`) already expanded, including the Claude voices — so it is the
-single seat list to split. Then split it: the `codex`/`codex-luna`/`agy`/`cursor-*`
+single seat list to split. Then split it: the external-CLI
 entries are **subprocess seats** (the Python engine); `opus`/`sonnet`/`fable`
 are **task seats** (`crew:panelist`
 for discuss / `crew:reviewer` for review, via the Task tool — in-session, on the
@@ -145,7 +139,7 @@ guard makes package imports resolve).
 
 **A2.0 — isolate the subprocess seats.** The `seats --debate` output you split
 above is ALREADY group-expanded (the engine expands `cursor` → every registered
-`cursor-*` seat before printing), so the `codex`/`codex-luna`/`agy`/`cursor-*` entries are
+`cursor-*` seat before printing), so the external-CLI entries are
 already concrete seat names — just take those entries from the resolved panel and
 loop. No second expansion call is needed. (If you ever need to re-expand a bare
 group token in isolation — e.g. you only have `--panel cursor` and not the
@@ -295,7 +289,7 @@ reference pointed at the same file.
 
 Then run the round's seats (in parallel where possible):
 
-- **Subprocess seats** (the `codex`/`codex-luna`/`agy`/`cursor-*` entries): execute the rendered prompt via the engine —
+- **Subprocess seats** (the external-CLI entries): execute the rendered prompt via the engine —
   ```bash
   "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt --json -o .crew/debates/<run-id>/<seat>-r<n>.json
   ```
@@ -362,8 +356,8 @@ and is NEVER silently dropped:
 
 ---
 
-Subscription safety: the engine drives only the subprocess seats — the
-`codex`/`codex-luna` + `agy`/`cursor-*` seats, all external-CLI auth; Claude voices are
+Subscription safety: the engine drives only external-CLI subprocess seats (all
+external-CLI auth); Claude voices are
 in-session Task seats. No `claude -p`, no Anthropic API — a stray
 `ANTHROPIC_API_KEY` is irrelevant here. This council is fully self-contained in
 crew — NEVER call `agy -p` / `codex exec` / `cursor-agent` directly, and NEVER

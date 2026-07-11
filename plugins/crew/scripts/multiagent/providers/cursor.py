@@ -110,11 +110,10 @@ def _auth_failure_marker(text: str) -> str | None:
 class CursorProvider(Provider):
     """A review-panel seat backed by the Cursor Agent CLI subprocess.
 
-    Pinned to one model. Multiple named instances (see ``CURSOR_SEATS``) run as
-    distinct seats — ``cursor-auto`` and ``cursor-composer`` are the default
-    cursor model-seats; ``cursor-gpt``, ``cursor-gemini``, ``cursor-glm``, and
-    ``cursor-grok`` are registered but opt-in (via ``--seats`` / ``--panel
-    cursor``).
+    Pinned to one model. Multiple named instances run as distinct seats; see
+    ``CURSOR_SEATS`` for the roster and ``cli._DEFAULT_SUBPROCESS_PANEL`` / the
+    scaffold for which are defaulted (naming a seat here is fine; classifying it
+    default-vs-opt-in is drift, so that lives in cli/seats truth + the canonical docs).
     """
 
     # EXPLICIT opt-in (fail-CLOSED ABC default is False): cursor honors
