@@ -25,7 +25,7 @@ task split, stage the ONE shared subprocess prompt, and PRINT
 ``{prompt_path, subprocess_seats, task_seats, task_seat_models}`` — runs NOTHING;
 the per-seat ``run`` loop + the Task-seat dispatch stay in the command markdown).
 
-The engine EXECUTES only subprocess seats (codex/agy/cursor-*), but ``render`` BUILDS the
+The engine EXECUTES only subprocess seats (codex/codex-luna/agy/cursor-*), but ``render`` BUILDS the
 prompt for ANY seat — including the Claude Task seats (opus/sonnet) the
 orchestrator dispatches — so every seat's prompt comes from the one builder
 (``prompts.build_prompt``/``council``) and the subprocess and Task paths can
@@ -61,9 +61,12 @@ from multiagent.providers import (
     get_provider,
     known_seat_names,
 )
+from multiagent.providers.codex import CODEX_SEATS
 
-# The default subprocess panel. codex (OpenAI) + agy (Gemini via Antigravity,
-# flat-rate) + two Cursor model-seats for cross-model diversity. `cursor-gpt` is
+# The default subprocess panel. codex + codex-luna (two OpenAI voices at
+# different reasoning styles on the one codex subscription, a deliberate
+# same-lineage pairing) + agy (Gemini via Antigravity, flat-rate) + two Cursor
+# model-seats for cross-model diversity. `cursor-gpt` is
 # NOT a default — codex already covers the GPT lineage, so defaulting it too is
 # redundant model coverage at extra token cost; it stays registered and opt-in
 # (`--seats cursor-gpt` / `--panel cursor`). `cursor-gemini` is likewise
@@ -81,15 +84,15 @@ from multiagent.providers import (
 # names are dropped. The configured default panel (config.default_panel() +
 # [panels]) is resolved in _resolve_seats — this is the floor when nothing is set.
 _DEFAULT_SUBPROCESS_PANEL = (
-    "codex", "agy", "cursor-auto", "cursor-composer",
+    "codex", "codex-luna", "agy", "cursor-auto", "cursor-composer",
 )
 
 
 def _default_subprocess_seats() -> list[str]:
     """The BUILTIN subprocess-seat fallback (registry-filtered).
 
-    The engine only knows subprocess seats (codex/agy/cursor-*; opus/sonnet Task
-    seats are owned by the orchestrator). The allowlist is REGISTRY-DERIVED:
+    The engine only knows subprocess seats (codex/codex-luna/agy/cursor-*;
+    opus/sonnet Task seats are owned by the orchestrator). The allowlist is REGISTRY-DERIVED:
     ``known_seat_names()`` returns every registered subprocess seat, so adding a
     seat to the registry makes it usable here automatically — no hardcoded list
     to keep in sync. The CONFIGURED default panel (``config.default_panel()`` +
@@ -155,7 +158,7 @@ def _drop_unavailable(names: list[str], explicit: set[str]) -> list[str]:
     per-list fallback ``_filter_available`` bakes in: a per-list fallback re-adds
     a deliberately-disabled seat-KIND whenever the OTHER kind still kept a seat
     (e.g. disabling both task seats in ``full`` would wrongly restore opus+sonnet
-    just because the four subprocess seats remain).
+    just because the five subprocess seats remain).
     """
     kept: list[str] = []
     for n in names:
@@ -220,11 +223,12 @@ def _resolve_timeout(arg: int | None) -> int:
     return 600
 
 
-def _codex_model() -> str | None:
+def _codex_model(seat: str = "codex") -> str | None:
     # Precedence: per-repo .crew/config.toml > global ~/.crew-config.toml
-    # ([seats.codex].model, both via config.seat_model) > None (codex's own
-    # default). An explicit CLI --model is applied ABOVE this at the call sites.
-    return config.seat_model("codex") or None
+    # ([seats.<seat>].model, both via config.seat_model) > the seat's built-in
+    # CODEX_SEATS pin. An explicit CLI --model is applied ABOVE this at the
+    # call sites. Resolved per codex seat (codex, codex-luna).
+    return config.seat_model(seat) or CODEX_SEATS.get(seat)
 
 
 def _run_seat(name: str, prompt: str, timeout: int) -> ProviderResult:
@@ -238,7 +242,7 @@ def _run_seat(name: str, prompt: str, timeout: int) -> ProviderResult:
             name=name, model=None, ok=False, output="",
             error=f"skipped: {diag}", elapsed=0.0,
         )
-    model = _codex_model() if name == "codex" else None
+    model = _codex_model(name) if name in CODEX_SEATS else None
     return provider.run(prompt, model=model, timeout=timeout)
 
 
@@ -730,7 +734,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     is dispatched through the SAME ``get_provider``/``Provider`` machinery as
     ``review`` so invocation shape, ANSI-strip, auth/error-banner detection,
     timeout floor, ARG_MAX guard, and config resolution all apply unchanged.
-    Valid seats are whatever the registry holds (codex, agy, cursor-*).
+    Valid seats are whatever the registry holds (codex, codex-luna, agy, cursor-*).
 
     With a TRUTHY, non-blank ``--session-id <id>``, ``-f`` and ``-o`` are DERIVED
     from ``.crew/reviews/<id>/`` when omitted: ``-f`` defaults to the shared
@@ -825,8 +829,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         # config/built-in default; agy resolves its own default internally.
         if args.model:
             model = args.model
-        elif seat == "codex":
-            model = _codex_model()
+        elif seat in CODEX_SEATS:
+            model = _codex_model(seat)
         else:
             model = None
         timeout = _resolve_timeout(args.timeout)
@@ -1090,8 +1094,8 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         # (f) Run the seat in workspace-write. Model precedence mirrors cmd_run.
         if args.model:
             model = args.model
-        elif seat == "codex":
-            model = _codex_model()
+        elif seat in CODEX_SEATS:
+            model = _codex_model(seat)
         else:
             model = None
         timeout = _resolve_timeout(args.timeout)
@@ -1973,7 +1977,7 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     #     unfiltered-panel fallback ONCE only if the ENTIRE resolved panel
     #     (subprocess + task + the opaque --task-seats override) is empty. This is
     #     the BLOCKING fix: disabling both task seats in `full` yields task_seats ==
-    #     [] with the four subprocess seats intact (no opus/sonnet restoration);
+    #     [] with the five subprocess seats intact (no opus/sonnet restoration);
     #     disabling EVERY seat triggers a single whole-panel fallback (one warn)
     #     restoring the unfiltered panel. The opaque --task-seats override
     #     (explicit_task_seats; task_raw stays [] for it) counts toward the final
@@ -2074,7 +2078,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     The ``agent`` binary is identical across every ``cursor-*`` seat, so the
     cursor identity probe runs EXACTLY ONCE — the single result is fanned to all
     cursor seats (calling each one's ``is_available()`` would spawn
-    ``agent --version`` up to 6x). codex/agy keep their own pure-``which`` checks.
+    ``agent --version`` up to 6x). codex/agy keep their own pure-``which``
+    checks; the codex seats (codex, codex-luna) share one ``codex`` binary and
+    each run ``shutil.which`` per seat: unlike cursor's spawned version probe,
+    ``which`` is a cheap in-process PATH scan, so no fan-out dedupe is needed.
 
     NON-BILLABLE: no metered/network call. stdout carries ONLY the JSON; every
     diagnostic/error goes to stderr. File-write destination follows the D1 matrix
@@ -2214,9 +2221,9 @@ def cmd_probe(args: argparse.Namespace) -> int:
             results[n] = {"status": "skipped", "detail": diag, "elapsed": 0.0}
             continue
         # Provider invocation copied from cmd_run's real call: same model
-        # precedence (codex config default; None elsewhere — probe exposes no
-        # --model override) and the same _resolve_timeout precedence chain.
-        model = _codex_model() if n == "codex" else None
+        # precedence (codex seats resolve config/pin; None elsewhere, and probe
+        # exposes no --model override) and the same _resolve_timeout chain.
+        model = _codex_model(n) if n in CODEX_SEATS else None
         timeout = _resolve_timeout(args.timeout)
         r = provider.run(_PROBE_PROMPT, model=model, timeout=timeout)
         out = (r.output or "").strip()
@@ -2317,8 +2324,9 @@ def _render_config_template(
 ) -> str:
     """Render the COMMENTED starter config (D4) — ONLY keys the loader reads.
 
-    ``reasoning_effort`` lives ONLY under ``[seats.codex]`` and ``print_timeout``
-    ONLY under ``[seats.agy]`` (where the getters read them). Per-seat ``available``
+    ``reasoning_effort`` lives under the codex seat tables (``[seats.codex]`` /
+    ``[seats.codex-luna]``, resolved per seat) and ``print_timeout`` ONLY under
+    ``[seats.agy]`` (where the getters read them). Per-seat ``available``
     lines are decided by ``_seat_avail`` (cost-safe defaults; premium seats off).
     """
     today = datetime.date.today().isoformat()
@@ -2339,7 +2347,7 @@ def _render_config_template(
     L.append("# Every key below is OPTIONAL; delete what you don't need. Python 3.11+ required to load.")
     L.append("")
     L.append("# Default panel when you name neither --panel nor --seats.")
-    L.append("# Cost-safe built-in full = codex + agy + cursor-auto + cursor-composer + opus + sonnet.")
+    L.append("# Cost-safe built-in full = codex + codex-luna + agy + cursor-auto + cursor-composer + opus + sonnet.")
     L.append(f"default_panel = {_toml_str(default_panel)}")
     L.append("")
     L.append("# [debate].panel — /crew:debate's default panel (can default fuller than reviews).")
@@ -2347,7 +2355,7 @@ def _render_config_template(
     L.append('# panel = "full"')
     L.append("")
     L.append("# [dispatch].seat — /crew:dispatch's default WRITE seat (must be ONE known subprocess")
-    L.append("# seat: codex/agy/cursor-*; a panel name or the 'cursor' group token is rejected).")
+    L.append("# seat: codex/codex-luna/agy/cursor-*; a panel name or the 'cursor' group token is rejected).")
     L.append("[dispatch]")
     L.append(f"seat = {_toml_str(dispatch_seat)}")
     L.append("")
@@ -2364,8 +2372,16 @@ def _render_config_template(
     a = av("codex")
     if a is not None:
         L.append(_avail_line(a))
-    L.append('# model = "..."                  # override codex\'s model')
-    L.append('# reasoning_effort = "xhigh"     # codex-only knob (read only from [seats.codex])')
+    L.append('# model = "gpt-5.6-sol"          # override codex\'s pinned model')
+    L.append('# reasoning_effort = "xhigh"     # codex-seat knob (read per seat: [seats.codex] here)')
+    L.append("")
+    # codex-luna shares the codex binary, so detection tracks codex's PATH probe.
+    L.append("[seats.codex-luna]")
+    a = av("codex-luna")
+    if a is not None:
+        L.append(_avail_line(a))
+    L.append('# model = "gpt-5.6-luna"         # override codex-luna\'s pinned model')
+    L.append('# reasoning_effort = "xhigh"     # codex-seat knob (read per seat: [seats.codex-luna] here)')
     L.append("")
     L.append("[seats.agy]")
     a = av("agy")

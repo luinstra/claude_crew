@@ -12,7 +12,7 @@
 - **Why provider = executor, and Claude seats are NOT providers.** This is the
   debate-validated shape: we deliberately did NOT adopt the Enterprise fork's
   prompt-builder `BaseProvider`/`TaskProvider`, which modelled non-executable
-  Claude seats as providers. codex/agy/cursor-* are executors (they invoke a CLI →
+  Claude seats as providers. codex/codex-luna/agy/cursor-* are executors (they invoke a CLI →
   `ProviderResult`); opus/sonnet Task seats are owned by the orchestrator.
 - **"One prompt builder" evolves an older contract.** The rule that `render`
   BUILDS the prompt for ANY seat (including Claude Task seats) *evolves* the older
@@ -30,9 +30,11 @@ decision.
 
 ## Why the default panel leaves some cursor seats opt-in
 
-The default panel is `codex + agy + cursor-auto/composer + opus + sonnet`.
-`cursor-gpt`, `cursor-gemini`, `cursor-glm`, and `cursor-grok` are registered
-but opt-in:
+The default panel is `codex + codex-luna + agy + cursor-auto/composer + opus + sonnet`
+(the two codex seats are distinct OpenAI voices, `gpt-5.6-sol` and `gpt-5.6-luna`,
+on the one codex CLI — a deliberate same-lineage pairing at different reasoning
+styles). `cursor-gpt`, `cursor-gemini`, `cursor-glm`, and `cursor-grok` are
+registered but opt-in:
 
 - `cursor-gpt` — codex already covers the GPT lineage, so it isn't defaulted.
 - `cursor-gemini` — `agy` covers the Gemini lineage flat-rate, so the metered

@@ -530,13 +530,13 @@ def test_default_seats():
     with project_config("", write_file=False):
         seats = _default_subprocess_seats()
         check("builtin subprocess fallback == codex + agy + cursor-auto/composer",
-              seats == ["codex", "agy", "cursor-auto", "cursor-composer"],
+              seats == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"],
               "['codex', 'agy', 'cursor-auto', 'cursor-composer']", str(seats))
         # No --seats -> the CONFIGURED default panel (here: built-in full) drives
         # _resolve_seats; opus/sonnet (Task seats) drop via the registry filter.
         resolved = _resolve_seats(None)
         check("_resolve_seats(None) -> builtin full's subprocess subset",
-              resolved == ["codex", "agy", "cursor-auto", "cursor-composer"],
+              resolved == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"],
               "['codex', 'agy', 'cursor-auto', 'cursor-composer']", str(resolved))
         # The 'cursor' group token expands on the --seats path (the env path is gone).
         seats = _resolve_seats("cursor")
@@ -713,6 +713,20 @@ def test_registry():
     check("CURSOR_SEATS pins cursor-grok to grok-4.5-xhigh",
           CURSOR_SEATS.get("cursor-grok") == "grok-4.5-xhigh",
           "grok-4.5-xhigh", str(CURSOR_SEATS.get("cursor-grok")))
+    # Codex model-seats mirror cursor: one CodexProvider per CODEX_SEATS entry,
+    # each pinned to its model (both are default panel seats).
+    from multiagent.providers.codex import CODEX_SEATS
+    for seat_name, model in CODEX_SEATS.items():
+        check(f"get_provider('{seat_name}') -> CodexProvider pinned to {model}",
+              isinstance(get_provider(seat_name), CodexProvider)
+              and get_provider(seat_name)._default_model == model,
+              f"CodexProvider({model})", repr(get_provider(seat_name).__dict__))
+    check("CODEX_SEATS pins codex to gpt-5.6-sol",
+          CODEX_SEATS.get("codex") == "gpt-5.6-sol",
+          "gpt-5.6-sol", str(CODEX_SEATS.get("codex")))
+    check("CODEX_SEATS pins codex-luna to gpt-5.6-luna",
+          CODEX_SEATS.get("codex-luna") == "gpt-5.6-luna",
+          "gpt-5.6-luna", str(CODEX_SEATS.get("codex-luna")))
 
 
 # =============================================================================
@@ -3053,6 +3067,10 @@ def test_config():
         model = "gpt-5.5"
         reasoning_effort = "high"
 
+        [seats.codex-luna]
+        model = "luna-config"
+        reasoning_effort = "low"
+
         [seats.agy]
         model = "Gemini Config Model"
         print_timeout = "3m"
@@ -3078,6 +3096,14 @@ def test_config():
               "glm-config-max", str(config.seat_model("cursor-glm")))
         check("config valid: codex_reasoning_effort() -> 'high'",
               config.codex_reasoning_effort() == "high", "high", str(config.codex_reasoning_effort()))
+        # Per-seat effort lookup: each codex seat reads ITS OWN table; the
+        # luna value does not bleed into the bare codex seat (and vice versa).
+        check("config valid: codex_reasoning_effort('codex-luna') -> 'low'",
+              config.codex_reasoning_effort("codex-luna") == "low",
+              "low", str(config.codex_reasoning_effort("codex-luna")))
+        check("config valid: seat_model('codex-luna') -> 'luna-config'",
+              config.seat_model("codex-luna") == "luna-config",
+              "luna-config", str(config.seat_model("codex-luna")))
         check("config valid: agy_print_timeout() -> '3m'",
               config.agy_print_timeout() == "3m", "3m", str(config.agy_print_timeout()))
         check("config valid: default_timeout() -> 777",
@@ -3236,6 +3262,23 @@ def test_config():
         check("precedence: global-only [seats.codex].model applies (no per-repo)",
               _codex_model() == "codex-global", "codex-global", str(_codex_model()))
 
+    # 7c2. No config in either layer -> _codex_model falls back to the seat's
+    #      built-in CODEX_SEATS pin (per codex seat, not None).
+    with crew_config():
+        check("no config: _codex_model() -> codex's built-in pin gpt-5.6-sol",
+              _codex_model() == "gpt-5.6-sol", "gpt-5.6-sol", str(_codex_model()))
+        check("no config: _codex_model('codex-luna') -> its pin gpt-5.6-luna",
+              _codex_model("codex-luna") == "gpt-5.6-luna",
+              "gpt-5.6-luna", str(_codex_model("codex-luna")))
+    # A [seats.codex-luna].model override beats the pin AND stays seat-scoped
+    # (the bare codex seat keeps its own pin).
+    with crew_config(project="[seats.codex-luna]\nmodel = \"luna-repo\"\n"):
+        check("[seats.codex-luna].model BEATS the built-in pin",
+              _codex_model("codex-luna") == "luna-repo",
+              "luna-repo", str(_codex_model("codex-luna")))
+        check("codex-luna config does NOT leak into the bare codex seat",
+              _codex_model() == "gpt-5.6-sol", "gpt-5.6-sol", str(_codex_model()))
+
     # ---- Per-seat argv/resolution assertions (NO metered seat calls) ------------
     # 8. codex reasoning_effort from config flows into the -c argv; absent -> xhigh.
     with project("[seats.codex]\nreasoning_effort = \"medium\"\n"):
@@ -3289,6 +3332,49 @@ def test_config():
             argv = json.loads(cap.read_text())
             check("per-seat: no config -> codex reasoning_effort falls back to xhigh",
                   "model_reasoning_effort=xhigh" in argv, "xhigh in argv", str(argv))
+
+    # 8c. Registry codex seats: the pinned --model lands in argv when no explicit
+    #     model is given, and [seats.codex-luna].reasoning_effort reaches ONLY the
+    #     luna seat (the bare codex seat keeps the xhigh default).
+    with project("[seats.codex-luna]\nreasoning_effort = \"low\"\n"):
+        with tempfile.TemporaryDirectory() as bd:
+            d = Path(bd)
+            cap = d / "capture.json"
+            make_fake_bin(d, "codex", f"""
+            import sys, json
+            a = sys.argv[1:]
+            out = None
+            for i, x in enumerate(a):
+                if x == "-o":
+                    out = a[i+1]
+            json.dump(a, open({str(cap)!r}, "w"))
+            sys.stdin.read()
+            open(out, "w").write("OK")
+            sys.exit(0)
+            """)
+            old_path = os.environ["PATH"]
+            os.environ["PATH"] = str(d) + os.pathsep + old_path
+            try:
+                get_provider("codex-luna").run("PROMPT", timeout=15)
+                argv_luna = json.loads(cap.read_text())
+                get_provider("codex").run("PROMPT", timeout=15)
+                argv_codex = json.loads(cap.read_text())
+            finally:
+                os.environ["PATH"] = old_path
+            check("per-seat: codex-luna argv carries its pinned --model gpt-5.6-luna",
+                  "--model" in argv_luna and "gpt-5.6-luna" in argv_luna,
+                  "--model gpt-5.6-luna", str(argv_luna))
+            check("per-seat: [seats.codex-luna].reasoning_effort -> luna argv effort=low",
+                  "model_reasoning_effort=low" in argv_luna, "low in argv", str(argv_luna))
+            check("per-seat: bare codex argv carries its pinned --model gpt-5.6-sol",
+                  "--model" in argv_codex and "gpt-5.6-sol" in argv_codex,
+                  "--model gpt-5.6-sol", str(argv_codex))
+            check("per-seat: luna effort does NOT leak into codex (stays xhigh)",
+                  "model_reasoning_effort=xhigh" in argv_codex,
+                  "xhigh in argv", str(argv_codex))
+            check("per-seat: codex hermetic flags identical across codex seats",
+                  "--ignore-user-config" in argv_luna and "--ignore-user-config" in argv_codex,
+                  "--ignore-user-config in both", f"luna={argv_luna} codex={argv_codex}")
 
     # 9. cursor seat model from config reaches CursorProvider.run()'s --model;
     #    per-repo BEATS global (env retired).
@@ -3389,7 +3475,7 @@ def test_config():
         obj = json.loads(proc.stdout)
         check("review-prep explicit --panel full OVERRIDES config default_panel=lite",
               proc.returncode == 0
-              and obj["subprocess_seats"] == ["codex", "agy", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"],
               "full overrides config", str(obj))
 
@@ -3412,7 +3498,7 @@ def test_config():
         obj = json.loads(proc.stdout) if proc.returncode == 0 else None
         check("review-prep invalid config default_panel -> built-in 'full' (no KeyError)",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex", "agy", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"],
               "full fallback on invalid", f"rc={proc.returncode} obj={obj}")
 
@@ -3649,7 +3735,7 @@ def test_panel_availability_consistency():
     # 8. BLOCKING: review-prep availability is WHOLE-PANEL, not per-split.
     #    Disabling BOTH task seats in `full` empties the TASK split only — it must
     #    NOT trip the unfiltered-panel fallback (which would re-add opus/sonnet)
-    #    because the four subprocess seats remain. Expected: subprocess intact,
+    #    because the five subprocess seats remain. Expected: subprocess intact,
     #    task_seats == [] (deliberately-disabled seat-KIND stays disabled).
     with tempfile.TemporaryDirectory() as td:
         proj = Path(td)
@@ -3661,7 +3747,7 @@ def test_panel_availability_consistency():
         obj = json.loads(rp.stdout)
         check("review-prep disabling BOTH task seats in full -> task_seats == [] (no opus/sonnet restoration)",
               rp.returncode == 0
-              and obj["subprocess_seats"] == ["codex", "agy", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == [],
               "subprocess intact, task []", str(obj))
         # The empty TASK split must NOT fire the all-unavailable whole-panel warn
@@ -3670,13 +3756,14 @@ def test_panel_availability_consistency():
               "all seats in the resolved panel" not in rp.stderr,
               "no whole-panel fallback warn", repr(rp.stderr[:200]))
 
-    # 8b. Symmetric: disabling ALL FOUR subprocess seats in `full` empties the
+    # 8b. Symmetric: disabling ALL FIVE subprocess seats in `full` empties the
     #     SUBPROCESS split only — task seats remain, no fallback, review runs
     #     task-only (subprocess_seats == []).
     with tempfile.TemporaryDirectory() as td:
         proj = Path(td)
         _write_cfg(proj,
                    '[seats.codex]\navailable = false\n'
+                   '[seats.codex-luna]\navailable = false\n'
                    '[seats.agy]\navailable = false\n'
                    '[seats.cursor-auto]\navailable = false\n'
                    '[seats.cursor-composer]\navailable = false\n')
@@ -3698,6 +3785,7 @@ def test_panel_availability_consistency():
         proj = Path(td)
         _write_cfg(proj,
                    '[seats.codex]\navailable = false\n'
+                   '[seats.codex-luna]\navailable = false\n'
                    '[seats.agy]\navailable = false\n'
                    '[seats.cursor-auto]\navailable = false\n'
                    '[seats.cursor-composer]\navailable = false\n'
@@ -3710,7 +3798,7 @@ def test_panel_availability_consistency():
         obj = json.loads(rp.stdout)
         check("review-prep disabling EVERY seat -> whole-panel fallback restores the unfiltered panel",
               rp.returncode == 0
-              and obj["subprocess_seats"] == ["codex", "agy", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"],
               "unfiltered full restored", str(obj))
         check("review-prep all-unavailable -> the whole-panel fallback warn fires once",
@@ -3718,7 +3806,7 @@ def test_panel_availability_consistency():
               "all-unavailable warn", repr(rp.stderr[:200]))
 
     # 9b. BLOCKING regression: the opaque --task-seats override counts toward the
-    #     final panel being NON-empty. Disable ALL FOUR subprocess seats in `full`
+    #     final panel being NON-empty. Disable ALL FIVE subprocess seats in `full`
     #     AND pass `--task-seats opus` (which sets task_raw=[] and supplies the
     #     panel via explicit_task_seats). The whole-panel emptiness check must see
     #     the override as the (non-empty) task panel and NOT restore the disabled
@@ -3728,6 +3816,7 @@ def test_panel_availability_consistency():
         proj = Path(td)
         _write_cfg(proj,
                    '[seats.codex]\navailable = false\n'
+                   '[seats.codex-luna]\navailable = false\n'
                    '[seats.agy]\navailable = false\n'
                    '[seats.cursor-auto]\navailable = false\n'
                    '[seats.cursor-composer]\navailable = false\n')
@@ -3956,7 +4045,7 @@ def test_review_prep():
         proc, obj = _prep(["--panel", "full", "--session-id", "pf"], td)
         check("review-prep --panel full -> default subprocess subset + task_seats/models",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex", "agy", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"]
               and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"},
               "full preset split", str(obj))
@@ -4052,7 +4141,7 @@ def test_review_prep():
         staged = Path(td) / ".crew" / "reviews" / "bo" / "prompt-seat.txt"
         check("review-prep both --panel and --seats omitted + no config -> built-in 'full' (subprocess AND task seats)",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex", "agy", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"]
               and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"}
               and obj["prompt_path"] == ".crew/reviews/bo/prompt-seat.txt"
@@ -4066,7 +4155,7 @@ def test_review_prep():
         proc, obj = _prep(["--panel", "full", "--task-seats", "opus", "--session-id", "ov1"], td)
         check("review-prep --panel full --task-seats opus -> task list overridden to ['opus']",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex", "agy", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus"]
               and obj["task_seat_models"] == {"opus": "opus"},
               "task-seats override", str(obj))
@@ -4122,7 +4211,7 @@ def test_debate_panel_resolver():
             lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
             return proc.returncode, lines
 
-    FULL = ["codex", "agy", "cursor-auto", "cursor-composer", "opus", "sonnet"]
+    FULL = ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer", "opus", "sonnet"]
 
     # 1. [debate].panel="full" BEATS default_panel="lite" -> debate resolves full.
     rc, lines = resolve("default_panel = \"lite\"\n\n[debate]\npanel = \"full\"\n")
@@ -5310,6 +5399,9 @@ def test_doctor():
             sub = payload.get("subprocess", {})
             check("doctor: codex detected available (present on PATH)",
                   sub.get("codex", {}).get("available") is True, "codex true", str(sub.get("codex")))
+            check("doctor: codex-luna tracks the shared codex binary (available)",
+                  sub.get("codex-luna", {}).get("available") is True,
+                  "codex-luna true", str(sub.get("codex-luna")))
             check("doctor: agy detected ABSENT with a PATH diag",
                   sub.get("agy", {}).get("available") is False
                   and "PATH" in (sub.get("agy", {}).get("diag") or ""),
@@ -5683,6 +5775,8 @@ def test_scaffold_config():
             check("bare (no --detection) OMITS every per-seat available line",
                   all("available" not in tbl for tbl in seats_tbl.values()),
                   "no available keys", str({k: v for k, v in seats_tbl.items() if 'available' in v}))
+            check("fresh template carries a [seats.codex-luna] block (default seat)",
+                  "codex-luna" in seats_tbl, "codex-luna table present", str(sorted(seats_tbl)))
 
         # round-trip through the real loader: getters read the values, ZERO warnings.
         config.global_config_path().write_text(out)
@@ -5698,7 +5792,7 @@ def test_scaffold_config():
     with crew_config() as proj:
         det = Path(proj) / "doctor.json"
         write_det(det, absent=["agy"],
-                  present=["codex", "cursor-auto", "cursor-composer",
+                  present=["codex", "codex-luna", "cursor-auto", "cursor-composer",
                            "cursor-glm", "cursor-gpt", "cursor-gemini",
                            "cursor-grok"])
         rc, out, err = run(["scaffold-config", "--out", "-", "--detection", str(det),
@@ -5709,6 +5803,9 @@ def test_scaffold_config():
               seats_tbl.get("agy", {}).get("available") is False, "agy false", str(seats_tbl.get("agy")))
         check("detection: detected-present codex -> available OMITTED",
               "available" not in seats_tbl.get("codex", {}), "codex no available", str(seats_tbl.get("codex")))
+        check("detection: detected-present codex-luna -> available OMITTED (default seat, not opt-in)",
+              "available" not in seats_tbl.get("codex-luna", {}),
+              "codex-luna no available", str(seats_tbl.get("codex-luna")))
         check("detection: premium cursor-glm -> available=false (cost-safe)",
               seats_tbl.get("cursor-glm", {}).get("available") is False,
               "glm false", str(seats_tbl.get("cursor-glm")))

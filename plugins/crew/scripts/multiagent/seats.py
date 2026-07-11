@@ -44,12 +44,12 @@ TASK_SEAT_NAMES = {"opus", "sonnet", "fable"}
 # opus, fable → fable). See the module docstring before adding an entry.
 MODEL_OVERRIDES: dict[str, str] = {}
 
-# The named panel presets. ``full``'s subprocess subset (codex + agy + two Cursor
-# model-seats) MUST equal cli._DEFAULT_SUBPROCESS_PANEL as a sequence — the
-# roster-fidelity drift guard. ``cursor`` is the literal group token (expanded
-# later in cli.py), NOT a baked-in cursor-* list.
+# The named panel presets. ``full``'s subprocess subset (two codex model-seats +
+# agy + two Cursor model-seats) MUST equal cli._DEFAULT_SUBPROCESS_PANEL as a
+# sequence — the roster-fidelity drift guard. ``cursor`` is the literal group
+# token (expanded later in cli.py), NOT a baked-in cursor-* list.
 PANEL_PRESETS = {
-    "full": ["codex", "agy", "cursor-auto", "cursor-composer", "opus", "sonnet"],
+    "full": ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer", "opus", "sonnet"],
     "quick": ["codex", "sonnet"],  # cheapest cross-model pair — routine reviews
     "lite": ["opus", "sonnet"],
     "solo": ["opus"],

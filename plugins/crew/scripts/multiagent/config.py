@@ -332,8 +332,8 @@ def seat_model(seat: str) -> str | None:
 
 # --- codex reasoning_effort ---------------------------------------------------
 
-def _extract_codex_reasoning_effort(data: dict, layer: str) -> str | None:
-    tbl = _seat_table("codex", data)
+def _extract_codex_reasoning_effort(data: dict, layer: str, seat: str) -> str | None:
+    tbl = _seat_table(seat, data)
     if tbl is None:
         return None
     val = tbl.get("reasoning_effort")
@@ -341,19 +341,22 @@ def _extract_codex_reasoning_effort(data: dict, layer: str) -> str | None:
         return None
     if not isinstance(val, str) or not val.strip():
         _warn_once(
-            f"codex_reasoning_effort:{layer}",
-            f"[seats.codex].reasoning_effort must be a non-empty string; "
+            f"codex_reasoning_effort:{layer}:{seat}",
+            f"[seats.{seat}].reasoning_effort must be a non-empty string; "
             f"ignoring {val!r}",
         )
         return None
     return val
 
 
-def codex_reasoning_effort() -> str | None:
-    """``[seats.codex].reasoning_effort`` (per-repo over global), or ``None``."""
+def codex_reasoning_effort(seat: str = "codex") -> str | None:
+    """``[seats.<seat>].reasoning_effort`` (per-repo over global), or ``None``.
+
+    Per-seat lookup: each codex seat (codex, codex-luna) reads its own table.
+    The ``seat`` default keeps existing bare-``codex`` callers unchanged."""
     return _first(
-        _extract_codex_reasoning_effort(_load(), "repo"),
-        _extract_codex_reasoning_effort(_global_load(), "global"),
+        _extract_codex_reasoning_effort(_load(), "repo", seat),
+        _extract_codex_reasoning_effort(_global_load(), "global", seat),
     )
 
 

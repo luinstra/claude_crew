@@ -182,16 +182,24 @@ class Provider(ABC):
 def _build_registry() -> dict:
     # Imported lazily to avoid a circular import (codex.py / agy.py import this
     # module for ProviderResult / Provider).
-    from .codex import CodexProvider
+    from .codex import CodexProvider, CODEX_SEATS
     from .agy import AgyProvider
     from .cursor import CursorProvider, CURSOR_SEATS
 
-    # codex is the live OpenAI seat; agy is the flat-rate Gemini seat (Antigravity)
-    # — both are in the default subprocess panel.
+    # agy is the flat-rate Gemini seat (Antigravity); the codex seats below are
+    # the live OpenAI seats (all in the default subprocess panel).
     registry: dict = {
-        "codex": CodexProvider,
         "agy": AgyProvider,
     }
+
+    # Each codex model is its own seat (codex + codex-luna: two OpenAI voices).
+    # Same closure-bound zero-arg factory pattern as cursor below; adding a
+    # model is a one-line edit to CODEX_SEATS (codex.py).
+    def _codex_factory(seat: str, model: str):
+        return lambda: CodexProvider(seat, model)
+
+    for seat, model in CODEX_SEATS.items():
+        registry[seat] = _codex_factory(seat, model)
 
     # Each Cursor model is its own seat. The registry maps name -> ZERO-ARG
     # factory (get_provider calls factory()), so bind each seat's model in a

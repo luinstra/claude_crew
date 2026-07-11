@@ -1,5 +1,5 @@
 ---
-description: Multi-model review of a plan OR code diff (default panel codex + agy + cursor-auto + cursor-composer + opus + sonnet; narrow with --panel/--seats)
+description: Multi-model review of a plan OR code diff (default panel codex + codex-luna + agy + cursor-auto + cursor-composer + opus + sonnet; narrow with --panel/--seats)
 argument-hint: "<the plan | the code | a .md path | a git scope>"
 allowed-tools: Bash, Task, Read, Write, Glob
 ---
@@ -35,7 +35,7 @@ user's configured default.
   (a premium-tier Claude voice, `model="fable"`) are opt-in — add via `--seats`.
 - **The engine resolves the preset — the orchestrator does NOT.** `review-prep`
   (Step 3) resolves `--panel`/`--seats` into `subprocess_seats` (the
-  `codex`/`agy`/`cursor-*` entries), `task_seats` (the Claude voices), and
+  `codex`/`codex-luna`/`agy`/`cursor-*` entries), `task_seats` (the Claude voices), and
   `task_seat_models` (each Task seat's model pin). The orchestrator never defines
   presets, classifies seat names, or hardcodes a model pin — pass the flag through
   and read the JSON. **Pass `--panel`/`--seats` ONLY when the user named a panel
@@ -48,12 +48,12 @@ The same review prompt fans out across a multi-model panel and you synthesize th
 results into the existing `APPROVED / REVISE / [BLOCKING] / [MINOR]` verdict. Two
 seat kinds:
 
-- **subprocess seats** — the `codex`/`agy`/`cursor-*` entries of the resolved
+- **subprocess seats** — the `codex`/`codex-luna`/`agy`/`cursor-*` entries of the resolved
   panel, via the Python engine.
 - **task seats** — the `opus`/`sonnet` entries, each a `crew:reviewer` via the
   Task tool (in-session, on the subscription — no `claude -p`, no API key).
 
-The panel is whatever the flags resolved to (default **codex + agy + cursor-auto +
+The panel is whatever the flags resolved to (default **codex + codex-luna + agy + cursor-auto +
 cursor-composer + opus + sonnet**); only fan out the seats in that list. A
 failed/skipped seat NEVER aborts the review (Step 6) — the verdict is synthesized
 from whichever seats succeed.
@@ -371,6 +371,6 @@ in the VERDICTS roster and/or the RAW section):
 
 ---
 
-Subscription safety: the engine drives only the subprocess seats — `codex` + the
-`agy`/`cursor-*` seats, all external-CLI auth; Claude voices are in-session Task
+Subscription safety: the engine drives only the subprocess seats — the
+`codex`/`codex-luna` + `agy`/`cursor-*` seats, all external-CLI auth; Claude voices are in-session Task
 seats. No `claude -p`, no Anthropic API — a stray `ANTHROPIC_API_KEY` is irrelevant.

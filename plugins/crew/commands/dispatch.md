@@ -169,6 +169,6 @@ read-only recovery diff of any partial edits — never a success summary.)
 
 ---
 
-Subscription safety: the engine drives only the subprocess seat (`codex` / `agy` /
-`cursor-*`, all external-CLI auth). No `claude -p`, no Anthropic API — a stray
+Subscription safety: the engine drives only the subprocess seat (`codex` /
+`codex-luna` / `agy` / `cursor-*`, all external-CLI auth). No `claude -p`, no Anthropic API — a stray
 `ANTHROPIC_API_KEY` is irrelevant here.

@@ -149,6 +149,6 @@ operating-instructions doc (a different file), mention `/crew:crew-config`.
 
 ---
 
-Subscription safety: `doctor` drives only `is_available()` (codex/agy = PATH check; cursor
+Subscription safety: `doctor` drives only `is_available()` (codex/codex-luna/agy = PATH check; cursor
 = one local `agent --version` identity probe) — no `claude -p`, no Anthropic API, no
 metered/network call. `scaffold-config` makes no probe at all.

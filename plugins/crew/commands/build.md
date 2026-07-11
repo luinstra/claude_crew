@@ -25,7 +25,7 @@ default.
   (a premium-tier Claude voice, `model="fable"`) are opt-in — add via `--seats`.
 - **The engine resolves the preset — the orchestrator does NOT.** `review-prep`
   (Step 2a) resolves `--panel`/`--seats` into `subprocess_seats` (the
-  `codex`/`agy`/`cursor-*` entries), `task_seats` (the Claude voices), and
+  `codex`/`codex-luna`/`agy`/`cursor-*` entries), `task_seats` (the Claude voices), and
   `task_seat_models` (each Task seat's model pin). The orchestrator never defines
   presets, classifies seat names, or hardcodes a model pin — pass the flag through
   and read the JSON. **Pass `--panel`/`--seats` ONLY when the user named a panel
@@ -101,12 +101,12 @@ When executor reports complete, verify the work with a multi-model panel over th
 **working-tree diff**, and synthesize the results into the existing verdict. Two
 seat kinds:
 
-- **subprocess seats** — the `codex`/`agy`/`cursor-*` entries of the resolved
+- **subprocess seats** — the `codex`/`codex-luna`/`agy`/`cursor-*` entries of the resolved
   panel, via the Python engine.
 - **task seats** — the `opus`/`sonnet` entries, each a `crew:reviewer` spawned via
   the Task tool (in-session, on the subscription — no `claude -p`, no API key).
 
-The panel is whatever the flags resolved to (default **codex + agy + cursor-auto +
+The panel is whatever the flags resolved to (default **codex + codex-luna + agy + cursor-auto +
 cursor-composer + opus + sonnet**); only fan out the seats in that list. A
 failed/skipped seat NEVER aborts the verification (see "Synthesize" below) — the
 verdict is synthesized from whichever seats succeed.
