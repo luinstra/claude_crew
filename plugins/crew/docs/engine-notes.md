@@ -28,12 +28,21 @@
 REVIEWS were prompt-level, not a dead seat. Re-probe before any future demotion
 decision.
 
-## Why the default panel leaves some cursor seats opt-in
+## Why some registered seats are opt-in
 
 The default panel roster of record is scripts/CLAUDE.md + `seats.PANEL_PRESETS`
-(the two codex seats are distinct OpenAI voices, `gpt-5.6-sol` and `gpt-5.6-luna`,
-on the one codex CLI — a deliberate same-lineage pairing at different reasoning
-styles). The premium cursor model-seats are registered but opt-in:
+(the two DEFAULT codex seats are distinct OpenAI voices, `gpt-5.6-sol` and
+`gpt-5.6-luna`, on the one codex CLI — a deliberate same-lineage pairing at
+different reasoning styles). Seats fall out of the default panel for two distinct
+reasons, redundancy or cost.
+
+Opt-in for REDUNDANCY (not bucket cost):
+
+- `codex-terra`: codex + codex-luna already span the OpenAI lineage, so a third
+  OpenAI voice is redundant on every default review (run via `--seats
+  codex-terra`).
+
+Opt-in for COST (premium/metered Cursor buckets):
 
 - `cursor-gpt` — codex already covers the GPT lineage, so it isn't defaulted.
 - `cursor-gemini` — `agy` covers the Gemini lineage flat-rate, so the metered

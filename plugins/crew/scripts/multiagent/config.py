@@ -352,7 +352,7 @@ def _extract_codex_reasoning_effort(data: dict, layer: str, seat: str) -> str | 
 def codex_reasoning_effort(seat: str = "codex") -> str | None:
     """``[seats.<seat>].reasoning_effort`` (per-repo over global), or ``None``.
 
-    Per-seat lookup: each codex seat (codex, codex-luna) reads its own table.
+    Per-seat lookup: each codex seat reads its own table.
     The ``seat`` default keeps existing bare-``codex`` callers unchanged."""
     return _first(
         _extract_codex_reasoning_effort(_load(), "repo", seat),

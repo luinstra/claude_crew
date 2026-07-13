@@ -198,11 +198,11 @@ synthesizes one verdict. The built-in default panel and the presets:
 <!-- seat-roster:preset:quick -->
 - `--panel quick`: `codex`, `sonnet`
 <!-- seat-roster:opt-in -->
-- Opt-in external seats (add via `--seats`): `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`
+- Opt-in external seats (add via `--seats`): `codex-terra`, `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`
 <!-- seat-roster:task-opt-in -->
 - Opt-in Claude voice (add via `--seats`): `fable`
 <!-- seat-roster:all -->
-- Every registered seat: `codex`, `codex-luna`, `agy`, `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`, `fable`
+- Every registered seat: `codex`, `codex-luna`, `codex-terra`, `agy`, `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`, `fable`
 
 These lines document the BUILT-IN roster; a configured `default_panel`/`[panels]`
 override changes what actually runs. `"${CLAUDE_PLUGIN_ROOT}/crew" seats` prints

@@ -38,14 +38,16 @@ from ._proc import TIMEOUT, run_reaped
 
 # === The codex panel seats: SINGLE SOURCE OF TRUTH ===========================
 # name -> model string `codex exec --model` accepts.
-# Two OpenAI voices at different reasoning styles: deliberate cross-style coverage
-# on the one codex subscription (which of these are defaulted lives in
-# cli._DEFAULT_SUBPROCESS_PANEL / the scaffold, not here). Retune a
-# seat without code via [seats.<name>].model in .crew/config.toml or the global
-# ~/.crew-config.toml.
+# OpenAI voices at different reasoning styles on the one codex subscription:
+# codex + codex-luna are DEFAULT; codex-terra is registered but OPT-IN (run via
+# --seats codex-terra), redundant coverage since two OpenAI voices already span
+# the lineage. Which seats are defaulted lives in cli._DEFAULT_SUBPROCESS_PANEL /
+# the scaffold, not here. Retune a seat without code via [seats.<name>].model in
+# .crew/config.toml or the global ~/.crew-config.toml.
 CODEX_SEATS: dict[str, str] = {
-    "codex":      "gpt-5.6-sol",
-    "codex-luna": "gpt-5.6-luna",
+    "codex":       "gpt-5.6-sol",
+    "codex-luna":  "gpt-5.6-luna",
+    "codex-terra": "gpt-5.6-terra",
 }
 
 
@@ -53,8 +55,9 @@ class CodexProvider(Provider):
     """A panel seat backed by the codex CLI subprocess.
 
     Pinned to one model. Multiple named instances (see ``CODEX_SEATS``) run as
-    distinct seats; which are defaulted lives in
-    ``cli._DEFAULT_SUBPROCESS_PANEL`` / the scaffold, not here.
+    distinct seats: ``codex`` + ``codex-luna`` are DEFAULT, ``codex-terra`` is
+    registered but OPT-IN (run via ``--seats codex-terra``). Which are defaulted
+    lives in ``cli._DEFAULT_SUBPROCESS_PANEL`` / the scaffold, not here.
     """
 
     # EXPLICIT opt-in (fail-CLOSED ABC default is False): codex honors

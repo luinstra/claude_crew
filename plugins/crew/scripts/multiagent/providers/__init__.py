@@ -187,12 +187,12 @@ def _build_registry() -> dict:
     from .cursor import CursorProvider, CURSOR_SEATS
 
     # agy is the flat-rate Gemini seat (Antigravity); the codex seats below are
-    # the live OpenAI seats (all in the default subprocess panel).
+    # the live OpenAI seats (some default, some opt-in).
     registry: dict = {
         "agy": AgyProvider,
     }
 
-    # Each codex model is its own seat (codex + codex-luna: two OpenAI voices).
+    # Each codex model is its own seat (distinct OpenAI voices).
     # Same closure-bound zero-arg factory pattern as cursor below; adding a
     # model is a one-line edit to CODEX_SEATS (codex.py).
     def _codex_factory(seat: str, model: str):

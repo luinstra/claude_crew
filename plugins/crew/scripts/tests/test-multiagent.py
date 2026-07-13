@@ -714,7 +714,7 @@ def test_registry():
           CURSOR_SEATS.get("cursor-grok") == "grok-4.5-xhigh",
           "grok-4.5-xhigh", str(CURSOR_SEATS.get("cursor-grok")))
     # Codex model-seats mirror cursor: one CodexProvider per CODEX_SEATS entry,
-    # each pinned to its model (both are default panel seats).
+    # each pinned to its model (codex + codex-luna default, codex-terra opt-in).
     from multiagent.providers.codex import CODEX_SEATS
     for seat_name, model in CODEX_SEATS.items():
         check(f"get_provider('{seat_name}') -> CodexProvider pinned to {model}",
@@ -727,6 +727,10 @@ def test_registry():
     check("CODEX_SEATS pins codex-luna to gpt-5.6-luna",
           CODEX_SEATS.get("codex-luna") == "gpt-5.6-luna",
           "gpt-5.6-luna", str(CODEX_SEATS.get("codex-luna")))
+    # The opt-in codex-terra seat's model pin (registered, run via --seats).
+    check("CODEX_SEATS pins codex-terra to gpt-5.6-terra",
+          CODEX_SEATS.get("codex-terra") == "gpt-5.6-terra",
+          "gpt-5.6-terra", str(CODEX_SEATS.get("codex-terra")))
 
 
 # =============================================================================
@@ -6207,7 +6211,8 @@ def test_scaffold_config():
     with crew_config() as proj:
         det = Path(proj) / "doctor.json"
         write_det(det, absent=["agy"],
-                  present=["codex", "codex-luna", "cursor-auto", "cursor-composer",
+                  present=["codex", "codex-luna", "codex-terra",
+                           "cursor-auto", "cursor-composer",
                            "cursor-glm", "cursor-gpt", "cursor-gemini",
                            "cursor-grok"])
         rc, out, err = run(["scaffold-config", "--out", "-", "--detection", str(det),
@@ -6227,6 +6232,9 @@ def test_scaffold_config():
         check("detection: premium cursor-grok -> available=false (cost-safe)",
               seats_tbl.get("cursor-grok", {}).get("available") is False,
               "grok false", str(seats_tbl.get("cursor-grok")))
+        check("detection: opt-in codex-terra -> available=false (even when CLI present)",
+              seats_tbl.get("codex-terra", {}).get("available") is False,
+              "codex-terra false", str(seats_tbl.get("codex-terra")))
         check("detection: --disable-seat opus (TASK seat) -> [seats.opus].available=false",
               seats_tbl.get("opus", {}).get("available") is False, "opus false", str(seats_tbl.get("opus")))
         # the opus-disabled output loads clean via the real loader.

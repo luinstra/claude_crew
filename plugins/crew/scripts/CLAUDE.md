@@ -112,7 +112,7 @@ Key contracts (do NOT regress):
 <!-- seat-roster:default -->
 - Built-in default panel: `codex`, `codex-luna`, `agy`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`
 <!-- seat-roster:opt-in -->
-- Registered but opt-in: `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`
+- Registered but opt-in: `codex-terra`, `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`
 <!-- seat-roster:task-opt-in -->
 - Opt-in Task seats: `fable`
 - These lines document the BUILT-IN roster; a configured `default_panel`/`[panels]`
@@ -332,7 +332,7 @@ Key contracts (do NOT regress):
     path); with NEITHER, no file is written. The JSON is ALWAYS printed to stdout (no
     `--json` flag — output is always JSON).
   - **`scaffold-config`** renders a COMMENTED starter config emitting ONLY loader-read
-    keys (`reasoning_effort` under the per-codex-seat tables `[seats.codex]`/`[seats.codex-luna]`, `print_timeout` under `[seats.agy]`,
+    keys (`reasoning_effort` under a per-codex-seat table, e.g. `[seats.codex]`, `print_timeout` under `[seats.agy]`,
     cost-safe defaults, premium seats `available=false`). It consumes `doctor`'s JSON via
     `--detection` (ABSENT flag → omit per-seat `available` lines + a stderr "detection
     skipped" note; GIVEN-but-missing/empty/malformed → error+nonzero). ONE output

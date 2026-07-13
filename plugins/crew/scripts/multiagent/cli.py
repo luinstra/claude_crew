@@ -25,7 +25,7 @@ task split, stage the ONE shared subprocess prompt, and PRINT
 ``{prompt_path, subprocess_seats, task_seats, task_seat_models}`` — runs NOTHING;
 the per-seat ``run`` loop + the Task-seat dispatch stay in the command markdown).
 
-The engine EXECUTES only subprocess seats (codex/codex-luna/agy/cursor-*), but ``render`` BUILDS the
+The engine EXECUTES only subprocess seats (codex-*/agy/cursor-*), but ``render`` BUILDS the
 prompt for ANY seat — including the Claude Task seats (opus/sonnet) the
 orchestrator dispatches — so every seat's prompt comes from the one builder
 (``prompts.build_prompt``/``council``) and the subprocess and Task paths can
@@ -91,7 +91,7 @@ _DEFAULT_SUBPROCESS_PANEL = (
 def _default_subprocess_seats() -> list[str]:
     """The BUILTIN subprocess-seat fallback (registry-filtered).
 
-    The engine only knows subprocess seats (codex/codex-luna/agy/cursor-*;
+    The engine only knows subprocess seats (codex-*/agy/cursor-*;
     opus/sonnet Task seats are owned by the orchestrator). The allowlist is REGISTRY-DERIVED:
     ``known_seat_names()`` returns every registered subprocess seat, so adding a
     seat to the registry makes it usable here automatically — no hardcoded list
@@ -227,7 +227,7 @@ def _codex_model(seat: str = "codex") -> str | None:
     # Precedence: per-repo .crew/config.toml > global ~/.crew-config.toml
     # ([seats.<seat>].model, both via config.seat_model) > the seat's built-in
     # CODEX_SEATS pin. An explicit CLI --model is applied ABOVE this at the
-    # call sites. Resolved per codex seat (codex, codex-luna).
+    # call sites. Resolved per codex seat.
     return config.seat_model(seat) or CODEX_SEATS.get(seat)
 
 
@@ -734,7 +734,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     is dispatched through the SAME ``get_provider``/``Provider`` machinery as
     ``review`` so invocation shape, ANSI-strip, auth/error-banner detection,
     timeout floor, ARG_MAX guard, and config resolution all apply unchanged.
-    Valid seats are whatever the registry holds (codex, codex-luna, agy, cursor-*).
+    Valid seats are whatever the registry holds (codex-*, agy, cursor-*).
 
     With a TRUTHY, non-blank ``--session-id <id>``, ``-f`` and ``-o`` are DERIVED
     from ``.crew/reviews/<id>/`` when omitted: ``-f`` defaults to the shared
@@ -2056,9 +2056,11 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
 # the machine payload (doctor JSON / {target,wrote,diverted} envelope / `--out -`
 # TOML); EVERY note/error goes to stderr (init.md parses stdout).
 
-# Premium-bucket / opt-in cursor seats — emitted available=false (unless the user
-# opts one back in) so no default crew panel touches the premium allotment.
-_PREMIUM_OFF_SEATS = ("cursor-glm", "cursor-gpt", "cursor-gemini", "cursor-grok")
+# Opt-in seats — emitted available=false (unless the user opts one back in). The
+# cursor seats are off for premium-bucket cost (no default panel touches the
+# premium allotment); codex-terra is off for REDUNDANCY (codex + codex-luna
+# already cover the OpenAI lineage), not cost.
+_PREMIUM_OFF_SEATS = ("cursor-glm", "cursor-gpt", "cursor-gemini", "cursor-grok", "codex-terra")
 
 # Honest task-seat diagnostics (subscription-backed; not CLI-detectable).
 _TASK_SEAT_DIAGS = {
@@ -2079,7 +2081,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     cursor identity probe runs EXACTLY ONCE — the single result is fanned to all
     cursor seats (calling each one's ``is_available()`` would spawn
     ``agent --version`` up to 6x). codex/agy keep their own pure-``which``
-    checks; the codex seats (codex, codex-luna) share one ``codex`` binary and
+    checks; the codex seats share one ``codex`` binary and
     each run ``shutil.which`` per seat: unlike cursor's spawned version probe,
     ``which`` is a cheap in-process PATH scan, so no fan-out dedupe is needed.
 
@@ -2270,6 +2272,7 @@ def _premium_comment(seat: str) -> str:
         "cursor-gpt": "opt-in (codex already covers the GPT lineage)",
         "cursor-gemini": "opt-in (agy covers the Gemini lineage flat-rate)",
         "cursor-grok": "opt-in (draws Cursor's shared premium MAX allotment)",
+        "codex-terra": "opt-in (codex + codex-luna already cover the OpenAI lineage)",
     }.get(seat, "opt-in")
 
 
@@ -2355,7 +2358,7 @@ def _render_config_template(
     L.append('# panel = "full"')
     L.append("")
     L.append("# [dispatch].seat — /crew:dispatch's default WRITE seat (must be ONE known subprocess")
-    L.append("# seat: codex/codex-luna/agy/cursor-*; a panel name or the 'cursor' group token is rejected).")
+    L.append("# seat: codex-*/agy/cursor-*; a panel name or the 'cursor' group token is rejected).")
     L.append("[dispatch]")
     L.append(f"seat = {_toml_str(dispatch_seat)}")
     L.append("")
