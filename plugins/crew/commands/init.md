@@ -93,7 +93,7 @@ Ask ONLY what detection can't infer. Keep it short:
 <!-- seat-roster:premium-add-back -->
 3. **Opt-in add-back**: `cursor-glm`, `cursor-gpt`, `cursor-gemini`, `cursor-grok`, `codex-terra`
    default OFF (the cursor seats draw the premium/metered buckets; `codex-terra` is
-   redundant since codex + codex-luna already cover the OpenAI lineage). Offer them
+   redundant since the two default codex seats already cover the OpenAI lineage). Offer them
    as opt-IN `--add-seat` only, with that note (per-seat WHY → engine-notes).
 4. **`[dispatch].seat`** — the default `/crew:dispatch` WRITE seat (default `codex`;
    must be a subprocess seat).

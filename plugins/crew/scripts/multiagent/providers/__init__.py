@@ -13,6 +13,25 @@ from dataclasses import dataclass
 
 
 # =============================================================================
+# Seat metadata — the enriched VALUE in CODEX_SEATS / CURSOR_SEATS
+# =============================================================================
+
+@dataclass(frozen=True)
+class Seat:
+    """One registered subprocess seat's metadata. opt_in is the flagged
+    EXCEPTION: a bare Seat("model") is a DEFAULT-panel seat; opt_in=True pulls it
+    out of the default (WHY per seat -> docs/engine-notes.md). The one flag drives
+    both cli._DEFAULT_SUBPROCESS_PANEL and cli._PREMIUM_OFF_SEATS.
+
+    frozen=True makes each instance immutable, and (unlike a NamedTuple) a Seat is
+    NOT tuple-unpackable, so a stale `for name, model in DICT.items()` that forgot
+    to read `.model` fails loudly instead of binding a Seat to `model`.
+    """
+    model: str
+    opt_in: bool = False
+
+
+# =============================================================================
 # Normalized result shape (Step 1.0 / 1.1) — the ONE shape both seat kinds use
 # =============================================================================
 
@@ -198,8 +217,8 @@ def _build_registry() -> dict:
     def _codex_factory(seat: str, model: str):
         return lambda: CodexProvider(seat, model)
 
-    for seat, model in CODEX_SEATS.items():
-        registry[seat] = _codex_factory(seat, model)
+    for seat, spec in CODEX_SEATS.items():
+        registry[seat] = _codex_factory(seat, spec.model)
 
     # Each Cursor model is its own seat. The registry maps name -> ZERO-ARG
     # factory (get_provider calls factory()), so bind each seat's model in a
@@ -207,8 +226,8 @@ def _build_registry() -> dict:
     def _cursor_factory(seat: str, model: str):
         return lambda: CursorProvider(seat, model)
 
-    for seat, model in CURSOR_SEATS.items():
-        registry[seat] = _cursor_factory(seat, model)
+    for seat, spec in CURSOR_SEATS.items():
+        registry[seat] = _cursor_factory(seat, spec.model)
     return registry
 
 

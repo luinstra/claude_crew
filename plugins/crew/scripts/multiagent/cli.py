@@ -62,30 +62,20 @@ from multiagent.providers import (
     known_seat_names,
 )
 from multiagent.providers.codex import CODEX_SEATS
+from multiagent.providers.cursor import CURSOR_SEATS
 
-# The default subprocess panel. codex + codex-luna (two OpenAI voices at
-# different reasoning styles on the one codex subscription, a deliberate
-# same-lineage pairing) + agy (Gemini via Antigravity, flat-rate) + two Cursor
-# model-seats for cross-model diversity. `cursor-gpt` is
-# NOT a default — codex already covers the GPT lineage, so defaulting it too is
-# redundant model coverage at extra token cost; it stays registered and opt-in
-# (`--seats cursor-gpt` / `--panel cursor`). `cursor-gemini` is likewise
-# registered-but-opt-in (`--seats cursor-gemini` / `--panel cursor`) — agy covers
-# the Gemini lineage flat-rate, so the metered Cursor gemini seat isn't defaulted.
-# `cursor-glm` is ALSO registered-but-opt-in (`--seats cursor-glm` / `--panel
-# cursor`): glm-max draws on Cursor's shared premium MAX allotment, so it's pulled
-# from the default to keep the default off the premium bucket. `cursor-auto`
-# (Cursor's auto model routing) is defaulted in its place — auto bills from
-# Cursor's cheap/dedicated bucket (like composer), so no default crew panel touches
-# the premium allotment. `cursor-grok` is opt-in for the same reason as
-# `cursor-glm`: grok-4.5-xhigh draws that same shared premium MAX allotment.
-# This tuple is the BUILTIN subprocess fallback. Any name here must be a
-# registered subprocess seat (see providers/__init__._build_registry); unknown
-# names are dropped. The configured default panel (config.default_panel() +
-# [panels]) is resolved in _resolve_seats — this is the floor when nothing is set.
-_DEFAULT_SUBPROCESS_PANEL = (
-    "codex", "codex-luna", "agy", "cursor-auto", "cursor-composer",
-)
+# The default subprocess panel + the premium-off set both DERIVE from the one
+# Seat.opt_in flag (per-provider dicts in codex.py / cursor.py); WHY each seat
+# is/isn't defaulted -> docs/engine-notes.md. A bare Seat("model") defaults;
+# opt_in=True pulls it out. agy is the sole flat-rate Gemini seat (no
+# model-family variants, so no per-provider Seat dict): it is spliced at its
+# historical slot (after the codex block, before cursor). ORDER IS LOAD-BEARING
+# (panel fan-out order; the drift guard pins the exact tuple). This tuple is the
+# BUILTIN subprocess fallback; the configured default panel (config.default_panel()
+# + [panels]) is resolved in _resolve_seats — this is the floor when nothing is set.
+_DEFAULT_CODEX = [n for n, s in CODEX_SEATS.items() if not s.opt_in]
+_DEFAULT_CURSOR = [n for n, s in CURSOR_SEATS.items() if not s.opt_in]
+_DEFAULT_SUBPROCESS_PANEL = tuple(_DEFAULT_CODEX + ["agy"] + _DEFAULT_CURSOR)
 
 
 def _default_subprocess_seats() -> list[str]:
@@ -226,9 +216,10 @@ def _resolve_timeout(arg: int | None) -> int:
 def _codex_model(seat: str = "codex") -> str | None:
     # Precedence: per-repo .crew/config.toml > global ~/.crew-config.toml
     # ([seats.<seat>].model, both via config.seat_model) > the seat's built-in
-    # CODEX_SEATS pin. An explicit CLI --model is applied ABOVE this at the
-    # call sites. Resolved per codex seat.
-    return config.seat_model(seat) or CODEX_SEATS.get(seat)
+    # CODEX_SEATS pin (the Seat's .model). An explicit CLI --model is applied
+    # ABOVE this at the call sites. Resolved per codex seat.
+    spec = CODEX_SEATS.get(seat)
+    return config.seat_model(seat) or (spec.model if spec else None)
 
 
 def _run_seat(name: str, prompt: str, timeout: int) -> ProviderResult:
@@ -2056,11 +2047,19 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
 # the machine payload (doctor JSON / {target,wrote,diverted} envelope / `--out -`
 # TOML); EVERY note/error goes to stderr (init.md parses stdout).
 
-# Opt-in seats — emitted available=false (unless the user opts one back in). The
-# cursor seats are off for premium-bucket cost (no default panel touches the
-# premium allotment); codex-terra is off for REDUNDANCY (codex + codex-luna
-# already cover the OpenAI lineage), not cost.
-_PREMIUM_OFF_SEATS = ("cursor-glm", "cursor-gpt", "cursor-gemini", "cursor-grok", "codex-terra")
+# Opt-in seats — emitted available=false (unless the user opts one back in).
+# DERIVED from the one Seat.opt_in flag (codex opt-ins then cursor opt-ins, each
+# in registry insertion order). Order is NOT load-bearing (all uses are
+# membership or scaffold block emission; the drift guard asserts SET equality).
+# WHY each seat is opt-in (premium-bucket cost / redundancy) -> docs/engine-notes.md.
+_PREMIUM_OFF_SEATS = tuple(
+    [n for n, s in CODEX_SEATS.items() if s.opt_in]
+    + [n for n, s in CURSOR_SEATS.items() if s.opt_in]
+)
+
+# Generic trailer for every opt-in seat's scaffold line — the curated per-seat WHY
+# lives in ONE place (docs/engine-notes.md's "Why some registered seats are opt-in").
+_OPT_IN_COMMENT = "opt-in; see docs/engine-notes.md for why"
 
 # Honest task-seat diagnostics (subscription-backed; not CLI-detectable).
 _TASK_SEAT_DIAGS = {
@@ -2266,16 +2265,6 @@ def _toml_str(s: str) -> str:
     return '"' + s + '"'
 
 
-def _premium_comment(seat: str) -> str:
-    return {
-        "cursor-glm": "opt-in (draws Cursor's shared premium MAX allotment)",
-        "cursor-gpt": "opt-in (codex already covers the GPT lineage)",
-        "cursor-gemini": "opt-in (agy covers the Gemini lineage flat-rate)",
-        "cursor-grok": "opt-in (draws Cursor's shared premium MAX allotment)",
-        "codex-terra": "opt-in (codex + codex-luna already cover the OpenAI lineage)",
-    }.get(seat, "opt-in")
-
-
 def _det_lookup(detection: dict, seat: str) -> dict | None:
     """The per-seat detection record from a doctor JSON payload, or None."""
     sub = detection.get("subprocess")
@@ -2312,7 +2301,7 @@ def _seat_avail(
         if det is not None and det.get("available") is False:
             return ("false", "not found on PATH")
         if seat in _PREMIUM_OFF_SEATS:
-            return ("false", _premium_comment(seat))
+            return ("false", _OPT_IN_COMMENT)
     return None
 
 
@@ -2409,7 +2398,7 @@ def _render_config_template(
             L.append(f"[seats.{seat}]")
             L.append(_avail_line(a))
         else:
-            L.append(f"# [seats.{seat}]   # {_premium_comment(seat)}")
+            L.append(f"# [seats.{seat}]   # {_OPT_IN_COMMENT}")
         L.append("")
     L.append("# [tuning].timeout — per-seat wall-clock default (positive integer seconds).")
     L.append("# [tuning]")

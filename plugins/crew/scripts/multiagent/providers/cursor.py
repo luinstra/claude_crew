@@ -3,9 +3,10 @@
 One Cursor subscription exposes many models (`agent models`); we run several as
 distinct panel seats for cross-model diversity at one price. Each seat is a
 ``CursorProvider`` instance pinned to a model string. Adding a model is a
-ONE-LINE change to ``CURSOR_SEATS`` below — the registry, the engine's
-subprocess-seat allowlist (which is registry-derived), and `--seats` all pick it
-up automatically.
+ONE-LINE ``Seat(...)`` change to ``CURSOR_SEATS`` below — the registry, the
+engine's subprocess-seat allowlist (which is registry-derived), and `--seats` all
+pick it up automatically. ``Seat.opt_in`` is the default-vs-opt-in truth (a bare
+``Seat("model")`` defaults, ``opt_in=True`` registers it opt-in).
 
 Adapted to OUR executor `Provider` ABC (`is_available()` + `run()`), NOT the
 Enterprise fork's prompt-builder `BaseProvider` — prompt-building stays in
@@ -31,7 +32,7 @@ import shutil
 import time
 
 from multiagent import config
-from multiagent.providers import Provider, ProviderResult
+from multiagent.providers import Provider, ProviderResult, Seat
 from multiagent.providers._proc import TIMEOUT, run_reaped
 
 # ANSI escape code pattern for stripping terminal colour sequences.
@@ -46,17 +47,20 @@ _ARG_MAX_BYTES = 256 * 1024
 _VERSION_DATESTAMP_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}-")
 
 # === The cursor panel seats — SINGLE SOURCE OF TRUTH ==========================
-# name -> model string `agent --model` accepts.
-# Add a model = add ONE line here. Model strings verified via `agent models`.
-# Retune a seat without code via [seats.<name>].model in .crew/config.toml or
-# the global ~/.crew-config.toml.
-CURSOR_SEATS: dict[str, str] = {
-    "cursor-gpt":      "gpt-5.5-extra-high",
-    "cursor-gemini":   "gemini-3.1-pro",
-    "cursor-glm":      "glm-5.2-max",
-    "cursor-grok":     "grok-4.5-xhigh",
-    "cursor-auto":     "auto",
-    "cursor-composer": "composer-2.5",
+# name -> Seat(model[, opt_in]). Model = the string `agent --model` accepts
+# (verified via `agent models`). Add a model = add ONE line here: Seat("model")
+# for a DEFAULT-panel seat, Seat("model", opt_in=True) for a registered-but-opt-in
+# one. The Seat.opt_in flag is the SINGLE default-vs-opt-in truth: cli derives
+# both _DEFAULT_SUBPROCESS_PANEL and _PREMIUM_OFF_SEATS from it (per-seat WHY a
+# seat is opt-in -> docs/engine-notes.md). Retune a seat without code via
+# [seats.<name>].model in .crew/config.toml or the global ~/.crew-config.toml.
+CURSOR_SEATS: dict[str, Seat] = {
+    "cursor-gpt":      Seat("gpt-5.5-extra-high", opt_in=True),
+    "cursor-gemini":   Seat("gemini-3.1-pro", opt_in=True),
+    "cursor-glm":      Seat("glm-5.2-max", opt_in=True),
+    "cursor-grok":     Seat("grok-4.5-xhigh", opt_in=True),
+    "cursor-auto":     Seat("auto"),
+    "cursor-composer": Seat("composer-2.5"),
 }
 
 # Auth-failure substrings for Cursor-specific error detection.
@@ -111,9 +115,9 @@ class CursorProvider(Provider):
     """A review-panel seat backed by the Cursor Agent CLI subprocess.
 
     Pinned to one model. Multiple named instances run as distinct seats; see
-    ``CURSOR_SEATS`` for the roster and ``cli._DEFAULT_SUBPROCESS_PANEL`` / the
-    scaffold for which are defaulted (naming a seat here is fine; classifying it
-    default-vs-opt-in is drift, so that lives in cli/seats truth + the canonical docs).
+    ``CURSOR_SEATS`` for the roster. Default-vs-opt-in is the ``Seat.opt_in`` flag
+    on each ``CURSOR_SEATS`` value (cli derives both the default panel and the
+    premium-off set from it), with the per-seat WHY in the canonical docs.
     """
 
     # EXPLICIT opt-in (fail-CLOSED ABC default is False): cursor honors
@@ -269,10 +273,13 @@ class CursorProvider(Provider):
 
 # =============================================================================
 # To add another Cursor model as a panel seat:
-#   1. Add ONE line to CURSOR_SEATS above: "cursor-<x>": "<model>".
-#      (Find the model string with `agent models`.)
+#   1. Add ONE line to CURSOR_SEATS above: "cursor-<x>": Seat("<model>") for a
+#      default seat, or Seat("<model>", opt_in=True) for a registered-but-opt-in
+#      one. (Find the model string with `agent models`.) Seat.opt_in is the
+#      default-vs-opt-in truth: cli derives the default panel + the premium-off
+#      set from it, so a default add ALSO needs the PANEL_PRESETS["full"] literal
+#      entry (seats.py) that the drift guard pins.
 #   2. That's it. providers/__init__._build_registry() registers every
 #      CURSOR_SEATS entry, the engine's subprocess-seat allowlist is derived from
-#      the registry, and `--seats cursor-<x>` works. Optionally add it to a
-#      command's DEFAULT panel vocabulary (commands/*.md) if it should run by default.
+#      the registry, and `--seats cursor-<x>` works.
 # =============================================================================

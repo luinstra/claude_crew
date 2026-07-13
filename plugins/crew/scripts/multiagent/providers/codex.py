@@ -3,8 +3,9 @@
 One codex binary exposes several models; we run more than one as distinct panel
 seats (see ``CODEX_SEATS`` below, mirroring cursor's ``CURSOR_SEATS``). Each
 seat is a ``CodexProvider`` instance pinned to a model string; adding a model
-is a one-line change to ``CODEX_SEATS`` (the registry and ``--seats`` pick it
-up automatically).
+is a one-line ``Seat(...)`` change to ``CODEX_SEATS`` (the registry and
+``--seats`` pick it up automatically). ``Seat.opt_in`` is the default-vs-opt-in
+truth: a bare ``Seat("model")`` defaults, ``opt_in=True`` registers it opt-in.
 
 Invocation (verified against codex-cli 0.142.2 `codex exec --help`):
     codex exec - --ignore-user-config -c model_reasoning_effort=xhigh \
@@ -33,21 +34,22 @@ import time
 
 from multiagent import config
 
-from . import Provider, ProviderResult
+from . import Provider, ProviderResult, Seat
 from ._proc import TIMEOUT, run_reaped
 
 # === The codex panel seats: SINGLE SOURCE OF TRUTH ===========================
-# name -> model string `codex exec --model` accepts.
-# OpenAI voices at different reasoning styles on the one codex subscription:
-# codex + codex-luna are DEFAULT; codex-terra is registered but OPT-IN (run via
-# --seats codex-terra), redundant coverage since two OpenAI voices already span
-# the lineage. Which seats are defaulted lives in cli._DEFAULT_SUBPROCESS_PANEL /
-# the scaffold, not here. Retune a seat without code via [seats.<name>].model in
-# .crew/config.toml or the global ~/.crew-config.toml.
-CODEX_SEATS: dict[str, str] = {
-    "codex":       "gpt-5.6-sol",
-    "codex-luna":  "gpt-5.6-luna",
-    "codex-terra": "gpt-5.6-terra",
+# name -> Seat(model[, opt_in]). Model = the string `codex exec --model` accepts.
+# OpenAI voices at different reasoning styles on the one codex subscription. Add a
+# seat = ONE line here: Seat("model") for a DEFAULT-panel seat, Seat("model",
+# opt_in=True) for a registered-but-opt-in one (run via --seats <name>). The
+# Seat.opt_in flag is the SINGLE default-vs-opt-in truth: cli derives both
+# _DEFAULT_SUBPROCESS_PANEL and _PREMIUM_OFF_SEATS from it (per-seat WHY a seat is
+# opt-in -> docs/engine-notes.md). Retune a seat without code via
+# [seats.<name>].model in .crew/config.toml or the global ~/.crew-config.toml.
+CODEX_SEATS: dict[str, Seat] = {
+    "codex":       Seat("gpt-5.6-sol"),
+    "codex-luna":  Seat("gpt-5.6-luna"),
+    "codex-terra": Seat("gpt-5.6-terra", opt_in=True),
 }
 
 
@@ -56,8 +58,9 @@ class CodexProvider(Provider):
 
     Pinned to one model. Multiple named instances (see ``CODEX_SEATS``) run as
     distinct seats: ``codex`` + ``codex-luna`` are DEFAULT, ``codex-terra`` is
-    registered but OPT-IN (run via ``--seats codex-terra``). Which are defaulted
-    lives in ``cli._DEFAULT_SUBPROCESS_PANEL`` / the scaffold, not here.
+    registered but OPT-IN (run via ``--seats codex-terra``). Default-vs-opt-in is
+    the ``Seat.opt_in`` flag on each ``CODEX_SEATS`` value, which cli derives both
+    the default panel and the premium-off set from, not a separate hardcode.
     """
 
     # EXPLICIT opt-in (fail-CLOSED ABC default is False): codex honors

@@ -701,35 +701,35 @@ def test_registry():
     # Cursor model-seats are registered (one per CURSOR_SEATS entry).
     from multiagent.providers import known_seat_names
     from multiagent.providers.cursor import CursorProvider, CURSOR_SEATS
-    for seat_name, model in CURSOR_SEATS.items():
-        check(f"get_provider('{seat_name}') -> CursorProvider pinned to {model}",
+    for seat_name, spec in CURSOR_SEATS.items():
+        check(f"get_provider('{seat_name}') -> CursorProvider pinned to {spec.model}",
               isinstance(get_provider(seat_name), CursorProvider)
-              and get_provider(seat_name)._default_model == model,
-              f"CursorProvider({model})", repr(get_provider(seat_name).__dict__))
+              and get_provider(seat_name)._default_model == spec.model,
+              f"CursorProvider({spec.model})", repr(get_provider(seat_name).__dict__))
     check("each cursor seat is a DISTINCT model (no closure late-binding bug)",
           len({get_provider(s)._default_model for s in CURSOR_SEATS}) == len(CURSOR_SEATS),
           "all distinct models", str([get_provider(s)._default_model for s in CURSOR_SEATS]))
     # The opt-in premium grok seat's model pin (verified via `agent models`).
     check("CURSOR_SEATS pins cursor-grok to grok-4.5-xhigh",
-          CURSOR_SEATS.get("cursor-grok") == "grok-4.5-xhigh",
+          CURSOR_SEATS.get("cursor-grok").model == "grok-4.5-xhigh",
           "grok-4.5-xhigh", str(CURSOR_SEATS.get("cursor-grok")))
     # Codex model-seats mirror cursor: one CodexProvider per CODEX_SEATS entry,
     # each pinned to its model (codex + codex-luna default, codex-terra opt-in).
     from multiagent.providers.codex import CODEX_SEATS
-    for seat_name, model in CODEX_SEATS.items():
-        check(f"get_provider('{seat_name}') -> CodexProvider pinned to {model}",
+    for seat_name, spec in CODEX_SEATS.items():
+        check(f"get_provider('{seat_name}') -> CodexProvider pinned to {spec.model}",
               isinstance(get_provider(seat_name), CodexProvider)
-              and get_provider(seat_name)._default_model == model,
-              f"CodexProvider({model})", repr(get_provider(seat_name).__dict__))
+              and get_provider(seat_name)._default_model == spec.model,
+              f"CodexProvider({spec.model})", repr(get_provider(seat_name).__dict__))
     check("CODEX_SEATS pins codex to gpt-5.6-sol",
-          CODEX_SEATS.get("codex") == "gpt-5.6-sol",
+          CODEX_SEATS.get("codex").model == "gpt-5.6-sol",
           "gpt-5.6-sol", str(CODEX_SEATS.get("codex")))
     check("CODEX_SEATS pins codex-luna to gpt-5.6-luna",
-          CODEX_SEATS.get("codex-luna") == "gpt-5.6-luna",
+          CODEX_SEATS.get("codex-luna").model == "gpt-5.6-luna",
           "gpt-5.6-luna", str(CODEX_SEATS.get("codex-luna")))
     # The opt-in codex-terra seat's model pin (registered, run via --seats).
     check("CODEX_SEATS pins codex-terra to gpt-5.6-terra",
-          CODEX_SEATS.get("codex-terra") == "gpt-5.6-terra",
+          CODEX_SEATS.get("codex-terra").model == "gpt-5.6-terra",
           "gpt-5.6-terra", str(CODEX_SEATS.get("codex-terra")))
 
 
@@ -4388,6 +4388,32 @@ def test_panel_catalog():
           subprocess_subset == list(cli._DEFAULT_SUBPROCESS_PANEL),
           str(list(cli._DEFAULT_SUBPROCESS_PANEL)), str(subprocess_subset))
 
+    # INDEPENDENT-literal drift pins: the two cli panels are now DERIVED from the
+    # Seat.opt_in flags (codex.py / cursor.py), so pin both against a hand-literal
+    # so a derivation-logic bug (wrong order / wrong filter) fails NAMING it, not
+    # just when it drifts in lockstep with the PANEL_PRESETS literal.
+    from multiagent.providers.codex import CODEX_SEATS
+    from multiagent.providers.cursor import CURSOR_SEATS
+    _both = {**CODEX_SEATS, **CURSOR_SEATS}
+    check("_DEFAULT_SUBPROCESS_PANEL == exact tuple (order pinned)",
+          cli._DEFAULT_SUBPROCESS_PANEL
+          == ("codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"),
+          "('codex', 'codex-luna', 'agy', 'cursor-auto', 'cursor-composer')",
+          str(cli._DEFAULT_SUBPROCESS_PANEL))
+    check("_PREMIUM_OFF_SEATS == the opt-in SET (no dupes/drops)",
+          set(cli._PREMIUM_OFF_SEATS)
+          == {"cursor-glm", "cursor-gpt", "cursor-gemini", "cursor-grok", "codex-terra"}
+          and len(cli._PREMIUM_OFF_SEATS) == 5,
+          "5 opt-in seats", str(cli._PREMIUM_OFF_SEATS))
+    # opt_in agreement: both derived panels tie back to the one flag.
+    check("_PREMIUM_OFF_SEATS == {seats with opt_in=True}",
+          set(cli._PREMIUM_OFF_SEATS) == {n for n, s in _both.items() if s.opt_in},
+          "opt_in True set", str(sorted(set(cli._PREMIUM_OFF_SEATS))))
+    check("_DEFAULT_SUBPROCESS_PANEL minus agy == {seats with opt_in=False}",
+          set(cli._DEFAULT_SUBPROCESS_PANEL) - {"agy"}
+          == {n for n, s in _both.items() if not s.opt_in},
+          "opt_in False set", str(sorted(set(cli._DEFAULT_SUBPROCESS_PANEL) - {"agy"})))
+
     # The other presets, verbatim. cursor is the literal group TOKEN, NOT an
     # expanded cursor-* list (seats.py is pure data; cli.py expands it later).
     check("lite == ['opus', 'sonnet']",
@@ -4729,6 +4755,13 @@ def _roster_scan(root: Path, report):
     from multiagent import seats
     from multiagent.cli import _DEFAULT_SUBPROCESS_PANEL, _PREMIUM_OFF_SEATS
     from multiagent.providers import known_seat_names
+    from multiagent.providers.codex import CODEX_SEATS
+    from multiagent.providers.cursor import CURSOR_SEATS
+
+    # Provider membership (the single truth): a line enumerating 2+ seats of the
+    # SAME provider is a stale-enumeration hazard the >=4 / stale-mix checks miss.
+    CODEX_KEYS = set(CODEX_SEATS)
+    CURSOR_KEYS = set(CURSOR_SEATS)
 
     FULL = seats.PANEL_PRESETS["full"]
     known = known_seat_names()
@@ -4822,6 +4855,14 @@ def _roster_scan(root: Path, report):
                 # Stale-mix: a stale/unknown name riding a roster of current ones.
                 report(f"{relf}:{i + 1} stale-mix token run >= 4", False,
                        "no >= 4 token run on a 3+ current-name line",
+                       f"{relf}:{i + 1}: {ln.strip()}")
+            # Provider-family rule (fires at 2, below every threshold above): a
+            # non-exempt prose line naming 2+ seats of the SAME provider is a
+            # stale-enumeration hazard (name_pats is separator-agnostic, so " + ",
+            # "/", ", " all trip). Cross-provider (1 codex + 1 cursor) does NOT.
+            if len(present & CODEX_KEYS) >= 2 or len(present & CURSOR_KEYS) >= 2:
+                report(f"{relf}:{i + 1} enumerates 2+ same-provider seats", False,
+                       "generic phrasing (e.g. 'the codex seats')",
                        f"{relf}:{i + 1}: {ln.strip()}")
 
 
@@ -4923,6 +4964,15 @@ def _roster_drill(root: Path):
         ("unbalanced-backtick wrapper on README default line", "README.md",
          lambda t: mutate_roster_line(t, "default",
              lambda l: l.replace("`codex`", "`codex", 1))),
+        # Provider-family rule: 2 same-provider seats on a NON-anchored prose line,
+        # one per separator, each BELOW every old-ratchet threshold so ONLY the
+        # family rule catches it (a 2-name line never reaches the >=4 / len>=3 gates).
+        ("family rule ' + ' separator (2 codex)", "plugins/crew/commands/review.md",
+         lambda t: append_line(t, "The codex + codex-luna seats agree here.")),
+        ("family rule '/' separator (2 cursor)", "plugins/crew/commands/build.md",
+         lambda t: append_line(t, "cursor-auto/cursor-composer routing note.")),
+        ("family rule ', ' separator (2 codex)", "plugins/crew/commands/measure-twice.md",
+         lambda t: append_line(t, "codex, codex-luna together on this line.")),
     ]
 
     scan_files = _roster_scan_files(root)

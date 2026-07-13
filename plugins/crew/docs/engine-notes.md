@@ -38,9 +38,9 @@ reasons, redundancy or cost.
 
 Opt-in for REDUNDANCY (not bucket cost):
 
-- `codex-terra`: codex + codex-luna already span the OpenAI lineage, so a third
-  OpenAI voice is redundant on every default review (run via `--seats
-  codex-terra`).
+- `codex-terra`: the two default codex-family seats already span the OpenAI
+  lineage, so a third OpenAI voice is redundant on every default review (run via
+  `--seats codex-terra`).
 
 Opt-in for COST (premium/metered Cursor buckets):
 
