@@ -2627,6 +2627,31 @@ def test_dispatcher():
         check("missing crew-state.py: NO raw traceback",
               "Traceback" not in proc.stderr, "no traceback", proc.stderr[:150])
 
+    # (a.7) Version floor: the engine needs stdlib tomllib, so the dispatcher
+    # refuses < 3.11 with ONE line and no traceback. Simulated (a real 3.10
+    # interpreter is not assumable): patch sys.version_info, then run the
+    # dispatcher through runpy as __main__. The guard must fire BEFORE the
+    # multiagent.cli import, so this also proves it sits above that import.
+    for sub in (["seats"], ["state", "show", "bl"]):
+        prog = (
+            "import sys, runpy\n"
+            "sys.version_info = (3, 10, 0)\n"
+            f"sys.argv = ['crew', *{sub!r}]\n"
+            f"runpy.run_path({str(CREW_DISPATCHER)!r}, run_name='__main__')\n"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            proc = subprocess.run(
+                [sys.executable, "-c", prog],
+                capture_output=True, text=True, env=_neutral_env(), cwd=td, timeout=30,
+            )
+        label = " ".join(sub)
+        err_lines = [ln for ln in proc.stderr.strip().splitlines() if ln.strip()]
+        check(f"crew {label} on simulated <3.11: exits NONZERO",
+              proc.returncode != 0, "nonzero", f"{proc.returncode}: {proc.stderr[:150]}")
+        check(f"crew {label} on simulated <3.11: ONE stderr line naming 3.11, no traceback",
+              len(err_lines) == 1 and "3.11" in err_lines[0] and "Traceback" not in proc.stderr,
+              "one line mentioning 3.11", repr(proc.stderr[:200]))
+
 
 def test_stage_all():
     log_section("render --stage-all (N labeled files in one call)")
@@ -3268,31 +3293,6 @@ def test_config():
     with project("[debate]\npanel = 7\n"):
         check("config non-string [debate].panel -> None",
               config.debate_panel() is None, "None", str(config.debate_panel()))
-
-    # 6. < 3.11 path: simulate tomllib ABSENT -> file ignored + ONE-TIME stderr note.
-    with project(VALID):
-        saved_tomllib = config.tomllib
-        config.tomllib = None
-        config._reset_cache_for_tests()
-        try:
-            buf = io.StringIO()
-            with redirect_stderr(buf):
-                dp = config.default_panel()
-                tmo = config.default_timeout()
-            note = buf.getvalue()
-            check("config <3.11 (no tomllib): file ignored -> getters None",
-                  dp is None and tmo is None, "None/None", f"dp={dp} tmo={tmo}")
-            check("config <3.11 (no tomllib): emits the mandatory one-time stderr note",
-                  "3.11" in note and "ignoring" in note.lower(),
-                  "note mentions 3.11 + ignoring", repr(note))
-            buf2 = io.StringIO()
-            with redirect_stderr(buf2):
-                config.default_panel()
-            check("config <3.11 note fires AT MOST ONCE per process",
-                  buf2.getvalue() == "", "no repeat", repr(buf2.getvalue()))
-        finally:
-            config.tomllib = saved_tomllib
-            config._reset_cache_for_tests()
 
     # ---- Precedence: per-repo BEATS global BEATS built-in (env retired) ----------
     from multiagent.cli import _resolve_timeout, _codex_model  # noqa: E402

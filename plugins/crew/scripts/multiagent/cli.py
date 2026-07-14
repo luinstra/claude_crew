@@ -2685,17 +2685,14 @@ def _apply_repo_overrides(
     # Parse-guard BACKSTOP: the base is known to parse (validated by the caller).
     # If our line-edits somehow produced an UNLOADABLE result (a header form the
     # recognizer still misses → a duplicate table, etc.), DISCARD the edit and
-    # leave the base verbatim — never hand back a config that won't load. On
-    # Python <3.11 tomllib is None and the guard can't run (the documented
-    # best-effort limitation); the broadened recognizer above still applies.
-    if config.tomllib is not None:
-        try:
-            config.tomllib.loads(result)
-        except (config.tomllib.TOMLDecodeError, UnicodeDecodeError):
-            return base, [
-                "could not safely apply overrides to your global — left it "
-                "unchanged; edit .crew/config.toml by hand"
-            ]
+    # leave the base verbatim — never hand back a config that won't load.
+    try:
+        config.tomllib.loads(result)
+    except (config.tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return base, [
+            "could not safely apply overrides to your global — left it "
+            "unchanged; edit .crew/config.toml by hand"
+        ]
     return result, notes
 
 
@@ -2798,17 +2795,16 @@ def cmd_scaffold_config(args: argparse.Namespace) -> int:
             base = ""
             has_global = False
         if has_global:
-            if config.tomllib is not None:
-                try:
-                    config.tomllib.loads(base)
-                except (config.tomllib.TOMLDecodeError, UnicodeDecodeError):
-                    print(
-                        "error: existing global ~/.crew-config.toml does not parse as TOML; "
-                        "refusing to seed an unloadable base into .crew/config.toml — fix or "
-                        "remove the global file first",
-                        file=sys.stderr,
-                    )
-                    return 2
+            try:
+                config.tomllib.loads(base)
+            except (config.tomllib.TOMLDecodeError, UnicodeDecodeError):
+                print(
+                    "error: existing global ~/.crew-config.toml does not parse as TOML; "
+                    "refusing to seed an unloadable base into .crew/config.toml — fix or "
+                    "remove the global file first",
+                    file=sys.stderr,
+                )
+                return 2
             seat_avail: dict[str, bool] = {}
             for s in sorted(opted_in):
                 seat_avail[s] = True

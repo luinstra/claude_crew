@@ -41,7 +41,7 @@ multiagent/
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
-├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel, [debate].panel, [dispatch].seat validated vs known_seat_names(), per-seat tuning, [panels] roster, seat `available`); per-repo>global>builtin; pure leaf, no cli/providers import; Python 3.11+ tomllib, else gracefully ignored
+├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel, [debate].panel, [dispatch].seat validated vs known_seat_names(), per-seat tuning, [panels] roster, seat `available`); per-repo>global>builtin; pure leaf, no cli/providers import; parses with stdlib tomllib (the 3.11 floor the `crew` dispatcher asserts)
 ├── render.py            # side-by-side panel + --json rendering (the faithful projection + raw-fallback)
 ├── findings.py          # PURE parser + complete-linkage grouping + grouped-digest renderer (no I/O, no model calls, never raises); powers `collect --group`
 └── providers/

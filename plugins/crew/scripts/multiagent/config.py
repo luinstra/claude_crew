@@ -32,9 +32,6 @@ predictable). The ``CREW_MA_*`` env surface is RETIRED — it is consulted nowhe
 
 Error handling (a review seat must NEVER die because of a config typo):
   * Missing file → no-op; getters return ``None`` (callers use defaults).
-  * No ``tomllib`` (Python < 3.11) → file ignored; behaves as today, PLUS a
-    MANDATORY one-time stderr note (so a user who set ``default_panel="lite"`` to
-    SAVE cost isn't silently given the full panel on the minimum interpreter).
   * Malformed TOML (``TOMLDecodeError``) → warn once, ignore the WHOLE file.
   * Bad individual field (wrong type / out-of-range) → that getter drops the
     field and keeps the built-in default, warning once; siblings unaffected.
@@ -57,10 +54,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-try:
-    import tomllib  # Python 3.11+
-except ModuleNotFoundError:  # < 3.11: file gracefully ignored (see _load_uncached)
-    tomllib = None  # type: ignore[assignment]
+import tomllib  # stdlib 3.11+; the dispatcher (plugins/crew/crew) enforces that floor
 
 
 # Sentinel distinguishing "never loaded" from a legitimately empty ({}) config.
@@ -121,24 +115,14 @@ def _load_uncached(path: Path) -> dict:
     """Read + parse the config file at ``path``, returning ``{}`` on any failure.
 
     Shared by BOTH the per-repo and global loaders so the parse/error posture
-    (missing → ``{}``; no-tomllib → one-time note; malformed → warn + ``{}``) is
-    written once. Warn keys are path-qualified so the per-repo and global files
-    each warn independently.
+    (missing → ``{}``; malformed → warn + ``{}``) is written once. Warn keys are
+    path-qualified so the per-repo and global files each warn independently.
     """
     try:
         raw = path.read_bytes()
     except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
         return {}
     except OSError:
-        return {}
-
-    # The file EXISTS. On Python < 3.11 there is no tomllib — emit the mandatory
-    # one-time note and ignore the file (behavior identical to today otherwise).
-    if tomllib is None:
-        _warn_once(
-            f"no-tomllib:{path}",
-            f"found {path} but TOML parsing requires Python 3.11+; ignoring",
-        )
         return {}
 
     try:

@@ -103,8 +103,7 @@ repo-relative path.
 
 ### Requirements
 
-- **Python 3.10+** — macOS 12+ and most modern Linux distributions include this. Check with `python3 --version`.
-  - The optional per-repo `.crew/config.toml` (see [Per-repo config](#per-repo-config)) needs **Python 3.11+** (stdlib `tomllib`); on 3.10 the config file is gracefully ignored and everything else works.
+- **Python 3.11+**: the engine parses its TOML config with stdlib `tomllib`, which lands in 3.11. macOS 13+ and most modern Linux distributions include it. Check with `python3 --version`; below 3.11 the `crew` engine exits with a one-line diagnostic.
 
 ## Usage
 
@@ -254,10 +253,8 @@ single seat is plenty for routine work.
 models (plus codex `reasoning_effort`, agy `print_timeout`) and the global
 per-seat `timeout`. When you name no panel, `default_panel` resolves from
 config, falling back to built-in `full`; the per-seat tuning knobs follow
-**CLI flag > per-repo config > global config > built-in**. Needs Python 3.11+
-(stdlib `tomllib`); on 3.10 the file is gracefully ignored — with a one-time
-stderr note, so a `default_panel = "lite"` set to save cost can't silently hand
-you the full panel.
+**CLI flag > per-repo config > global config > built-in**. A malformed file is
+ignored with a one-time stderr note, so a config typo never takes down a panel.
 
 `/crew:debate` honors config too, with its own `[debate].panel` override so a
 repo can default its debates fuller than its reviews (debate's value is
@@ -300,8 +297,8 @@ file — set them globally in `~/.crew-config.toml` or per-repo in
 per-repo value wins over the global one, which wins over the built-in default
 (`CLI flag > per-repo .crew/config.toml > global ~/.crew-config.toml >
 built-in`). For `[seats.<name>]` tables this is per-seat-per-key, so a seat tuned
-only in the global file still applies. Same TOML/`tomllib`/one-time-stderr-note
-posture as the per-repo file.
+only in the global file still applies. Same TOML/one-time-stderr-note posture as
+the per-repo file.
 
 ```toml
 # ~/.crew-config.toml

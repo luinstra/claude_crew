@@ -18,7 +18,22 @@ resolves because this dispatcher's guard already put ``scripts/`` on sys.path.
 from __future__ import annotations
 
 import sys
-from pathlib import Path
+
+# --- version floor: the engine needs stdlib tomllib (3.11+) ------------------
+# Asserted HERE and nowhere else: this dispatcher is the single entry point to
+# both the engine and `crew state`, so a per-module guard would buy nothing. It
+# must run BEFORE the `multiagent.cli` import below, whose config layer imports
+# tomllib unconditionally. One line, no traceback.
+if sys.version_info < (3, 11):
+    print(
+        "crew: needs Python 3.11+ for TOML config parsing, found "
+        f"{sys.version_info[0]}.{sys.version_info[1]}; upgrade the python3 on PATH.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+# -----------------------------------------------------------------------------
+
+from pathlib import Path  # noqa: E402
 
 # --- sys.path guard: make the sibling `scripts/` package dir importable ------
 # crew lives at plugins/crew/crew; the package parent is plugins/crew/scripts.
