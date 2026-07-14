@@ -457,14 +457,17 @@ When the panel's verdict is **APPROVED** (or REVISE with only [MINOR] issues):
 2. **Present the final plan to the user:**
    - Read the plan file
    - Summarize what was planned
-   - Note how many iterations it took
+   - Note what the loop cost against its budget (stop fires and elapsed vs the
+     deadline, as `crew state show mt` reports them). There is no round counter
+     in state, so do not claim an iteration count.
    - Ask if they want to proceed with `/crew:execute`
 
 ## Exit Conditions
 
 - Panel verdict is **APPROVED**
 - Panel verdict is **REVISE** but ALL issues are marked [MINOR]
-- Max iterations (10) reached (safety limit)
+- A hook-owned safety limit trips: the stop-fire cap or the wall-clock deadline
+  (both force-exit the loop; see `scripts/CLAUDE.md`)
 - User runs `/crew:cancel-measure-twice`
 
 ---

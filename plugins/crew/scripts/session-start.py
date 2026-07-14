@@ -37,10 +37,16 @@ from models import (
     SessionStartInput,
     SessionStartResult,
     read_hook_input,
+    effective_count,
+    effective_deadline,
+    elapsed_minutes,
     get_file_age_days,
     count_incomplete_todos,
     is_verbose,
     read_state_json,
+    DEFAULT_DEADLINE_MINUTES,
+    DEFAULT_MAX_STOP_FIRES,
+    LOAD_FUTURE_SCHEMA,
     LOAD_OK,
 )
 from state_discovery import is_loop_state_file, is_active_state_file
@@ -100,6 +106,13 @@ def cleanup_stale_files(directory: Path) -> None:
     # names (the two state kinds × legacy/`-<id>` forms), never a bare `.*.tmp`
     # that would delete any hidden temp from any tool. These sweep atomic-write
     # temps orphaned by a crash between mkstemp and os.replace (rare).
+    #
+    # The `.lock` globs match the sibling lock files `models.state_lock` creates
+    # next to each state file (`<state-filename>.lock`), already crew-anchored by the
+    # state filename, and swept only past MAX_AGE_DAYS. A lock in use is kept young
+    # (the acquire touches its mtime), so this only reaps locks whose loop is long
+    # gone: deleting one mid-use would split that loop's writers across two inodes.
+    # Same exact + `-<id>` anchoring as the rest, never a bare `*.lock`.
     non_state_patterns = [
         "context-snapshot-*.json",
         "context-snapshot.md",
@@ -112,6 +125,10 @@ def cleanup_stale_files(directory: Path) -> None:
         "build-state-*.json.corrupt",
         "measure-twice-state.json.corrupt",
         "measure-twice-state-*.json.corrupt",
+        "build-state.json.lock",
+        "build-state-*.json.lock",
+        "measure-twice-state.json.lock",
+        "measure-twice-state-*.json.lock",
     ]
 
     now = time.time()
@@ -121,12 +138,28 @@ def cleanup_stale_files(directory: Path) -> None:
         try:
             if is_loop_state_file(json_file.name):
                 age = now - json_file.stat().st_mtime
-                if is_active_state_file(json_file):
+                _, status = read_state_json(json_file)
+                if status == LOAD_FUTURE_SCHEMA:
+                    # Refuse to touch a newer-schema file, the same contract every
+                    # other mutating path honors: deleting is the most destructive
+                    # touch there is, and a downgrade must never destroy a live
+                    # loop it cannot even read. Note it only when it WOULD have
+                    # been swept, so a fresh newer-format loop stays quiet.
+                    limit = (MAX_AGE_SECONDS if is_active_state_file(json_file)
+                             else STALE_INACTIVE_SECONDS)
+                    if age > limit:
+                        print(
+                            f"[crew] keeping {json_file.name}: written by a newer "
+                            f"crew version (state schema ahead of this install); "
+                            f"not sweeping it.",
+                            file=sys.stderr,
+                        )
+                elif is_active_state_file(json_file):
                     # Active but very old (>7 days) — force-deactivate and delete
                     if age > MAX_AGE_SECONDS:
                         json_file.unlink()
                 else:
-                    # Inactive — delete if older than 1 day
+                    # Inactive (incl. corrupt/unreadable): delete if older than 1 day
                     if age > STALE_INACTIVE_SECONDS:
                         json_file.unlink()
         except (OSError, AttributeError, KeyError, ValueError):
@@ -380,6 +413,24 @@ def build_plugin_guidance(stack_hints: list[str]) -> str:
     return "\n".join(lines)
 
 
+def loop_budget_line(data: dict) -> str:
+    """The restored loop's REAL budget: the two hook-owned bounds that can end it.
+
+    A resumed loop keeps the fires and the wall clock it accumulated, so the
+    banner reports those rather than a counter frozen at init. `elapsed` is `?`
+    when `started_at` is absent or unparseable (a legacy file the Stop hook has
+    not stamped yet). The bounds run through the SAME coercions the Stop hook
+    enforces with, so the banner can never advertise a bound the hook won't honor.
+    """
+    minutes = elapsed_minutes(data.get("started_at", ""))
+    elapsed = f"{minutes:.0f}" if minutes is not None else "?"
+    deadline = effective_deadline(data.get("deadline_minutes", DEFAULT_DEADLINE_MINUTES))
+    fires = effective_count(data.get("stop_fires", 0), 0)
+    max_fires = effective_count(
+        data.get("max_stop_fires", DEFAULT_MAX_STOP_FIRES), DEFAULT_MAX_STOP_FIRES)
+    return f"Budget: stop fires {fires}/{max_fires} · elapsed {elapsed}/{deadline} min"
+
+
 def build_session_status(
     directory: Path,
     home: Path,
@@ -436,12 +487,11 @@ def build_session_status(
 
                 # Build status line
                 if json_file.name.startswith("build-state"):
-                    iteration = data.get("iteration", 1)
-                    max_iter = data.get("max_iterations", 10)
                     prompt = data.get("prompt", "")
                     if is_this_session:
                         this_session_loops.append(
-                            f"[Build Loop Active - {iteration}/{max_iter}]\n"
+                            f"[Build Loop Active]\n"
+                            f"{loop_budget_line(data)}\n"
                             f"Task: {prompt}\n"
                             f"Continue until the multi-model panel approves completion."
                         )
@@ -450,13 +500,12 @@ def build_session_status(
                             f"Build loop (session {file_session[:8]}...): {prompt[:50]}"
                         )
                 elif json_file.name.startswith("measure-twice-state"):
-                    iteration = data.get("iteration", 1)
-                    max_iter = data.get("max_iterations", 10)
                     task = data.get("task_description", "")
                     plan = data.get("plan_file", "")
                     if is_this_session:
                         this_session_loops.append(
-                            f"[Measure-Twice Loop Active - {iteration}/{max_iter}]\n"
+                            f"[Measure-Twice Loop Active]\n"
+                            f"{loop_budget_line(data)}\n"
                             f"Task: {task}\n"
                             f"Plan: {plan}\n"
                             f"Continue until the panel approves the plan."

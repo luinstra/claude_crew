@@ -2400,9 +2400,18 @@ def _render_config_template(
         else:
             L.append(f"# [seats.{seat}]   # {_OPT_IN_COMMENT}")
         L.append("")
+    # Lazy import (call-time), like config.py's: the engine stays a leaf that does
+    # not need the state models at load. Emitting the real numbers keeps the
+    # scaffolded default and the enforced bound from drifting apart.
+    from models import DEFAULT_DEADLINE_MINUTES, MAX_DEADLINE_MINUTES
+
     L.append("# [tuning].timeout — per-seat wall-clock default (positive integer seconds).")
+    L.append("# [tuning].deadline_minutes: the persistence loops' wall clock, read by")
+    L.append(f"#   `crew state init` (1-{MAX_DEADLINE_MINUTES}; an out-of-range value is")
+    L.append("#   dropped with a warning, never silently clamped).")
     L.append("# [tuning]")
     L.append("# timeout = 600")
+    L.append(f"# deadline_minutes = {DEFAULT_DEADLINE_MINUTES}")
 
     # Task seats: only an explicit --disable-seat (opt-out) emits a line.
     task_blocks: list[str] = []

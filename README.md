@@ -141,7 +141,11 @@ For non-trivial work, use the **plan → execute** workflow to keep your main co
 4. **Execute** — `/crew:execute` to implement via executor agent
 5. **Verify** — Check results, iterate if needed
 
-For work requiring verification before declaring "done," use `/crew:build` instead — it won't let you stop until the multi-model review panel approves completion.
+For work requiring verification before declaring "done," use `/crew:build` instead: it won't let you stop until the multi-model review panel approves completion. Three other things can end a turn:
+
+- **Cancelling** (`/crew:cancel-build`).
+- **A hook-owned safety limit** (a stop-fire cap or the wall-clock deadline), which force-exits the loop and asks for a status report instead of an approval.
+- **A parked turn.** While the session still has background work in flight (its own panel seats, but also any unrelated background shell: a dev server, a `tail -f`), the Stop is ALLOWED and the turn ends: waiting is not quitting, and the session resumes when that work completes. The loop stays active. Consecutive parked turns are capped (20), after which a parked stop is nudged like any other, so a background process that never exits cannot switch the loop off.
 
 ## Commands
 
@@ -282,6 +286,7 @@ print_timeout = "8m"
 
 [tuning]
 timeout = 600                     # global per-seat wall-clock seconds
+deadline_minutes = 120            # the persistence loops' wall clock (1-240); read by `crew state init`
 ```
 
 #### Global per-user config

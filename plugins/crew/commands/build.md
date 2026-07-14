@@ -437,7 +437,17 @@ When the panel's verdict is APPROVED (or REVISE with only [MINOR] issues):
 
 ## Early Exit
 
-To exit before completion: `/crew:cancel-build`
+The loop can end before the panel approves in three ways:
+
+- User runs `/crew:cancel-build`
+- A hook-owned safety limit trips: the stop-fire cap or the wall-clock deadline
+  (both force-exit the loop; see `scripts/CLAUDE.md`). Report where the work
+  stands; do NOT re-init the loop to keep going.
+- The turn is PARKED: background work the session launched is still in flight
+  (panel seats, but also any unrelated background shell), so the Stop is ALLOWED
+  and the turn ends. This is not an exit: the loop stays active and picks up when
+  that work completes. Consecutive parked turns are capped, so a shell that never
+  exits cannot switch the loop off.
 
 ---
 

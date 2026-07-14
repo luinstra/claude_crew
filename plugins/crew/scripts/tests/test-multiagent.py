@@ -582,6 +582,56 @@ def test_resolve_timeout():
               _resolve_timeout(None) >= 600, ">=600", str(_resolve_timeout(None)))
 
 
+def test_deadline_minutes():
+    """[tuning].deadline_minutes: the persistence loops' wall clock.
+
+    Same two-layer precedence and same never-crash posture as every other key.
+    Validated against the SAME ceiling `crew state init` polices the flag with: a
+    config file is no more trustworthy than the flag, and a non-positive value
+    would read as "no deadline" in the Stop hook.
+    """
+    log_section("[tuning].deadline_minutes")
+    import io  # noqa: E402
+    from contextlib import redirect_stderr  # noqa: E402
+
+    from multiagent import config  # noqa: E402
+    from models import MAX_DEADLINE_MINUTES  # noqa: E402
+
+    with project_config("", write_file=False):
+        check("no config -> deadline_minutes() is None (caller keeps its builtin)",
+              config.deadline_minutes() is None, "None", str(config.deadline_minutes()))
+    with project_config("[tuning]\ndeadline_minutes = 90\n"):
+        check("per-repo [tuning].deadline_minutes -> 90",
+              config.deadline_minutes() == 90, "90", str(config.deadline_minutes()))
+    with crew_config(glob="[tuning]\ndeadline_minutes = 150\n"):
+        check("global [tuning].deadline_minutes applies with no per-repo file",
+              config.deadline_minutes() == 150, "150", str(config.deadline_minutes()))
+    with crew_config(project="[tuning]\ndeadline_minutes = 90\n",
+                     glob="[tuning]\ndeadline_minutes = 150\n"):
+        check("per-repo [tuning].deadline_minutes BEATS global",
+              config.deadline_minutes() == 90, "90", str(config.deadline_minutes()))
+    with project_config(f"[tuning]\ndeadline_minutes = {MAX_DEADLINE_MINUTES}\n"):
+        check(f"[tuning].deadline_minutes at the policy ceiling ({MAX_DEADLINE_MINUTES}) is accepted",
+              config.deadline_minutes() == MAX_DEADLINE_MINUTES,
+              str(MAX_DEADLINE_MINUTES), str(config.deadline_minutes()))
+    # Every out-of-policy shape is DROPPED (None -> builtin), never clamped, and
+    # never raises: a bad value must not delete the only cost ceiling in the loop.
+    for body, label in (
+        (f"[tuning]\ndeadline_minutes = {MAX_DEADLINE_MINUTES + 1}\n", "past the ceiling"),
+        ("[tuning]\ndeadline_minutes = 0\n", "zero"),
+        ("[tuning]\ndeadline_minutes = -5\n", "negative"),
+        ("[tuning]\ndeadline_minutes = true\n", "bool (an int subclass)"),
+        ("[tuning]\ndeadline_minutes = \"soon\"\n", "non-int"),
+    ):
+        with project_config(body):
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                val = config.deadline_minutes()
+            check(f"[tuning].deadline_minutes {label} -> None + stderr warn",
+                  val is None and "deadline_minutes" in buf.getvalue(),
+                  "None + warn", f"val={val!r} stderr={buf.getvalue()[:120]!r}")
+
+
 def test_stage():
     log_section("--stage session-scoped prompt staging")
     from multiagent import cli  # noqa: E402
@@ -6239,6 +6289,14 @@ def test_scaffold_config():
         check("bare (no --detection): 'detection skipped' note on STDERR not stdout",
               "detection skipped" in err and "detection skipped" not in out,
               "note on stderr only", f"err={err[:80]} out-has-note={'detection skipped' in out}")
+        # The template emits every LOADER-READ key, and `[tuning].deadline_minutes`
+        # (the persistence loops' wall clock, read by `crew state init`) is one: a
+        # knob absent from the generated config is a knob nobody discovers.
+        from models import DEFAULT_DEADLINE_MINUTES as _DDM, MAX_DEADLINE_MINUTES as _MDM
+        check("scaffold [tuning] emits deadline_minutes at the enforced default",
+              f"# deadline_minutes = {_DDM}" in out and f"1-{_MDM}" in out,
+              f"commented `deadline_minutes = {_DDM}` + the 1-{_MDM} range",
+              out[out.find("[tuning]"):][:200] if "[tuning]" in out else out[:120])
         if parsed is not None:
             seats_tbl = parsed.get("seats", {})
             check("bare (no --detection) OMITS every per-seat available line",
@@ -7527,6 +7585,7 @@ def main():
     test_result_contract()
     test_default_seats()
     test_resolve_timeout()
+    test_deadline_minutes()
     test_stage()
     test_stage_all()
     test_dispatcher()

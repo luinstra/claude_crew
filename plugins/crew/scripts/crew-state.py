@@ -7,18 +7,29 @@ import os
 import re
 import sys
 from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
 
 # Import from models.py (same directory)
 from models import (
     BuildState,
     MeasureTwiceState,
-    atomic_write_json,
+    StateLockError,
+    effective_count,
+    effective_deadline,
+    elapsed_minutes,
+    read_state_json,
+    update_state_json,
+    utc_now_iso,
+    DEFAULT_DEADLINE_MINUTES,
+    DEFAULT_MAX_STOP_FIRES,
+    FORCE_EXIT_KEY,
+    MAX_DEADLINE_MINUTES,
     SCHEMA_VERSION,
     LOAD_CORRUPT,
     LOAD_FUTURE_SCHEMA,
+    LOAD_OK,
 )
+from multiagent import config
 from state_discovery import find_adoptable_legacy, find_session_state_file
 
 LOOP_ALIASES = {
@@ -53,8 +64,8 @@ def _refuse_future_schema(path: Path, status: str) -> None:
 
 def _refuse_corrupt(path: Path, status: str) -> None:
     """Mirror the hook's corrupt handling for mutate-in-place commands
-    (set/increment/deactivate): never silently overwrite an unparseable file as
-    if it were clean — emit a loud diagnostic and exit nonzero."""
+    (set/deactivate): never silently overwrite an unparseable file as if it were
+    clean, emit a loud diagnostic and exit nonzero."""
     if status == LOAD_CORRUPT:
         print(
             f"Error: {path.name} is corrupt (unparseable JSON) — refusing to "
@@ -65,15 +76,33 @@ def _refuse_corrupt(path: Path, status: str) -> None:
         sys.exit(2)
 
 
-def _load_for_mutation(cls, path: Path):
-    """Load state for a mutate-in-place CLI command, honoring the
-    refuse-to-touch contract (same as the Stop hook): a newer-schema file is
-    NEVER overwritten; a corrupt file is not silently clobbered. Returns the
-    loaded (OK/MISSING) state."""
-    state, status = cls.load_with_status(path)
+def _mutate_state(cls, path: Path, mutate) -> dict:
+    """Apply ``mutate`` to the state file under the shared interprocess lock.
+
+    The lock spans the READ and the WRITE, so a Stop-hook counter bump landing in
+    that window is not lost: an atomic write alone makes the replace indivisible,
+    not the read-modify-write around it. ``mutate`` edits only the keys its verb
+    owns, on the dict that is on disk NOW (unknown keys and hook-owned counters go
+    back verbatim, which a dataclass round trip would drop or revert).
+
+    Honors the same refuse-to-touch contract as the Stop hook: a newer-schema file
+    is NEVER overwritten and a corrupt one is never silently clobbered (both exit
+    nonzero, bytes untouched). A missing file starts from the loop's default shape,
+    so a first write is a complete state file. A lock that cannot be taken is a
+    FAILED write, not a silent unlocked one.
+    """
+    try:
+        data, status = update_state_json(path, mutate, default=asdict(cls()))
+    except StateLockError as exc:
+        print(
+            f"Error: could not lock {path.name} ({exc}). Another writer is holding "
+            f"it; nothing was written. Retry.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     _refuse_future_schema(path, status)
     _refuse_corrupt(path, status)
-    return state
+    return data
 
 
 def get_loop_filename(canonical: str, session_id: str = "") -> str:
@@ -140,11 +169,29 @@ def slugify(text: str, max_length: int = 50) -> str:
     return slug[:max_length] if slug else "plan"
 
 
+def _budget_summary(state) -> str:
+    """The loop's REAL budget: the two hook-owned bounds that can end it.
+
+    Reported through the SAME defensive coercions the Stop hook enforces with, so
+    a hand-edited out-of-policy value can never make this line disagree with the
+    bound that actually ends the loop.
+
+    There is no round counter to report: the Stop hook counts its own fires, not
+    revision rounds. `elapsed` reads `?` when `started_at` is missing or
+    unparseable (a legacy file the hook has not stamped yet).
+    """
+    minutes = elapsed_minutes(getattr(state, "started_at", ""))
+    deadline = effective_deadline(getattr(state, "deadline_minutes", DEFAULT_DEADLINE_MINUTES))
+    elapsed = f"{minutes:.0f}" if minutes is not None else "?"
+    fires = effective_count(getattr(state, "stop_fires", 0), 0)
+    max_fires = effective_count(
+        getattr(state, "max_stop_fires", DEFAULT_MAX_STOP_FIRES), DEFAULT_MAX_STOP_FIRES)
+    return f"fires={fires}/{max_fires} elapsed={elapsed}/{deadline}min"
+
+
 def _compact_show(state, canonical: str) -> str:
     """Format state as a compact single-line summary."""
     active_str = "true" if state.active else "false"
-    iteration = getattr(state, "iteration", 1)
-    max_iter = getattr(state, "max_iterations", 10)
 
     if canonical == "bl":
         raw_task = getattr(state, "prompt", "")
@@ -159,7 +206,10 @@ def _compact_show(state, canonical: str) -> str:
     # Escape double quotes in task for safe inline display
     task_escaped = task.replace('"', '\\"')
 
-    line = f'loop={canonical} active={active_str} iter={iteration}/{max_iter} task="{task_escaped}"'
+    line = (
+        f'loop={canonical} active={active_str} {_budget_summary(state)} '
+        f'task="{task_escaped}"'
+    )
 
     if canonical == "mt":
         plan = getattr(state, "plan_file", "")
@@ -178,7 +228,15 @@ def cmd_show(args):
 
     verbose = getattr(args, "verbose", False)
     if verbose:
-        print(json.dumps(asdict(state), indent=2))
+        # Print what is ON DISK, not asdict(state): the dataclass drops the keys
+        # written outside it (completed_at, reason, force_exit), and `init`
+        # refuses to restart a force-exited loop based on exactly those. A
+        # refusal the supported inspection command cannot explain is a trap.
+        data, status = read_state_json(path)
+        if status == LOAD_OK and isinstance(data, dict):
+            print(json.dumps(data, indent=2))
+        else:
+            print(json.dumps(asdict(state), indent=2))
     else:
         print(_compact_show(state, canonical))
 
@@ -211,7 +269,7 @@ def _resolve_loop_path(loop: str, session_id: str) -> Path:
     the Stop hook resolves (find_session_state_file, so an adopted legacy file
     is read and mutated on its real path), falling back to the fresh
     session-scoped path when nothing is found. Keeps show/is-active and
-    set/increment/deactivate in agreement about which file the loop lives in."""
+    set/deactivate in agreement about which file the loop lives in."""
     canonical = LOOP_ALIASES[loop]
     crew_dir = get_project_dir() / ".crew"
     path = find_session_state_file(crew_dir, LOOP_PREFIXES[canonical], session_id)
@@ -220,22 +278,64 @@ def _resolve_loop_path(loop: str, session_id: str) -> Path:
     return path
 
 
+def _apply_field(cls, path: Path, field: str, raw_value: str) -> None:
+    """Write ONE key into the state file, under the lock, reading AT WRITE TIME.
+
+    The dict written back is the one on disk NOW, not a snapshot taken before the
+    command validated its arguments: a `stop_fires` the Stop hook bumped in that
+    window is written back as the HOOK left it, never as this process last saw it.
+    """
+    # Type comes from the DATACLASS field, never from whatever is on disk, so a
+    # hand-edited wrong-typed value can't dictate how the new one is coerced.
+    field_type = type(getattr(cls(), field))
+    value = coerce_value(raw_value, field_type)
+
+    def mutate(data: dict) -> dict:
+        data[field] = value
+        data["schema"] = SCHEMA_VERSION
+        return data
+
+    _mutate_state(cls, path, mutate)
+
+
 def cmd_set(args):
-    """Set a single field on a loop state."""
+    """Set a single field on a loop state: a FIELD-LEVEL update, not a whole-state
+    rewrite.
+
+    Refuses any field outside the loop's AGENT_SETTABLE allowlist. The allowlist
+    is deliberately narrow: every field the Stop hook's termination predicate
+    reads is off limits, so the loop's safety bounds cannot be edited by the
+    thing they are meant to bound. `deactivate` remains the audited way to turn a
+    loop off; this verb must never be a back door around it.
+
+    Only the ONE requested key is written; the rest of the file goes back
+    verbatim. A whole-state save would let an allowlisted write ALSO restore this
+    process's stale snapshot of `stop_fires`/`parked_fires`/`started_at`, which
+    reopens the counter-reset hole the allowlist exists to close (the Stop hook
+    can bump a counter between this command's read and its write).
+    """
     session_id = resolve_session_id(args)
     path = _resolve_loop_path(args.loop, session_id)
     cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
-    state = _load_for_mutation(cls, path)
+    defaults = cls()
 
-    if not hasattr(state, args.field):
+    if not hasattr(defaults, args.field):
         print(f"Error: {cls.__name__} has no field '{args.field}'", file=sys.stderr)
         sys.exit(1)
 
-    # Get field type from dataclass
-    field_type = type(getattr(state, args.field))
-    coerced = coerce_value(args.value, field_type)
-    setattr(state, args.field, coerced)
-    state.save(path)
+    if args.field not in cls.AGENT_SETTABLE:
+        allowed = ", ".join(sorted(cls.AGENT_SETTABLE)) or "(none)"
+        print(
+            f"Error: '{args.field}' is not settable: it is owned by the Stop "
+            f"hook, which enforces this loop's termination bounds.\n"
+            f"  Settable fields: {allowed}\n"
+            f"  To stop the loop:  crew state deactivate {args.loop} "
+            f"--reason '<why>' --session-id <id>",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    _apply_field(cls, path, args.field, args.value)
 
 
 def check_for_conflicts(session_id: str = ""):
@@ -311,6 +411,39 @@ def _resolve_init_text(args, inline_value, inline_flag_name):
         sys.exit(2)
 
 
+def _find_force_exited(canonical: str, session_id: str):
+    """The state file of a loop the Stop hook FORCE-EXITED, or None.
+
+    Checks the file a fresh `init` would replace AND any adoptable legacy file
+    (the same two candidates check_for_conflicts weighs), because after a
+    force-exit both are `active: false` and neither blocks as a conflict.
+    """
+    crew_dir = get_project_dir() / ".crew"
+    candidates = [crew_dir / get_loop_filename(canonical, session_id)]
+    if session_id:
+        legacy = find_adoptable_legacy(crew_dir, LOOP_PREFIXES[canonical], session_id)
+        if legacy is not None:
+            candidates.append(legacy)
+    for path in candidates:
+        data, status = read_state_json(path)
+        if status == LOAD_OK and data.get(FORCE_EXIT_KEY):
+            return path
+    return None
+
+
+def _resolve_deadline(args) -> int:
+    """The loop's wall clock: CLI flag > per-repo > global > builtin.
+
+    Same precedence as every other crew config key. The config value is already
+    validated (1..MAX_DEADLINE_MINUTES) by the getter, and the flag by argparse,
+    so nothing out of policy reaches the state file.
+    """
+    if args.deadline_minutes:
+        return args.deadline_minutes
+    configured = config.deadline_minutes()
+    return configured if configured is not None else DEFAULT_DEADLINE_MINUTES
+
+
 def cmd_init(args):
     """Initialize a loop with default state."""
     session_id = resolve_session_id(args)
@@ -323,6 +456,26 @@ def cmd_init(args):
 
     canonical = LOOP_ALIASES[args.loop]
     path = get_state_path(args.loop, session_id)
+
+    # A force-exited loop is turned off, so nothing above blocks a fresh init that
+    # zeroes stop_fires and restarts the wall clock: re-initing IS the way around
+    # a safety limit. Make it a deliberate, visible act rather than the default
+    # path. (Only the sanctioned CLI is gated here; the state file itself remains
+    # writable by any tool, so this raises the cost, it does not seal the door.)
+    if not getattr(args, "force", False):
+        exited = _find_force_exited(canonical, session_id)
+        if exited is not None:
+            data, _ = read_state_json(exited)
+            reason = (data or {}).get("reason", "a safety limit")
+            print(
+                f"ERROR: {exited.name} records a force-exit ({reason}). Re-initing "
+                f"restarts the loop's fire counter and wall clock, which is exactly "
+                f"how a loop escapes the bound that just stopped it.\n"
+                f"  Report where the work stands instead. If a fresh loop really is "
+                f"warranted, say so and re-run with --force.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     # Refuse-to-touch: never overwrite a newer-schema file (already
     # blocked as a conflict above), and set a corrupt one aside (mirroring the
@@ -359,10 +512,10 @@ def cmd_init(args):
         state = BuildState(
             active=True,
             prompt=prompt,
-            iteration=1,
-            max_iterations=args.max_iterations or 10,
             completion_promise="DONE",
             session_id=session_id,
+            started_at=utc_now_iso(),
+            deadline_minutes=_resolve_deadline(args),
         )
     else:  # mt
         task = _resolve_init_text(args, args.task, "--task")
@@ -387,16 +540,44 @@ def cmd_init(args):
             active=True,
             task_description=task,
             plan_file=plan_file,
-            iteration=1,
-            max_iterations=args.max_iterations or 10,
             last_verdict="",
             session_id=session_id,
+            started_at=utc_now_iso(),
+            deadline_minutes=_resolve_deadline(args),
         )
         # Output the plan file path so caller can use it
         if args.auto_plan:
             print(plan_file)
 
-    state.save(path)
+    fresh = asdict(state)
+    fresh["schema"] = SCHEMA_VERSION
+
+    # A REPLACE, not an edit: a fresh loop zeroes the fire counters, restarts the
+    # wall clock, and drops the previous loop's deactivation keys (completed_at /
+    # reason / force_exit), which would otherwise leave the new loop looking
+    # force-exited. It still goes through the lock so it cannot interleave with a
+    # Stop-hook write and leave a half-old, half-new file behind.
+    _mutate_state(LOOP_CLASSES[canonical], path, lambda _data: fresh)
+
+
+def deadline_minutes_arg(value: str) -> int:
+    """argparse type for --deadline-minutes, validated BEFORE any state is written.
+
+    The wall clock is the only cost ceiling in the system and `init` is invoked
+    by the agent, so the requested bound is policed on both ends: a non-positive
+    value would read as "no deadline" in the Stop hook (deleting the ceiling),
+    and an arbitrarily large one would evade it. Out-of-range is an ERROR
+    (argparse exits 2 with no state file created), never a silent clamp.
+    """
+    try:
+        minutes = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected an integer, got {value!r}")
+    if minutes <= 0 or minutes > MAX_DEADLINE_MINUTES:
+        raise argparse.ArgumentTypeError(
+            f"must be between 1 and {MAX_DEADLINE_MINUTES} minutes, got {minutes}"
+        )
+    return minutes
 
 
 def cmd_deactivate(args):
@@ -405,43 +586,37 @@ def cmd_deactivate(args):
     canonical = LOOP_ALIASES[args.loop]
     cls = LOOP_CLASSES[canonical]
 
-    # BLOCKING 1 (session-id symmetry): deactivate the SAME file the Stop hook
-    # would find — the session-scoped file if present, else an adoptable legacy
-    # file — so a loop init'd with a given session-id is always turned off
-    # against the file it wrote (never a stale legacy file while the scoped one
-    # keeps blocking). set/increment share this resolver so all mutating verbs
-    # agree on which file they touch. Fall back to the scoped path when nothing
-    # is found.
+    # Session-id symmetry: deactivate the SAME file the Stop hook would find (the
+    # session-scoped file if present, else an adoptable legacy file), so a loop
+    # init'd with a given session-id is always turned off against the file it
+    # wrote, never a stale legacy file while the scoped one keeps blocking. `set`
+    # shares this resolver so all mutating verbs agree on which file they touch.
+    # Fall back to the scoped path when nothing is found.
     path = _resolve_loop_path(args.loop, session_id)
 
-    # Refuse-to-touch: honor the same contract as the hook.
-    state = _load_for_mutation(cls, path)
+    def mutate(data: dict) -> dict:
+        data["schema"] = SCHEMA_VERSION
+        data["active"] = False
+        # utc_now_iso, NOT a naive local `datetime.now()`: the Stop hook's
+        # force-exit stamps this same field in aware UTC, and `parse_iso` reads a
+        # naive stamp AS UTC, so two clocks in one field would be off by the local
+        # offset.
+        data["completed_at"] = utc_now_iso()
+        if args.reason:
+            if data.get(FORCE_EXIT_KEY):
+                # `reason` on a force-exited file is the bound that tripped, and
+                # `init` quotes it back when it refuses to restart the loop.
+                # Overwriting it would make a later refusal cite "User cancelled"
+                # as though THAT were the safety limit. Cancelling after a trip is
+                # recorded next to it, not over it.
+                data["deactivate_reason"] = args.reason
+            else:
+                data["reason"] = args.reason
+        return data
 
-    # Build dict with extra metadata
-    data = asdict(state)
-    data["schema"] = SCHEMA_VERSION
-    data["active"] = False
-    data["completed_at"] = datetime.now().isoformat()
-    if args.reason:
-        data["reason"] = args.reason
-
-    # Write directly (bypass .save() to include extra fields), atomically + 0600.
-    atomic_write_json(path, data)
-
-
-def cmd_increment(args):
-    """Increment a numeric field (typically iteration)."""
-    if args.field != "iteration":
-        print("Error: Only 'iteration' can be incremented", file=sys.stderr)
-        sys.exit(1)
-
-    session_id = resolve_session_id(args)
-    path = _resolve_loop_path(args.loop, session_id)
-    cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
-    state = _load_for_mutation(cls, path)
-
-    state.iteration += 1
-    state.save(path)
+    # Refuse-to-touch + field-level edit under the lock: same contract as the hook,
+    # writing back only the keys this verb owns (see _mutate_state).
+    _mutate_state(cls, path, mutate)
 
 
 def main():
@@ -489,7 +664,17 @@ def main():
     )
     p_init.add_argument("--plan-file", help="Plan file path (for measure-twice)")
     p_init.add_argument("--auto-plan", action="store_true", help="Auto-derive plan file from task (for measure-twice)")
-    p_init.add_argument("--max-iterations", type=int, help="Override max iterations")
+    p_init.add_argument(
+        "--deadline-minutes", dest="deadline_minutes", type=deadline_minutes_arg,
+        help=f"Absolute wall-clock bound on the loop, 1-{MAX_DEADLINE_MINUTES} "
+             f"minutes (default: [tuning].deadline_minutes, else "
+             f"{DEFAULT_DEADLINE_MINUTES})",
+    )
+    p_init.add_argument(
+        "--force", action="store_true", default=False,
+        help="Start a fresh loop even when the previous one was force-exited by a "
+             "safety limit (otherwise refused)",
+    )
     p_init.add_argument("--session-id", dest="session_id", help="Session ID for scoped state")
     p_init.set_defaults(func=cmd_init)
 
@@ -499,13 +684,6 @@ def main():
     p_deact.add_argument("--reason", help="Reason for deactivation")
     p_deact.add_argument("--session-id", dest="session_id", help="Session ID for scoped state")
     p_deact.set_defaults(func=cmd_deactivate)
-
-    # increment
-    p_inc = subparsers.add_parser("increment", help="Increment a counter")
-    p_inc.add_argument("loop", choices=list(LOOP_ALIASES.keys()))
-    p_inc.add_argument("field", choices=["iteration"])
-    p_inc.add_argument("--session-id", dest="session_id", help="Session ID for scoped state")
-    p_inc.set_defaults(func=cmd_increment)
 
     args = parser.parse_args()
     args.func(args)

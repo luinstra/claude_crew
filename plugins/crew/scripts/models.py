@@ -7,12 +7,20 @@ for type safety, validation, and self-documentation.
 """
 
 from dataclasses import dataclass, asdict, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Any
+from typing import ClassVar, Optional, Any
 import contextlib
 import json
 import os
+import sys
 import tempfile
+import time
+
+try:
+    import fcntl
+except ImportError:  # non-POSIX: no interprocess lock primitive available
+    fcntl = None
 
 
 # =============================================================================
@@ -83,18 +91,76 @@ class SessionStartInput:
         return Path(self.directory)
 
 
+# Statuses that mean a background task is DONE. Anything else, including an
+# absent or unrecognized status, is treated as still running: the safe default is
+# to keep waiting, never to assume work finished and let an unverified loop stop.
+TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "killed", "cancelled", "done", "error"})
+
+
+def _task_in_flight(task) -> bool:
+    """True when a background_tasks entry is not known to have finished."""
+    if not isinstance(task, dict):
+        # A shape we do not understand is not evidence that work finished.
+        return True
+    status = task.get("status")
+    if not isinstance(status, str):
+        return True
+    return status.strip().lower() not in TERMINAL_TASK_STATUSES
+
+
 @dataclass
 class StopInput:
     """Input structure for Stop hooks."""
     directory: str = ""
     session_id: str = ""
+    # Harness-tracked work the session launched and has not consumed yet
+    # (background shells, async subagents). Verified present on the live Stop
+    # payload. A non-empty list is the ONE honest signal that separates "parked
+    # waiting on my own work" from "trying to quit". Without it the hook has to
+    # guess, and guessing wrong is what drove the loop to poll.
+    background_tasks: list = field(default_factory=list)
+    # The other documented wake signal on the Stop payload: a scheduled wake-up
+    # is a wait, not a quit, so it parks the same way background_tasks does.
+    session_crons: list = field(default_factory=list)
+    # Set by Claude Code when THIS Stop was already continued by a hook. It is NOT
+    # an enforcement input (crew bounds the loop with its own stop_fires): the Stop
+    # hook renders it into the fail-open diagnostic, where it is the one fact that
+    # says whether the fire that failed was already inside a blocked loop.
+    stop_hook_active: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> "StopInput":
+        tasks = data.get("background_tasks")
+        crons = data.get("session_crons")
         return cls(
             directory=_get_project_dir(data),
             session_id=data.get("session_id", data.get("sessionId", "")),
+            # A non-list (older or future harness) reads as "no signal" rather
+            # than crashing the hook.
+            background_tasks=tasks if isinstance(tasks, list) else [],
+            session_crons=crons if isinstance(crons, list) else [],
+            stop_hook_active=bool(data.get("stop_hook_active", False)),
         )
+
+    @property
+    def is_parked(self) -> bool:
+        """True when the session still has work in flight it launched itself.
+
+        Counts only tasks that are STILL RUNNING. A probe of the live payload
+        shows the harness already prunes finished work (a completed shell and a
+        completed subagent were both absent while a running shell and a running
+        subagent were listed with `status: "running"`), so today this filter is a
+        no-op. It is here because the alternative is not survivable: if a future
+        harness kept finished tasks listed, every Stop after one panel fan-out
+        would read as parked, and a parked Stop is ALLOWED, so the panel-approval
+        gate would switch itself off with no error and no diagnostic.
+
+        An entry whose status is unknown or absent counts as IN FLIGHT, so an
+        unrecognized payload degrades to parking (a needless wait) rather than to
+        waving work through unverified.
+        """
+        live = [t for t in self.background_tasks if _task_in_flight(t)]
+        return bool(live) or bool(self.session_crons)
 
     @property
     def directory_path(self) -> Path:
@@ -122,9 +188,9 @@ class HookResult:
           shape. The legacy ``{"continue": false, ...}`` is INERT for blocking
           a Stop: Claude Code honors it as a HARD-STOP directive (the child
           session ends at the first stop attempt with
-          ``terminal_reason=stop_hook_prevented``; state-file iteration stays
-          at 2). Because ``continue: false`` demonstrably forces termination,
-          it must NOT be dual-emitted alongside ``decision: block``.
+          ``terminal_reason=stop_hook_prevented``, the loop never resuming).
+          Because ``continue: false`` demonstrably forces termination, it must
+          NOT be dual-emitted alongside ``decision: block``.
         - Allow: ``{}`` (benign empty object); asserts nothing about the
           ambiguous ``continue`` field.
         """
@@ -190,7 +256,138 @@ class SessionStartResult:
 # Current on-disk state-file schema. `load` treats an absent `schema` key
 # as 1 (legacy files keep working); a HIGHER value than this is a
 # newer-crew file that must be REFUSED, never rewritten (see LOAD_FUTURE_SCHEMA).
-SCHEMA_VERSION = 1
+# 2 added the hook-owned termination fields (stop_fires / started_at); a schema-1
+# file loads with their defaults, and the hook stamps started_at on first fire.
+# The parked counters and the removal of the old round counter did NOT need a new
+# version: every read defaults a missing field and ignores an unknown one, so a
+# file stays legible in both directions. Bumping would make an older install
+# refuse to touch a live loop for a change it degrades safely on.
+SCHEMA_VERSION = 2
+
+# Termination bounds, both hook-owned. They are deliberately generous: a bound
+# that trips during legitimate work teaches the agent to route around it, which
+# is how the counter-reset livelock started.
+#
+# stop_fires is the livelock circuit breaker: it counts what a Stop hook can
+# honestly observe (its own fires). A real panel wait costs tens of Stop fires,
+# so this is set well above any honest loop.
+DEFAULT_MAX_STOP_FIRES = 150
+
+# The absolute wall clock, and the only cost ceiling in the system: every other
+# bound is denominated in a unit the agent controls. Deliberately NOT a stall
+# timer: a single seat legitimately takes minutes, and any late seat would reset
+# a stall clock forever. Sized for the real job it has to survive: a multi-round
+# build with a 7-seat panel, where one round alone costs many minutes of seat
+# wait. Overridable per repo/user via `[tuning].deadline_minutes`.
+DEFAULT_DEADLINE_MINUTES = 120
+
+# The policy ceiling on that wall clock. `init` is invoked BY the agent, so the
+# deadline it may request is bounded on BOTH ends: a bound the bounded thing can
+# widen (or delete with a negative) is not a bound.
+MAX_DEADLINE_MINUTES = 240
+
+# Consecutive parked Stops (see StopInput.is_parked) allowed before the hook
+# nudges anyway. Generous on purpose: a genuine seat wait costs one or two parked
+# fires per round, so honest waiting stays effectively free. Its job is the case
+# the park signal cannot distinguish: an unrelated background shell that never
+# exits would otherwise park every Stop and silently disable the loop.
+DEFAULT_MAX_PARKED_FIRES = 20
+
+# Stamped by the Stop hook next to `completed_at`/`reason` when a termination
+# bound trips. `crew state init` reads it to tell a force-exit apart from a clean
+# `deactivate`, so re-initing straight over a tripped safety limit takes an
+# explicit `--force` instead of being the default path.
+FORCE_EXIT_KEY = "force_exit"
+
+
+def utc_now_iso() -> str:
+    """Timezone-aware UTC timestamp for the state files' clock fields."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def effective_count(value, default: int) -> int:
+    """A hook-owned counter/bound read defensively off disk.
+
+    The state file is hand-editable, so every reader of these ints must survive a
+    non-int or negative value: an unguarded comparison raises into the Stop hook's
+    fail-open handler, which ALLOWS the stop, i.e. the circuit breaker quietly
+    stops enforcing on exactly the fire someone tampered with. Fall back to the
+    caller's default (never to "unbounded").
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return default
+    return value
+
+
+def effective_deadline(value) -> int:
+    """The wall clock actually enforced, in minutes (same threat model as above).
+
+    A non-positive or non-integer value must NOT read as "unbounded" (that would
+    delete the only cost ceiling in the system), and a too-large one is clamped to
+    the policy ceiling `crew state init` already enforces. Single-sourced here so
+    the Stop hook, `crew state show`, and the SessionStart banner can never report
+    a different bound than the one that ends the loop.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return DEFAULT_DEADLINE_MINUTES
+    return min(value, MAX_DEADLINE_MINUTES)
+
+
+def parse_iso(value: str):
+    """Parse an ISO timestamp written by utc_now_iso, or None if unusable.
+
+    Never raises: a hand-edited or truncated timestamp must not wedge the Stop
+    hook, it just means "no wall-clock bound available this fire".
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    # A naive timestamp (hand-edited, or written by an older build) is read as
+    # UTC rather than rejected, so the deadline still bounds the loop.
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def elapsed_minutes(started_at: str):
+    """Minutes since `started_at`, or None when it can't be determined."""
+    started = parse_iso(started_at)
+    if started is None:
+        return None
+    delta = datetime.now(timezone.utc) - started
+    return delta.total_seconds() / 60.0
+
+
+# How far ahead of this machine's clock a `started_at` may sit before it is read
+# as bogus rather than as skew. A stamp written seconds ago on a slightly-ahead
+# clock is normal; minutes ahead is not a clock, it is a value nothing should
+# trust with the only cost ceiling in the system.
+CLOCK_SKEW_TOLERANCE_MINUTES = 2
+
+
+def effective_started_at(value):
+    """The wall clock's start stamp, read defensively. Returns ``(stamp, repaired)``.
+
+    Same threat model as ``effective_count``, and the same self-heal: the state
+    file is hand-editable, and here a bad value does not raise, it silently
+    DELETES the deadline. An unparseable or wrong-typed stamp makes
+    ``elapsed_minutes`` return None, and a FUTURE-dated one makes it negative;
+    either way the deadline never trips and the loop is unbounded forever. So a
+    stamp that cannot bound the loop is restamped to now, and the caller persists
+    that, which bounds the loop from this fire forward.
+    """
+    now = datetime.now(timezone.utc)
+    parsed = parse_iso(value) if isinstance(value, str) else None
+    if parsed is None:
+        return now.isoformat(), True
+    ahead = (parsed - now).total_seconds() / 60.0
+    if ahead > CLOCK_SKEW_TOLERANCE_MINUTES:
+        return now.isoformat(), True
+    return value, False
+
 
 # Load-status classifiers for the ordered decision tree in persistent-mode.py:
 # corrupt-check (unparseable) → schema-check (parseable but newer) → adoption.
@@ -245,15 +442,134 @@ def read_state_json(path: Path):
     return data, LOAD_OK
 
 
+# The lock a writer holds for the WHOLE read-modify-write of a state file. It
+# lives on a sibling `<state-file>.lock` and never on the state file itself:
+# atomic_write_json replaces the state file's inode, so a lock taken on the old
+# inode guards nothing once the first writer lands (the next writer opens the NEW
+# inode and takes an uncontended lock, and the two run concurrently anyway). The
+# sibling's inode is stable, so it serializes every writer.
+STATE_LOCK_SUFFIX = ".lock"
+
+# Bounded, never an indefinite block: the Stop hook's budget in hooks.json is 5s,
+# so a stuck holder must surface as a fail-open diagnostic rather than a hung hook.
+STATE_LOCK_TIMEOUT_SECONDS = 2.0
+_STATE_LOCK_POLL_SECONDS = 0.02
+
+
+class StateLockError(Exception):
+    """The state file's lock could not be taken (timed out, or unopenable).
+
+    Callers must treat this as a FAILURE TO WRITE, never as a write: the Stop hook
+    allows the stop with a loud diagnostic, the CLI exits nonzero.
+    """
+
+
+def state_lock_path(path: Path) -> Path:
+    """The sibling lock file for a state file (see STATE_LOCK_SUFFIX)."""
+    return path.with_name(path.name + STATE_LOCK_SUFFIX)
+
+
+@contextlib.contextmanager
+def state_lock(path: Path, timeout: float = STATE_LOCK_TIMEOUT_SECONDS):
+    """Hold the exclusive interprocess lock for one read-modify-write of ``path``.
+
+    Without fcntl (non-POSIX) the body still runs, UNLOCKED: degrading to the old
+    last-writer-wins behavior beats wedging every state write on a platform that
+    cannot lock. It says so on stderr rather than degrading silently.
+    """
+    if fcntl is None:
+        print(
+            "[crew] fcntl is unavailable on this platform: state writes are not "
+            "serialized, so a concurrent writer can lose an update.",
+            file=sys.stderr,
+        )
+        yield
+        return
+
+    lock_file = state_lock_path(path)
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise StateLockError(f"cannot open {lock_file.name}: {exc}") from exc
+    try:
+        # Keep the lock file young: the session-start sweep deletes crew artifacts
+        # past MAX_AGE_DAYS, and deleting a lock that a live loop still uses would
+        # split its writers across two inodes (see STATE_LOCK_SUFFIX).
+        with contextlib.suppress(OSError):
+            os.utime(fd)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    raise StateLockError(
+                        f"timed out after {timeout:g}s waiting for "
+                        f"{lock_file.name}: {exc}"
+                    ) from exc
+                time.sleep(_STATE_LOCK_POLL_SECONDS)
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def update_state_json(path: Path, mutate, default: Optional[dict] = None):
+    """The ONE serialized read-modify-write over a state file. Returns ``(data, status)``.
+
+    EVERY writer goes through this (the Stop hook and the crew-state CLI).
+    ``atomic_write_json`` makes the WRITE atomic but says nothing about the
+    read-modify-write SEQUENCE around it: two unlocked writers each replace the
+    file with a dict built from the state they read BEFORE the other landed, so one
+    of the two updates is silently gone. That lost update is how a `set` of an
+    allowlisted field could roll back a Stop-hook counter bump, and how a hook save
+    could revert an agent-owned field.
+
+    ``mutate(dict) -> dict`` is called with the dict on disk NOW and must touch only
+    the keys its caller owns. The read keeps ``read_state_json``'s classification: a
+    corrupt or newer-schema file is NOT mutated (returns ``(None, status)``), so each
+    caller applies its own refuse-to-touch handling; a missing file starts from
+    ``default``. Raises StateLockError when the lock cannot be taken.
+    """
+    with state_lock(path):
+        data, status = read_state_json(path)
+        if status in (LOAD_CORRUPT, LOAD_FUTURE_SCHEMA):
+            return None, status
+        if data is None:
+            data = dict(default) if default else {}
+        updated = mutate(data)
+        atomic_write_json(path, updated)
+        return updated, status
+
+
 @dataclass
 class BuildState:
     """State for build loop persistence with multi-model panel verification."""
     active: bool = False
     prompt: str = ""
-    iteration: int = 1
-    max_iterations: int = 10
     completion_promise: str = "DONE"
     session_id: str = ""
+    # Hook-owned fields: the Stop hook is the ONLY writer of all five. There is
+    # deliberately no round counter here, because nothing in the Stop path can
+    # honestly observe a revision round.
+    stop_fires: int = 0
+    max_stop_fires: int = DEFAULT_MAX_STOP_FIRES
+    started_at: str = ""
+    deadline_minutes: int = DEFAULT_DEADLINE_MINUTES
+    parked_fires: int = 0
+    max_parked_fires: int = DEFAULT_MAX_PARKED_FIRES
+
+    # The ONLY fields `crew state set` will write. Everything else (every field
+    # the termination predicate reads) is refused, because a safety limit the
+    # agent can rewrite is not a safety limit: a live loop reset its own counter
+    # 30 times to stay under a cap it kept hitting merely for waiting, making the
+    # force-exit unreachable.
+    AGENT_SETTABLE: ClassVar[frozenset] = frozenset({"completion_promise"})
 
     @classmethod
     def load_with_status(cls, path: Path):
@@ -270,10 +586,14 @@ class BuildState:
         return cls(
             active=data.get("active", False),
             prompt=data.get("prompt", ""),
-            iteration=data.get("iteration", 1),
-            max_iterations=data.get("max_iterations", 10),
             completion_promise=data.get("completion_promise", "DONE"),
             session_id=data.get("session_id", ""),
+            stop_fires=data.get("stop_fires", 0),
+            max_stop_fires=data.get("max_stop_fires", DEFAULT_MAX_STOP_FIRES),
+            started_at=data.get("started_at", ""),
+            deadline_minutes=data.get("deadline_minutes", DEFAULT_DEADLINE_MINUTES),
+            parked_fires=data.get("parked_fires", 0),
+            max_parked_fires=data.get("max_parked_fires", DEFAULT_MAX_PARKED_FIRES),
         ), LOAD_OK
 
     @classmethod
@@ -371,10 +691,20 @@ class MeasureTwiceState:
     active: bool = False
     task_description: str = ""
     plan_file: str = ""  # Path to current plan, e.g., ".crew/plans/auth-system.md"
-    iteration: int = 1
-    max_iterations: int = 10
     last_verdict: str = ""  # APPROVED, REVISE, REJECT, or empty
     session_id: str = ""
+    # Hook-owned fields (see BuildState).
+    stop_fires: int = 0
+    max_stop_fires: int = DEFAULT_MAX_STOP_FIRES
+    started_at: str = ""
+    deadline_minutes: int = DEFAULT_DEADLINE_MINUTES
+    parked_fires: int = 0
+    max_parked_fires: int = DEFAULT_MAX_PARKED_FIRES
+
+    # See BuildState.AGENT_SETTABLE. `last_verdict` and `plan_file` are settable
+    # because recording a verdict and pointing at the current plan are the
+    # orchestrator's job; every field the Stop hook's bounds read is not.
+    AGENT_SETTABLE: ClassVar[frozenset] = frozenset({"last_verdict", "plan_file"})
 
     @classmethod
     def load_with_status(cls, path: Path):
@@ -390,10 +720,14 @@ class MeasureTwiceState:
             active=data.get("active", False),
             task_description=data.get("task_description", ""),
             plan_file=data.get("plan_file", ""),
-            iteration=data.get("iteration", 1),
-            max_iterations=data.get("max_iterations", 10),
             last_verdict=data.get("last_verdict", ""),
             session_id=data.get("session_id", ""),
+            stop_fires=data.get("stop_fires", 0),
+            max_stop_fires=data.get("max_stop_fires", DEFAULT_MAX_STOP_FIRES),
+            started_at=data.get("started_at", ""),
+            deadline_minutes=data.get("deadline_minutes", DEFAULT_DEADLINE_MINUTES),
+            parked_fires=data.get("parked_fires", 0),
+            max_parked_fires=data.get("max_parked_fires", DEFAULT_MAX_PARKED_FIRES),
         ), LOAD_OK
 
     @classmethod

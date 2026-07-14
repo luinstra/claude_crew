@@ -309,7 +309,11 @@ Key contracts (do NOT regress):
   (the `/crew:dispatch` default seat, validated against `known_seat_names()` —
   a panel name / group token like `cursor` is rejected), `[seats.<name>]`
   (`model`/`reasoning_effort`/`print_timeout`/`available`), `[tuning].timeout`,
-  and the global-tier `[panels]` roster. Resolution is PER-KEY (per-seat-per-key
+  `[tuning].deadline_minutes` (the persistence loops' wall clock, read by `crew
+  state init` when `--deadline-minutes` is not passed; validated 1..240, so a
+  non-int, a non-positive value, or one past the ceiling is dropped with a
+  one-time warn, never clamped silently), and the global-tier `[panels]` roster.
+  Resolution is PER-KEY (per-seat-per-key
   for `[seats.<name>]`): CLI flag > per-repo > global > builtin. The old tuning
   env surface is RETIRED — consulted at no call site. `[panels]` redefines a
   built-in preset or adds a custom one (validated vs known seats; unknown dropped
@@ -397,11 +401,19 @@ directory = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()))
 state_file = directory / ".crew" / "build-state.json"
 state = BuildState.load(state_file)
 
-# Modify and save
-state.iteration += 1
-state.save(state_file)  # Atomic write via atomic_write_json: creates parent
-                        # dirs and writes the temp file 0600 FROM BIRTH
-                        # (tempfile.mkstemp), then os.replace — no chmod window.
+# Modify. Only fields the WRITER owns: the Stop hook owns the bounds (stop_fires /
+# parked_fires / started_at), the orchestrator owns the task fields. Mutations go
+# through update_state_json: it holds the interprocess lock across the read AND the
+# write (an atomic write alone does not make the read-modify-write atomic), and the
+# mutate_fn edits only its own keys, so the other writer's fields and any unknown
+# on-disk key survive. atomic_write_json underneath creates parent dirs and writes
+# the temp file 0600 FROM BIRTH (tempfile.mkstemp), then os.replace: no chmod window.
+update_state_json(
+    state_file,
+    lambda data: {**data, "completion_promise": "SHIPPED", "schema": SCHEMA_VERSION},
+)
+# state.save(path) still exists (a WHOLE-state write) and is right only where a
+# fresh state REPLACES the file, never for editing a live loop.
 ```
 
 ### SessionStart Output Pattern
@@ -469,17 +481,32 @@ crew state init mt --task "Add user profiles" --auto-plan --session-id abc123
 # successful init (the session-start orphan-cleanup patterns do NOT cover these task files).
 crew state init bl -f .crew/task-bl-abc123.txt --session-id abc123
 
+# The loop's wall clock: --deadline-minutes (1..240) > [tuning].deadline_minutes
+# (per-repo, then global) > the built-in 120. `init` REFUSES (exit 1) when the
+# state file it would replace records a force-exit (the Stop hook's bound tripped),
+# because a fresh loop zeroes stop_fires and restarts the clock: that IS the way
+# around a safety limit, so it takes an explicit --force.
+crew state init bl --prompt "Fix the auth bug" --deadline-minutes 90 --session-id abc123
+
 # Check if this session has conflicts (other sessions ignored)
 crew state check-conflicts --session-id abc123
 
-# Set specific fields
-crew state set bl iteration 5 --session-id abc123
+# Set a field. ONLY the loop's AGENT_SETTABLE allowlist (bl: completion_promise;
+# mt: last_verdict, plan_file). Any other field exits 2 and writes nothing.
+# FIELD-LEVEL: it edits the ONE key in the on-disk dict and writes the rest back
+# verbatim (unknown keys included). A whole-state save would let an allowlisted
+# write also restore this process's stale `stop_fires`/`parked_fires` snapshot,
+# reverting a bump the Stop hook landed in between: the counter-reset hole the
+# allowlist exists to close, reopened through a field the agent IS allowed to set.
 crew state set mt last_verdict REVISE --session-id abc123
 
 # Deactivate — pass the SAME --session-id init used, so deactivate targets the
 # exact session-scoped file (init and deactivate/cancel of one loop MUST resolve
 # to the same file; cmd_deactivate additionally reuses the Stop hook's
 # find_session_state_file so an adopted legacy file is also turned off).
+# On an already FORCE-EXITED file the `--reason` lands in `deactivate_reason`, not
+# `reason`: `reason` there is the bound that tripped, and `init` quotes it back
+# when it refuses to restart the loop.
 crew state deactivate bl --reason "User cancelled" --session-id abc123
 ```
 
@@ -493,17 +520,19 @@ crew state deactivate bl --reason "User cancelled" --session-id abc123
 - `measure-twice-state-{session_id}.json`
 
 **Schema version + refuse-to-touch.** Every write stamps
-`"schema": SCHEMA_VERSION` (currently 1); an ABSENT `schema` loads as 1 (legacy
-files keep working). Reads classify a file via `read_state_json` /
+`"schema": SCHEMA_VERSION` (currently 2; 2 added the hook-owned termination
+fields); an ABSENT `schema` loads as 1 (legacy files keep working, and the hook
+stamps their missing `started_at` on first fire so an adopted old loop is still
+bounded). Reads classify a file via `read_state_json` /
 `load_with_status` into `LOAD_OK` / `LOAD_MISSING` / `LOAD_CORRUPT` /
 `LOAD_FUTURE_SCHEMA`. Every MUTATING path — the Stop hook AND the crew-state CLI
-(`init` / `set` / `increment` / `deactivate`) — honors the SAME contract:
+(`init` / `set` / `deactivate`) honors the SAME contract:
 - **Newer schema** (`schema > SCHEMA_VERSION`): REFUSE to touch. The hook allows
   stop with a loud diagnostic; the CLI exits nonzero, bytes untouched — a
   downgrade must never clobber a live newer-format loop.
 - **Corrupt** (unparseable / non-object JSON): the Stop hook and `init` set the
   file aside as `<name>.corrupt` (a one-time diagnostic; `init` then starts fresh
-  state), while `set` / `increment` / `deactivate` refuse (nonzero) rather than
+  state), while `set` / `deactivate` refuse (nonzero) rather than
   silently overwrite. These set-aside artifacts are swept by `session-start`
   cleanup, which is SCOPED to crew's own backup names via exact-plus-hyphen globs
   — `build-state.json.corrupt` / `build-state-*.json.corrupt` and
@@ -511,6 +540,33 @@ files keep working). Reads classify a file via `read_state_json` /
   legacy exact name and the session-scoped `-<id>` form only) — so neither an
   unrelated `*.corrupt` file nor a prefix-collision like
   `build-stateEVIL.json.corrupt` is ever deleted.
+
+**One serialized read-modify-write (`models.update_state_json`).** The Stop hook
+and the crew-state CLI are two PROCESSES writing one file, so `atomic_write_json`
+is not enough: it makes the replace indivisible, not the read-modify-write around
+it. Two unlocked writers each rebuild the file from the dict they read BEFORE the
+other landed, and whichever replaces last erases the other's field. That lost
+update is how an allowlisted `set` could roll back a `stop_fires` bump (the
+counter-reset escape route) and how a hook save could revert `last_verdict`. So
+EVERY mutation (hook counters, force-exit, `init` / `set` / `deactivate`) goes
+through `update_state_json(path, mutate_fn)`, which holds one `fcntl.flock` on a
+sibling `<state-file>.lock` across the read AND the write, and each writer's
+`mutate_fn` touches only the keys its owner owns (so unknown on-disk keys survive
+and the two writers never overwrite each other's fields even when they interleave).
+
+- The lock is on the SIBLING, never the state file: `atomic_write_json` replaces the
+  state file's inode, so a lock on the old inode would guard nothing after the first
+  write. The sweep reaps stale `*.json.lock` siblings on the same anchored globs as
+  the other artifacts, and an acquire touches the lock's mtime so a live loop's lock
+  is never reaped mid-use.
+- The wait is BOUNDED (2s, under the hook's 5s budget in hooks.json), never an
+  indefinite block. A lock that cannot be taken is a FAILED write: the Stop hook
+  fails OPEN (allow + loud `systemMessage`, no write, because blocking without
+  writing would nudge forever with the counters frozen, so the bound that ends the
+  loop would never arrive), and the CLI exits 2 with the bytes untouched.
+- Without `fcntl` (non-POSIX) the write still happens, unlocked, with a stderr note:
+  degrading to last-writer-wins beats wedging every state write on a platform that
+  cannot lock.
 
 **Loop aliases:**
 - `bl` = `build`
@@ -548,11 +604,23 @@ HookResult.block("Must continue")    # {"decision": "block", "reason": "..."}
 class BuildState:
     active: bool = False
     prompt: str = ""              # Original task
-    iteration: int = 1
-    max_iterations: int = 10
     completion_promise: str = "DONE"
     session_id: str = ""          # Session that owns this loop
+    stop_fires: int = 0           # hook-owned livelock circuit breaker
+    max_stop_fires: int = 150
+    started_at: str = ""          # hook-owned wall clock (ISO, UTC)
+    deadline_minutes: int = 120   # 1..MAX_DEADLINE_MINUTES (240), validated at init
+    parked_fires: int = 0         # hook-owned CONSECUTIVE parked-Stop counter
+    max_parked_fires: int = 20
+
+    AGENT_SETTABLE = frozenset({"completion_promise"})
 ```
+
+There is **no round counter**. A Stop hook cannot observe a revision round (only
+its own fires), and no other writer bumps one, so the field would be a frozen
+`Round 1/N` lie on every surface that printed it. The budget the loop actually
+runs on is `stop_fires`/`max_stop_fires` plus elapsed-vs-`deadline_minutes`, and
+that is what `crew state show`, the nudge, and the SessionStart banner report.
 
 ### MeasureTwiceState
 
@@ -562,11 +630,94 @@ class MeasureTwiceState:
     active: bool = False
     task_description: str = ""
     plan_file: str = ""           # e.g., ".crew/plans/auth-system.md"
-    iteration: int = 1
-    max_iterations: int = 10
     last_verdict: str = ""        # APPROVED, REVISE, REJECT
     session_id: str = ""          # Session that owns this loop
+    stop_fires: int = 0           # hook-owned livelock circuit breaker
+    max_stop_fires: int = 150
+    started_at: str = ""          # hook-owned wall clock (ISO, UTC)
+    deadline_minutes: int = 120   # 1..MAX_DEADLINE_MINUTES (240), validated at init
+    parked_fires: int = 0         # hook-owned CONSECUTIVE parked-Stop counter
+    max_parked_fires: int = 20
+
+    AGENT_SETTABLE = frozenset({"last_verdict", "plan_file"})
 ```
+
+## Stop hook: the loop contract (do NOT regress)
+
+The Stop hook writes **only what a Stop hook can honestly observe.** These five
+rules are load-bearing; each one is a bug that already happened.
+
+1. **The hook counts FIRES, not rounds.** It writes only what it owns:
+   `stop_fires`, `parked_fires`, the `started_at` stamp, and the deactivation
+   when a bound trips. It once incremented a field named `iteration` on every
+   fire, silently redefining "revision round" to mean "Stop fire". That field is
+   gone rather than faked: nothing in the Stop path can see a revision round, so
+   a round counter with no writer would report `Round 1/N` forever.
+
+2. **Termination bounds are hook-owned, and the sanctioned paths to them are
+   closed.** `crew state set` writes ONLY `AGENT_SETTABLE` (exit 2 for anything
+   else), it writes that ONE key field-level so an allowlisted write can't carry
+   back a stale snapshot of the counters, `--deadline-minutes` is validated to
+   1..240 at `init`, and `init` refuses to start a fresh loop over a force-exited
+   one without `--force`. A safety limit the agent can rewrite is not a safety
+   limit: a live loop, cornered by a cap it kept hitting merely for WAITING, reset
+   its own counter 30 times and made the force-exit unreachable. `active` is
+   refused for the same reason: setting it false is an unaudited back door around
+   the panel-approval gate that `deactivate` exists to be.
+
+   **This is reliability hardening, NOT a security boundary. Do not document it
+   as one.** The agent has `Write`/`Edit` on `.crew/*-state-*.json` and can edit
+   any field the CLI refuses. What the allowlist buys is that no *sanctioned,
+   convenient, plausibly-innocent* path resets a bound: the counter-reset livelock
+   happened through the CLI, in good faith, one `set` at a time. Every remaining
+   route is now a conspicuous act (hand-editing state, or `init --force`), and the
+   hook reads all four counters defensively (`effective_count`) so a garbage value
+   falls back to a real bound instead of raising into the fail-open handler and
+   silently disabling enforcement for that fire. `started_at` is read the same way
+   (`effective_started_at`) and SELF-HEALS: a missing, unparseable, wrongly-typed,
+   or FUTURE-dated stamp does not raise, it deletes the wall clock (elapsed reads
+   as unknown or negative, so the deadline never trips), so the fire restamps it to
+   now and persists that, bounding the loop from that fire forward.
+
+   Every one of those writes goes through the ONE serialized read-modify-write
+   (`update_state_json`), because an unlocked `set` could otherwise roll a counter
+   bump straight back off the disk (see the state-lock section above).
+
+3. **Waiting is FREE, but bounded.** When the Stop payload's `background_tasks`
+   or `session_crons` is non-empty the session is parked on work it launched, so
+   the hook **allows** the stop and does not touch `stop_fires`. The harness
+   re-invokes the session when that work completes. Blocking a parked Stop is
+   what manufactured the busy-wait: the agent was forced to take a turn with
+   nothing to do, so it polled, which burned the counter and flooded the context
+   until compaction wiped its memory of the panel mid-flight and it re-ran the
+   panel over its own completed seats.
+
+4. **`max_parked_fires` is the escape valve.** The park signal is broad: ANY
+   harness-tracked background shell (a dev server, a `tail -f`) parks every Stop,
+   which would otherwise disable the loop entirely (no nudge, no bound, no
+   diagnostic). So `parked_fires` counts CONSECUTIVE parks, resets on any fire
+   with nothing in flight, and past `max_parked_fires` (20) a parked Stop is
+   nudged like an ordinary one and costs a `stop_fire`. 20 is generous on
+   purpose: an honest seat wait costs one or two parked fires per round.
+
+5. **Termination beats parking.** The bounds are evaluated BEFORE the parked
+   check, so a background task that never finishes cannot hide behind "I'm
+   waiting" forever. The wall clock is the only cost ceiling in the system: every
+   other bound is denominated in a unit the agent controls.
+
+**Known limitation (do not overclaim the deadline).** Every bound is evaluated
+ON a Stop fire, and nothing in a Stop hook fires on a timer. A session parked on
+a background task that hangs forever is therefore never re-invoked, so no Stop
+fires and no bound (deadline included) is ever evaluated. That case is bounded by
+`max_parked_fires` once the session takes turns again, and by the session-start
+orphan sweep (an active state file is force-deleted after 7 days), NOT by the
+deadline. The deadline is an absolute ceiling on a loop that keeps *running*, not
+on one that is asleep.
+
+Deliberately NOT added: a stall timer. A single panel seat legitimately takes
+minutes, so a stall timer risks killing healthy work, and any late-landing seat
+would reset it forever. The absolute deadline needs no such heuristic: it is
+denominated in the one unit the agent cannot spend, and it does the job.
 
 ## Common Mistakes
 
@@ -614,6 +765,11 @@ The `session-start.py` hook cleans up stale state files on every session start:
 
 - **Inactive** state files older than **1 day**: deleted
 - **Active** state files older than **7 days**: force-deleted (safety limit for abandoned sessions)
+- **Newer-schema** state files (`LOAD_FUTURE_SCHEMA`): NEVER deleted, at any age.
+  The sweep classifies with `read_state_json` first, because deleting is the most
+  destructive touch there is and the refuse-to-touch contract binds it too: a
+  downgraded install must not destroy a live loop it cannot even read. It leaves a
+  one-line stderr note when it declines a file it would otherwise have swept.
 - Applies to `build-state-*` and `measure-twice-state-*` files
 - **Non-state artifacts older than 7 days** are also swept, but EVERY glob is
   anchored to a crew-specific name (cleanup runs over the SHARED `~/.claude` root
@@ -630,6 +786,12 @@ The `session-start.py` hook cleans up stale state files on every session start:
     `suffix=".tmp"`), so the sweep globs exactly those anchored names
     (`.build-state.json.*.tmp` / `.build-state-*.json.*.tmp` and the
     measure-twice pair), NEVER a bare `.*.tmp`.
+  - state-lock siblings (`<state-filename>.lock`, from `models.state_lock`), globbed
+    on the same exact + `-<id>` anchoring (`build-state.json.lock` /
+    `build-state-*.json.lock` and the measure-twice pair), NEVER a bare `*.lock`.
+    An acquire touches the lock's mtime, so only locks whose loop is long gone reach
+    the age threshold: deleting one mid-use would split that loop's writers across
+    two inodes.
 
 ## Testing
 
@@ -649,13 +811,17 @@ Tests cover:
 - Multi-session isolation (concurrent loops, conflict detection)
 - Orphan cleanup (stale inactive and very old active files)
 - `CLAUDE_SESSION_ID` env var fallback
+- Concurrent writers: a hook counter bump and a `crew state set` landing in the same
+  window both survive (the widened-window case FAILS without the lock), plus the
+  fail-open/exit-2 behavior when the lock cannot be taken
 
 ## Working Here Checklist
 
 - [ ] Import models from `models.py`, don't duplicate dataclasses
 - [ ] Use `CLAUDE_PROJECT_DIR` env var for directory
 - [ ] Handle missing state files gracefully (return defaults)
-- [ ] Write state via `atomic_write_json` / `state.save` (0600-from-birth, atomic) — never hand-roll a write + chmod
+- [ ] Mutate a live loop's state ONLY via `update_state_json` (locked read-modify-write, own keys only); `state.save` is a whole-state REPLACE, never an edit
+- [ ] Never hand-roll a write + chmod (`atomic_write_json` is 0600-from-birth, atomic)
 - [ ] Run `tests/test-hooks.py` after changes
 - [ ] Output valid JSON only (no print debugging to stdout)
 

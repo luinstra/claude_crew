@@ -144,4 +144,6 @@ Before concluding ANY work session, verify:
 
 **If ANY checkbox is unchecked, CONTINUE WORKING.**
 
-Active build / measure-twice loops are enforced by the Stop hook — they won't end until the multi-model panel approves (or you cancel via `/crew:cancel-build` or `/crew:cancel-measure-twice`).
+Active build / measure-twice loops are enforced by the Stop hook: they won't end until the multi-model panel approves, you cancel (`/crew:cancel-build` / `/crew:cancel-measure-twice`), or a hook-owned safety limit trips (the stop-fire cap or the wall-clock deadline, which force-exit the loop).
+
+A **parked turn** is the exception: while the session has background work in flight (panel seats, but also any unrelated background shell), the Stop is ALLOWED and the turn ends with the loop still active. Waiting is not quitting, and the session resumes when that work completes. Consecutive parked turns are capped (20), so a background process that never exits cannot silently switch the loop off.
