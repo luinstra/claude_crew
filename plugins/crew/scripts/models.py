@@ -13,7 +13,14 @@ from typing import ClassVar, Optional, Any
 import contextlib
 import json
 import os
+import sys
 import tempfile
+import time
+
+try:
+    import fcntl
+except ImportError:  # non-POSIX: no interprocess lock primitive available
+    fcntl = None
 
 
 # =============================================================================
@@ -115,8 +122,10 @@ class StopInput:
     # The other documented wake signal on the Stop payload: a scheduled wake-up
     # is a wait, not a quit, so it parks the same way background_tasks does.
     session_crons: list = field(default_factory=list)
-    # Set by Claude Code when THIS Stop was already continued by a hook. Read for
-    # diagnostics only: crew enforces its own bound via BuildState.stop_fires.
+    # Set by Claude Code when THIS Stop was already continued by a hook. It is NOT
+    # an enforcement input (crew bounds the loop with its own stop_fires): the Stop
+    # hook renders it into the fail-open diagnostic, where it is the one fact that
+    # says whether the fire that failed was already inside a blocked loop.
     stop_hook_active: bool = False
 
     @classmethod
@@ -351,6 +360,35 @@ def elapsed_minutes(started_at: str):
     delta = datetime.now(timezone.utc) - started
     return delta.total_seconds() / 60.0
 
+
+# How far ahead of this machine's clock a `started_at` may sit before it is read
+# as bogus rather than as skew. A stamp written seconds ago on a slightly-ahead
+# clock is normal; minutes ahead is not a clock, it is a value nothing should
+# trust with the only cost ceiling in the system.
+CLOCK_SKEW_TOLERANCE_MINUTES = 2
+
+
+def effective_started_at(value):
+    """The wall clock's start stamp, read defensively. Returns ``(stamp, repaired)``.
+
+    Same threat model as ``effective_count``, and the same self-heal: the state
+    file is hand-editable, and here a bad value does not raise, it silently
+    DELETES the deadline. An unparseable or wrong-typed stamp makes
+    ``elapsed_minutes`` return None, and a FUTURE-dated one makes it negative;
+    either way the deadline never trips and the loop is unbounded forever. So a
+    stamp that cannot bound the loop is restamped to now, and the caller persists
+    that, which bounds the loop from this fire forward.
+    """
+    now = datetime.now(timezone.utc)
+    parsed = parse_iso(value) if isinstance(value, str) else None
+    if parsed is None:
+        return now.isoformat(), True
+    ahead = (parsed - now).total_seconds() / 60.0
+    if ahead > CLOCK_SKEW_TOLERANCE_MINUTES:
+        return now.isoformat(), True
+    return value, False
+
+
 # Load-status classifiers for the ordered decision tree in persistent-mode.py:
 # corrupt-check (unparseable) → schema-check (parseable but newer) → adoption.
 LOAD_OK = "ok"
@@ -402,6 +440,111 @@ def read_state_json(path: Path):
     if isinstance(schema, int) and schema > SCHEMA_VERSION:
         return None, LOAD_FUTURE_SCHEMA
     return data, LOAD_OK
+
+
+# The lock a writer holds for the WHOLE read-modify-write of a state file. It
+# lives on a sibling `<state-file>.lock` and never on the state file itself:
+# atomic_write_json replaces the state file's inode, so a lock taken on the old
+# inode guards nothing once the first writer lands (the next writer opens the NEW
+# inode and takes an uncontended lock, and the two run concurrently anyway). The
+# sibling's inode is stable, so it serializes every writer.
+STATE_LOCK_SUFFIX = ".lock"
+
+# Bounded, never an indefinite block: the Stop hook's budget in hooks.json is 5s,
+# so a stuck holder must surface as a fail-open diagnostic rather than a hung hook.
+STATE_LOCK_TIMEOUT_SECONDS = 2.0
+_STATE_LOCK_POLL_SECONDS = 0.02
+
+
+class StateLockError(Exception):
+    """The state file's lock could not be taken (timed out, or unopenable).
+
+    Callers must treat this as a FAILURE TO WRITE, never as a write: the Stop hook
+    allows the stop with a loud diagnostic, the CLI exits nonzero.
+    """
+
+
+def state_lock_path(path: Path) -> Path:
+    """The sibling lock file for a state file (see STATE_LOCK_SUFFIX)."""
+    return path.with_name(path.name + STATE_LOCK_SUFFIX)
+
+
+@contextlib.contextmanager
+def state_lock(path: Path, timeout: float = STATE_LOCK_TIMEOUT_SECONDS):
+    """Hold the exclusive interprocess lock for one read-modify-write of ``path``.
+
+    Without fcntl (non-POSIX) the body still runs, UNLOCKED: degrading to the old
+    last-writer-wins behavior beats wedging every state write on a platform that
+    cannot lock. It says so on stderr rather than degrading silently.
+    """
+    if fcntl is None:
+        print(
+            "[crew] fcntl is unavailable on this platform: state writes are not "
+            "serialized, so a concurrent writer can lose an update.",
+            file=sys.stderr,
+        )
+        yield
+        return
+
+    lock_file = state_lock_path(path)
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise StateLockError(f"cannot open {lock_file.name}: {exc}") from exc
+    try:
+        # Keep the lock file young: the session-start sweep deletes crew artifacts
+        # past MAX_AGE_DAYS, and deleting a lock that a live loop still uses would
+        # split its writers across two inodes (see STATE_LOCK_SUFFIX).
+        with contextlib.suppress(OSError):
+            os.utime(fd)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    raise StateLockError(
+                        f"timed out after {timeout:g}s waiting for "
+                        f"{lock_file.name}: {exc}"
+                    ) from exc
+                time.sleep(_STATE_LOCK_POLL_SECONDS)
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def update_state_json(path: Path, mutate, default: Optional[dict] = None):
+    """The ONE serialized read-modify-write over a state file. Returns ``(data, status)``.
+
+    EVERY writer goes through this (the Stop hook and the crew-state CLI).
+    ``atomic_write_json`` makes the WRITE atomic but says nothing about the
+    read-modify-write SEQUENCE around it: two unlocked writers each replace the
+    file with a dict built from the state they read BEFORE the other landed, so one
+    of the two updates is silently gone. That lost update is how a `set` of an
+    allowlisted field could roll back a Stop-hook counter bump, and how a hook save
+    could revert an agent-owned field.
+
+    ``mutate(dict) -> dict`` is called with the dict on disk NOW and must touch only
+    the keys its caller owns. The read keeps ``read_state_json``'s classification: a
+    corrupt or newer-schema file is NOT mutated (returns ``(None, status)``), so each
+    caller applies its own refuse-to-touch handling; a missing file starts from
+    ``default``. Raises StateLockError when the lock cannot be taken.
+    """
+    with state_lock(path):
+        data, status = read_state_json(path)
+        if status in (LOAD_CORRUPT, LOAD_FUTURE_SCHEMA):
+            return None, status
+        if data is None:
+            data = dict(default) if default else {}
+        updated = mutate(data)
+        atomic_write_json(path, updated)
+        return updated, status
 
 
 @dataclass

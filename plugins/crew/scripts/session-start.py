@@ -106,6 +106,13 @@ def cleanup_stale_files(directory: Path) -> None:
     # names (the two state kinds × legacy/`-<id>` forms), never a bare `.*.tmp`
     # that would delete any hidden temp from any tool. These sweep atomic-write
     # temps orphaned by a crash between mkstemp and os.replace (rare).
+    #
+    # The `.lock` globs match the sibling lock files `models.state_lock` creates
+    # next to each state file (`<state-filename>.lock`), already crew-anchored by the
+    # state filename, and swept only past MAX_AGE_DAYS. A lock in use is kept young
+    # (the acquire touches its mtime), so this only reaps locks whose loop is long
+    # gone: deleting one mid-use would split that loop's writers across two inodes.
+    # Same exact + `-<id>` anchoring as the rest, never a bare `*.lock`.
     non_state_patterns = [
         "context-snapshot-*.json",
         "context-snapshot.md",
@@ -118,6 +125,10 @@ def cleanup_stale_files(directory: Path) -> None:
         "build-state-*.json.corrupt",
         "measure-twice-state.json.corrupt",
         "measure-twice-state-*.json.corrupt",
+        "build-state.json.lock",
+        "build-state-*.json.lock",
+        "measure-twice-state.json.lock",
+        "measure-twice-state-*.json.lock",
     ]
 
     now = time.time()

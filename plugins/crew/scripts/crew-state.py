@@ -13,11 +13,12 @@ from pathlib import Path
 from models import (
     BuildState,
     MeasureTwiceState,
-    atomic_write_json,
+    StateLockError,
     effective_count,
     effective_deadline,
     elapsed_minutes,
     read_state_json,
+    update_state_json,
     utc_now_iso,
     DEFAULT_DEADLINE_MINUTES,
     DEFAULT_MAX_STOP_FIRES,
@@ -75,23 +76,32 @@ def _refuse_corrupt(path: Path, status: str) -> None:
         sys.exit(2)
 
 
-def _read_dict_for_mutation(cls, path: Path) -> dict:
-    """The RAW on-disk dict a mutate-in-place command will edit, honoring the
-    refuse-to-touch contract (same as the Stop hook): a newer-schema file is
-    NEVER overwritten; a corrupt file is not silently clobbered. A missing file
-    yields the loop's default shape (so a first write is a complete state file).
+def _mutate_state(cls, path: Path, mutate) -> dict:
+    """Apply ``mutate`` to the state file under the shared interprocess lock.
 
-    Raw dict, NOT a dataclass round trip: rehydrating the whole state and saving
-    it back would also write this command's STALE snapshot of the hook-owned
-    counters, silently reverting any bump the Stop hook landed between the read
-    and the write, and would drop any key this install doesn't know about.
-    Mutating verbs touch ONLY the keys they own.
+    The lock spans the READ and the WRITE, so a Stop-hook counter bump landing in
+    that window is not lost: an atomic write alone makes the replace indivisible,
+    not the read-modify-write around it. ``mutate`` edits only the keys its verb
+    owns, on the dict that is on disk NOW (unknown keys and hook-owned counters go
+    back verbatim, which a dataclass round trip would drop or revert).
+
+    Honors the same refuse-to-touch contract as the Stop hook: a newer-schema file
+    is NEVER overwritten and a corrupt one is never silently clobbered (both exit
+    nonzero, bytes untouched). A missing file starts from the loop's default shape,
+    so a first write is a complete state file. A lock that cannot be taken is a
+    FAILED write, not a silent unlocked one.
     """
-    data, status = read_state_json(path)
+    try:
+        data, status = update_state_json(path, mutate, default=asdict(cls()))
+    except StateLockError as exc:
+        print(
+            f"Error: could not lock {path.name} ({exc}). Another writer is holding "
+            f"it; nothing was written. Retry.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     _refuse_future_schema(path, status)
     _refuse_corrupt(path, status)
-    if data is None:
-        return asdict(cls())
     return data
 
 
@@ -269,19 +279,23 @@ def _resolve_loop_path(loop: str, session_id: str) -> Path:
 
 
 def _apply_field(cls, path: Path, field: str, raw_value: str) -> None:
-    """Write ONE key into the state file, re-reading the file AT WRITE TIME.
+    """Write ONE key into the state file, under the lock, reading AT WRITE TIME.
 
     The dict written back is the one on disk NOW, not a snapshot taken before the
     command validated its arguments: a `stop_fires` the Stop hook bumped in that
     window is written back as the HOOK left it, never as this process last saw it.
     """
-    data = _read_dict_for_mutation(cls, path)
     # Type comes from the DATACLASS field, never from whatever is on disk, so a
     # hand-edited wrong-typed value can't dictate how the new one is coerced.
     field_type = type(getattr(cls(), field))
-    data[field] = coerce_value(raw_value, field_type)
-    data["schema"] = SCHEMA_VERSION
-    atomic_write_json(path, data)
+    value = coerce_value(raw_value, field_type)
+
+    def mutate(data: dict) -> dict:
+        data[field] = value
+        data["schema"] = SCHEMA_VERSION
+        return data
+
+    _mutate_state(cls, path, mutate)
 
 
 def cmd_set(args):
@@ -535,7 +549,15 @@ def cmd_init(args):
         if args.auto_plan:
             print(plan_file)
 
-    state.save(path)
+    fresh = asdict(state)
+    fresh["schema"] = SCHEMA_VERSION
+
+    # A REPLACE, not an edit: a fresh loop zeroes the fire counters, restarts the
+    # wall clock, and drops the previous loop's deactivation keys (completed_at /
+    # reason / force_exit), which would otherwise leave the new loop looking
+    # force-exited. It still goes through the lock so it cannot interleave with a
+    # Stop-hook write and leave a half-old, half-new file behind.
+    _mutate_state(LOOP_CLASSES[canonical], path, lambda _data: fresh)
 
 
 def deadline_minutes_arg(value: str) -> int:
@@ -572,20 +594,29 @@ def cmd_deactivate(args):
     # Fall back to the scoped path when nothing is found.
     path = _resolve_loop_path(args.loop, session_id)
 
-    # Refuse-to-touch + field-level edit: honor the same contract as the hook, and
-    # write back only the keys this verb owns (see _read_dict_for_mutation).
-    data = _read_dict_for_mutation(cls, path)
+    def mutate(data: dict) -> dict:
+        data["schema"] = SCHEMA_VERSION
+        data["active"] = False
+        # utc_now_iso, NOT a naive local `datetime.now()`: the Stop hook's
+        # force-exit stamps this same field in aware UTC, and `parse_iso` reads a
+        # naive stamp AS UTC, so two clocks in one field would be off by the local
+        # offset.
+        data["completed_at"] = utc_now_iso()
+        if args.reason:
+            if data.get(FORCE_EXIT_KEY):
+                # `reason` on a force-exited file is the bound that tripped, and
+                # `init` quotes it back when it refuses to restart the loop.
+                # Overwriting it would make a later refusal cite "User cancelled"
+                # as though THAT were the safety limit. Cancelling after a trip is
+                # recorded next to it, not over it.
+                data["deactivate_reason"] = args.reason
+            else:
+                data["reason"] = args.reason
+        return data
 
-    data["schema"] = SCHEMA_VERSION
-    data["active"] = False
-    # utc_now_iso, NOT a naive local `datetime.now()`: the Stop hook's force-exit
-    # stamps this same field in aware UTC, and `parse_iso` reads a naive stamp AS
-    # UTC, so two clocks in one field would be off by the local offset.
-    data["completed_at"] = utc_now_iso()
-    if args.reason:
-        data["reason"] = args.reason
-
-    atomic_write_json(path, data)
+    # Refuse-to-touch + field-level edit under the lock: same contract as the hook,
+    # writing back only the keys this verb owns (see _mutate_state).
+    _mutate_state(cls, path, mutate)
 
 
 def main():

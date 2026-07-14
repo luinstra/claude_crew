@@ -1849,9 +1849,43 @@ def main():
                 log_fail("Cleanup preserves foreign .sometool.tmp",
                          "file exists", "file wrongly swept by bare .*.tmp glob")
 
+            # --- the state-lock siblings sweep on the SAME anchored terms ---
+            # models.state_lock leaves a `<state-file>.lock` next to each state
+            # file. A lock whose loop is long gone is reaped; a foreign `.lock`
+            # (this cleanup also runs over the shared ~/.claude root) and a
+            # prefix-collision name are not.
+            stale_lock = crew_dir / "build-state.json.lock"
+            stale_lock.write_text("")
+            stale_scoped_lock = crew_dir / "measure-twice-state-abc.json.lock"
+            stale_scoped_lock.write_text("")
+            foreign_lock = crew_dir / "some-tool.lock"
+            foreign_lock.write_text("another tool's lock")
+            prefix_lock = crew_dir / "build-stateevil.json.lock"
+            prefix_lock.write_text("foreign file sharing the build-state prefix")
+            lock_old_mtime = _time.time() - (8 * 86400)
+            for _lf in (stale_lock, stale_scoped_lock, foreign_lock, prefix_lock):
+                os.utime(_lf, (lock_old_mtime, lock_old_mtime))
+
+            run_script(session_start, json.dumps({"directory": str(test_path)}))
+
+            if not stale_lock.exists() and not stale_scoped_lock.exists():
+                log_pass("Cleanup sweeps stale state-lock siblings (legacy + -<id> forms)")
+            else:
+                log_fail("Cleanup sweeps stale state-lock siblings (legacy + -<id> forms)",
+                         "both deleted",
+                         f"legacy={stale_lock.exists()} scoped={stale_scoped_lock.exists()}")
+
+            if foreign_lock.exists() and prefix_lock.exists():
+                log_pass("Cleanup preserves foreign/prefix-collision *.lock files")
+            else:
+                log_fail("Cleanup preserves foreign/prefix-collision *.lock files",
+                         "both preserved",
+                         f"foreign={foreign_lock.exists()} prefix={prefix_lock.exists()}")
+
             # Clean up
             for f in set(list(crew_dir.glob("*.md")) + list(crew_dir.glob("*.tmp"))
-                         + list(crew_dir.glob(".*.tmp")) + list(crew_dir.glob("*-state*.json"))):
+                         + list(crew_dir.glob(".*.tmp")) + list(crew_dir.glob("*.lock"))
+                         + list(crew_dir.glob("*-state*.json"))):
                 f.unlink()
 
             # =========================================================================
@@ -2621,7 +2655,88 @@ def main():
                              f"decision={out_v1.get('decision')}, started_at={stamped!r}, "
                              f"schema={after.get('schema')}")
 
+                # --- a started_at the wall clock cannot use is REPAIRED, not
+                # tolerated. Unlike the counters, a bad value here does not raise
+                # into the fail-open handler, it silently DELETES the deadline:
+                # unparseable reads as "elapsed unknown" and a future date reads as
+                # negative elapsed, and neither ever trips. So the only cost ceiling
+                # in the system could be switched off with valid JSON. Each fire
+                # restamps it, which bounds the loop from that fire forward. ---
+                future_stamp = (_dt.now(_tz.utc) + _td(minutes=45)).isoformat()
+                for bad_label, bad_start in (
+                    ("unparseable", "not-a-timestamp"),
+                    ("future-dated", future_stamp),
+                    ("a nonsense type (int)", 1234567890),
+                ):
+                    _clear_state_files()
+                    state_path = _write_loop_state(
+                        loop, started_at=bad_start, deadline_minutes=60, stop_fires=0)
+                    out_bad_start = json.loads(run_script(persistent_mode, stop_payload))
+                    after = _read_state_json(state_path)
+                    healed = after.get("started_at")
+                    healed_dt = (models_module.parse_iso(healed)
+                                 if isinstance(healed, str) else None)
+                    ahead = ((healed_dt - _dt.now(_tz.utc)).total_seconds() / 60.0
+                             if healed_dt else None)
+                    if (out_bad_start.get("decision") == "block"
+                            and "Safety Limit Reached" not in out_bad_start.get("reason", "")
+                            and healed != bad_start
+                            and healed_dt is not None
+                            and ahead is not None
+                            and ahead <= models_module.CLOCK_SKEW_TOLERANCE_MINUTES
+                            and after.get("active") is True):
+                        log_pass(f"{loop}: a {bad_label} started_at is repaired on disk (deadline restored)")
+                    else:
+                        log_fail(f"{loop}: a {bad_label} started_at is repaired on disk (deadline restored)",
+                                 "nudge (not a trip), started_at restamped to a parseable non-future value",
+                                 f"decision={out_bad_start.get('decision')}, "
+                                 f"started_at={healed!r}, ahead={ahead}")
+
+                    # ... and from that repaired stamp the deadline ENFORCES: age it
+                    # past the bound and the next fire force-exits. Before the
+                    # repair, no amount of elapsed time could trip it.
+                    aged = _read_state_json(state_path)
+                    aged["started_at"] = (
+                        _dt.now(_tz.utc) - _td(minutes=90)).isoformat()
+                    state_path.write_text(json.dumps(aged))
+                    out_enforced = json.loads(run_script(persistent_mode, stop_payload))
+                    after = _read_state_json(state_path)
+                    if ("deadline reached" in out_enforced.get("reason", "")
+                            and after.get("active") is False):
+                        log_pass(f"{loop}: the deadline enforces against the repaired started_at ({bad_label})")
+                    else:
+                        log_fail(f"{loop}: the deadline enforces against the repaired started_at ({bad_label})",
+                                 "force-exit with 'deadline reached', active=False",
+                                 f"reason={out_enforced.get('reason', '')[:120]!r}, "
+                                 f"active={after.get('active')}")
+
             _clear_state_files()
+
+            # models.effective_started_at, direct: the same three shapes, plus the
+            # pass-through a healthy stamp must get (a repair on every fire would
+            # restart the wall clock every fire, i.e. no deadline at all).
+            good_stamp = (_dt.now(_tz.utc) - _td(minutes=10)).isoformat()
+            skewed = (_dt.now(_tz.utc) + _td(seconds=30)).isoformat()  # inside tolerance
+            for label, value, expect_repair in (
+                ("a healthy stamp", good_stamp, False),
+                ("a slightly-ahead clock (inside tolerance)", skewed, False),
+                ("an unparseable stamp", "yesterday", True),
+                ("an empty stamp", "", True),
+                ("a future stamp", (_dt.now(_tz.utc) + _td(hours=3)).isoformat(), True),
+                ("an int", 1234567890, True),
+                ("a None", None, True),
+                ("a bool", True, True),
+            ):
+                stamp, repaired = models_module.effective_started_at(value)
+                usable = models_module.elapsed_minutes(stamp)
+                if (repaired is expect_repair
+                        and usable is not None
+                        and (repaired or stamp == value)):
+                    log_pass(f"effective_started_at: {label} -> repaired={expect_repair}, elapsed usable")
+                else:
+                    log_fail(f"effective_started_at: {label} -> repaired={expect_repair}, elapsed usable",
+                             f"repaired={expect_repair}, a stamp elapsed_minutes can read",
+                             f"repaired={repaired}, stamp={stamp!r}, elapsed={usable!r}")
 
             # =========================================================================
             # `crew state set` is a FIELD-LEVEL update, not a whole-state rewrite
@@ -2689,6 +2804,183 @@ def main():
             _clear_state_files()
 
             # =========================================================================
+            # CONCURRENT WRITERS: the Stop hook and `crew state set` are two
+            # processes writing one file. An atomic WRITE does not make the
+            # read-modify-write SEQUENCE around it atomic: each writer replaces the
+            # file with a dict it built from the state it read BEFORE the other
+            # landed, so one of the two updates is silently gone. That lost update
+            # is the counter-reset escape route (a hook bump rolled back by an
+            # allowlisted `set`) and its mirror (an agent field reverted by a hook
+            # save). Both writers now hold ONE interprocess lock for the whole
+            # read-modify-write.
+            # =========================================================================
+            log_section("concurrent writers (interprocess lock)")
+
+            import threading
+            import time as _time_mod
+            # The SAME module object crew-state.py and persistent-mode.py import
+            # (`models`), NOT the importlib copy loaded above as `crew_models`:
+            # patching the copy would leave the code under test unpatched.
+            import models as models_live
+
+            pm_spec = importlib.util.spec_from_file_location(
+                "crew_persistent_mode", SCRIPT_DIR / "persistent-mode.py")
+            pm_module = importlib.util.module_from_spec(pm_spec)
+            pm_spec.loader.exec_module(pm_module)
+
+            def _write_conc_state() -> Path:
+                _clear_state_files()
+                path = crew_dir / "build-state-conc.json"
+                path.write_text(json.dumps({
+                    "active": True, "prompt": "concurrent task", "session_id": "conc",
+                    "completion_promise": "INIT", "stop_fires": 0, "parked_fires": 0,
+                    "started_at": _dt.now(_tz.utc).isoformat(), "schema": 2,
+                }))
+                return path
+
+            conc_payload = json.dumps({"directory": str(test_path), "session_id": "conc"})
+
+            # --- 1. The race, made deterministic. The window between a writer's
+            # read and its replace is microseconds wide, so widen it: the LOCK, not
+            # the width of the window, is what has to make this safe. Both writers
+            # read the same dict, then write 0.2s later; unlocked, whichever lands
+            # second erases the other's field. ---
+            conc_path = _write_conc_state()
+            _real_atomic_write = models_live.atomic_write_json
+            race_errors = []
+
+            def _slow_atomic_write(path, data):
+                _time_mod.sleep(0.2)
+                _real_atomic_write(path, data)
+
+            def _hook_writer():
+                try:
+                    st = models_live.BuildState.load(conc_path)
+                    pm_module._normalize_bounds(st)
+                    pm_module._persist_fires(conc_path, st, stop_delta=1, parked="reset")
+                except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+                    race_errors.append(f"hook writer: {exc!r}")
+
+            def _cli_writer():
+                try:
+                    _time_mod.sleep(0.05)  # read INSIDE the hook's window
+                    crew_state_module._apply_field(
+                        models_live.BuildState, conc_path, "completion_promise", "SHIPPED")
+                except BaseException as exc:  # noqa: BLE001 - incl. SystemExit
+                    race_errors.append(f"cli writer: {exc!r}")
+
+            models_live.atomic_write_json = _slow_atomic_write
+            try:
+                race_threads = [threading.Thread(target=_hook_writer),
+                                threading.Thread(target=_cli_writer)]
+                for _t in race_threads:
+                    _t.start()
+                for _t in race_threads:
+                    _t.join(timeout=15)
+            finally:
+                models_live.atomic_write_json = _real_atomic_write
+
+            after = _read_state_json(conc_path)
+            if (not race_errors and after.get("stop_fires") == 1
+                    and after.get("completion_promise") == "SHIPPED"):
+                log_pass("concurrent hook bump + `set` (widened window): BOTH survive (no lost update)")
+            else:
+                log_fail("concurrent hook bump + `set` (widened window): BOTH survive (no lost update)",
+                         "stop_fires=1 AND completion_promise=SHIPPED",
+                         f"stop_fires={after.get('stop_fires')!r}, "
+                         f"completion_promise={after.get('completion_promise')!r}, "
+                         f"errors={race_errors}")
+
+            # --- 2. End-to-end, no monkeypatching: real Stop-hook processes firing
+            # while a real `crew state set` loop runs against the same file. ---
+            conc_path = _write_conc_state()
+            conc_rounds = 12
+            e2e_errors = []
+
+            def _fire_hooks():
+                try:
+                    for _ in range(conc_rounds):
+                        run_script(persistent_mode, conc_payload)
+                except BaseException as exc:  # noqa: BLE001
+                    e2e_errors.append(f"hook fires: {exc!r}")
+
+            def _run_sets():
+                try:
+                    for i in range(conc_rounds):
+                        run_crew_state(
+                            ["set", "bl", "completion_promise", f"v{i}",
+                             "--session-id", "conc"], test_path)
+                except BaseException as exc:  # noqa: BLE001
+                    e2e_errors.append(f"sets: {exc!r}")
+
+            e2e_threads = [threading.Thread(target=_fire_hooks),
+                           threading.Thread(target=_run_sets)]
+            for _t in e2e_threads:
+                _t.start()
+            for _t in e2e_threads:
+                _t.join(timeout=120)
+
+            after = _read_state_json(conc_path)
+            if (not e2e_errors and after.get("stop_fires") == conc_rounds
+                    and after.get("completion_promise") == f"v{conc_rounds - 1}"):
+                log_pass(f"{conc_rounds} concurrent Stop fires + {conc_rounds} `set` calls: "
+                         f"no counter bump lost, no agent field lost")
+            else:
+                log_fail(f"{conc_rounds} concurrent Stop fires + {conc_rounds} `set` calls: "
+                         f"no counter bump lost, no agent field lost",
+                         f"stop_fires={conc_rounds}, completion_promise=v{conc_rounds - 1}",
+                         f"stop_fires={after.get('stop_fires')!r}, "
+                         f"completion_promise={after.get('completion_promise')!r}, "
+                         f"errors={e2e_errors}")
+
+            # --- 3. A lock that cannot be taken is a FAILED write, never a silent
+            # unlocked one. The hook fails OPEN (allow + loud systemMessage): it
+            # cannot write, and blocking without writing would nudge forever with
+            # the counters frozen, so the bound that ends the loop never arrives.
+            # The CLI exits nonzero with the bytes untouched. ---
+            if models_live.fcntl is None:
+                print(f"{YELLOW}~ SKIP{NC}: no fcntl on this platform (lock-contention tests)")
+            else:
+                conc_path = _write_conc_state()
+                before_bytes = conc_path.read_bytes()
+                lock_fd = os.open(str(models_live.state_lock_path(conc_path)),
+                                  os.O_RDWR | os.O_CREAT, 0o600)
+                try:
+                    models_live.fcntl.flock(lock_fd, models_live.fcntl.LOCK_EX)
+
+                    raw_locked = run_script(persistent_mode, conc_payload)
+                    try:
+                        locked_out = json.loads(raw_locked)
+                    except (json.JSONDecodeError, ValueError):
+                        locked_out = {}
+                    if ("decision" not in locked_out
+                            and "could not lock" in locked_out.get("systemMessage", "")
+                            and conc_path.read_bytes() == before_bytes):
+                        log_pass("Stop hook vs a held state lock: fails OPEN (allow + loud diagnostic), no write")
+                    else:
+                        log_fail("Stop hook vs a held state lock: fails OPEN (allow + loud diagnostic), no write",
+                                 "allow JSON with a 'could not lock' systemMessage, file byte-unchanged",
+                                 f"out={raw_locked[:200]!r}, "
+                                 f"unchanged={conc_path.read_bytes() == before_bytes}")
+
+                    _, err, code = run_crew_state(
+                        ["set", "bl", "completion_promise", "LOCKED",
+                         "--session-id", "conc"], test_path)
+                    if (code == 2 and "could not lock" in err
+                            and conc_path.read_bytes() == before_bytes):
+                        log_pass("`crew state set` vs a held state lock: exit 2, state file byte-unchanged")
+                    else:
+                        log_fail("`crew state set` vs a held state lock: exit 2, state file byte-unchanged",
+                                 "exit 2, stderr says it could not lock, bytes identical",
+                                 f"code={code} err={err[:160]!r} "
+                                 f"unchanged={conc_path.read_bytes() == before_bytes}")
+                finally:
+                    models_live.fcntl.flock(lock_fd, models_live.fcntl.LOCK_UN)
+                    os.close(lock_fd)
+
+            _clear_state_files()
+
+            # =========================================================================
             # `deactivate` stamps completed_at on the SAME clock the hook's
             # force-exit does: parse_iso reads a naive stamp AS UTC, so a local
             # naive one would be off by the machine's offset on every later read.
@@ -2702,6 +2994,40 @@ def main():
             else:
                 log_fail("deactivate - completed_at is a timezone-aware UTC stamp (same clock as force-exit)",
                          "aware ISO timestamp", f"completed_at={stamped_at!r}")
+            _clear_state_files()
+
+            # `reason` on a force-exited file is the BOUND THAT TRIPPED, and `init`
+            # quotes it back when it refuses to restart the loop. Cancelling after a
+            # trip must not overwrite it, or the refusal cites "User cancelled" as
+            # though that were the safety limit.
+            for loop, cancel_reason in (("bl", "User cancelled"),
+                                        ("mt", "User cancelled")):
+                _clear_state_files()
+                tripped_path = _write_loop_state(loop, stop_fires=2, max_stop_fires=2)
+                run_script(persistent_mode, stop_payload)  # trips the bound
+                run_crew_state(["deactivate", loop, "--reason", cancel_reason], test_path)
+                after = _read_state_json(tripped_path)
+                if ("livelock circuit breaker" in after.get("reason", "")
+                        and after.get("deactivate_reason") == cancel_reason
+                        and after.get("force_exit") is True):
+                    log_pass(f"deactivate {loop} after a force-exit - keeps the trip reason, records the cancel separately")
+                else:
+                    log_fail(f"deactivate {loop} after a force-exit - keeps the trip reason, records the cancel separately",
+                             "reason still names the tripped bound, deactivate_reason holds the cancel",
+                             f"reason={after.get('reason')!r}, "
+                             f"deactivate_reason={after.get('deactivate_reason')!r}")
+
+                # A later `init` must therefore cite the BOUND, not the cancellation.
+                _, err, code = run_crew_state(
+                    ["init", loop, "--prompt" if loop == "bl" else "--task", "next run"]
+                    + ([] if loop == "bl" else ["--auto-plan"]), test_path)
+                if code != 0 and "livelock circuit breaker" in err and cancel_reason not in err:
+                    log_pass(f"init {loop} after cancel-over-force-exit - the refusal cites the tripped bound")
+                else:
+                    log_fail(f"init {loop} after cancel-over-force-exit - the refusal cites the tripped bound",
+                             "nonzero, stderr quotes the livelock reason, not the cancel text",
+                             f"code={code} err={err[:160]!r}")
+
             _clear_state_files()
 
             # =========================================================================

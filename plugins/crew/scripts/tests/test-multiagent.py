@@ -6289,6 +6289,14 @@ def test_scaffold_config():
         check("bare (no --detection): 'detection skipped' note on STDERR not stdout",
               "detection skipped" in err and "detection skipped" not in out,
               "note on stderr only", f"err={err[:80]} out-has-note={'detection skipped' in out}")
+        # The template emits every LOADER-READ key, and `[tuning].deadline_minutes`
+        # (the persistence loops' wall clock, read by `crew state init`) is one: a
+        # knob absent from the generated config is a knob nobody discovers.
+        from models import DEFAULT_DEADLINE_MINUTES as _DDM, MAX_DEADLINE_MINUTES as _MDM
+        check("scaffold [tuning] emits deadline_minutes at the enforced default",
+              f"# deadline_minutes = {_DDM}" in out and f"1-{_MDM}" in out,
+              f"commented `deadline_minutes = {_DDM}` + the 1-{_MDM} range",
+              out[out.find("[tuning]"):][:200] if "[tuning]" in out else out[:120])
         if parsed is not None:
             seats_tbl = parsed.get("seats", {})
             check("bare (no --detection) OMITS every per-seat available line",

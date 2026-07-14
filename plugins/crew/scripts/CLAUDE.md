@@ -401,12 +401,19 @@ directory = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()))
 state_file = directory / ".crew" / "build-state.json"
 state = BuildState.load(state_file)
 
-# Modify and save. Only fields the WRITER owns: the Stop hook owns the bounds
-# (stop_fires / parked_fires / started_at), the orchestrator owns the task fields.
-state.completion_promise = "SHIPPED"
-state.save(state_file)  # Atomic write via atomic_write_json: creates parent
-                        # dirs and writes the temp file 0600 FROM BIRTH
-                        # (tempfile.mkstemp), then os.replace — no chmod window.
+# Modify. Only fields the WRITER owns: the Stop hook owns the bounds (stop_fires /
+# parked_fires / started_at), the orchestrator owns the task fields. Mutations go
+# through update_state_json: it holds the interprocess lock across the read AND the
+# write (an atomic write alone does not make the read-modify-write atomic), and the
+# mutate_fn edits only its own keys, so the other writer's fields and any unknown
+# on-disk key survive. atomic_write_json underneath creates parent dirs and writes
+# the temp file 0600 FROM BIRTH (tempfile.mkstemp), then os.replace: no chmod window.
+update_state_json(
+    state_file,
+    lambda data: {**data, "completion_promise": "SHIPPED", "schema": SCHEMA_VERSION},
+)
+# state.save(path) still exists (a WHOLE-state write) and is right only where a
+# fresh state REPLACES the file, never for editing a live loop.
 ```
 
 ### SessionStart Output Pattern
@@ -497,6 +504,9 @@ crew state set mt last_verdict REVISE --session-id abc123
 # exact session-scoped file (init and deactivate/cancel of one loop MUST resolve
 # to the same file; cmd_deactivate additionally reuses the Stop hook's
 # find_session_state_file so an adopted legacy file is also turned off).
+# On an already FORCE-EXITED file the `--reason` lands in `deactivate_reason`, not
+# `reason`: `reason` there is the bound that tripped, and `init` quotes it back
+# when it refuses to restart the loop.
 crew state deactivate bl --reason "User cancelled" --session-id abc123
 ```
 
@@ -530,6 +540,33 @@ bounded). Reads classify a file via `read_state_json` /
   legacy exact name and the session-scoped `-<id>` form only) — so neither an
   unrelated `*.corrupt` file nor a prefix-collision like
   `build-stateEVIL.json.corrupt` is ever deleted.
+
+**One serialized read-modify-write (`models.update_state_json`).** The Stop hook
+and the crew-state CLI are two PROCESSES writing one file, so `atomic_write_json`
+is not enough: it makes the replace indivisible, not the read-modify-write around
+it. Two unlocked writers each rebuild the file from the dict they read BEFORE the
+other landed, and whichever replaces last erases the other's field. That lost
+update is how an allowlisted `set` could roll back a `stop_fires` bump (the
+counter-reset escape route) and how a hook save could revert `last_verdict`. So
+EVERY mutation (hook counters, force-exit, `init` / `set` / `deactivate`) goes
+through `update_state_json(path, mutate_fn)`, which holds one `fcntl.flock` on a
+sibling `<state-file>.lock` across the read AND the write, and each writer's
+`mutate_fn` touches only the keys its owner owns (so unknown on-disk keys survive
+and the two writers never overwrite each other's fields even when they interleave).
+
+- The lock is on the SIBLING, never the state file: `atomic_write_json` replaces the
+  state file's inode, so a lock on the old inode would guard nothing after the first
+  write. The sweep reaps stale `*.json.lock` siblings on the same anchored globs as
+  the other artifacts, and an acquire touches the lock's mtime so a live loop's lock
+  is never reaped mid-use.
+- The wait is BOUNDED (2s, under the hook's 5s budget in hooks.json), never an
+  indefinite block. A lock that cannot be taken is a FAILED write: the Stop hook
+  fails OPEN (allow + loud `systemMessage`, no write, because blocking without
+  writing would nudge forever with the counters frozen, so the bound that ends the
+  loop would never arrive), and the CLI exits 2 with the bytes untouched.
+- Without `fcntl` (non-POSIX) the write still happens, unlocked, with a stderr note:
+  degrading to last-writer-wins beats wedging every state write on a platform that
+  cannot lock.
 
 **Loop aliases:**
 - `bl` = `build`
@@ -636,7 +673,15 @@ rules are load-bearing; each one is a bug that already happened.
    route is now a conspicuous act (hand-editing state, or `init --force`), and the
    hook reads all four counters defensively (`effective_count`) so a garbage value
    falls back to a real bound instead of raising into the fail-open handler and
-   silently disabling enforcement for that fire.
+   silently disabling enforcement for that fire. `started_at` is read the same way
+   (`effective_started_at`) and SELF-HEALS: a missing, unparseable, wrongly-typed,
+   or FUTURE-dated stamp does not raise, it deletes the wall clock (elapsed reads
+   as unknown or negative, so the deadline never trips), so the fire restamps it to
+   now and persists that, bounding the loop from that fire forward.
+
+   Every one of those writes goes through the ONE serialized read-modify-write
+   (`update_state_json`), because an unlocked `set` could otherwise roll a counter
+   bump straight back off the disk (see the state-lock section above).
 
 3. **Waiting is FREE, but bounded.** When the Stop payload's `background_tasks`
    or `session_crons` is non-empty the session is parked on work it launched, so
@@ -741,6 +786,12 @@ The `session-start.py` hook cleans up stale state files on every session start:
     `suffix=".tmp"`), so the sweep globs exactly those anchored names
     (`.build-state.json.*.tmp` / `.build-state-*.json.*.tmp` and the
     measure-twice pair), NEVER a bare `.*.tmp`.
+  - state-lock siblings (`<state-filename>.lock`, from `models.state_lock`), globbed
+    on the same exact + `-<id>` anchoring (`build-state.json.lock` /
+    `build-state-*.json.lock` and the measure-twice pair), NEVER a bare `*.lock`.
+    An acquire touches the lock's mtime, so only locks whose loop is long gone reach
+    the age threshold: deleting one mid-use would split that loop's writers across
+    two inodes.
 
 ## Testing
 
@@ -760,13 +811,17 @@ Tests cover:
 - Multi-session isolation (concurrent loops, conflict detection)
 - Orphan cleanup (stale inactive and very old active files)
 - `CLAUDE_SESSION_ID` env var fallback
+- Concurrent writers: a hook counter bump and a `crew state set` landing in the same
+  window both survive (the widened-window case FAILS without the lock), plus the
+  fail-open/exit-2 behavior when the lock cannot be taken
 
 ## Working Here Checklist
 
 - [ ] Import models from `models.py`, don't duplicate dataclasses
 - [ ] Use `CLAUDE_PROJECT_DIR` env var for directory
 - [ ] Handle missing state files gracefully (return defaults)
-- [ ] Write state via `atomic_write_json` / `state.save` (0600-from-birth, atomic) — never hand-roll a write + chmod
+- [ ] Mutate a live loop's state ONLY via `update_state_json` (locked read-modify-write, own keys only); `state.save` is a whole-state REPLACE, never an edit
+- [ ] Never hand-roll a write + chmod (`atomic_write_json` is 0600-from-birth, atomic)
 - [ ] Run `tests/test-hooks.py` after changes
 - [ ] Output valid JSON only (no print debugging to stdout)
 

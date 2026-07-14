@@ -32,7 +32,8 @@ from models import (
     HookResult,
     BuildState,
     MeasureTwiceState,
-    atomic_write_json,
+    StateLockError,
+    update_state_json,
     read_hook_input,
     is_verbose,
     truncate,
@@ -40,6 +41,7 @@ from models import (
     elapsed_minutes,
     effective_count,
     effective_deadline,
+    effective_started_at,
     DEFAULT_MAX_STOP_FIRES,
     DEFAULT_MAX_PARKED_FIRES,
     FORCE_EXIT_KEY,
@@ -48,6 +50,10 @@ from models import (
     LOAD_FUTURE_SCHEMA,
 )
 from state_discovery import find_session_state_file
+
+# The parsed Stop payload, for the fail-open handler (which runs outside main()
+# and would otherwise have nothing to say about the fire that failed).
+_HOOK_INPUT: StopInput = StopInput()
 
 
 def _corrupt_block_message(loop_file: Path, disposition: str) -> str:
@@ -119,19 +125,26 @@ def _handle_load_status(loop_file: Path, status: str):
 
 
 def _normalize_bounds(state) -> None:
-    """Coerce the four hook-owned counters in place before anything reads them.
+    """Coerce the hook-owned bound fields in place before anything reads them.
 
     Same threat model the deadline already had: the file is hand-editable, and a
     non-int counter would raise straight into the fail-open handler, so the fire
     that trips a tampered bound is the one where the bound stops enforcing. The
     coerced values are what the fire then saves, so a garbage counter self-heals
     into a real int rather than raising again next fire.
+
+    `started_at` gets the same treatment for a sharper reason: a bad value there
+    does not raise, it DELETES the wall clock (unparseable reads as "no elapsed
+    time known", future-dated reads as negative elapsed), so the only cost ceiling
+    in the system can be switched off with valid JSON. Restamping bounds the loop
+    from this fire forward instead of never.
     """
     state.stop_fires = effective_count(state.stop_fires, 0)
     state.max_stop_fires = effective_count(state.max_stop_fires, DEFAULT_MAX_STOP_FIRES)
     state.parked_fires = effective_count(state.parked_fires, 0)
     state.max_parked_fires = effective_count(
         state.max_parked_fires, DEFAULT_MAX_PARKED_FIRES)
+    state.started_at = effective_started_at(state.started_at)[0]
 
 
 def _termination_reason(state):
@@ -165,21 +178,66 @@ def _elapsed_note(state) -> str:
     return f"Elapsed: {clock} · stop fires: {state.stop_fires}/{state.max_stop_fires}"
 
 
+def _hook_owned(data: dict, state) -> dict:
+    """Stamp the keys the Stop hook owns onto the dict on disk, in place.
+
+    The hook writes ONLY these. A whole-state write (`asdict(state)`) would also
+    drop every key this install does not model and revert an agent-owned field
+    (`last_verdict`, `plan_file`) that `crew state set` landed between the hook's
+    load and its save: the mirror image of the stale-snapshot hazard the CLI's
+    field-level write closes.
+    """
+    data["schema"] = SCHEMA_VERSION
+    data["session_id"] = state.session_id
+    data["started_at"] = state.started_at
+    data["max_stop_fires"] = state.max_stop_fires
+    data["max_parked_fires"] = state.max_parked_fires
+    return data
+
+
+def _persist_fires(loop_file: Path, state, stop_delta: int = 0, parked: str = "keep") -> None:
+    """Persist this fire's counters under the shared state lock.
+
+    The counters are recomputed from the dict read INSIDE the lock, not from the
+    snapshot this process loaded, so a bump another writer landed in that window is
+    added to, never overwritten. `parked` is one of keep / bump / reset.
+    """
+    def mutate(data: dict) -> dict:
+        _hook_owned(data, state)
+        stop_fires = effective_count(data.get("stop_fires"), 0) + stop_delta
+        parked_fires = effective_count(data.get("parked_fires"), 0)
+        if parked == "bump":
+            parked_fires += 1
+        elif parked == "reset":
+            parked_fires = 0
+        data["stop_fires"] = stop_fires
+        data["parked_fires"] = parked_fires
+        # Report what was PERSISTED (the nudge prints these), not the pre-lock read.
+        state.stop_fires = stop_fires
+        state.parked_fires = parked_fires
+        return data
+
+    update_state_json(loop_file, mutate, default=asdict(state))
+
+
 def _force_exit(loop_file: Path, state, reason: str) -> None:
     """Turn the loop off the way `crew state deactivate` does, stamping
     `completed_at` + `reason` alongside `active=False`. Without them a
     force-exited loop is indistinguishable from a clean finish on later
     inspection. The `force_exit` marker is what `crew state init` reads to refuse
-    a fresh loop over a tripped bound without `--force`. Written as a dict (not
-    `state.save`) because these are deactivation metadata, not loop state.
+    a fresh loop over a tripped bound without `--force`.
     """
-    data = asdict(state)
-    data["schema"] = SCHEMA_VERSION
-    data["active"] = False
-    data["completed_at"] = utc_now_iso()
-    data["reason"] = reason
-    data[FORCE_EXIT_KEY] = True
-    atomic_write_json(loop_file, data)
+    def mutate(data: dict) -> dict:
+        _hook_owned(data, state)
+        data["stop_fires"] = state.stop_fires
+        data["parked_fires"] = state.parked_fires
+        data["active"] = False
+        data["completed_at"] = utc_now_iso()
+        data["reason"] = reason
+        data[FORCE_EXIT_KEY] = True
+        return data
+
+    update_state_json(loop_file, mutate, default=asdict(state))
 
 
 def _handle_loop(loop_file, state, parked, banner, task_text, detail_lines, recipe, cancel_cmd):
@@ -214,8 +272,7 @@ what did not, and what you were waiting on."""
             # was forced to take a turn with nothing to do, so it polled, which
             # burned the counter and flooded the context until compaction wiped
             # its memory of the panel.
-            state.parked_fires += 1
-            state.save(loop_file)
+            _persist_fires(loop_file, state, parked="bump")
             print(HookResult.allow().to_json())
             return True
         # Past the cap, this Stop is treated as an ordinary one (nudge + a
@@ -225,13 +282,11 @@ what did not, and what you were waiting on."""
         # no nudge, no bound, no diagnostic. The counter is NOT reset here, so
         # a wait that never produces a working turn keeps costing stop_fires
         # until the circuit breaker trips.
+        _persist_fires(loop_file, state, stop_delta=1, parked="keep")
     else:
         # parked_fires counts CONSECUTIVE parks: a fire with nothing in flight
         # means the session came back and did work, so the wait was real.
-        state.parked_fires = 0
-
-    state.stop_fires += 1
-    state.save(loop_file)
+        _persist_fires(loop_file, state, stop_delta=1, parked="reset")
 
     # The full recipe is CREW_VERBOSE-only. It used to also print on the first
     # fire, but the first fire is not special: the loop parks and re-fires many
@@ -246,21 +301,20 @@ what did not, and what you were waiting on."""
             f"landed seat files. Exit: `{cancel_cmd}`"
         )
 
-    detail = "\n".join(detail_lines)
-    print(HookResult.block(
-        f"""[{banner}]
-{_elapsed_note(state)}
-
-Task: {task_text}
-{detail}
-{body}"""
-    ).to_json())
+    # Assembled line by line so a loop with no detail lines (the build loop) does
+    # not render an empty one between the task and the body.
+    lines = [f"[{banner}]", _elapsed_note(state), "", f"Task: {task_text}"]
+    lines.extend(detail_lines)
+    lines.append(body)
+    print(HookResult.block("\n".join(lines)).to_json())
     return True
 
 
 def main():
+    global _HOOK_INPUT
     data = read_hook_input()
     hook_input = StopInput.from_dict(data)
+    _HOOK_INPUT = hook_input
     directory = hook_input.directory_path
     session_id = hook_input.session_id
 
@@ -280,13 +334,11 @@ def main():
         if loop_state.active:
             # adoption stamp: claim an unowned legacy file for this session
             # before the save (the fire already saves, zero extra writes).
-            # Closes the co-adoption window at first touch.
+            # Closes the co-adoption window at first touch. A schema-1 file's
+            # missing started_at is stamped by _normalize_bounds, with every other
+            # unusable value of that field.
             if not loop_state.session_id and session_id:
                 loop_state.session_id = session_id
-            # A schema-1 file predates the wall clock; start it now rather than
-            # leaving the loop unbounded.
-            if not loop_state.started_at:
-                loop_state.started_at = utc_now_iso()
             _handle_loop(
                 loop_file,
                 loop_state,
@@ -321,8 +373,6 @@ To exit early: `/crew:cancel-build`""",
             # adoption stamp (see build loop above).
             if not measure_state.session_id and session_id:
                 measure_state.session_id = session_id
-            if not measure_state.started_at:
-                measure_state.started_at = utc_now_iso()
             _handle_loop(
                 measure_file,
                 measure_state,
@@ -350,18 +400,37 @@ To exit early: `/crew:cancel-measure-twice`""",
     print(HookResult.allow().to_json())
 
 
+def _fail_open(diag: str) -> None:
+    """Allow the stop, LOUDLY (stderr + systemMessage), never silently.
+
+    `stop_hook_active` is the one fact the payload carries about the failing fire:
+    it says whether this Stop was already being continued by a hook, i.e. whether
+    a blocked loop just lost its enforcement or nothing was being held anyway.
+    """
+    if _HOOK_INPUT.stop_hook_active:
+        diag += " This Stop was already being continued by a hook (a loop was blocking)."
+    print(HookResult.allow_with_diagnostic(diag).to_json())
+    print(diag, file=sys.stderr)
+    sys.exit(0)
+
+
 if __name__ == "__main__":
     try:
         main()
+    except StateLockError as exc:
+        # The state file's lock could not be taken, so this fire cannot write.
+        # Blocking without a write is what wedges a loop: it would re-nudge
+        # forever with the counters frozen, so the bound that ends it never
+        # arrives. Allow, loudly.
+        _fail_open(
+            "[crew] Stop hook could not lock the loop state file (%s), so it cannot "
+            "write: allowing stop. This loop's bounds are not enforced on this fire."
+            % exc
+        )
     except Exception as exc:  # noqa: BLE001. Stop is architecturally fail-open;
         # make the failure LOUD (stderr + systemMessage), never silent.
-        _diag = (
+        _fail_open(
             "[crew] Stop hook crashed (%s: %s) — allowing stop. An active "
             "persistence loop may not be enforced this fire."
             % (exc.__class__.__name__, exc)
         )
-        # models is importable here (top-of-module import succeeded before
-        # main() ran), so use the shared allow-with-diagnostic shape.
-        print(HookResult.allow_with_diagnostic(_diag).to_json())
-        print(_diag, file=sys.stderr)
-        sys.exit(0)
