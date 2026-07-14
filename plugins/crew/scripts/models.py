@@ -7,8 +7,9 @@ for type safety, validation, and self-documentation.
 """
 
 from dataclasses import dataclass, asdict, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Any
+from typing import ClassVar, Optional, Any
 import contextlib
 import json
 import os
@@ -88,13 +89,32 @@ class StopInput:
     """Input structure for Stop hooks."""
     directory: str = ""
     session_id: str = ""
+    # Harness-tracked work the session launched and has not consumed yet
+    # (background shells, async subagents). Verified present on the live Stop
+    # payload. A non-empty list is the ONE honest signal that separates "parked
+    # waiting on my own work" from "trying to quit". Without it the hook has to
+    # guess, and guessing wrong is what drove the loop to poll.
+    background_tasks: list = field(default_factory=list)
+    # Set by Claude Code when THIS Stop was already continued by a hook. Read for
+    # diagnostics only: crew enforces its own bound via BuildState.stop_fires.
+    stop_hook_active: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> "StopInput":
+        tasks = data.get("background_tasks")
         return cls(
             directory=_get_project_dir(data),
             session_id=data.get("session_id", data.get("sessionId", "")),
+            # A non-list (older or future harness) reads as "no signal" rather
+            # than crashing the hook.
+            background_tasks=tasks if isinstance(tasks, list) else [],
+            stop_hook_active=bool(data.get("stop_hook_active", False)),
         )
+
+    @property
+    def is_parked(self) -> bool:
+        """True when the session still has work in flight it launched itself."""
+        return bool(self.background_tasks)
 
     @property
     def directory_path(self) -> Path:
@@ -190,7 +210,57 @@ class SessionStartResult:
 # Current on-disk state-file schema. `load` treats an absent `schema` key
 # as 1 (legacy files keep working); a HIGHER value than this is a
 # newer-crew file that must be REFUSED, never rewritten (see LOAD_FUTURE_SCHEMA).
-SCHEMA_VERSION = 1
+# 2 added the hook-owned termination fields (stop_fires / started_at); a schema-1
+# file loads with their defaults, and the hook stamps started_at on first fire.
+SCHEMA_VERSION = 2
+
+# Termination bounds, both hook-owned. They are deliberately generous: a bound
+# that trips during legitimate work teaches the agent to route around it, which
+# is how the counter-reset livelock started.
+#
+# stop_fires is the livelock circuit breaker (what the old `iteration` field
+# accidentally measured). A real panel wait costs tens of Stop fires, so this is
+# set well above any honest loop.
+DEFAULT_MAX_STOP_FIRES = 150
+
+# The absolute wall clock, and the only cost ceiling in the system: every other
+# bound is denominated in a unit the agent controls. Deliberately NOT a stall
+# timer: a single seat legitimately takes minutes, and any late seat would reset
+# a stall clock forever.
+DEFAULT_DEADLINE_MINUTES = 60
+
+
+def utc_now_iso() -> str:
+    """Timezone-aware UTC timestamp for the state files' clock fields."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def parse_iso(value: str):
+    """Parse an ISO timestamp written by utc_now_iso, or None if unusable.
+
+    Never raises: a hand-edited or truncated timestamp must not wedge the Stop
+    hook, it just means "no wall-clock bound available this fire".
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    # A naive timestamp (hand-edited, or written by an older build) is read as
+    # UTC rather than rejected, so the deadline still bounds the loop.
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def elapsed_minutes(started_at: str):
+    """Minutes since `started_at`, or None when it can't be determined."""
+    started = parse_iso(started_at)
+    if started is None:
+        return None
+    delta = datetime.now(timezone.utc) - started
+    return delta.total_seconds() / 60.0
 
 # Load-status classifiers for the ordered decision tree in persistent-mode.py:
 # corrupt-check (unparseable) → schema-check (parseable but newer) → adoption.
@@ -254,6 +324,18 @@ class BuildState:
     max_iterations: int = 10
     completion_promise: str = "DONE"
     session_id: str = ""
+    # Hook-owned termination fields. `iteration` is NOT one of them: it counts
+    # revision rounds and the Stop hook never touches it (see AGENT_SETTABLE).
+    stop_fires: int = 0
+    max_stop_fires: int = DEFAULT_MAX_STOP_FIRES
+    started_at: str = ""
+    deadline_minutes: int = DEFAULT_DEADLINE_MINUTES
+
+    # The ONLY fields `crew state set` will write. Everything else (every field
+    # the termination predicate reads) is refused, because a safety limit the
+    # agent can rewrite is not a safety limit: a live loop reset its own counter
+    # 30 times to stay under max_iterations, making the force-exit unreachable.
+    AGENT_SETTABLE: ClassVar[frozenset] = frozenset({"completion_promise"})
 
     @classmethod
     def load_with_status(cls, path: Path):
@@ -274,6 +356,10 @@ class BuildState:
             max_iterations=data.get("max_iterations", 10),
             completion_promise=data.get("completion_promise", "DONE"),
             session_id=data.get("session_id", ""),
+            stop_fires=data.get("stop_fires", 0),
+            max_stop_fires=data.get("max_stop_fires", DEFAULT_MAX_STOP_FIRES),
+            started_at=data.get("started_at", ""),
+            deadline_minutes=data.get("deadline_minutes", DEFAULT_DEADLINE_MINUTES),
         ), LOAD_OK
 
     @classmethod
@@ -375,6 +461,16 @@ class MeasureTwiceState:
     max_iterations: int = 10
     last_verdict: str = ""  # APPROVED, REVISE, REJECT, or empty
     session_id: str = ""
+    # Hook-owned termination fields (see BuildState).
+    stop_fires: int = 0
+    max_stop_fires: int = DEFAULT_MAX_STOP_FIRES
+    started_at: str = ""
+    deadline_minutes: int = DEFAULT_DEADLINE_MINUTES
+
+    # See BuildState.AGENT_SETTABLE. `last_verdict` is settable because recording
+    # a verdict is the orchestrator's job; `iteration` is not, because it bounds
+    # termination.
+    AGENT_SETTABLE: ClassVar[frozenset] = frozenset({"last_verdict", "plan_file"})
 
     @classmethod
     def load_with_status(cls, path: Path):
@@ -394,6 +490,10 @@ class MeasureTwiceState:
             max_iterations=data.get("max_iterations", 10),
             last_verdict=data.get("last_verdict", ""),
             session_id=data.get("session_id", ""),
+            stop_fires=data.get("stop_fires", 0),
+            max_stop_fires=data.get("max_stop_fires", DEFAULT_MAX_STOP_FIRES),
+            started_at=data.get("started_at", ""),
+            deadline_minutes=data.get("deadline_minutes", DEFAULT_DEADLINE_MINUTES),
         ), LOAD_OK
 
     @classmethod

@@ -472,8 +472,8 @@ crew state init bl -f .crew/task-bl-abc123.txt --session-id abc123
 # Check if this session has conflicts (other sessions ignored)
 crew state check-conflicts --session-id abc123
 
-# Set specific fields
-crew state set bl iteration 5 --session-id abc123
+# Set a field. ONLY the loop's AGENT_SETTABLE allowlist (bl: completion_promise;
+# mt: last_verdict, plan_file). Any other field exits 2 and writes nothing.
 crew state set mt last_verdict REVISE --session-id abc123
 
 # Deactivate — pass the SAME --session-id init used, so deactivate targets the
@@ -493,17 +493,19 @@ crew state deactivate bl --reason "User cancelled" --session-id abc123
 - `measure-twice-state-{session_id}.json`
 
 **Schema version + refuse-to-touch.** Every write stamps
-`"schema": SCHEMA_VERSION` (currently 1); an ABSENT `schema` loads as 1 (legacy
-files keep working). Reads classify a file via `read_state_json` /
+`"schema": SCHEMA_VERSION` (currently 2; 2 added the hook-owned termination
+fields); an ABSENT `schema` loads as 1 (legacy files keep working, and the hook
+stamps their missing `started_at` on first fire so an adopted old loop is still
+bounded). Reads classify a file via `read_state_json` /
 `load_with_status` into `LOAD_OK` / `LOAD_MISSING` / `LOAD_CORRUPT` /
 `LOAD_FUTURE_SCHEMA`. Every MUTATING path — the Stop hook AND the crew-state CLI
-(`init` / `set` / `increment` / `deactivate`) — honors the SAME contract:
+(`init` / `set` / `deactivate`) honors the SAME contract:
 - **Newer schema** (`schema > SCHEMA_VERSION`): REFUSE to touch. The hook allows
   stop with a loud diagnostic; the CLI exits nonzero, bytes untouched — a
   downgrade must never clobber a live newer-format loop.
 - **Corrupt** (unparseable / non-object JSON): the Stop hook and `init` set the
   file aside as `<name>.corrupt` (a one-time diagnostic; `init` then starts fresh
-  state), while `set` / `increment` / `deactivate` refuse (nonzero) rather than
+  state), while `set` / `deactivate` refuse (nonzero) rather than
   silently overwrite. These set-aside artifacts are swept by `session-start`
   cleanup, which is SCOPED to crew's own backup names via exact-plus-hyphen globs
   — `build-state.json.corrupt` / `build-state-*.json.corrupt` and
@@ -548,10 +550,16 @@ HookResult.block("Must continue")    # {"decision": "block", "reason": "..."}
 class BuildState:
     active: bool = False
     prompt: str = ""              # Original task
-    iteration: int = 1
+    iteration: int = 1            # REVISION ROUNDS. The Stop hook never writes it.
     max_iterations: int = 10
     completion_promise: str = "DONE"
     session_id: str = ""          # Session that owns this loop
+    stop_fires: int = 0           # hook-owned livelock circuit breaker
+    max_stop_fires: int = 150
+    started_at: str = ""          # hook-owned wall clock (ISO, UTC)
+    deadline_minutes: int = 60
+
+    AGENT_SETTABLE = frozenset({"completion_promise"})
 ```
 
 ### MeasureTwiceState
@@ -562,11 +570,53 @@ class MeasureTwiceState:
     active: bool = False
     task_description: str = ""
     plan_file: str = ""           # e.g., ".crew/plans/auth-system.md"
-    iteration: int = 1
+    iteration: int = 1            # REVISION ROUNDS. The Stop hook never writes it.
     max_iterations: int = 10
     last_verdict: str = ""        # APPROVED, REVISE, REJECT
     session_id: str = ""          # Session that owns this loop
+    stop_fires: int = 0           # hook-owned livelock circuit breaker
+    max_stop_fires: int = 150
+    started_at: str = ""          # hook-owned wall clock (ISO, UTC)
+    deadline_minutes: int = 60
+
+    AGENT_SETTABLE = frozenset({"last_verdict", "plan_file"})
 ```
+
+## Stop hook: the loop contract (do NOT regress)
+
+The Stop hook is a **READER of loop progress, not a writer.** These four rules are
+load-bearing; each one is a bug that already happened.
+
+1. **The hook NEVER writes `iteration`.** `iteration` counts REVISION ROUNDS. It
+   writes only what it owns: `stop_fires`, the `started_at` stamp, and
+   `active=False` when a bound trips. It used to increment `iteration` on every
+   fire, which silently redefined the field to mean "Stop fires", the only thing
+   a Stop hook can honestly observe.
+
+2. **Termination bounds are hook-owned and NOT agent-writable** (`AGENT_SETTABLE`
+   above; `crew state set` refuses everything else with exit 2). A safety limit
+   the agent can rewrite is not a safety limit: a live loop, cornered by a cap it
+   kept hitting merely for WAITING, reset its own counter 30 times and made the
+   force-exit unreachable. `active` is refused for the same reason: setting it
+   false is an unaudited back door around the panel-approval gate that
+   `deactivate` exists to be.
+
+3. **Waiting is FREE.** When the Stop payload's `background_tasks` is non-empty
+   the session is parked on work it launched, so the hook **allows** the stop and
+   does not touch `stop_fires`. The harness re-invokes the session when that work
+   completes. Blocking a parked Stop is what manufactured the busy-wait: the
+   agent was forced to take a turn with nothing to do, so it polled, which burned
+   the counter and flooded the context until compaction wiped its memory of the
+   panel mid-flight and it re-ran the panel over its own completed seats.
+
+4. **Termination beats parking.** The bounds are evaluated BEFORE the parked
+   check, so a background task that never finishes cannot hide behind "I'm
+   waiting" forever. The wall clock is the only cost ceiling in the system: every
+   other bound is denominated in a unit the agent controls.
+
+Deliberately NOT added: a stall timer. A single panel seat legitimately takes
+minutes, so a stall timer risks killing healthy work, and any late-landing seat
+would reset it forever. The absolute deadline is un-gameable and does the job.
 
 ## Common Mistakes
 

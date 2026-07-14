@@ -24,11 +24,11 @@ After running both commands, report the status in this format:
 
 **Build Loop:**
 - Status: [Active/Inactive]
-- If active: Iteration X/Y, Task: "..."
+- If active: Round X/Y (revision rounds), elapsed vs `deadline_minutes`, `stop_fires`/`max_stop_fires`, Task: "..."
 
 **Measure-Twice Loop:**
 - Status: [Active/Inactive]
-- If active: Iteration X/Y, Task: "...", Plan: "..."
+- If active: Round X/Y (revision rounds), elapsed vs `deadline_minutes`, `stop_fires`/`max_stop_fires`, Task: "...", Plan: "..."
 
 **Context Snapshot:**
 - Check if `.crew/context-snapshot.md` exists

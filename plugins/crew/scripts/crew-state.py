@@ -15,6 +15,8 @@ from models import (
     BuildState,
     MeasureTwiceState,
     atomic_write_json,
+    utc_now_iso,
+    DEFAULT_DEADLINE_MINUTES,
     SCHEMA_VERSION,
     LOAD_CORRUPT,
     LOAD_FUTURE_SCHEMA,
@@ -221,7 +223,14 @@ def _resolve_loop_path(loop: str, session_id: str) -> Path:
 
 
 def cmd_set(args):
-    """Set a single field on a loop state."""
+    """Set a single field on a loop state.
+
+    Refuses any field outside the loop's AGENT_SETTABLE allowlist. The allowlist
+    is deliberately narrow: every field the Stop hook's termination predicate
+    reads is off limits, so the loop's safety bounds cannot be edited by the
+    thing they are meant to bound. `deactivate` remains the audited way to turn a
+    loop off; this verb must never be a back door around it.
+    """
     session_id = resolve_session_id(args)
     path = _resolve_loop_path(args.loop, session_id)
     cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
@@ -230,6 +239,18 @@ def cmd_set(args):
     if not hasattr(state, args.field):
         print(f"Error: {cls.__name__} has no field '{args.field}'", file=sys.stderr)
         sys.exit(1)
+
+    if args.field not in cls.AGENT_SETTABLE:
+        allowed = ", ".join(sorted(cls.AGENT_SETTABLE)) or "(none)"
+        print(
+            f"Error: '{args.field}' is not settable: it is owned by the Stop "
+            f"hook, which enforces this loop's termination bounds.\n"
+            f"  Settable fields: {allowed}\n"
+            f"  To stop the loop:  crew state deactivate {args.loop} "
+            f"--reason '<why>' --session-id <id>",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     # Get field type from dataclass
     field_type = type(getattr(state, args.field))
@@ -363,6 +384,8 @@ def cmd_init(args):
             max_iterations=args.max_iterations or 10,
             completion_promise="DONE",
             session_id=session_id,
+            started_at=utc_now_iso(),
+            deadline_minutes=args.deadline_minutes or DEFAULT_DEADLINE_MINUTES,
         )
     else:  # mt
         task = _resolve_init_text(args, args.task, "--task")
@@ -391,6 +414,8 @@ def cmd_init(args):
             max_iterations=args.max_iterations or 10,
             last_verdict="",
             session_id=session_id,
+            started_at=utc_now_iso(),
+            deadline_minutes=args.deadline_minutes or DEFAULT_DEADLINE_MINUTES,
         )
         # Output the plan file path so caller can use it
         if args.auto_plan:
@@ -427,21 +452,6 @@ def cmd_deactivate(args):
 
     # Write directly (bypass .save() to include extra fields), atomically + 0600.
     atomic_write_json(path, data)
-
-
-def cmd_increment(args):
-    """Increment a numeric field (typically iteration)."""
-    if args.field != "iteration":
-        print("Error: Only 'iteration' can be incremented", file=sys.stderr)
-        sys.exit(1)
-
-    session_id = resolve_session_id(args)
-    path = _resolve_loop_path(args.loop, session_id)
-    cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
-    state = _load_for_mutation(cls, path)
-
-    state.iteration += 1
-    state.save(path)
 
 
 def main():
@@ -490,6 +500,10 @@ def main():
     p_init.add_argument("--plan-file", help="Plan file path (for measure-twice)")
     p_init.add_argument("--auto-plan", action="store_true", help="Auto-derive plan file from task (for measure-twice)")
     p_init.add_argument("--max-iterations", type=int, help="Override max iterations")
+    p_init.add_argument(
+        "--deadline-minutes", dest="deadline_minutes", type=int,
+        help=f"Absolute wall-clock bound on the loop (default {DEFAULT_DEADLINE_MINUTES})",
+    )
     p_init.add_argument("--session-id", dest="session_id", help="Session ID for scoped state")
     p_init.set_defaults(func=cmd_init)
 
@@ -499,13 +513,6 @@ def main():
     p_deact.add_argument("--reason", help="Reason for deactivation")
     p_deact.add_argument("--session-id", dest="session_id", help="Session ID for scoped state")
     p_deact.set_defaults(func=cmd_deactivate)
-
-    # increment
-    p_inc = subparsers.add_parser("increment", help="Increment a counter")
-    p_inc.add_argument("loop", choices=list(LOOP_ALIASES.keys()))
-    p_inc.add_argument("field", choices=["iteration"])
-    p_inc.add_argument("--session-id", dest="session_id", help="Session ID for scoped state")
-    p_inc.set_defaults(func=cmd_increment)
 
     args = parser.parse_args()
     args.func(args)

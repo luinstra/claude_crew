@@ -34,6 +34,8 @@ from models import (
     read_hook_input,
     is_verbose,
     truncate,
+    utc_now_iso,
+    elapsed_minutes,
     LOAD_CORRUPT,
     LOAD_FUTURE_SCHEMA,
 )
@@ -108,6 +110,97 @@ def _handle_load_status(loop_file: Path, status: str):
     return False
 
 
+def _termination_reason(state):
+    """Why this loop must stop NOW, or None to keep going.
+
+    Both bounds are hook-owned and unwritable by the agent (see
+    ``AGENT_SETTABLE``). Neither is a stall timer: a single panel seat can take
+    minutes, and any late-landing seat would reset a stall clock forever.
+    """
+    if state.stop_fires >= state.max_stop_fires:
+        return (
+            f"livelock circuit breaker: {state.stop_fires} Stop fires without "
+            f"the loop finishing (limit {state.max_stop_fires})"
+        )
+    minutes = elapsed_minutes(state.started_at)
+    if minutes is not None and state.deadline_minutes > 0 and minutes >= state.deadline_minutes:
+        return (
+            f"deadline reached: {minutes:.0f} minutes elapsed "
+            f"(limit {state.deadline_minutes})"
+        )
+    return None
+
+
+def _elapsed_note(state) -> str:
+    """One-line budget line for the nudge, so a runaway loop is VISIBLE."""
+    minutes = elapsed_minutes(state.started_at)
+    clock = f"{minutes:.0f}/{state.deadline_minutes} min" if minutes is not None else "unknown"
+    return f"Elapsed: {clock} · stop fires: {state.stop_fires}/{state.max_stop_fires}"
+
+
+def _handle_loop(loop_file, state, parked, banner, task_text, detail_lines, recipe, cancel_cmd):
+    """Shared Stop handling for both loops. Emits output; returns True if handled.
+
+    The hook is a READER of loop progress: it NEVER writes `iteration`, which
+    counts revision rounds. It writes only the fields it owns: `stop_fires`,
+    the `started_at` stamp, and `active=False` when a bound trips. Conflating the
+    two is what made `iteration` mean "Stop fires" and drove a live loop to reset
+    its own counter to escape a limit it kept hitting for merely waiting.
+    """
+    reason = _termination_reason(state)
+    if reason:
+        state.active = False
+        state.save(loop_file)
+        print(HookResult.block(
+            f"""[{banner} - Safety Limit Reached]
+
+Loop deactivated: {reason}.
+
+Do NOT re-init the loop. Report where the work actually stands: what completed,
+what did not, and what you were waiting on."""
+        ).to_json())
+        return True
+
+    if parked:
+        # Work the session launched is still in flight, so this Stop is a WAIT,
+        # not an attempt to quit. ALLOW it: the harness re-invokes the session
+        # when that work completes, and the loop picks up from there. Blocking
+        # here is what manufactured the busy-wait: the agent was forced to take
+        # a turn with nothing to do, so it polled, which burned the counter and
+        # flooded the context until compaction wiped its memory of the panel.
+        # The wall-clock deadline above still bounds a wait that never ends.
+        state.save(loop_file)
+        print(HookResult.allow().to_json())
+        return True
+
+    state.stop_fires += 1
+    state.save(loop_file)
+
+    # The full recipe is CREW_VERBOSE-only. It used to also print on the first
+    # fire, but the first fire is not special: the loop parks and re-fires many
+    # times per round, so that only bought a wall of text at the least useful
+    # moment. The one line that must survive terse mode is the wait guard:
+    # re-running a panel mid-flight deletes the seats that already landed.
+    if is_verbose():
+        body = recipe
+    else:
+        body = (
+            f"Waiting on seats? Just wait. Do NOT re-run the panel or clear "
+            f"landed seat files. Exit: `{cancel_cmd}`"
+        )
+
+    detail = "\n".join(detail_lines)
+    print(HookResult.block(
+        f"""[{banner} - Round {state.iteration}/{state.max_iterations}]
+{_elapsed_note(state)}
+
+Task: {task_text}
+{detail}
+{body}"""
+    ).to_json())
+    return True
+
+
 def main():
     data = read_hook_input()
     hook_input = StopInput.from_dict(data)
@@ -129,20 +222,22 @@ def main():
 
         if loop_state.active:
             # adoption stamp: claim an unowned legacy file for this session
-            # before the iteration save (the fire already saves — zero extra
-            # writes). Closes the co-adoption window at first touch.
+            # before the save (the fire already saves, zero extra writes).
+            # Closes the co-adoption window at first touch.
             if not loop_state.session_id and session_id:
                 loop_state.session_id = session_id
-            if loop_state.iteration <= loop_state.max_iterations:
-                # iteration field = "next nudge to display"; init sets it to 1,
-                # we display it as-is then increment for the next Stop fire.
-                task_text = truncate(loop_state.prompt, 120)
-                if is_verbose() or loop_state.iteration == 1:
-                    # Full recipe on verbose mode or first Stop fire
-                    message = f"""[Build Loop - Iteration {loop_state.iteration}/{loop_state.max_iterations}]
-
-Task: {task_text}
-
+            # A schema-1 file predates the wall clock; start it now rather than
+            # leaving the loop unbounded.
+            if not loop_state.started_at:
+                loop_state.started_at = utc_now_iso()
+            _handle_loop(
+                loop_file,
+                loop_state,
+                hook_input.is_parked,
+                banner="Build Loop",
+                task_text=truncate(loop_state.prompt, 120),
+                detail_lines=[],
+                recipe=f"""
 Continue working. When complete, verify via the multi-model panel
 (/crew:build Step 2):
 1. "${{CLAUDE_PLUGIN_ROOT}}/crew" review-prep working-tree{session_flag}
@@ -150,28 +245,12 @@ Continue working. When complete, verify via the multi-model panel
 3. If APPROVED, deactivate the loop and summarize
 4. If REVISE with [BLOCKING] issues, fix and re-verify
 
-To exit early: `/crew:cancel-build`
-"""
-                else:
-                    # Terse mode for second Stop fire onwards
-                    message = f"""[Build Loop - Iteration {loop_state.iteration}/{loop_state.max_iterations}]
-Task: {task_text}
-"""
-                loop_state.iteration += 1
-                loop_state.save(loop_file)
-                print(HookResult.block(message).to_json())
-                return
+If you are WAITING on seats that are still running, just wait. Do NOT re-run
+the panel and do NOT clear seat files that already landed.
 
-            # Max iterations reached - force exit
-            loop_state.active = False
-            loop_state.save(loop_file)
-            message = f"""[Build Loop - Safety Limit Reached]
-
-Maximum iterations ({loop_state.max_iterations}) reached. Loop deactivated.
-
-Review what was accomplished and whether the task is complete.
-"""
-            print(HookResult.block(message).to_json())
+To exit early: `/crew:cancel-build`""",
+                cancel_cmd="/crew:cancel-build",
+            )
             return
 
     # Priority 2: Measure-Twice Loop (session-scoped lookup)
@@ -185,17 +264,16 @@ Review what was accomplished and whether the task is complete.
             # adoption stamp (see build loop above).
             if not measure_state.session_id and session_id:
                 measure_state.session_id = session_id
-            if measure_state.iteration <= measure_state.max_iterations:
-                # iteration field = "next nudge to display"; init sets it to 1,
-                # we display it as-is then increment for the next Stop fire.
-                task_text = truncate(measure_state.task_description, 120)
-                if is_verbose() or measure_state.iteration == 1:
-                    # Full recipe on verbose mode or first Stop fire
-                    message = f"""[Measure-Twice Loop - Iteration {measure_state.iteration}/{measure_state.max_iterations}]
-
-Task: {task_text}
-Plan: {measure_state.plan_file}
-
+            if not measure_state.started_at:
+                measure_state.started_at = utc_now_iso()
+            _handle_loop(
+                measure_file,
+                measure_state,
+                hook_input.is_parked,
+                banner="Measure-Twice Loop",
+                task_text=truncate(measure_state.task_description, 120),
+                detail_lines=[f"Plan: {measure_state.plan_file}"],
+                recipe=f"""
 Continue refining the plan. Verify via the multi-model panel
 (/crew:measure-twice Phase 3):
 1. If you just received panel feedback, revise the plan to address [BLOCKING] issues
@@ -203,29 +281,12 @@ Continue refining the plan. Verify via the multi-model panel
 3. Fan out ALL resolved seats, wait for every seat, collect, synthesize
 4. When APPROVED (or only [MINOR] issues), deactivate the loop and present the final plan
 
-To exit early: `/crew:cancel-measure-twice`
-"""
-                else:
-                    # Terse mode for second Stop fire onwards
-                    message = f"""[Measure-Twice Loop - Iteration {measure_state.iteration}/{measure_state.max_iterations}]
-Task: {task_text}
-Plan: {measure_state.plan_file}
-"""
-                measure_state.iteration += 1
-                measure_state.save(measure_file)
-                print(HookResult.block(message).to_json())
-                return
+If you are WAITING on seats that are still running, just wait. Do NOT re-run
+the panel and do NOT clear seat files that already landed.
 
-            # Max iterations reached - force exit
-            measure_state.active = False
-            measure_state.save(measure_file)
-            message = f"""[Measure-Twice Loop - Safety Limit Reached]
-
-Maximum iterations ({measure_state.max_iterations}) reached. Loop deactivated.
-
-Present the current plan to the user and explain where it stands.
-"""
-            print(HookResult.block(message).to_json())
+To exit early: `/crew:cancel-measure-twice`""",
+                cancel_cmd="/crew:cancel-measure-twice",
+            )
             return
 
     # No active loop — allow stop

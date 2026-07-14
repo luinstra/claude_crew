@@ -116,6 +116,29 @@ def test_not_contains(name: str, script: Path, input_data: str, not_expected: st
         log_fail(name, f"does NOT contain '{not_expected}'", f"found in: {output[:200]}")
 
 
+def test_contains_verbose(name: str, script: Path, input_data: str, expected: str) -> None:
+    """CREW_VERBOSE variant of test_contains.
+
+    The nudge's full recipe (and the copy-pasteable commands inside it) renders
+    ONLY under CREW_VERBOSE, so every assertion about the recipe's command text
+    must run verbose or it is asserting against the terse one-liner.
+    """
+    output = run_script_verbose(script, input_data)
+    if expected in output:
+        log_pass(name)
+    else:
+        log_fail(name, f"contains '{expected}'", output)
+
+
+def test_not_contains_verbose(name: str, script: Path, input_data: str, not_expected: str) -> None:
+    """CREW_VERBOSE variant of test_not_contains (see test_contains_verbose)."""
+    output = run_script_verbose(script, input_data)
+    if not_expected not in output:
+        log_pass(name)
+    else:
+        log_fail(name, f"does NOT contain '{not_expected}'", f"found in: {output[:200]}")
+
+
 def main():
     # =========================================================================
     # MODELS: HookResult.to_json() shape contract (direct unit assertions of
@@ -162,6 +185,62 @@ def main():
         log_fail('SessionStartResult.with_context() -> {"hookSpecificOutput": {...additionalContext...}}',
                  '{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "restored context"}}',
                  _ctx_json)
+
+    # =========================================================================
+    # MODELS: StopInput parses the live Stop payload's parking signal.
+    # `background_tasks` is the ONE honest signal separating "parked, waiting on
+    # work I launched" from "trying to quit". The hook's allow/block decision
+    # rides on it, so parse it at the unit level too, not just through the hook.
+    # =========================================================================
+    log_section("models.StopInput (background_tasks / stop_hook_active)")
+    from models import StopInput
+
+    _parked_in = StopInput.from_dict({
+        "directory": "/tmp/crew-x",
+        "session_id": "s1",
+        "background_tasks": [{"id": "bash-1", "status": "running"}],
+        "stop_hook_active": True,
+    })
+    if (_parked_in.background_tasks == [{"id": "bash-1", "status": "running"}]
+            and _parked_in.stop_hook_active is True
+            and _parked_in.is_parked is True):
+        log_pass("StopInput.from_dict: parses background_tasks + stop_hook_active, is_parked True")
+    else:
+        log_fail("StopInput.from_dict: parses background_tasks + stop_hook_active, is_parked True",
+                 "one task, stop_hook_active=True, is_parked=True",
+                 f"tasks={_parked_in.background_tasks!r}, "
+                 f"stop_hook_active={_parked_in.stop_hook_active!r}, "
+                 f"is_parked={_parked_in.is_parked!r}")
+
+    _bare_in = StopInput.from_dict({"directory": "/tmp/crew-x"})
+    if (_bare_in.background_tasks == []
+            and _bare_in.stop_hook_active is False
+            and _bare_in.is_parked is False):
+        log_pass("StopInput.from_dict: missing keys default to [] / False, is_parked False")
+    else:
+        log_fail("StopInput.from_dict: missing keys default to [] / False, is_parked False",
+                 "tasks=[], stop_hook_active=False, is_parked=False",
+                 f"tasks={_bare_in.background_tasks!r}, "
+                 f"stop_hook_active={_bare_in.stop_hook_active!r}, "
+                 f"is_parked={_bare_in.is_parked!r}")
+
+    _empty_in = StopInput.from_dict({"directory": "/tmp/crew-x", "background_tasks": []})
+    if _empty_in.is_parked is False:
+        log_pass("StopInput.is_parked: an EMPTY background_tasks list is not parked")
+    else:
+        log_fail("StopInput.is_parked: an EMPTY background_tasks list is not parked",
+                 "is_parked=False", f"is_parked={_empty_in.is_parked!r}")
+
+    # A non-list from an older or future harness reads as "no signal" rather than
+    # crashing the hook or (worse) reading truthy and allowing every Stop.
+    for _shape, _bad in (("string", "running"), ("object", {"bash-1": "running"})):
+        _bad_in = StopInput.from_dict({"directory": "/tmp/crew-x", "background_tasks": _bad})
+        if _bad_in.background_tasks == [] and _bad_in.is_parked is False:
+            log_pass(f"StopInput.from_dict: a malformed background_tasks ({_shape}) reads as NOT parked")
+        else:
+            log_fail(f"StopInput.from_dict: a malformed background_tasks ({_shape}) reads as NOT parked",
+                     "tasks=[], is_parked=False",
+                     f"tasks={_bad_in.background_tasks!r}, is_parked={_bad_in.is_parked!r}")
 
     # Global-state isolation: every subprocess env pins HOME to _NEUTRAL_HOME
     # (see _neutral_env), so the scripts under test can never read from — or
@@ -426,14 +505,15 @@ def main():
                 "Build Loop",
             )
 
-            # The first-fire nudge prescribes the multi-model
-            # panel flow, not the retired lone-advisor flow. Reset to
-            # iteration 1 so the full recipe (not the terse variant) renders.
+            # The recipe nudge prescribes the multi-model panel flow, not the
+            # retired lone-advisor flow. Every recipe assertion runs VERBOSE:
+            # the recipe (and the copy-pasteable commands in it) renders only
+            # under CREW_VERBOSE, so a terse assertion would be vacuous.
             (crew_dir / "build-state.json").write_text(
                 '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
             )
-            test_contains(
-                "Build loop nudge - prescribes panel (review-prep)",
+            test_contains_verbose(
+                "Build loop nudge (verbose) - prescribes panel (review-prep)",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
                 "review-prep",
@@ -441,8 +521,8 @@ def main():
             (crew_dir / "build-state.json").write_text(
                 '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
             )
-            test_not_contains(
-                "Build loop nudge - no lone-advisor recipe",
+            test_not_contains_verbose(
+                "Build loop nudge (verbose) - no lone-advisor recipe",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
                 "Spawn advisor",
@@ -454,8 +534,8 @@ def main():
             (crew_dir / "build-state.json").write_text(
                 '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
             )
-            test_not_contains(
-                "Build loop nudge - no bare --session-id when session_id empty",
+            test_not_contains_verbose(
+                "Build loop nudge (verbose) - no bare --session-id when session_id empty",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
                 "--session-id",
@@ -463,8 +543,8 @@ def main():
             (crew_dir / "build-state.json").write_text(
                 '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
             )
-            test_contains(
-                "Build loop nudge - renders --session-id with value",
+            test_contains_verbose(
+                "Build loop nudge (verbose) - renders --session-id with value",
                 persistent_mode,
                 json.dumps({"directory": str(test_path), "session_id": "s9"}),
                 "--session-id s9",
@@ -475,8 +555,8 @@ def main():
             (crew_dir / "build-state.json").write_text(
                 '{"active": true, "prompt": "Complete the task", "iteration": 1, "max_iterations": 10, "completion_promise": "DONE"}'
             )
-            test_contains(
-                "Build loop nudge - shell-quotes session_id with metacharacter",
+            test_contains_verbose(
+                "Build loop nudge (verbose) - shell-quotes session_id with metacharacter",
                 persistent_mode,
                 json.dumps({"directory": str(test_path), "session_id": "s x;rm"}),
                 "--session-id 's x;rm'",
@@ -516,13 +596,13 @@ def main():
                 "Measure-Twice Loop",
             )
 
-            # The measure-twice first-fire nudge prescribes the
-            # panel flow, not the retired lone-advisor re-review.
+            # The measure-twice recipe nudge prescribes the panel flow, not the
+            # retired lone-advisor re-review (verbose: see the build-loop block).
             (crew_dir / "measure-twice-state.json").write_text(
                 '{"active": true, "task_description": "Design auth", "plan_file": ".crew/plans/auth.md", "iteration": 1, "max_iterations": 10}'
             )
-            test_contains(
-                "Measure-twice nudge - prescribes panel (review-prep)",
+            test_contains_verbose(
+                "Measure-twice nudge (verbose) - prescribes panel (review-prep)",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
                 "review-prep",
@@ -530,8 +610,8 @@ def main():
             (crew_dir / "measure-twice-state.json").write_text(
                 '{"active": true, "task_description": "Design auth", "plan_file": ".crew/plans/auth.md", "iteration": 1, "max_iterations": 10}'
             )
-            test_not_contains(
-                "Measure-twice nudge - no lone-advisor recipe",
+            test_not_contains_verbose(
+                "Measure-twice nudge (verbose) - no lone-advisor recipe",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
                 "Spawn advisor",
@@ -545,8 +625,8 @@ def main():
                 "plan_file": ".crew/plans/auth plan.md",
                 "iteration": 1, "max_iterations": 10,
             }))
-            test_contains(
-                "Measure-twice nudge - shell-quotes spaced plan path",
+            test_contains_verbose(
+                "Measure-twice nudge (verbose) - shell-quotes spaced plan path",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
                 "review-prep '.crew/plans/auth plan.md'",
@@ -559,8 +639,8 @@ def main():
                 "plan_file": ".crew/plans/auth.md",
                 "iteration": 1, "max_iterations": 10,
             }))
-            test_contains(
-                "Measure-twice nudge - shell-quotes session_id with metacharacter",
+            test_contains_verbose(
+                "Measure-twice nudge (verbose) - shell-quotes session_id with metacharacter",
                 persistent_mode,
                 json.dumps({"directory": str(test_path), "session_id": "s x;rm"}),
                 "--session-id 's x;rm'",
@@ -606,63 +686,66 @@ def main():
                 if f.is_file():
                     f.unlink()
 
-            # iteration=1 (first Stop fire): display reads "1/N", full recipe present
+            # Terse (default): NO recipe, but the two lines that must survive
+            # terse mode are present: the wait guard (re-running a panel
+            # mid-flight deletes the seats that already landed) and the exit
+            # command (the sanctioned way out).
             (crew_dir / "build-state.json").write_text(
                 '{"active": true, "prompt": "Fix auth bug", "iteration": 1, "max_iterations": 10}'
             )
-            out_terse_iter1 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
-            if "verify via the multi-model panel" in out_terse_iter1:
-                log_pass("Terse mode + iteration 1 (bl): full recipe present")
+            out_terse_bl = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if "verify via the multi-model panel" not in out_terse_bl:
+                log_pass("Terse nudge (bl): recipe absent")
             else:
-                log_fail("Terse mode + iteration 1 (bl): full recipe present",
-                         "contains 'verify via the multi-model panel'", out_terse_iter1[:300])
+                log_fail("Terse nudge (bl): recipe absent",
+                         "does NOT contain 'verify via the multi-model panel'", out_terse_bl[:300])
 
-            # First Stop fire displays "Iteration 1/10" (display-then-increment)
-            if "Iteration 1/10" in out_terse_iter1:
-                log_pass("First Stop fire (bl) displays 'Iteration 1/10'")
+            if "/crew:cancel-build" in out_terse_bl and "Just wait" in out_terse_bl:
+                log_pass("Terse nudge (bl): keeps the wait guard + exit command")
             else:
-                log_fail("First Stop fire (bl) displays 'Iteration 1/10'",
-                         "contains 'Iteration 1/10'", out_terse_iter1[:300])
+                log_fail("Terse nudge (bl): keeps the wait guard + exit command",
+                         "contains 'Just wait' and '/crew:cancel-build'", out_terse_bl[:300])
 
-            # State now has iteration=2. Terse second fire: recipe absent
-            out_terse_iter2 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
-            if "verify via the multi-model panel" not in out_terse_iter2:
-                log_pass("Terse mode + iteration 2 (bl): recipe absent")
+            # The header counts revision ROUNDS (iteration), not Stop fires; the
+            # budget line reports the hook-owned bounds separately.
+            if "Round 1/10" in out_terse_bl and "stop fires: 1/150" in out_terse_bl:
+                log_pass("Terse nudge (bl): 'Round 1/10' header + elapsed/stop-fires budget line")
             else:
-                log_fail("Terse mode + iteration 2 (bl): recipe absent",
-                         "does NOT contain 'verify via the multi-model panel'", out_terse_iter2[:300])
+                log_fail("Terse nudge (bl): 'Round 1/10' header + elapsed/stop-fires budget line",
+                         "contains 'Round 1/10' and 'stop fires: 1/150'", out_terse_bl[:300])
 
-            if "cancel-build" not in out_terse_iter2:
-                log_pass("Terse mode + iteration 2 (bl): cancel-build absent")
+            # A second terse fire bumps ONLY stop_fires: the round header is
+            # unchanged because the hook never writes `iteration`.
+            out_terse_bl2 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if ("Round 1/10" in out_terse_bl2 and "stop fires: 2/150" in out_terse_bl2
+                    and "Fix auth bug" in out_terse_bl2):
+                log_pass("Terse nudge (bl): second fire bumps stop_fires only, Round header unchanged")
             else:
-                log_fail("Terse mode + iteration 2 (bl): cancel-build absent",
-                         "does NOT contain 'cancel-build'", out_terse_iter2[:300])
+                log_fail("Terse nudge (bl): second fire bumps stop_fires only, Round header unchanged",
+                         "contains 'Round 1/10', 'stop fires: 2/150' and task", out_terse_bl2[:300])
 
-            # Second Stop fire displays "Iteration 2/10"
-            if "Iteration 2/10" in out_terse_iter2 and "Fix auth bug" in out_terse_iter2:
-                log_pass("Second Stop fire (bl) displays 'Iteration 2/10' with task")
+            # Verbose: the full recipe renders on ANY fire (there is no
+            # first-fire special case anymore).
+            out_verbose_bl = run_script_verbose(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if "verify via the multi-model panel" in out_verbose_bl:
+                log_pass("Verbose nudge (bl): full recipe present on a later fire")
             else:
-                log_fail("Second Stop fire (bl) displays 'Iteration 2/10' with task",
-                         "contains 'Iteration 2/10' and task", out_terse_iter2[:300])
+                log_fail("Verbose nudge (bl): full recipe present on a later fire",
+                         "contains 'verify via the multi-model panel'", out_verbose_bl[:300])
 
-            # Verbose mode (state now iteration=3): full recipe present despite iteration>1
-            out_verbose_iter3 = run_script_verbose(persistent_mode, json.dumps({"directory": str(test_path)}))
-            if "verify via the multi-model panel" in out_verbose_iter3:
-                log_pass("Verbose mode + iteration 3 (bl): full recipe present")
+            # max_iterations is NOT a termination bound: fires well past it keep
+            # nudging (the hook-owned stop_fires/deadline bounds are the only
+            # force-exits, covered in the termination-bounds section below).
+            (crew_dir / "build-state.json").write_text(
+                '{"active": true, "prompt": "Fix auth bug", "iteration": 99, '
+                '"max_iterations": 10, "stop_fires": 20}'
+            )
+            out_past_max = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if "Safety Limit Reached" not in out_past_max and "Round 99/10" in out_past_max:
+                log_pass("Round past max_iterations still nudges (max_iterations is not a bound)")
             else:
-                log_fail("Verbose mode + iteration 3 (bl): full recipe present",
-                         "contains 'verify via the multi-model panel'", out_verbose_iter3[:300])
-
-            # Safety cap: exactly max_iterations nudges. State is at iteration=4 now.
-            # Run 7 more terse nudges → display 4/10..10/10, leaving iteration=11.
-            for _ in range(7):
-                run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
-            out_safety = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
-            if "Safety Limit Reached" in out_safety:
-                log_pass("Safety cap fires after exactly max_iterations nudges (10/10 displayed)")
-            else:
-                log_fail("Safety cap fires after exactly max_iterations nudges",
-                         "contains 'Safety Limit Reached'", out_safety[:300])
+                log_fail("Round past max_iterations still nudges (max_iterations is not a bound)",
+                         "no 'Safety Limit Reached', header 'Round 99/10'", out_past_max[:300])
 
             # Prompt truncation: 500-char prompt → exactly 120 chars in reason
             long_prompt = "A" * 500
@@ -700,30 +783,43 @@ def main():
 
             (crew_dir / "build-state.json").unlink()
 
-            # Measure-twice terse/verbose
+            # Measure-twice terse/verbose (same contract as the build loop).
             (crew_dir / "measure-twice-state.json").write_text(
                 '{"active": true, "task_description": "Design profiles", "plan_file": ".crew/plans/profiles.md", "iteration": 1, "max_iterations": 10}'
             )
-            out_mt_iter1 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
-            if "When APPROVED" in out_mt_iter1 and "Iteration 1/10" in out_mt_iter1:
-                log_pass("Terse mode + iteration 1 (mt): full recipe + 'Iteration 1/10'")
+            out_terse_mt = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if "When APPROVED" not in out_terse_mt:
+                log_pass("Terse nudge (mt): recipe absent")
             else:
-                log_fail("Terse mode + iteration 1 (mt): full recipe + 'Iteration 1/10'",
-                         "contains 'When APPROVED' and 'Iteration 1/10'", out_mt_iter1[:300])
+                log_fail("Terse nudge (mt): recipe absent",
+                         "does NOT contain 'When APPROVED'", out_terse_mt[:300])
 
-            out_mt_iter2 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
-            if ("When APPROVED" not in out_mt_iter2 and "cancel-measure-twice" not in out_mt_iter2
-                    and "Design profiles" in out_mt_iter2 and ".crew/plans/profiles.md" in out_mt_iter2):
-                log_pass("Terse mode + iteration 2 (mt): recipe absent, task+plan present")
+            if "/crew:cancel-measure-twice" in out_terse_mt and "Just wait" in out_terse_mt:
+                log_pass("Terse nudge (mt): keeps the wait guard + exit command")
             else:
-                log_fail("Terse mode + iteration 2 (mt): recipe absent, task+plan present",
-                         "no recipe, task and plan present", out_mt_iter2[:300])
+                log_fail("Terse nudge (mt): keeps the wait guard + exit command",
+                         "contains 'Just wait' and '/crew:cancel-measure-twice'", out_terse_mt[:300])
+
+            if ("Round 1/10" in out_terse_mt and "stop fires: 1/150" in out_terse_mt
+                    and "Design profiles" in out_terse_mt
+                    and ".crew/plans/profiles.md" in out_terse_mt):
+                log_pass("Terse nudge (mt): 'Round 1/10' header + budget line + task/plan")
+            else:
+                log_fail("Terse nudge (mt): 'Round 1/10' header + budget line + task/plan",
+                         "Round 1/10, stop fires: 1/150, task and plan present", out_terse_mt[:300])
+
+            out_terse_mt2 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
+            if "Round 1/10" in out_terse_mt2 and "stop fires: 2/150" in out_terse_mt2:
+                log_pass("Terse nudge (mt): second fire bumps stop_fires only, Round header unchanged")
+            else:
+                log_fail("Terse nudge (mt): second fire bumps stop_fires only, Round header unchanged",
+                         "contains 'Round 1/10' and 'stop fires: 2/150'", out_terse_mt2[:300])
 
             out_mt_v = run_script_verbose(persistent_mode, json.dumps({"directory": str(test_path)}))
             if "When APPROVED" in out_mt_v:
-                log_pass("Verbose mode (mt): full recipe present")
+                log_pass("Verbose nudge (mt): full recipe present")
             else:
-                log_fail("Verbose mode (mt): full recipe present",
+                log_fail("Verbose nudge (mt): full recipe present",
                          "contains 'When APPROVED'", out_mt_v[:300])
 
             (crew_dir / "measure-twice-state.json").unlink()
@@ -786,33 +882,27 @@ def main():
                 log_fail("show bl -v - short flag works same as --verbose",
                          "JSON with active: true", stdout_sv)
 
-            # Test set bl (use --verbose for JSON assertion)
-            stdout, stderr, code = run_crew_state(["set", "bl", "iteration", "5"], test_path)
+            # Test set bl on an allowlisted field (use --verbose for JSON assertion)
+            stdout, stderr, code = run_crew_state(
+                ["set", "bl", "completion_promise", "SHIPPED"], test_path)
             stdout2, _, _ = run_crew_state(["show", "bl", "--verbose"], test_path)
-            if code == 0 and '"iteration": 5' in stdout2:
-                log_pass("set bl - changes field value")
+            if code == 0 and '"completion_promise": "SHIPPED"' in stdout2:
+                log_pass("set bl - changes an allowlisted field value")
             else:
-                log_fail("set bl - changes field value", "iteration: 5", stdout2)
+                log_fail("set bl - changes an allowlisted field value",
+                         'completion_promise: "SHIPPED"', f"exit {code}, {stdout2}")
 
-            # Test set bl active false (bool coercion, use --verbose for JSON assertion)
-            stdout, stderr, code = run_crew_state(["set", "bl", "active", "false"], test_path)
-            stdout2, _, _ = run_crew_state(["show", "bl", "--verbose"], test_path)
-            if code == 0 and '"active": false' in stdout2:
-                log_pass("set bl - bool coercion works")
-            else:
-                log_fail("set bl - bool coercion works", "active: false", stdout2)
-
-            # Reset for increment test
-            run_crew_state(["set", "bl", "active", "true"], test_path)
-            run_crew_state(["set", "bl", "iteration", "5"], test_path)
-
-            # Test increment bl (use --verbose for JSON assertion)
+            # The `increment` verb is GONE: it existed only to bump `iteration`,
+            # the field the hook now owns the bounds for. argparse must reject it
+            # outright rather than the loop finding a counter it can rewrite.
             stdout, stderr, code = run_crew_state(["increment", "bl", "iteration"], test_path)
             stdout2, _, _ = run_crew_state(["show", "bl", "--verbose"], test_path)
-            if code == 0 and '"iteration": 6' in stdout2:
-                log_pass("increment bl - bumps counter")
+            if code != 0 and "invalid choice" in stderr and '"iteration": 1' in stdout2:
+                log_pass("increment verb removed - rejected, iteration untouched")
             else:
-                log_fail("increment bl - bumps counter", "iteration: 6", stdout2)
+                log_fail("increment verb removed - rejected, iteration untouched",
+                         "nonzero + 'invalid choice', iteration still 1",
+                         f"exit {code}, stderr={stderr[:120]!r}, state={stdout2[:120]}")
 
             # Test deactivate bl
             stdout, stderr, code = run_crew_state(["deactivate", "bl", "--reason", "Test done"], test_path)
@@ -1076,10 +1166,12 @@ def main():
                 b'{"active": true, "prompt": "newer", "iteration": 3, '
                 b'"max_iterations": 10, "session_id": "futS", "schema": 99}')
             fut = crew_dir / "build-state-futS.json"
+            # `set` carries an ALLOWLISTED field here: a refused field would exit
+            # nonzero on the allowlist check alone and pass this test without the
+            # refuse-to-touch guard ever running.
             for mut in (
                 ["init", "bl", "--prompt", "x", "--session-id", "futS"],
-                ["set", "bl", "iteration", "5", "--session-id", "futS"],
-                ["increment", "bl", "iteration", "--session-id", "futS"],
+                ["set", "bl", "completion_promise", "SHIPPED", "--session-id", "futS"],
                 ["deactivate", "bl", "--reason", "x", "--session-id", "futS"],
             ):
                 fut.write_bytes(future_bytes)
@@ -1128,12 +1220,12 @@ def main():
                 f.unlink()
 
             # =========================================================================
-            # _resolve_loop_path: set/increment with --session-id against an
+            # _resolve_loop_path: the mutating verbs with --session-id against an
             # ADOPTED LEGACY (unsuffixed) state file mutate THAT file in place (via
-            # find_session_state_file), never a stray session-scoped path. The
-            # deactivate arm of this symmetry is covered above; this covers the
-            # set/increment verbs (the actual bug _resolve_loop_path fixed) plus
-            # the read verbs (show/is-active must report the adopted file too).
+            # find_session_state_file), never a stray session-scoped path. This
+            # covers `set` and `deactivate` (the bug _resolve_loop_path fixed) plus
+            # the read verbs (show/is-active must report the adopted file too);
+            # the init/deactivate session-id symmetry is covered above.
             # =========================================================================
             legacy = crew_dir / "build-state.json"
             scoped_stray = crew_dir / "build-state-legS.json"
@@ -1143,11 +1235,11 @@ def main():
                 '"max_iterations": 10, "session_id": ""}'
             )
             _, _, set_code = run_crew_state(
-                ["set", "bl", "iteration", "7", "--session-id", "legS"], test_path)
+                ["set", "bl", "completion_promise", "SHIPPED", "--session-id", "legS"], test_path)
             legacy_after_set = json.loads(legacy.read_text())
             set_ok = (
                 set_code == 0
-                and legacy_after_set.get("iteration") == 7
+                and legacy_after_set.get("completion_promise") == "SHIPPED"
                 and not scoped_stray.exists()
             )
             if set_ok:
@@ -1155,24 +1247,9 @@ def main():
             else:
                 log_fail(
                     "set --session-id over adopted legacy file - mutates legacy in place, no stray scoped file",
-                    "legacy iteration=7, no build-state-legS.json",
-                    f"code={set_code} legacy_iter={legacy_after_set.get('iteration')} stray={scoped_stray.exists()}")
-
-            _, _, inc_code = run_crew_state(
-                ["increment", "bl", "iteration", "--session-id", "legS"], test_path)
-            legacy_after_inc = json.loads(legacy.read_text())
-            inc_ok = (
-                inc_code == 0
-                and legacy_after_inc.get("iteration") == 8
-                and not scoped_stray.exists()
-            )
-            if inc_ok:
-                log_pass("increment --session-id over adopted legacy file - mutates legacy in place, no stray scoped file")
-            else:
-                log_fail(
-                    "increment --session-id over adopted legacy file - mutates legacy in place, no stray scoped file",
-                    "legacy iteration=8, no build-state-legS.json",
-                    f"code={inc_code} legacy_iter={legacy_after_inc.get('iteration')} stray={scoped_stray.exists()}")
+                    "legacy completion_promise=SHIPPED, no build-state-legS.json",
+                    f"code={set_code} legacy_promise={legacy_after_set.get('completion_promise')} "
+                    f"stray={scoped_stray.exists()}")
 
             # show/is-active must resolve the SAME adopted file: reporting
             # inactive while Stop still adopts the legacy loop would tell the
@@ -1193,6 +1270,21 @@ def main():
             else:
                 log_fail("is-active --session-id over adopted legacy file - exits 0 (active)",
                          "exit 0", f"exit {ia_code}")
+
+            # deactivate resolves the same adopted file (run last: it turns the
+            # legacy loop off, which the read verbs above still needed active).
+            _, _, deact_leg_code = run_crew_state(
+                ["deactivate", "bl", "--reason", "done", "--session-id", "legS"], test_path)
+            legacy_after_deact = json.loads(legacy.read_text())
+            if (deact_leg_code == 0 and legacy_after_deact.get("active") is False
+                    and not scoped_stray.exists()):
+                log_pass("deactivate --session-id over adopted legacy file - turns legacy off, no stray scoped file")
+            else:
+                log_fail(
+                    "deactivate --session-id over adopted legacy file - turns legacy off, no stray scoped file",
+                    "legacy active=false, no build-state-legS.json",
+                    f"code={deact_leg_code} legacy_active={legacy_after_deact.get('active')} "
+                    f"stray={scoped_stray.exists()}")
             for f in crew_dir.glob("*-state*.json*"):
                 f.unlink()
 
@@ -1930,10 +2022,12 @@ def main():
 
             with open(p5_state) as f:
                 _saved = json.load(f)
-            if _saved.get("schema") == 1:
-                log_pass("save() stamps schema:1")
+            # Schema 2 added the hook-owned termination fields (stop_fires /
+            # started_at); a v1 file still loads, with their defaults.
+            if _saved.get("schema") == 2:
+                log_pass("save() stamps schema:2")
             else:
-                log_fail("save() stamps schema:1", "1", str(_saved.get("schema")))
+                log_fail("save() stamps schema:2", "2", str(_saved.get("schema")))
 
             # --- Atomicity: crash between temp-write and os.replace ---
             # A monkeypatched os.replace records the TEMP file's mode (proving
@@ -1974,20 +2068,19 @@ def main():
                 log_fail("atomic write: temp file is 0600 by construction", "0o600",
                          oct(_temp_modes[0]) if _temp_modes and _temp_modes[0] is not None else str(_temp_modes))
 
-            # --- Concurrent increment: no torn state, unique temps ---
+            # --- Concurrent writes: no torn state, unique temps ---
             for f in crew_dir.glob("*"):
                 if f.is_file():
                     f.unlink()
             run_crew_state(["init", "bl", "--prompt", "race"], test_path)
-            run_crew_state(["set", "bl", "iteration", "5"], test_path)
             _race_procs = [
                 subprocess.Popen(
-                    [sys.executable, str(crew_state), "increment", "bl", "iteration"],
+                    [sys.executable, str(crew_state), "set", "bl", "completion_promise", _val],
                     cwd=test_path,
                     env={**_neutral_env(), "CLAUDE_PROJECT_DIR": str(test_path)},
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 )
-                for _ in range(2)
+                for _val in ("RACE_A", "RACE_B")
             ]
             for pr in _race_procs:
                 pr.wait()
@@ -1998,13 +2091,15 @@ def main():
             except (OSError, json.JSONDecodeError):
                 raced, parseable = {}, False
             race_stray = list(crew_dir.glob(".build-state.json.*.tmp"))
-            # Lost update is accepted (both may read 5 → 6); corruption is not.
-            if parseable and raced.get("iteration") in (6, 7) and not race_stray:
-                log_pass("concurrent increment: final JSON parseable, valid state, no temp collision")
+            # Last writer wins (either value is fine); a torn/partial file is not.
+            if (parseable and raced.get("completion_promise") in ("RACE_A", "RACE_B")
+                    and raced.get("prompt") == "race" and not race_stray):
+                log_pass("concurrent set: final JSON parseable, valid state, no temp collision")
             else:
-                log_fail("concurrent increment: final JSON parseable, valid state, no temp collision",
-                         "parseable JSON, iteration in {6,7}, no stray temp",
-                         f"parseable={parseable}, iter={raced.get('iteration')}, stray={[s.name for s in race_stray]}")
+                log_fail("concurrent set: final JSON parseable, valid state, no temp collision",
+                         "parseable JSON, completion_promise in {RACE_A,RACE_B}, prompt intact, no stray temp",
+                         f"parseable={parseable}, promise={raced.get('completion_promise')}, "
+                         f"prompt={raced.get('prompt')!r}, stray={[s.name for s in race_stray]}")
 
             # --- adoption stamp ---
             for f in crew_dir.glob("*"):
@@ -2105,6 +2200,300 @@ def main():
             for f in crew_dir.glob("*"):
                 if f.is_file():
                     f.unlink()
+
+            # =========================================================================
+            # TERMINATION BOUNDS: hook-owned counters, agent-unwritable
+            # Every case runs against BOTH loops: the bug this suite exists for
+            # (a loop resetting its own counter to escape a cap it hit by merely
+            # waiting) lives in the shared Stop path, so a fix proven on one loop
+            # proves nothing about the other.
+            # =========================================================================
+            log_section("termination bounds (bl + mt)")
+
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+            def _write_loop_state(loop: str, **overrides) -> Path:
+                """Write an ACTIVE, unowned (adoptable) state file for a loop.
+
+                Fields absent from the dict are the schema-1 shape: no
+                `started_at`, no `stop_fires`, no `schema` key.
+                """
+                if loop == "bl":
+                    data = {"active": True, "prompt": "bounded task",
+                            "iteration": 4, "max_iterations": 10, "session_id": ""}
+                    path = crew_dir / "build-state.json"
+                else:
+                    data = {"active": True, "task_description": "bounded plan",
+                            "plan_file": ".crew/plans/bounded.md",
+                            "iteration": 4, "max_iterations": 10, "session_id": ""}
+                    path = crew_dir / "measure-twice-state.json"
+                data.update(overrides)
+                path.write_text(json.dumps(data))
+                return path
+
+            def _read_state_json(path: Path) -> dict:
+                with open(path) as fh:
+                    return json.load(fh)
+
+            def _clear_state_files() -> None:
+                # The build loop has priority in the Stop hook, so a leftover
+                # build-state file would shadow every mt case below.
+                for f in crew_dir.glob("*-state*.json*"):
+                    f.unlink()
+
+            stop_payload = json.dumps({"directory": str(test_path)})
+
+            for loop, banner, ok_field, ok_value in (
+                ("bl", "Build Loop", "completion_promise", "SHIPPED"),
+                ("mt", "Measure-Twice Loop", "last_verdict", "REVISE"),
+            ):
+                # --- The hook is a READER of iteration ---
+                _clear_state_files()
+                state_path = _write_loop_state(loop, iteration=4, stop_fires=0)
+                for _ in range(3):
+                    run_script(persistent_mode, stop_payload)
+                after = _read_state_json(state_path)
+                if after.get("iteration") == 4 and after.get("stop_fires") == 3:
+                    log_pass(f"{loop}: 3 consecutive Stop fires bump stop_fires only, iteration untouched")
+                else:
+                    log_fail(f"{loop}: 3 consecutive Stop fires bump stop_fires only, iteration untouched",
+                             "iteration=4, stop_fires=3",
+                             f"iteration={after.get('iteration')}, stop_fires={after.get('stop_fires')}")
+
+                # --- `set iteration` refused: the exact 30x self-medication that
+                # made the safety limit unreachable ---
+                before_bytes = state_path.read_bytes()
+                _, err, code = run_crew_state(["set", loop, "iteration", "1"], test_path)
+                if code == 2 and state_path.read_bytes() == before_bytes:
+                    log_pass(f"set {loop} iteration - refused (exit 2), state file byte-unchanged")
+                else:
+                    log_fail(f"set {loop} iteration - refused (exit 2), state file byte-unchanged",
+                             "exit 2, bytes identical",
+                             f"code={code} unchanged={state_path.read_bytes() == before_bytes} err={err[:120]}")
+
+                # --- `set active false` refused: an unaudited backdoor around the
+                # panel-approval gate; `deactivate` is the sanctioned path ---
+                before_bytes = state_path.read_bytes()
+                _, err, code = run_crew_state(["set", loop, "active", "false"], test_path)
+                if code == 2 and state_path.read_bytes() == before_bytes:
+                    log_pass(f"set {loop} active false - refused (exit 2), state file byte-unchanged")
+                else:
+                    log_fail(f"set {loop} active false - refused (exit 2), state file byte-unchanged",
+                             "exit 2, bytes identical",
+                             f"code={code} unchanged={state_path.read_bytes() == before_bytes} err={err[:120]}")
+
+                if "deactivate" in err:
+                    log_pass(f"set {loop} active false - error points at `deactivate` instead")
+                else:
+                    log_fail(f"set {loop} active false - error points at `deactivate` instead",
+                             "stderr names deactivate", err[:160])
+
+                # --- an allowlisted field still writes ---
+                _, err, code = run_crew_state(["set", loop, ok_field, ok_value], test_path)
+                after = _read_state_json(state_path)
+                if code == 0 and after.get(ok_field) == ok_value:
+                    log_pass(f"set {loop} {ok_field} - allowlisted field still writes")
+                else:
+                    log_fail(f"set {loop} {ok_field} - allowlisted field still writes",
+                             f"exit 0, {ok_field}={ok_value}",
+                             f"code={code} value={after.get(ok_field)!r} err={err[:120]}")
+
+                # --- stop_fires circuit breaker: force-exit, then RELEASE ---
+                # The bound is checked before the bump, so with max_stop_fires=2
+                # fires 1 and 2 nudge and fire 3 trips it.
+                _clear_state_files()
+                state_path = _write_loop_state(loop, stop_fires=0, max_stop_fires=2)
+                fires = [json.loads(run_script(persistent_mode, stop_payload)) for _ in range(3)]
+                after = _read_state_json(state_path)
+                trip_reason = fires[2].get("reason", "")
+                if (fires[0].get("decision") == "block"
+                        and fires[1].get("decision") == "block"
+                        and fires[2].get("decision") == "block"
+                        and f"[{banner} - Safety Limit Reached]" in trip_reason
+                        and "livelock circuit breaker" in trip_reason
+                        and after.get("active") is False):
+                    log_pass(f"{loop}: stop_fires cap force-exits (Safety Limit Reached, active=False)")
+                else:
+                    log_fail(f"{loop}: stop_fires cap force-exits (Safety Limit Reached, active=False)",
+                             f"2 nudges then '[{banner} - Safety Limit Reached]' + livelock reason, active=False",
+                             f"decisions={[f.get('decision') for f in fires]}, "
+                             f"active={after.get('active')}, reason={trip_reason[:120]!r}")
+
+                out_after_trip = run_script(persistent_mode, stop_payload)
+                if out_after_trip == "{}":
+                    log_pass(f"{loop}: the Stop after a stop_fires force-exit ALLOWS (never wedges)")
+                else:
+                    log_fail(f"{loop}: the Stop after a stop_fires force-exit ALLOWS (never wedges)",
+                             "{}", out_after_trip[:200])
+
+                # --- wall-clock deadline: force-exit, then RELEASE ---
+                _clear_state_files()
+                stale_start = (_dt.now(_tz.utc) - _td(minutes=90)).isoformat()
+                state_path = _write_loop_state(
+                    loop, started_at=stale_start, deadline_minutes=60, stop_fires=0)
+                out_deadline = json.loads(run_script(persistent_mode, stop_payload))
+                after = _read_state_json(state_path)
+                dl_reason = out_deadline.get("reason", "")
+                if (out_deadline.get("decision") == "block"
+                        and f"[{banner} - Safety Limit Reached]" in dl_reason
+                        and "deadline reached" in dl_reason
+                        and after.get("active") is False):
+                    log_pass(f"{loop}: wall-clock deadline force-exits (Safety Limit Reached, active=False)")
+                else:
+                    log_fail(f"{loop}: wall-clock deadline force-exits (Safety Limit Reached, active=False)",
+                             f"'[{banner} - Safety Limit Reached]' + deadline reason, active=False",
+                             f"decision={out_deadline.get('decision')}, active={after.get('active')}, "
+                             f"reason={dl_reason[:120]!r}")
+
+                out_after_deadline = run_script(persistent_mode, stop_payload)
+                if out_after_deadline == "{}":
+                    log_pass(f"{loop}: the Stop after a deadline force-exit ALLOWS (never wedges)")
+                else:
+                    log_fail(f"{loop}: the Stop after a deadline force-exit ALLOWS (never wedges)",
+                             "{}", out_after_deadline[:200])
+
+                # --- an adopted schema-1 loop is not left unbounded forever ---
+                _clear_state_files()
+                state_path = _write_loop_state(loop)  # no started_at, no schema key
+                out_v1 = json.loads(run_script(persistent_mode, stop_payload))
+                after = _read_state_json(state_path)
+                stamped = after.get("started_at", "")
+                if (out_v1.get("decision") == "block"
+                        and stamped
+                        and models_module.parse_iso(stamped) is not None
+                        and after.get("schema") == 2):
+                    log_pass(f"{loop}: schema-1 state with no started_at is stamped on the first Stop fire")
+                else:
+                    log_fail(f"{loop}: schema-1 state with no started_at is stamped on the first Stop fire",
+                             "block + parseable started_at + schema:2",
+                             f"decision={out_v1.get('decision')}, started_at={stamped!r}, "
+                             f"schema={after.get('schema')}")
+
+            _clear_state_files()
+
+            # =========================================================================
+            # PARKED STOPS: waiting on launched work must be FREE
+            # A Stop that fires while the session still has `background_tasks` in
+            # flight is a WAIT, not an attempt to quit: the harness re-invokes the
+            # session when that work lands. Blocking it forced the agent to take a
+            # turn with nothing to do, so it polled: the busy-wait that burned the
+            # counter and flooded the context. Every case runs against BOTH loops
+            # (the parked branch lives in the shared Stop path).
+            # =========================================================================
+            log_section("parked stops (bl + mt)")
+
+            def _parked_payload(tasks) -> str:
+                """A Stop payload carrying `tasks` as the harness's background_tasks."""
+                return json.dumps({"directory": str(test_path), "background_tasks": tasks})
+
+            # Shape of a live in-flight entry; only its NON-EMPTINESS is load-bearing.
+            one_task = [{"id": "bash-1", "status": "running", "command": "crew run codex"}]
+
+            for loop, banner in (("bl", "Build Loop"), ("mt", "Measure-Twice Loop")):
+                # --- parked + active: ALLOW, and waiting costs nothing ---
+                _clear_state_files()
+                state_path = _write_loop_state(loop, stop_fires=5)
+                parked_outs = [
+                    run_script(persistent_mode, _parked_payload(one_task)) for _ in range(4)
+                ]
+                after = _read_state_json(state_path)
+                if (all(o == "{}" for o in parked_outs)
+                        and after.get("stop_fires") == 5
+                        and after.get("active") is True):
+                    log_pass(f"{loop}: 4 consecutive parked fires ALLOW ({{}}), stop_fires unchanged, loop stays active")
+                else:
+                    log_fail(f"{loop}: 4 consecutive parked fires ALLOW ({{}}), stop_fires unchanged, loop stays active",
+                             "4x '{}', stop_fires=5, active=True",
+                             f"outs={[o[:60] for o in parked_outs]}, "
+                             f"stop_fires={after.get('stop_fires')}, active={after.get('active')}")
+
+                # A parked fire must never carry a block decision, however phrased.
+                if all('"decision": "block"' not in o for o in parked_outs):
+                    log_pass(f"{loop}: a parked fire emits no block decision")
+                else:
+                    log_fail(f"{loop}: a parked fire emits no block decision",
+                             "no 'decision': 'block' in any parked output",
+                             f"outs={[o[:80] for o in parked_outs]}")
+
+                # --- termination beats parking: a wedged background task must not
+                # be able to hide behind "I'm waiting" forever ---
+                _clear_state_files()
+                stale_start = (_dt.now(_tz.utc) - _td(minutes=90)).isoformat()
+                state_path = _write_loop_state(
+                    loop, started_at=stale_start, deadline_minutes=60, stop_fires=0)
+                out_parked_dl = json.loads(run_script(persistent_mode, _parked_payload(one_task)))
+                after = _read_state_json(state_path)
+                dl_reason = out_parked_dl.get("reason", "")
+                if (out_parked_dl.get("decision") == "block"
+                        and f"[{banner} - Safety Limit Reached]" in dl_reason
+                        and "deadline reached" in dl_reason
+                        and after.get("active") is False):
+                    log_pass(f"{loop}: parked + past deadline still force-exits (termination beats parking)")
+                else:
+                    log_fail(f"{loop}: parked + past deadline still force-exits (termination beats parking)",
+                             f"'[{banner} - Safety Limit Reached]' + deadline reason, active=False",
+                             f"decision={out_parked_dl.get('decision')}, active={after.get('active')}, "
+                             f"reason={dl_reason[:120]!r}")
+
+                _clear_state_files()
+                state_path = _write_loop_state(loop, stop_fires=2, max_stop_fires=2)
+                out_parked_cap = json.loads(run_script(persistent_mode, _parked_payload(one_task)))
+                after = _read_state_json(state_path)
+                cap_reason = out_parked_cap.get("reason", "")
+                if (out_parked_cap.get("decision") == "block"
+                        and f"[{banner} - Safety Limit Reached]" in cap_reason
+                        and "livelock circuit breaker" in cap_reason
+                        and after.get("active") is False):
+                    log_pass(f"{loop}: parked at the stop_fires cap still force-exits")
+                else:
+                    log_fail(f"{loop}: parked at the stop_fires cap still force-exits",
+                             f"'[{banner} - Safety Limit Reached]' + livelock reason, active=False",
+                             f"decision={out_parked_cap.get('decision')}, active={after.get('active')}, "
+                             f"reason={cap_reason[:120]!r}")
+
+                # --- NOT parked: the two "no work in flight" payload shapes (key
+                # absent vs an empty list) must be indistinguishable to the hook ---
+                _clear_state_files()
+                state_path = _write_loop_state(loop, stop_fires=0)
+                out_absent = json.loads(run_script(persistent_mode, stop_payload))
+                absent_fires = _read_state_json(state_path).get("stop_fires")
+
+                _clear_state_files()
+                state_path = _write_loop_state(loop, stop_fires=0)
+                out_empty = json.loads(run_script(persistent_mode, _parked_payload([])))
+                empty_fires = _read_state_json(state_path).get("stop_fires")
+
+                if (out_absent.get("decision") == "block" and absent_fires == 1
+                        and out_empty.get("decision") == "block" and empty_fires == 1
+                        and out_absent.get("reason") == out_empty.get("reason")):
+                    log_pass(f"{loop}: not parked (background_tasks absent vs []) nudges identically, stop_fires increments")
+                else:
+                    log_fail(f"{loop}: not parked (background_tasks absent vs []) nudges identically, stop_fires increments",
+                             "both block with the same reason, stop_fires=1 each",
+                             f"absent=({out_absent.get('decision')}, {absent_fires}), "
+                             f"empty=({out_empty.get('decision')}, {empty_fires}), "
+                             f"reasons_equal={out_absent.get('reason') == out_empty.get('reason')}")
+
+                # --- a malformed background_tasks is NO signal, not a crash and not
+                # a free pass: a future or older harness must never wedge the hook ---
+                for shape, bad in (("string", "bash-1 running"),
+                                   ("object", {"bash-1": "running"})):
+                    _clear_state_files()
+                    state_path = _write_loop_state(loop, stop_fires=0)
+                    raw_bad = run_script(persistent_mode, _parked_payload(bad))
+                    out_bad = json.loads(raw_bad)
+                    bad_fires = _read_state_json(state_path).get("stop_fires")
+                    if (out_bad.get("decision") == "block"
+                            and "systemMessage" not in out_bad
+                            and f"[{banner} - Round" in out_bad.get("reason", "")
+                            and bad_fires == 1):
+                        log_pass(f"{loop}: a malformed background_tasks ({shape}) is NOT parked - nudges, no crash")
+                    else:
+                        log_fail(f"{loop}: a malformed background_tasks ({shape}) is NOT parked - nudges, no crash",
+                                 f"block with '[{banner} - Round' nudge, no systemMessage, stop_fires=1",
+                                 f"decision={out_bad.get('decision')}, stop_fires={bad_fires}, out={raw_bad[:160]}")
+
+            _clear_state_files()
 
             # =========================================================================
             # BOUNDED STACK DETECTION
