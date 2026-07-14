@@ -144,4 +144,4 @@ Before concluding ANY work session, verify:
 
 **If ANY checkbox is unchecked, CONTINUE WORKING.**
 
-Active build / measure-twice loops are enforced by the Stop hook — they won't end until the multi-model panel approves (or you cancel via `/crew:cancel-build` or `/crew:cancel-measure-twice`).
+Active build / measure-twice loops are enforced by the Stop hook: they won't end until the multi-model panel approves, you cancel (`/crew:cancel-build` / `/crew:cancel-measure-twice`), or a hook-owned safety limit trips (the stop-fire cap or the wall-clock deadline, which force-exit the loop).

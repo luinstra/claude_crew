@@ -464,7 +464,8 @@ When the panel's verdict is **APPROVED** (or REVISE with only [MINOR] issues):
 
 - Panel verdict is **APPROVED**
 - Panel verdict is **REVISE** but ALL issues are marked [MINOR]
-- Max iterations (10) reached (safety limit)
+- A hook-owned safety limit trips: the stop-fire cap or the wall-clock deadline
+  (both force-exit the loop; see `scripts/CLAUDE.md`)
 - User runs `/crew:cancel-measure-twice`
 
 ---

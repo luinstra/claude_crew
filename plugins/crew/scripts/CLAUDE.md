@@ -397,8 +397,9 @@ directory = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()))
 state_file = directory / ".crew" / "build-state.json"
 state = BuildState.load(state_file)
 
-# Modify and save
-state.iteration += 1
+# Modify and save. Only fields the WRITER owns: the Stop hook owns the bounds
+# (stop_fires / parked_fires / started_at), the orchestrator owns the task fields.
+state.completion_promise = "SHIPPED"
 state.save(state_file)  # Atomic write via atomic_write_json: creates parent
                         # dirs and writes the temp file 0600 FROM BIRTH
                         # (tempfile.mkstemp), then os.replace — no chmod window.
@@ -550,17 +551,23 @@ HookResult.block("Must continue")    # {"decision": "block", "reason": "..."}
 class BuildState:
     active: bool = False
     prompt: str = ""              # Original task
-    iteration: int = 1            # REVISION ROUNDS. The Stop hook never writes it.
-    max_iterations: int = 10
     completion_promise: str = "DONE"
     session_id: str = ""          # Session that owns this loop
     stop_fires: int = 0           # hook-owned livelock circuit breaker
     max_stop_fires: int = 150
     started_at: str = ""          # hook-owned wall clock (ISO, UTC)
-    deadline_minutes: int = 60
+    deadline_minutes: int = 60    # 1..MAX_DEADLINE_MINUTES (240), validated at init
+    parked_fires: int = 0         # hook-owned CONSECUTIVE parked-Stop counter
+    max_parked_fires: int = 20
 
     AGENT_SETTABLE = frozenset({"completion_promise"})
 ```
+
+There is **no round counter**. A Stop hook cannot observe a revision round (only
+its own fires), and no other writer bumps one, so the field would be a frozen
+`Round 1/N` lie on every surface that printed it. The budget the loop actually
+runs on is `stop_fires`/`max_stop_fires` plus elapsed-vs-`deadline_minutes`, and
+that is what `crew state show`, the nudge, and the SessionStart banner report.
 
 ### MeasureTwiceState
 
@@ -570,49 +577,69 @@ class MeasureTwiceState:
     active: bool = False
     task_description: str = ""
     plan_file: str = ""           # e.g., ".crew/plans/auth-system.md"
-    iteration: int = 1            # REVISION ROUNDS. The Stop hook never writes it.
-    max_iterations: int = 10
     last_verdict: str = ""        # APPROVED, REVISE, REJECT
     session_id: str = ""          # Session that owns this loop
     stop_fires: int = 0           # hook-owned livelock circuit breaker
     max_stop_fires: int = 150
     started_at: str = ""          # hook-owned wall clock (ISO, UTC)
-    deadline_minutes: int = 60
+    deadline_minutes: int = 60    # 1..MAX_DEADLINE_MINUTES (240), validated at init
+    parked_fires: int = 0         # hook-owned CONSECUTIVE parked-Stop counter
+    max_parked_fires: int = 20
 
     AGENT_SETTABLE = frozenset({"last_verdict", "plan_file"})
 ```
 
 ## Stop hook: the loop contract (do NOT regress)
 
-The Stop hook is a **READER of loop progress, not a writer.** These four rules are
-load-bearing; each one is a bug that already happened.
+The Stop hook writes **only what a Stop hook can honestly observe.** These five
+rules are load-bearing; each one is a bug that already happened.
 
-1. **The hook NEVER writes `iteration`.** `iteration` counts REVISION ROUNDS. It
-   writes only what it owns: `stop_fires`, the `started_at` stamp, and
-   `active=False` when a bound trips. It used to increment `iteration` on every
-   fire, which silently redefined the field to mean "Stop fires", the only thing
-   a Stop hook can honestly observe.
+1. **The hook counts FIRES, not rounds.** It writes only what it owns:
+   `stop_fires`, `parked_fires`, the `started_at` stamp, and the deactivation
+   when a bound trips. It once incremented a field named `iteration` on every
+   fire, silently redefining "revision round" to mean "Stop fire". That field is
+   gone rather than faked: nothing in the Stop path can see a revision round, so
+   a round counter with no writer would report `Round 1/N` forever.
 
 2. **Termination bounds are hook-owned and NOT agent-writable** (`AGENT_SETTABLE`
-   above; `crew state set` refuses everything else with exit 2). A safety limit
-   the agent can rewrite is not a safety limit: a live loop, cornered by a cap it
+   above; `crew state set` refuses everything else with exit 2, and
+   `--deadline-minutes` is validated to 1..240 at `init`). A safety limit the
+   agent can rewrite is not a safety limit: a live loop, cornered by a cap it
    kept hitting merely for WAITING, reset its own counter 30 times and made the
    force-exit unreachable. `active` is refused for the same reason: setting it
    false is an unaudited back door around the panel-approval gate that
    `deactivate` exists to be.
 
-3. **Waiting is FREE.** When the Stop payload's `background_tasks` is non-empty
-   the session is parked on work it launched, so the hook **allows** the stop and
-   does not touch `stop_fires`. The harness re-invokes the session when that work
-   completes. Blocking a parked Stop is what manufactured the busy-wait: the
-   agent was forced to take a turn with nothing to do, so it polled, which burned
-   the counter and flooded the context until compaction wiped its memory of the
-   panel mid-flight and it re-ran the panel over its own completed seats.
+3. **Waiting is FREE, but bounded.** When the Stop payload's `background_tasks`
+   or `session_crons` is non-empty the session is parked on work it launched, so
+   the hook **allows** the stop and does not touch `stop_fires`. The harness
+   re-invokes the session when that work completes. Blocking a parked Stop is
+   what manufactured the busy-wait: the agent was forced to take a turn with
+   nothing to do, so it polled, which burned the counter and flooded the context
+   until compaction wiped its memory of the panel mid-flight and it re-ran the
+   panel over its own completed seats.
 
-4. **Termination beats parking.** The bounds are evaluated BEFORE the parked
+4. **`max_parked_fires` is the escape valve.** The park signal is broad: ANY
+   harness-tracked background shell (a dev server, a `tail -f`) parks every Stop,
+   which would otherwise disable the loop entirely (no nudge, no bound, no
+   diagnostic). So `parked_fires` counts CONSECUTIVE parks, resets on any fire
+   with nothing in flight, and past `max_parked_fires` (20) a parked Stop is
+   nudged like an ordinary one and costs a `stop_fire`. 20 is generous on
+   purpose: an honest seat wait costs one or two parked fires per round.
+
+5. **Termination beats parking.** The bounds are evaluated BEFORE the parked
    check, so a background task that never finishes cannot hide behind "I'm
    waiting" forever. The wall clock is the only cost ceiling in the system: every
    other bound is denominated in a unit the agent controls.
+
+**Known limitation (do not overclaim the deadline).** Every bound is evaluated
+ON a Stop fire, and nothing in a Stop hook fires on a timer. A session parked on
+a background task that hangs forever is therefore never re-invoked, so no Stop
+fires and no bound (deadline included) is ever evaluated. That case is bounded by
+`max_parked_fires` once the session takes turns again, and by the session-start
+orphan sweep (an active state file is force-deleted after 7 days), NOT by the
+deadline. The deadline is an absolute ceiling on a loop that keeps *running*, not
+on one that is asleep.
 
 Deliberately NOT added: a stall timer. A single panel seat legitimately takes
 minutes, so a stall timer risks killing healthy work, and any late-landing seat

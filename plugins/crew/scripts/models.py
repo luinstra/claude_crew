@@ -95,6 +95,9 @@ class StopInput:
     # waiting on my own work" from "trying to quit". Without it the hook has to
     # guess, and guessing wrong is what drove the loop to poll.
     background_tasks: list = field(default_factory=list)
+    # The other documented wake signal on the Stop payload: a scheduled wake-up
+    # is a wait, not a quit, so it parks the same way background_tasks does.
+    session_crons: list = field(default_factory=list)
     # Set by Claude Code when THIS Stop was already continued by a hook. Read for
     # diagnostics only: crew enforces its own bound via BuildState.stop_fires.
     stop_hook_active: bool = False
@@ -102,19 +105,28 @@ class StopInput:
     @classmethod
     def from_dict(cls, data: dict) -> "StopInput":
         tasks = data.get("background_tasks")
+        crons = data.get("session_crons")
         return cls(
             directory=_get_project_dir(data),
             session_id=data.get("session_id", data.get("sessionId", "")),
             # A non-list (older or future harness) reads as "no signal" rather
             # than crashing the hook.
             background_tasks=tasks if isinstance(tasks, list) else [],
+            session_crons=crons if isinstance(crons, list) else [],
             stop_hook_active=bool(data.get("stop_hook_active", False)),
         )
 
     @property
     def is_parked(self) -> bool:
-        """True when the session still has work in flight it launched itself."""
-        return bool(self.background_tasks)
+        """True when the session still has work in flight it launched itself.
+
+        Deliberately BROAD (any tracked background shell parks the Stop), which
+        also means an unrelated long-lived shell (a dev server, a `tail -f`)
+        reads as parked forever. That false positive is bounded on the state
+        side by `max_parked_fires`, not narrowed here: the payload carries no
+        field that reliably separates crew's own seats from other work.
+        """
+        return bool(self.background_tasks) or bool(self.session_crons)
 
     @property
     def directory_path(self) -> Path:
@@ -142,9 +154,9 @@ class HookResult:
           shape. The legacy ``{"continue": false, ...}`` is INERT for blocking
           a Stop: Claude Code honors it as a HARD-STOP directive (the child
           session ends at the first stop attempt with
-          ``terminal_reason=stop_hook_prevented``; state-file iteration stays
-          at 2). Because ``continue: false`` demonstrably forces termination,
-          it must NOT be dual-emitted alongside ``decision: block``.
+          ``terminal_reason=stop_hook_prevented``, the loop never resuming).
+          Because ``continue: false`` demonstrably forces termination, it must
+          NOT be dual-emitted alongside ``decision: block``.
         - Allow: ``{}`` (benign empty object); asserts nothing about the
           ambiguous ``continue`` field.
         """
@@ -212,15 +224,19 @@ class SessionStartResult:
 # newer-crew file that must be REFUSED, never rewritten (see LOAD_FUTURE_SCHEMA).
 # 2 added the hook-owned termination fields (stop_fires / started_at); a schema-1
 # file loads with their defaults, and the hook stamps started_at on first fire.
+# The parked counters and the removal of the old round counter did NOT need a new
+# version: every read defaults a missing field and ignores an unknown one, so a
+# file stays legible in both directions. Bumping would make an older install
+# refuse to touch a live loop for a change it degrades safely on.
 SCHEMA_VERSION = 2
 
 # Termination bounds, both hook-owned. They are deliberately generous: a bound
 # that trips during legitimate work teaches the agent to route around it, which
 # is how the counter-reset livelock started.
 #
-# stop_fires is the livelock circuit breaker (what the old `iteration` field
-# accidentally measured). A real panel wait costs tens of Stop fires, so this is
-# set well above any honest loop.
+# stop_fires is the livelock circuit breaker: it counts what a Stop hook can
+# honestly observe (its own fires). A real panel wait costs tens of Stop fires,
+# so this is set well above any honest loop.
 DEFAULT_MAX_STOP_FIRES = 150
 
 # The absolute wall clock, and the only cost ceiling in the system: every other
@@ -228,6 +244,18 @@ DEFAULT_MAX_STOP_FIRES = 150
 # timer: a single seat legitimately takes minutes, and any late seat would reset
 # a stall clock forever.
 DEFAULT_DEADLINE_MINUTES = 60
+
+# The policy ceiling on that wall clock. `init` is invoked BY the agent, so the
+# deadline it may request is bounded on BOTH ends: a bound the bounded thing can
+# widen (or delete with a negative) is not a bound.
+MAX_DEADLINE_MINUTES = 240
+
+# Consecutive parked Stops (see StopInput.is_parked) allowed before the hook
+# nudges anyway. Generous on purpose: a genuine seat wait costs one or two parked
+# fires per round, so honest waiting stays effectively free. Its job is the case
+# the park signal cannot distinguish: an unrelated background shell that never
+# exits would otherwise park every Stop and silently disable the loop.
+DEFAULT_MAX_PARKED_FIRES = 20
 
 
 def utc_now_iso() -> str:
@@ -320,21 +348,23 @@ class BuildState:
     """State for build loop persistence with multi-model panel verification."""
     active: bool = False
     prompt: str = ""
-    iteration: int = 1
-    max_iterations: int = 10
     completion_promise: str = "DONE"
     session_id: str = ""
-    # Hook-owned termination fields. `iteration` is NOT one of them: it counts
-    # revision rounds and the Stop hook never touches it (see AGENT_SETTABLE).
+    # Hook-owned fields: the Stop hook is the ONLY writer of all five. There is
+    # deliberately no round counter here, because nothing in the Stop path can
+    # honestly observe a revision round.
     stop_fires: int = 0
     max_stop_fires: int = DEFAULT_MAX_STOP_FIRES
     started_at: str = ""
     deadline_minutes: int = DEFAULT_DEADLINE_MINUTES
+    parked_fires: int = 0
+    max_parked_fires: int = DEFAULT_MAX_PARKED_FIRES
 
     # The ONLY fields `crew state set` will write. Everything else (every field
     # the termination predicate reads) is refused, because a safety limit the
     # agent can rewrite is not a safety limit: a live loop reset its own counter
-    # 30 times to stay under max_iterations, making the force-exit unreachable.
+    # 30 times to stay under a cap it kept hitting merely for waiting, making the
+    # force-exit unreachable.
     AGENT_SETTABLE: ClassVar[frozenset] = frozenset({"completion_promise"})
 
     @classmethod
@@ -352,14 +382,14 @@ class BuildState:
         return cls(
             active=data.get("active", False),
             prompt=data.get("prompt", ""),
-            iteration=data.get("iteration", 1),
-            max_iterations=data.get("max_iterations", 10),
             completion_promise=data.get("completion_promise", "DONE"),
             session_id=data.get("session_id", ""),
             stop_fires=data.get("stop_fires", 0),
             max_stop_fires=data.get("max_stop_fires", DEFAULT_MAX_STOP_FIRES),
             started_at=data.get("started_at", ""),
             deadline_minutes=data.get("deadline_minutes", DEFAULT_DEADLINE_MINUTES),
+            parked_fires=data.get("parked_fires", 0),
+            max_parked_fires=data.get("max_parked_fires", DEFAULT_MAX_PARKED_FIRES),
         ), LOAD_OK
 
     @classmethod
@@ -457,19 +487,19 @@ class MeasureTwiceState:
     active: bool = False
     task_description: str = ""
     plan_file: str = ""  # Path to current plan, e.g., ".crew/plans/auth-system.md"
-    iteration: int = 1
-    max_iterations: int = 10
     last_verdict: str = ""  # APPROVED, REVISE, REJECT, or empty
     session_id: str = ""
-    # Hook-owned termination fields (see BuildState).
+    # Hook-owned fields (see BuildState).
     stop_fires: int = 0
     max_stop_fires: int = DEFAULT_MAX_STOP_FIRES
     started_at: str = ""
     deadline_minutes: int = DEFAULT_DEADLINE_MINUTES
+    parked_fires: int = 0
+    max_parked_fires: int = DEFAULT_MAX_PARKED_FIRES
 
-    # See BuildState.AGENT_SETTABLE. `last_verdict` is settable because recording
-    # a verdict is the orchestrator's job; `iteration` is not, because it bounds
-    # termination.
+    # See BuildState.AGENT_SETTABLE. `last_verdict` and `plan_file` are settable
+    # because recording a verdict and pointing at the current plan are the
+    # orchestrator's job; every field the Stop hook's bounds read is not.
     AGENT_SETTABLE: ClassVar[frozenset] = frozenset({"last_verdict", "plan_file"})
 
     @classmethod
@@ -486,14 +516,14 @@ class MeasureTwiceState:
             active=data.get("active", False),
             task_description=data.get("task_description", ""),
             plan_file=data.get("plan_file", ""),
-            iteration=data.get("iteration", 1),
-            max_iterations=data.get("max_iterations", 10),
             last_verdict=data.get("last_verdict", ""),
             session_id=data.get("session_id", ""),
             stop_fires=data.get("stop_fires", 0),
             max_stop_fires=data.get("max_stop_fires", DEFAULT_MAX_STOP_FIRES),
             started_at=data.get("started_at", ""),
             deadline_minutes=data.get("deadline_minutes", DEFAULT_DEADLINE_MINUTES),
+            parked_fires=data.get("parked_fires", 0),
+            max_parked_fires=data.get("max_parked_fires", DEFAULT_MAX_PARKED_FIRES),
         ), LOAD_OK
 
     @classmethod

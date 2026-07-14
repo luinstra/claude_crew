@@ -1,5 +1,5 @@
 ---
-description: Show active loops, iteration counts, and crew state
+description: Show active loops, their remaining budget, and crew state
 allowed-tools: Bash
 ---
 
@@ -22,13 +22,16 @@ rather than a legacy or other-session state file:
 
 After running both commands, report the status in this format:
 
+A loop has no round counter: the only bounds that can end it are `stop_fires` and
+the wall clock, so report those as the budget (compute elapsed from `started_at`).
+
 **Build Loop:**
 - Status: [Active/Inactive]
-- If active: Round X/Y (revision rounds), elapsed vs `deadline_minutes`, `stop_fires`/`max_stop_fires`, Task: "..."
+- If active: `stop_fires`/`max_stop_fires`, elapsed vs `deadline_minutes`, Task: "..."
 
 **Measure-Twice Loop:**
 - Status: [Active/Inactive]
-- If active: Round X/Y (revision rounds), elapsed vs `deadline_minutes`, `stop_fires`/`max_stop_fires`, Task: "...", Plan: "..."
+- If active: `stop_fires`/`max_stop_fires`, elapsed vs `deadline_minutes`, Task: "...", Plan: "...", last verdict
 
 **Context Snapshot:**
 - Check if `.crew/context-snapshot.md` exists

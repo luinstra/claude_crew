@@ -37,10 +37,13 @@ from models import (
     SessionStartInput,
     SessionStartResult,
     read_hook_input,
+    elapsed_minutes,
     get_file_age_days,
     count_incomplete_todos,
     is_verbose,
     read_state_json,
+    DEFAULT_DEADLINE_MINUTES,
+    DEFAULT_MAX_STOP_FIRES,
     LOAD_OK,
 )
 from state_discovery import is_loop_state_file, is_active_state_file
@@ -380,6 +383,22 @@ def build_plugin_guidance(stack_hints: list[str]) -> str:
     return "\n".join(lines)
 
 
+def loop_budget_line(data: dict) -> str:
+    """The restored loop's REAL budget: the two hook-owned bounds that can end it.
+
+    A resumed loop keeps the fires and the wall clock it accumulated, so the
+    banner reports those rather than a counter frozen at init. `elapsed` is `?`
+    when `started_at` is absent or unparseable (a legacy file the Stop hook has
+    not stamped yet).
+    """
+    minutes = elapsed_minutes(data.get("started_at", ""))
+    elapsed = f"{minutes:.0f}" if minutes is not None else "?"
+    deadline = data.get("deadline_minutes", DEFAULT_DEADLINE_MINUTES)
+    fires = data.get("stop_fires", 0)
+    max_fires = data.get("max_stop_fires", DEFAULT_MAX_STOP_FIRES)
+    return f"Budget: stop fires {fires}/{max_fires} · elapsed {elapsed}/{deadline} min"
+
+
 def build_session_status(
     directory: Path,
     home: Path,
@@ -436,12 +455,11 @@ def build_session_status(
 
                 # Build status line
                 if json_file.name.startswith("build-state"):
-                    iteration = data.get("iteration", 1)
-                    max_iter = data.get("max_iterations", 10)
                     prompt = data.get("prompt", "")
                     if is_this_session:
                         this_session_loops.append(
-                            f"[Build Loop Active - {iteration}/{max_iter}]\n"
+                            f"[Build Loop Active]\n"
+                            f"{loop_budget_line(data)}\n"
                             f"Task: {prompt}\n"
                             f"Continue until the multi-model panel approves completion."
                         )
@@ -450,13 +468,12 @@ def build_session_status(
                             f"Build loop (session {file_session[:8]}...): {prompt[:50]}"
                         )
                 elif json_file.name.startswith("measure-twice-state"):
-                    iteration = data.get("iteration", 1)
-                    max_iter = data.get("max_iterations", 10)
                     task = data.get("task_description", "")
                     plan = data.get("plan_file", "")
                     if is_this_session:
                         this_session_loops.append(
-                            f"[Measure-Twice Loop Active - {iteration}/{max_iter}]\n"
+                            f"[Measure-Twice Loop Active]\n"
+                            f"{loop_budget_line(data)}\n"
                             f"Task: {task}\n"
                             f"Plan: {plan}\n"
                             f"Continue until the panel approves the plan."

@@ -15,8 +15,11 @@ from models import (
     BuildState,
     MeasureTwiceState,
     atomic_write_json,
+    elapsed_minutes,
     utc_now_iso,
     DEFAULT_DEADLINE_MINUTES,
+    DEFAULT_MAX_STOP_FIRES,
+    MAX_DEADLINE_MINUTES,
     SCHEMA_VERSION,
     LOAD_CORRUPT,
     LOAD_FUTURE_SCHEMA,
@@ -55,8 +58,8 @@ def _refuse_future_schema(path: Path, status: str) -> None:
 
 def _refuse_corrupt(path: Path, status: str) -> None:
     """Mirror the hook's corrupt handling for mutate-in-place commands
-    (set/increment/deactivate): never silently overwrite an unparseable file as
-    if it were clean — emit a loud diagnostic and exit nonzero."""
+    (set/deactivate): never silently overwrite an unparseable file as if it were
+    clean, emit a loud diagnostic and exit nonzero."""
     if status == LOAD_CORRUPT:
         print(
             f"Error: {path.name} is corrupt (unparseable JSON) — refusing to "
@@ -142,11 +145,24 @@ def slugify(text: str, max_length: int = 50) -> str:
     return slug[:max_length] if slug else "plan"
 
 
+def _budget_summary(state) -> str:
+    """The loop's REAL budget: the two hook-owned bounds that can end it.
+
+    There is no round counter to report: the Stop hook counts its own fires, not
+    revision rounds. `elapsed` reads `?` when `started_at` is missing or
+    unparseable (a legacy file the hook has not stamped yet).
+    """
+    minutes = elapsed_minutes(getattr(state, "started_at", ""))
+    deadline = getattr(state, "deadline_minutes", DEFAULT_DEADLINE_MINUTES)
+    elapsed = f"{minutes:.0f}" if minutes is not None else "?"
+    fires = getattr(state, "stop_fires", 0)
+    max_fires = getattr(state, "max_stop_fires", DEFAULT_MAX_STOP_FIRES)
+    return f"fires={fires}/{max_fires} elapsed={elapsed}/{deadline}min"
+
+
 def _compact_show(state, canonical: str) -> str:
     """Format state as a compact single-line summary."""
     active_str = "true" if state.active else "false"
-    iteration = getattr(state, "iteration", 1)
-    max_iter = getattr(state, "max_iterations", 10)
 
     if canonical == "bl":
         raw_task = getattr(state, "prompt", "")
@@ -161,7 +177,10 @@ def _compact_show(state, canonical: str) -> str:
     # Escape double quotes in task for safe inline display
     task_escaped = task.replace('"', '\\"')
 
-    line = f'loop={canonical} active={active_str} iter={iteration}/{max_iter} task="{task_escaped}"'
+    line = (
+        f'loop={canonical} active={active_str} {_budget_summary(state)} '
+        f'task="{task_escaped}"'
+    )
 
     if canonical == "mt":
         plan = getattr(state, "plan_file", "")
@@ -213,7 +232,7 @@ def _resolve_loop_path(loop: str, session_id: str) -> Path:
     the Stop hook resolves (find_session_state_file, so an adopted legacy file
     is read and mutated on its real path), falling back to the fresh
     session-scoped path when nothing is found. Keeps show/is-active and
-    set/increment/deactivate in agreement about which file the loop lives in."""
+    set/deactivate in agreement about which file the loop lives in."""
     canonical = LOOP_ALIASES[loop]
     crew_dir = get_project_dir() / ".crew"
     path = find_session_state_file(crew_dir, LOOP_PREFIXES[canonical], session_id)
@@ -380,8 +399,6 @@ def cmd_init(args):
         state = BuildState(
             active=True,
             prompt=prompt,
-            iteration=1,
-            max_iterations=args.max_iterations or 10,
             completion_promise="DONE",
             session_id=session_id,
             started_at=utc_now_iso(),
@@ -410,8 +427,6 @@ def cmd_init(args):
             active=True,
             task_description=task,
             plan_file=plan_file,
-            iteration=1,
-            max_iterations=args.max_iterations or 10,
             last_verdict="",
             session_id=session_id,
             started_at=utc_now_iso(),
@@ -424,19 +439,38 @@ def cmd_init(args):
     state.save(path)
 
 
+def deadline_minutes_arg(value: str) -> int:
+    """argparse type for --deadline-minutes, validated BEFORE any state is written.
+
+    The wall clock is the only cost ceiling in the system and `init` is invoked
+    by the agent, so the requested bound is policed on both ends: a non-positive
+    value would read as "no deadline" in the Stop hook (deleting the ceiling),
+    and an arbitrarily large one would evade it. Out-of-range is an ERROR
+    (argparse exits 2 with no state file created), never a silent clamp.
+    """
+    try:
+        minutes = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected an integer, got {value!r}")
+    if minutes <= 0 or minutes > MAX_DEADLINE_MINUTES:
+        raise argparse.ArgumentTypeError(
+            f"must be between 1 and {MAX_DEADLINE_MINUTES} minutes, got {minutes}"
+        )
+    return minutes
+
+
 def cmd_deactivate(args):
     """Deactivate a loop with timestamp and optional reason."""
     session_id = resolve_session_id(args)
     canonical = LOOP_ALIASES[args.loop]
     cls = LOOP_CLASSES[canonical]
 
-    # BLOCKING 1 (session-id symmetry): deactivate the SAME file the Stop hook
-    # would find — the session-scoped file if present, else an adoptable legacy
-    # file — so a loop init'd with a given session-id is always turned off
-    # against the file it wrote (never a stale legacy file while the scoped one
-    # keeps blocking). set/increment share this resolver so all mutating verbs
-    # agree on which file they touch. Fall back to the scoped path when nothing
-    # is found.
+    # Session-id symmetry: deactivate the SAME file the Stop hook would find (the
+    # session-scoped file if present, else an adoptable legacy file), so a loop
+    # init'd with a given session-id is always turned off against the file it
+    # wrote, never a stale legacy file while the scoped one keeps blocking. `set`
+    # shares this resolver so all mutating verbs agree on which file they touch.
+    # Fall back to the scoped path when nothing is found.
     path = _resolve_loop_path(args.loop, session_id)
 
     # Refuse-to-touch: honor the same contract as the hook.
@@ -499,10 +533,10 @@ def main():
     )
     p_init.add_argument("--plan-file", help="Plan file path (for measure-twice)")
     p_init.add_argument("--auto-plan", action="store_true", help="Auto-derive plan file from task (for measure-twice)")
-    p_init.add_argument("--max-iterations", type=int, help="Override max iterations")
     p_init.add_argument(
-        "--deadline-minutes", dest="deadline_minutes", type=int,
-        help=f"Absolute wall-clock bound on the loop (default {DEFAULT_DEADLINE_MINUTES})",
+        "--deadline-minutes", dest="deadline_minutes", type=deadline_minutes_arg,
+        help=f"Absolute wall-clock bound on the loop, 1-{MAX_DEADLINE_MINUTES} "
+             f"minutes (default {DEFAULT_DEADLINE_MINUTES})",
     )
     p_init.add_argument("--session-id", dest="session_id", help="Session ID for scoped state")
     p_init.set_defaults(func=cmd_init)

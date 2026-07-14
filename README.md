@@ -141,7 +141,7 @@ For non-trivial work, use the **plan → execute** workflow to keep your main co
 4. **Execute** — `/crew:execute` to implement via executor agent
 5. **Verify** — Check results, iterate if needed
 
-For work requiring verification before declaring "done," use `/crew:build` instead — it won't let you stop until the multi-model review panel approves completion.
+For work requiring verification before declaring "done," use `/crew:build` instead: it won't let you stop until the multi-model review panel approves completion. The only other ways out are cancelling it (`/crew:cancel-build`) or a hook-owned safety limit (a stop-fire cap or the wall-clock deadline), which force-exits the loop and asks for a status report instead of an approval.
 
 ## Commands
 

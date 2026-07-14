@@ -24,6 +24,7 @@ if sys.version_info < (3, 10):
     sys.exit(0)
 
 import shlex
+from dataclasses import asdict
 from pathlib import Path
 
 from models import (
@@ -31,11 +32,15 @@ from models import (
     HookResult,
     BuildState,
     MeasureTwiceState,
+    atomic_write_json,
     read_hook_input,
     is_verbose,
     truncate,
     utc_now_iso,
     elapsed_minutes,
+    DEFAULT_DEADLINE_MINUTES,
+    MAX_DEADLINE_MINUTES,
+    SCHEMA_VERSION,
     LOAD_CORRUPT,
     LOAD_FUTURE_SCHEMA,
 )
@@ -110,6 +115,20 @@ def _handle_load_status(loop_file: Path, status: str):
     return False
 
 
+def _effective_deadline(state) -> int:
+    """The wall clock this fire enforces, in minutes.
+
+    Read defensively: the file on disk can be hand-edited, and a non-positive or
+    non-integer value must NOT read as "unbounded" (that would delete the only
+    cost ceiling in the system). Out-of-policy values fall back to the default
+    and a too-large one is clamped, matching what `crew state init` accepts.
+    """
+    value = state.deadline_minutes
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return DEFAULT_DEADLINE_MINUTES
+    return min(value, MAX_DEADLINE_MINUTES)
+
+
 def _termination_reason(state):
     """Why this loop must stop NOW, or None to keep going.
 
@@ -122,11 +141,12 @@ def _termination_reason(state):
             f"livelock circuit breaker: {state.stop_fires} Stop fires without "
             f"the loop finishing (limit {state.max_stop_fires})"
         )
+    deadline = _effective_deadline(state)
     minutes = elapsed_minutes(state.started_at)
-    if minutes is not None and state.deadline_minutes > 0 and minutes >= state.deadline_minutes:
+    if minutes is not None and minutes >= deadline:
         return (
             f"deadline reached: {minutes:.0f} minutes elapsed "
-            f"(limit {state.deadline_minutes})"
+            f"(limit {deadline})"
         )
     return None
 
@@ -134,23 +154,38 @@ def _termination_reason(state):
 def _elapsed_note(state) -> str:
     """One-line budget line for the nudge, so a runaway loop is VISIBLE."""
     minutes = elapsed_minutes(state.started_at)
-    clock = f"{minutes:.0f}/{state.deadline_minutes} min" if minutes is not None else "unknown"
+    deadline = _effective_deadline(state)
+    clock = f"{minutes:.0f}/{deadline} min" if minutes is not None else "unknown"
     return f"Elapsed: {clock} · stop fires: {state.stop_fires}/{state.max_stop_fires}"
+
+
+def _force_exit(loop_file: Path, state, reason: str) -> None:
+    """Turn the loop off the way `crew state deactivate` does, stamping
+    `completed_at` + `reason` alongside `active=False`. Without them a
+    force-exited loop is indistinguishable from a clean finish on later
+    inspection. Written as a dict (not `state.save`) because those two fields
+    are deactivation metadata, not loop state.
+    """
+    data = asdict(state)
+    data["schema"] = SCHEMA_VERSION
+    data["active"] = False
+    data["completed_at"] = utc_now_iso()
+    data["reason"] = reason
+    atomic_write_json(loop_file, data)
 
 
 def _handle_loop(loop_file, state, parked, banner, task_text, detail_lines, recipe, cancel_cmd):
     """Shared Stop handling for both loops. Emits output; returns True if handled.
 
-    The hook is a READER of loop progress: it NEVER writes `iteration`, which
-    counts revision rounds. It writes only the fields it owns: `stop_fires`,
-    the `started_at` stamp, and `active=False` when a bound trips. Conflating the
-    two is what made `iteration` mean "Stop fires" and drove a live loop to reset
-    its own counter to escape a limit it kept hitting for merely waiting.
+    The hook writes ONLY what it can honestly observe: `stop_fires`,
+    `parked_fires`, the `started_at` stamp, and the deactivation on a tripped
+    bound. It counts no revision rounds, because a Stop fire is not a round: an
+    earlier version conflated them, and the loop then reset its own counter to
+    escape a limit it kept hitting for merely waiting.
     """
     reason = _termination_reason(state)
     if reason:
-        state.active = False
-        state.save(loop_file)
+        _force_exit(loop_file, state, reason)
         print(HookResult.block(
             f"""[{banner} - Safety Limit Reached]
 
@@ -162,16 +197,29 @@ what did not, and what you were waiting on."""
         return True
 
     if parked:
-        # Work the session launched is still in flight, so this Stop is a WAIT,
-        # not an attempt to quit. ALLOW it: the harness re-invokes the session
-        # when that work completes, and the loop picks up from there. Blocking
-        # here is what manufactured the busy-wait: the agent was forced to take
-        # a turn with nothing to do, so it polled, which burned the counter and
-        # flooded the context until compaction wiped its memory of the panel.
-        # The wall-clock deadline above still bounds a wait that never ends.
-        state.save(loop_file)
-        print(HookResult.allow().to_json())
-        return True
+        if state.parked_fires < state.max_parked_fires:
+            # Work the session launched is still in flight, so this Stop is a
+            # WAIT, not an attempt to quit. ALLOW it: the harness re-invokes the
+            # session when that work completes, and the loop picks up from
+            # there. Blocking here is what manufactured the busy-wait: the agent
+            # was forced to take a turn with nothing to do, so it polled, which
+            # burned the counter and flooded the context until compaction wiped
+            # its memory of the panel.
+            state.parked_fires += 1
+            state.save(loop_file)
+            print(HookResult.allow().to_json())
+            return True
+        # Past the cap, this Stop is treated as an ordinary one (nudge + a
+        # stop_fire). The park signal cannot tell crew's own seats from an
+        # unrelated long-lived shell (a dev server, a `tail -f`), and such a
+        # shell would otherwise park every Stop and silently disable the loop:
+        # no nudge, no bound, no diagnostic. The counter is NOT reset here, so
+        # a wait that never produces a working turn keeps costing stop_fires
+        # until the circuit breaker trips.
+    else:
+        # parked_fires counts CONSECUTIVE parks: a fire with nothing in flight
+        # means the session came back and did work, so the wait was real.
+        state.parked_fires = 0
 
     state.stop_fires += 1
     state.save(loop_file)
@@ -191,7 +239,7 @@ what did not, and what you were waiting on."""
 
     detail = "\n".join(detail_lines)
     print(HookResult.block(
-        f"""[{banner} - Round {state.iteration}/{state.max_iterations}]
+        f"""[{banner}]
 {_elapsed_note(state)}
 
 Task: {task_text}
