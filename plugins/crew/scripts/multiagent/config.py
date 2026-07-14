@@ -2,9 +2,10 @@
 
 Two small, optional, PERSONAL config files tune the default panel choice (when
 the user names no panel), the panel ROSTER (``[panels]`` — what's *in* a preset),
-per-seat AVAILABILITY (``available`` opt-out), and per-seat tuning (model pins,
+per-seat AVAILABILITY (``available`` opt-out), per-seat tuning (model pins,
 codex ``reasoning_effort``, agy ``print_timeout``, and the global per-seat
-``timeout``):
+``timeout``), and the persistence loops' wall clock
+(``[tuning].deadline_minutes``):
 
   * per-repo  ``<project>/.crew/config.toml`` (resolved against
     ``CLAUDE_PROJECT_DIR`` → cwd — the SAME resolution the other ``.crew/`` paths
@@ -412,6 +413,44 @@ def default_timeout() -> int | None:
     return _first(
         _extract_default_timeout(_load(), "repo"),
         _extract_default_timeout(_global_load(), "global"),
+    )
+
+
+# --- loop deadline ------------------------------------------------------------
+
+def _extract_deadline_minutes(data: dict, layer: str) -> int | None:
+    tuning = data.get("tuning")
+    if not isinstance(tuning, dict):
+        return None
+    val = tuning.get("deadline_minutes")
+    if val is None:
+        return None
+    # Lazy import (call-time) keeps this module a pure leaf at load, and keeps the
+    # policy ceiling single-sourced with the one `crew state init` enforces.
+    from models import MAX_DEADLINE_MINUTES
+
+    # bool is an int subclass: reject it explicitly. The bounds are the same ones
+    # `--deadline-minutes` is policed by, because a config file is no more
+    # trustworthy than the flag: a non-positive value would read as "no deadline"
+    # in the Stop hook, deleting the only cost ceiling in the system.
+    if (isinstance(val, bool) or not isinstance(val, int)
+            or val <= 0 or val > MAX_DEADLINE_MINUTES):
+        _warn_once(
+            f"deadline_minutes:{layer}",
+            f"[tuning].deadline_minutes must be an integer between 1 and "
+            f"{MAX_DEADLINE_MINUTES}; ignoring {val!r}",
+        )
+        return None
+    return val
+
+
+def deadline_minutes() -> int | None:
+    """``[tuning].deadline_minutes``, the persistence loops' wall-clock bound
+    (per-repo over global), or ``None`` so `crew state init` keeps its built-in
+    default. An explicit ``--deadline-minutes`` flag still wins over both."""
+    return _first(
+        _extract_deadline_minutes(_load(), "repo"),
+        _extract_deadline_minutes(_global_load(), "global"),
     )
 
 

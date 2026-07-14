@@ -437,7 +437,12 @@ When the panel's verdict is APPROVED (or REVISE with only [MINOR] issues):
 
 ## Early Exit
 
-To exit before completion: `/crew:cancel-build`
+The loop can end before the panel approves in two ways:
+
+- User runs `/crew:cancel-build`
+- A hook-owned safety limit trips: the stop-fire cap or the wall-clock deadline
+  (both force-exit the loop; see `scripts/CLAUDE.md`). Report where the work
+  stands; do NOT re-init the loop to keep going.
 
 ---
 

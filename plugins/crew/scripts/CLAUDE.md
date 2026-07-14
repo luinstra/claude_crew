@@ -309,7 +309,11 @@ Key contracts (do NOT regress):
   (the `/crew:dispatch` default seat, validated against `known_seat_names()` —
   a panel name / group token like `cursor` is rejected), `[seats.<name>]`
   (`model`/`reasoning_effort`/`print_timeout`/`available`), `[tuning].timeout`,
-  and the global-tier `[panels]` roster. Resolution is PER-KEY (per-seat-per-key
+  `[tuning].deadline_minutes` (the persistence loops' wall clock, read by `crew
+  state init` when `--deadline-minutes` is not passed; validated 1..240, so a
+  non-int, a non-positive value, or one past the ceiling is dropped with a
+  one-time warn, never clamped silently), and the global-tier `[panels]` roster.
+  Resolution is PER-KEY (per-seat-per-key
   for `[seats.<name>]`): CLI flag > per-repo > global > builtin. The old tuning
   env surface is RETIRED — consulted at no call site. `[panels]` redefines a
   built-in preset or adds a custom one (validated vs known seats; unknown dropped
@@ -470,11 +474,23 @@ crew state init mt --task "Add user profiles" --auto-plan --session-id abc123
 # successful init (the session-start orphan-cleanup patterns do NOT cover these task files).
 crew state init bl -f .crew/task-bl-abc123.txt --session-id abc123
 
+# The loop's wall clock: --deadline-minutes (1..240) > [tuning].deadline_minutes
+# (per-repo, then global) > the built-in 120. `init` REFUSES (exit 1) when the
+# state file it would replace records a force-exit (the Stop hook's bound tripped),
+# because a fresh loop zeroes stop_fires and restarts the clock: that IS the way
+# around a safety limit, so it takes an explicit --force.
+crew state init bl --prompt "Fix the auth bug" --deadline-minutes 90 --session-id abc123
+
 # Check if this session has conflicts (other sessions ignored)
 crew state check-conflicts --session-id abc123
 
 # Set a field. ONLY the loop's AGENT_SETTABLE allowlist (bl: completion_promise;
 # mt: last_verdict, plan_file). Any other field exits 2 and writes nothing.
+# FIELD-LEVEL: it edits the ONE key in the on-disk dict and writes the rest back
+# verbatim (unknown keys included). A whole-state save would let an allowlisted
+# write also restore this process's stale `stop_fires`/`parked_fires` snapshot,
+# reverting a bump the Stop hook landed in between: the counter-reset hole the
+# allowlist exists to close, reopened through a field the agent IS allowed to set.
 crew state set mt last_verdict REVISE --session-id abc123
 
 # Deactivate — pass the SAME --session-id init used, so deactivate targets the
@@ -556,7 +572,7 @@ class BuildState:
     stop_fires: int = 0           # hook-owned livelock circuit breaker
     max_stop_fires: int = 150
     started_at: str = ""          # hook-owned wall clock (ISO, UTC)
-    deadline_minutes: int = 60    # 1..MAX_DEADLINE_MINUTES (240), validated at init
+    deadline_minutes: int = 120   # 1..MAX_DEADLINE_MINUTES (240), validated at init
     parked_fires: int = 0         # hook-owned CONSECUTIVE parked-Stop counter
     max_parked_fires: int = 20
 
@@ -582,7 +598,7 @@ class MeasureTwiceState:
     stop_fires: int = 0           # hook-owned livelock circuit breaker
     max_stop_fires: int = 150
     started_at: str = ""          # hook-owned wall clock (ISO, UTC)
-    deadline_minutes: int = 60    # 1..MAX_DEADLINE_MINUTES (240), validated at init
+    deadline_minutes: int = 120   # 1..MAX_DEADLINE_MINUTES (240), validated at init
     parked_fires: int = 0         # hook-owned CONSECUTIVE parked-Stop counter
     max_parked_fires: int = 20
 
@@ -601,14 +617,26 @@ rules are load-bearing; each one is a bug that already happened.
    gone rather than faked: nothing in the Stop path can see a revision round, so
    a round counter with no writer would report `Round 1/N` forever.
 
-2. **Termination bounds are hook-owned and NOT agent-writable** (`AGENT_SETTABLE`
-   above; `crew state set` refuses everything else with exit 2, and
-   `--deadline-minutes` is validated to 1..240 at `init`). A safety limit the
-   agent can rewrite is not a safety limit: a live loop, cornered by a cap it
-   kept hitting merely for WAITING, reset its own counter 30 times and made the
-   force-exit unreachable. `active` is refused for the same reason: setting it
-   false is an unaudited back door around the panel-approval gate that
-   `deactivate` exists to be.
+2. **Termination bounds are hook-owned, and the sanctioned paths to them are
+   closed.** `crew state set` writes ONLY `AGENT_SETTABLE` (exit 2 for anything
+   else), it writes that ONE key field-level so an allowlisted write can't carry
+   back a stale snapshot of the counters, `--deadline-minutes` is validated to
+   1..240 at `init`, and `init` refuses to start a fresh loop over a force-exited
+   one without `--force`. A safety limit the agent can rewrite is not a safety
+   limit: a live loop, cornered by a cap it kept hitting merely for WAITING, reset
+   its own counter 30 times and made the force-exit unreachable. `active` is
+   refused for the same reason: setting it false is an unaudited back door around
+   the panel-approval gate that `deactivate` exists to be.
+
+   **This is reliability hardening, NOT a security boundary. Do not document it
+   as one.** The agent has `Write`/`Edit` on `.crew/*-state-*.json` and can edit
+   any field the CLI refuses. What the allowlist buys is that no *sanctioned,
+   convenient, plausibly-innocent* path resets a bound: the counter-reset livelock
+   happened through the CLI, in good faith, one `set` at a time. Every remaining
+   route is now a conspicuous act (hand-editing state, or `init --force`), and the
+   hook reads all four counters defensively (`effective_count`) so a garbage value
+   falls back to a real bound instead of raising into the fail-open handler and
+   silently disabling enforcement for that fire.
 
 3. **Waiting is FREE, but bounded.** When the Stop payload's `background_tasks`
    or `session_crons` is non-empty the session is parked on work it launched, so
@@ -643,7 +671,8 @@ on one that is asleep.
 
 Deliberately NOT added: a stall timer. A single panel seat legitimately takes
 minutes, so a stall timer risks killing healthy work, and any late-landing seat
-would reset it forever. The absolute deadline is un-gameable and does the job.
+would reset it forever. The absolute deadline needs no such heuristic: it is
+denominated in the one unit the agent cannot spend, and it does the job.
 
 ## Common Mistakes
 
@@ -691,6 +720,11 @@ The `session-start.py` hook cleans up stale state files on every session start:
 
 - **Inactive** state files older than **1 day**: deleted
 - **Active** state files older than **7 days**: force-deleted (safety limit for abandoned sessions)
+- **Newer-schema** state files (`LOAD_FUTURE_SCHEMA`): NEVER deleted, at any age.
+  The sweep classifies with `read_state_json` first, because deleting is the most
+  destructive touch there is and the refuse-to-touch contract binds it too: a
+  downgraded install must not destroy a live loop it cannot even read. It leaves a
+  one-line stderr note when it declines a file it would otherwise have swept.
 - Applies to `build-state-*` and `measure-twice-state-*` files
 - **Non-state artifacts older than 7 days** are also swept, but EVERY glob is
   anchored to a crew-specific name (cleanup runs over the SHARED `~/.claude` root

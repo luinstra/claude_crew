@@ -38,8 +38,11 @@ from models import (
     truncate,
     utc_now_iso,
     elapsed_minutes,
-    DEFAULT_DEADLINE_MINUTES,
-    MAX_DEADLINE_MINUTES,
+    effective_count,
+    effective_deadline,
+    DEFAULT_MAX_STOP_FIRES,
+    DEFAULT_MAX_PARKED_FIRES,
+    FORCE_EXIT_KEY,
     SCHEMA_VERSION,
     LOAD_CORRUPT,
     LOAD_FUTURE_SCHEMA,
@@ -115,33 +118,36 @@ def _handle_load_status(loop_file: Path, status: str):
     return False
 
 
-def _effective_deadline(state) -> int:
-    """The wall clock this fire enforces, in minutes.
+def _normalize_bounds(state) -> None:
+    """Coerce the four hook-owned counters in place before anything reads them.
 
-    Read defensively: the file on disk can be hand-edited, and a non-positive or
-    non-integer value must NOT read as "unbounded" (that would delete the only
-    cost ceiling in the system). Out-of-policy values fall back to the default
-    and a too-large one is clamped, matching what `crew state init` accepts.
+    Same threat model the deadline already had: the file is hand-editable, and a
+    non-int counter would raise straight into the fail-open handler, so the fire
+    that trips a tampered bound is the one where the bound stops enforcing. The
+    coerced values are what the fire then saves, so a garbage counter self-heals
+    into a real int rather than raising again next fire.
     """
-    value = state.deadline_minutes
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        return DEFAULT_DEADLINE_MINUTES
-    return min(value, MAX_DEADLINE_MINUTES)
+    state.stop_fires = effective_count(state.stop_fires, 0)
+    state.max_stop_fires = effective_count(state.max_stop_fires, DEFAULT_MAX_STOP_FIRES)
+    state.parked_fires = effective_count(state.parked_fires, 0)
+    state.max_parked_fires = effective_count(
+        state.max_parked_fires, DEFAULT_MAX_PARKED_FIRES)
 
 
 def _termination_reason(state):
     """Why this loop must stop NOW, or None to keep going.
 
-    Both bounds are hook-owned and unwritable by the agent (see
-    ``AGENT_SETTABLE``). Neither is a stall timer: a single panel seat can take
-    minutes, and any late-landing seat would reset a stall clock forever.
+    Both bounds are hook-owned (see ``AGENT_SETTABLE``) and read through the
+    defensive coercions above, never raw off disk. Neither is a stall timer: a
+    single panel seat can take minutes, and any late-landing seat would reset a
+    stall clock forever.
     """
     if state.stop_fires >= state.max_stop_fires:
         return (
             f"livelock circuit breaker: {state.stop_fires} Stop fires without "
             f"the loop finishing (limit {state.max_stop_fires})"
         )
-    deadline = _effective_deadline(state)
+    deadline = effective_deadline(state.deadline_minutes)
     minutes = elapsed_minutes(state.started_at)
     if minutes is not None and minutes >= deadline:
         return (
@@ -154,7 +160,7 @@ def _termination_reason(state):
 def _elapsed_note(state) -> str:
     """One-line budget line for the nudge, so a runaway loop is VISIBLE."""
     minutes = elapsed_minutes(state.started_at)
-    deadline = _effective_deadline(state)
+    deadline = effective_deadline(state.deadline_minutes)
     clock = f"{minutes:.0f}/{deadline} min" if minutes is not None else "unknown"
     return f"Elapsed: {clock} · stop fires: {state.stop_fires}/{state.max_stop_fires}"
 
@@ -163,14 +169,16 @@ def _force_exit(loop_file: Path, state, reason: str) -> None:
     """Turn the loop off the way `crew state deactivate` does, stamping
     `completed_at` + `reason` alongside `active=False`. Without them a
     force-exited loop is indistinguishable from a clean finish on later
-    inspection. Written as a dict (not `state.save`) because those two fields
-    are deactivation metadata, not loop state.
+    inspection. The `force_exit` marker is what `crew state init` reads to refuse
+    a fresh loop over a tripped bound without `--force`. Written as a dict (not
+    `state.save`) because these are deactivation metadata, not loop state.
     """
     data = asdict(state)
     data["schema"] = SCHEMA_VERSION
     data["active"] = False
     data["completed_at"] = utc_now_iso()
     data["reason"] = reason
+    data[FORCE_EXIT_KEY] = True
     atomic_write_json(loop_file, data)
 
 
@@ -183,6 +191,7 @@ def _handle_loop(loop_file, state, parked, banner, task_text, detail_lines, reci
     earlier version conflated them, and the loop then reset its own counter to
     escape a limit it kept hitting for merely waiting.
     """
+    _normalize_bounds(state)
     reason = _termination_reason(state)
     if reason:
         _force_exit(loop_file, state, reason)

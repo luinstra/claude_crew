@@ -37,6 +37,8 @@ from models import (
     SessionStartInput,
     SessionStartResult,
     read_hook_input,
+    effective_count,
+    effective_deadline,
     elapsed_minutes,
     get_file_age_days,
     count_incomplete_todos,
@@ -44,6 +46,7 @@ from models import (
     read_state_json,
     DEFAULT_DEADLINE_MINUTES,
     DEFAULT_MAX_STOP_FIRES,
+    LOAD_FUTURE_SCHEMA,
     LOAD_OK,
 )
 from state_discovery import is_loop_state_file, is_active_state_file
@@ -124,12 +127,28 @@ def cleanup_stale_files(directory: Path) -> None:
         try:
             if is_loop_state_file(json_file.name):
                 age = now - json_file.stat().st_mtime
-                if is_active_state_file(json_file):
+                _, status = read_state_json(json_file)
+                if status == LOAD_FUTURE_SCHEMA:
+                    # Refuse to touch a newer-schema file, the same contract every
+                    # other mutating path honors: deleting is the most destructive
+                    # touch there is, and a downgrade must never destroy a live
+                    # loop it cannot even read. Note it only when it WOULD have
+                    # been swept, so a fresh newer-format loop stays quiet.
+                    limit = (MAX_AGE_SECONDS if is_active_state_file(json_file)
+                             else STALE_INACTIVE_SECONDS)
+                    if age > limit:
+                        print(
+                            f"[crew] keeping {json_file.name}: written by a newer "
+                            f"crew version (state schema ahead of this install); "
+                            f"not sweeping it.",
+                            file=sys.stderr,
+                        )
+                elif is_active_state_file(json_file):
                     # Active but very old (>7 days) — force-deactivate and delete
                     if age > MAX_AGE_SECONDS:
                         json_file.unlink()
                 else:
-                    # Inactive — delete if older than 1 day
+                    # Inactive (incl. corrupt/unreadable): delete if older than 1 day
                     if age > STALE_INACTIVE_SECONDS:
                         json_file.unlink()
         except (OSError, AttributeError, KeyError, ValueError):
@@ -389,13 +408,15 @@ def loop_budget_line(data: dict) -> str:
     A resumed loop keeps the fires and the wall clock it accumulated, so the
     banner reports those rather than a counter frozen at init. `elapsed` is `?`
     when `started_at` is absent or unparseable (a legacy file the Stop hook has
-    not stamped yet).
+    not stamped yet). The bounds run through the SAME coercions the Stop hook
+    enforces with, so the banner can never advertise a bound the hook won't honor.
     """
     minutes = elapsed_minutes(data.get("started_at", ""))
     elapsed = f"{minutes:.0f}" if minutes is not None else "?"
-    deadline = data.get("deadline_minutes", DEFAULT_DEADLINE_MINUTES)
-    fires = data.get("stop_fires", 0)
-    max_fires = data.get("max_stop_fires", DEFAULT_MAX_STOP_FIRES)
+    deadline = effective_deadline(data.get("deadline_minutes", DEFAULT_DEADLINE_MINUTES))
+    fires = effective_count(data.get("stop_fires", 0), 0)
+    max_fires = effective_count(
+        data.get("max_stop_fires", DEFAULT_MAX_STOP_FIRES), DEFAULT_MAX_STOP_FIRES)
     return f"Budget: stop fires {fires}/{max_fires} · elapsed {elapsed}/{deadline} min"
 
 

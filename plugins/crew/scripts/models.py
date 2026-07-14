@@ -84,6 +84,23 @@ class SessionStartInput:
         return Path(self.directory)
 
 
+# Statuses that mean a background task is DONE. Anything else, including an
+# absent or unrecognized status, is treated as still running: the safe default is
+# to keep waiting, never to assume work finished and let an unverified loop stop.
+TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "killed", "cancelled", "done", "error"})
+
+
+def _task_in_flight(task) -> bool:
+    """True when a background_tasks entry is not known to have finished."""
+    if not isinstance(task, dict):
+        # A shape we do not understand is not evidence that work finished.
+        return True
+    status = task.get("status")
+    if not isinstance(status, str):
+        return True
+    return status.strip().lower() not in TERMINAL_TASK_STATUSES
+
+
 @dataclass
 class StopInput:
     """Input structure for Stop hooks."""
@@ -120,13 +137,21 @@ class StopInput:
     def is_parked(self) -> bool:
         """True when the session still has work in flight it launched itself.
 
-        Deliberately BROAD (any tracked background shell parks the Stop), which
-        also means an unrelated long-lived shell (a dev server, a `tail -f`)
-        reads as parked forever. That false positive is bounded on the state
-        side by `max_parked_fires`, not narrowed here: the payload carries no
-        field that reliably separates crew's own seats from other work.
+        Counts only tasks that are STILL RUNNING. A probe of the live payload
+        shows the harness already prunes finished work (a completed shell and a
+        completed subagent were both absent while a running shell and a running
+        subagent were listed with `status: "running"`), so today this filter is a
+        no-op. It is here because the alternative is not survivable: if a future
+        harness kept finished tasks listed, every Stop after one panel fan-out
+        would read as parked, and a parked Stop is ALLOWED, so the panel-approval
+        gate would switch itself off with no error and no diagnostic.
+
+        An entry whose status is unknown or absent counts as IN FLIGHT, so an
+        unrecognized payload degrades to parking (a needless wait) rather than to
+        waving work through unverified.
         """
-        return bool(self.background_tasks) or bool(self.session_crons)
+        live = [t for t in self.background_tasks if _task_in_flight(t)]
+        return bool(live) or bool(self.session_crons)
 
     @property
     def directory_path(self) -> Path:
@@ -242,8 +267,10 @@ DEFAULT_MAX_STOP_FIRES = 150
 # The absolute wall clock, and the only cost ceiling in the system: every other
 # bound is denominated in a unit the agent controls. Deliberately NOT a stall
 # timer: a single seat legitimately takes minutes, and any late seat would reset
-# a stall clock forever.
-DEFAULT_DEADLINE_MINUTES = 60
+# a stall clock forever. Sized for the real job it has to survive: a multi-round
+# build with a 7-seat panel, where one round alone costs many minutes of seat
+# wait. Overridable per repo/user via `[tuning].deadline_minutes`.
+DEFAULT_DEADLINE_MINUTES = 120
 
 # The policy ceiling on that wall clock. `init` is invoked BY the agent, so the
 # deadline it may request is bounded on BOTH ends: a bound the bounded thing can
@@ -257,10 +284,44 @@ MAX_DEADLINE_MINUTES = 240
 # exits would otherwise park every Stop and silently disable the loop.
 DEFAULT_MAX_PARKED_FIRES = 20
 
+# Stamped by the Stop hook next to `completed_at`/`reason` when a termination
+# bound trips. `crew state init` reads it to tell a force-exit apart from a clean
+# `deactivate`, so re-initing straight over a tripped safety limit takes an
+# explicit `--force` instead of being the default path.
+FORCE_EXIT_KEY = "force_exit"
+
 
 def utc_now_iso() -> str:
     """Timezone-aware UTC timestamp for the state files' clock fields."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def effective_count(value, default: int) -> int:
+    """A hook-owned counter/bound read defensively off disk.
+
+    The state file is hand-editable, so every reader of these ints must survive a
+    non-int or negative value: an unguarded comparison raises into the Stop hook's
+    fail-open handler, which ALLOWS the stop, i.e. the circuit breaker quietly
+    stops enforcing on exactly the fire someone tampered with. Fall back to the
+    caller's default (never to "unbounded").
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return default
+    return value
+
+
+def effective_deadline(value) -> int:
+    """The wall clock actually enforced, in minutes (same threat model as above).
+
+    A non-positive or non-integer value must NOT read as "unbounded" (that would
+    delete the only cost ceiling in the system), and a too-large one is clamped to
+    the policy ceiling `crew state init` already enforces. Single-sourced here so
+    the Stop hook, `crew state show`, and the SessionStart banner can never report
+    a different bound than the one that ends the loop.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return DEFAULT_DEADLINE_MINUTES
+    return min(value, MAX_DEADLINE_MINUTES)
 
 
 def parse_iso(value: str):
