@@ -538,16 +538,12 @@ def test_agy_is_available():
 
 def test_default_seats():
     log_section("default subprocess seats")
-    from multiagent.cli import _default_subprocess_seats, _resolve_seats  # noqa: E402
+    from multiagent.cli import _resolve_seats  # noqa: E402
     CURSOR_SEATS = shipped_seats("cursor")
-    # The BUILTIN fallback (registry-filtered) — no config, no env (retired).
+    # No config, no env (retired): the CONFIGURED default panel (here the built-in
+    # full) drives _resolve_seats; opus/sonnet (Task seats) drop via the registry
+    # filter, leaving the built-in five subprocess seats.
     with project_config("", write_file=False):
-        seats = _default_subprocess_seats()
-        check("builtin subprocess fallback == codex + codex-luna + agy + cursor-auto/composer",
-              seats == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"],
-              "['codex', 'codex-luna', 'agy', 'cursor-auto', 'cursor-composer']", str(seats))
-        # No --seats -> the CONFIGURED default panel (here: built-in full) drives
-        # _resolve_seats; opus/sonnet (Task seats) drop via the registry filter.
         resolved = _resolve_seats(None)
         check("_resolve_seats(None) -> builtin full's subprocess subset",
               resolved == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"],
@@ -3545,8 +3541,8 @@ def test_config():
 
     # 12. config default_panel="cursor" -> the subprocess branch is ALSO driven by
     #     config (all cursor-* seats), task_seats==[].
-    from multiagent.providers import known_seat_names as _kn  # noqa: E402
-    _cursor_all = sorted(n for n in _kn() if n.startswith("cursor-"))
+    from multiagent import seats as _seatcat  # noqa: E402
+    _cursor_all = sorted(_seatcat.group_tokens()["cursor"])
     with project("default_panel = \"cursor\"\n") as proj:
         _write_plan(proj)
         proc = _run_dispatcher(["review-prep", "plan.md", "--session-id", "cfgc"],
@@ -3966,9 +3962,11 @@ def test_review_prep():
             cwd=td, timeout=30)
         obj = json.loads(proc.stdout)
         subs = obj["subprocess_seats"]
+        from multiagent import seats as _seatcat  # noqa: E402
+        _cursor = set(_seatcat.group_tokens()["cursor"])
         check("review-prep subprocess_seats are registry seats only (no opus/sonnet)",
               proc.returncode == 0 and "opus" not in subs and "sonnet" not in subs
-              and "codex" in subs and any(s.startswith("cursor-") for s in subs),
+              and "codex" in subs and any(s in _cursor for s in subs),
               "registry subprocess seats only", str(subs))
         check("review-prep task_seats echoes --task-seats verbatim",
               obj["task_seats"] == ["opus", "sonnet"], "['opus','sonnet']",
@@ -4097,8 +4095,8 @@ def test_review_prep():
             ["review-prep", "plan.md", "--seats", "cursor", "--session-id", "s6"],
             cwd=td, timeout=30)
         subs = json.loads(proc.stdout)["subprocess_seats"]
-        from multiagent.providers import known_seat_names  # noqa: E402
-        expected_cursor = sorted(n for n in known_seat_names() if n.startswith("cursor-"))
+        from multiagent import seats as _seatcat  # noqa: E402
+        expected_cursor = sorted(_seatcat.group_tokens()["cursor"])
         check("review-prep --seats cursor expands to every registered cursor-* seat",
               proc.returncode == 0 and sorted(subs) == expected_cursor and len(subs) >= 2,
               str(expected_cursor), str(subs))
@@ -4125,8 +4123,8 @@ def test_review_prep():
               f"rc={proc.returncode} obj={obj} staged={staged.exists()}")
 
     # ---- Step 2 (panel catalog): --panel resolution + unified --seats split ----
-    from multiagent.providers import known_seat_names as _known_seats  # noqa: E402
-    _registered_cursor = sorted(n for n in _known_seats() if n.startswith("cursor-"))
+    from multiagent import seats as _seatcat  # noqa: E402
+    _registered_cursor = sorted(_seatcat.group_tokens()["cursor"])
 
     def _prep(args, cwd):
         proc = _run_dispatcher(["review-prep", "plan.md", *args], cwd=cwd, timeout=30)
@@ -4286,8 +4284,8 @@ def test_review_prep():
 
 def test_debate_panel_resolver():
     log_section("crew seats --debate (config-aware debate panel resolver)")
-    from multiagent.providers import known_seat_names as _kn  # noqa: E402
-    _cursor_all = sorted(n for n in _kn() if n.startswith("cursor-"))
+    from multiagent import seats as _seatcat  # noqa: E402
+    _cursor_all = sorted(_seatcat.group_tokens()["cursor"])
 
     def resolve(config_toml=None, extra_args=()):
         """Run `crew seats --debate [extra_args]` with CLAUDE_PROJECT_DIR pointing
@@ -4459,23 +4457,25 @@ def test_panel_catalog():
               "absent from all panels", str(panels))
 
         # ROSTER-FIDELITY: the subprocess subset of full (the names that are NOT
-        # Task seats) equals cli._DEFAULT_SUBPROCESS_PANEL as a sequence.
+        # Task seats) equals what _resolve_seats(None) runs — the path that
+        # actually fans out when nobody names a panel.
         task_names = set(seats.task_seats())
         subprocess_subset = [n for n in panels["full"] if n not in task_names]
-        check("full's subprocess subset == cli._DEFAULT_SUBPROCESS_PANEL (sequence)",
-              subprocess_subset == list(cli._DEFAULT_SUBPROCESS_PANEL),
-              str(list(cli._DEFAULT_SUBPROCESS_PANEL)), str(subprocess_subset))
+        builtin_five = cli._resolve_seats(None)
+        check("full's subprocess subset == _resolve_seats(None) (sequence)",
+              subprocess_subset == builtin_five,
+              str(builtin_five), str(subprocess_subset))
 
-        # INDEPENDENT-literal drift pins: cli's default panel + premium-off set are
+        # INDEPENDENT-literal drift pins: the built-in panel + premium-off set are
         # DERIVED from the catalog's opt_in flags, so pin both against a
         # hand-literal so a derivation-logic bug (wrong order / wrong filter) fails
         # NAMING it, not just when it drifts in lockstep with the panels literal.
         catalog = seats.merged_catalog()
-        check("_DEFAULT_SUBPROCESS_PANEL == exact tuple (order pinned)",
-              cli._DEFAULT_SUBPROCESS_PANEL
-              == ("codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"),
-              "('codex', 'codex-luna', 'agy', 'cursor-auto', 'cursor-composer')",
-              str(cli._DEFAULT_SUBPROCESS_PANEL))
+        check("_resolve_seats(None) == the built-in five (order pinned)",
+              builtin_five
+              == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"],
+              "['codex', 'codex-luna', 'agy', 'cursor-auto', 'cursor-composer']",
+              str(builtin_five))
         check("premium_off_seats() == the opt-in SET (no dupes/drops)",
               set(seats.premium_off_seats())
               == {"cursor-glm", "cursor-gpt", "cursor-gemini", "cursor-grok", "codex-terra"}
@@ -4486,11 +4486,11 @@ def test_panel_catalog():
         check("premium_off_seats() == {subprocess seats with opt_in=True}",
               set(seats.premium_off_seats()) == _sub_opt,
               "opt_in True set", str(sorted(set(seats.premium_off_seats()))))
-        check("_DEFAULT_SUBPROCESS_PANEL minus agy == {subprocess seats with opt_in=False}",
-              set(cli._DEFAULT_SUBPROCESS_PANEL) - {"agy"}
+        check("the built-in five minus agy == {subprocess seats with opt_in=False}",
+              set(builtin_five) - {"agy"}
               == {n for n, s in catalog.items()
                   if s.has_executor and not s.opt_in and n != "agy"},
-              "opt_in False set", str(sorted(set(cli._DEFAULT_SUBPROCESS_PANEL) - {"agy"})))
+              "opt_in False set", str(sorted(set(builtin_five) - {"agy"})))
 
         # The other panels, verbatim. cursor is the literal group TOKEN, NOT an
         # expanded cursor-* list (the token is expanded at resolution in cli.py).
@@ -4890,7 +4890,6 @@ def _roster_scan(root: Path, report):
     check: rosters are token-parsed and compared exactly. The two deliberate
     substring uses are LOCATORS (finding markers) and the pinned prose spans."""
     from multiagent import seats
-    from multiagent.cli import _DEFAULT_SUBPROCESS_PANEL
     from multiagent.providers import known_seat_names
 
     # Provider membership (the single truth): a line enumerating 2+ seats of the
@@ -4902,7 +4901,7 @@ def _roster_scan(root: Path, report):
     task_names = set(seats.task_seats())
     FULL = seats.merged_panels()["full"]
     known = known_seat_names()
-    OPT_SUB = [n for n in known if n not in set(_DEFAULT_SUBPROCESS_PANEL)]
+    OPT_SUB = [n for n, s in catalog.items() if s.has_executor and s.opt_in]
     OPT_TASK = sorted(task_names - set(FULL))
     ALL_SEATS = set(known) | task_names
     UNIVERSE = ALL_SEATS
@@ -5145,20 +5144,20 @@ def _roster_drill(root: Path):
 def test_roster_doc_sync():
     log_section("roster doc-sync (anchored rosters == registry truth; enumeration ratchet)")
     from multiagent import seats
-    from multiagent.cli import _DEFAULT_SUBPROCESS_PANEL
     from multiagent.providers import known_seat_names
 
     root = _roster_repo_root()
     FULL = seats.merged_panels()["full"]
     known = known_seat_names()
-    OPT_SUB = [n for n in known if n not in set(_DEFAULT_SUBPROCESS_PANEL)]
+    OPT_SUB = [n for n, s in seats.merged_catalog().items()
+               if s.has_executor and s.opt_in]
     ALL_SEATS = set(known) | set(seats.task_seats())
 
     # --- Part 0: derivation self-checks (a wrong truth can't agree with a wrong
-    # doc). The opt-in set derived from _DEFAULT_SUBPROCESS_PANEL must equal the
-    # one derived from FULL (re-proving full's subprocess subset covers the
-    # builtin fallback), and FULL must live inside the universe.
-    check("Part 0: OPT_SUB (from _DEFAULT_SUBPROCESS_PANEL) == known - FULL",
+    # doc). The opt-in subprocess set (has_executor ∧ opt_in) must equal the one
+    # derived from FULL (re-proving full's subprocess subset covers the builtin
+    # fallback), and FULL must live inside the universe.
+    check("Part 0: OPT_SUB (opt-in subprocess seats) == known - FULL",
           set(OPT_SUB) == set(known) - set(FULL),
           str(sorted(set(known) - set(FULL))), str(sorted(set(OPT_SUB))))
     check("Part 0: set(FULL) <= ALL_SEATS",
@@ -6013,10 +6012,11 @@ def test_doctor():
                   sub.get("agy", {}).get("available") is False
                   and "PATH" in (sub.get("agy", {}).get("diag") or ""),
                   "agy false + diag", str(sub.get("agy")))
+            _cursor = set(_seats.group_tokens()["cursor"])
             check("doctor: every cursor-* seat present (probe fanned)",
                   all(sub.get(s, {}).get("available") is True
-                      for s in sub if s.startswith("cursor-")),
-                  "all cursor true", str({k: v for k, v in sub.items() if k.startswith("cursor-")}))
+                      for s in sub if s in _cursor),
+                  "all cursor true", str({k: v for k, v in sub.items() if k in _cursor}))
             task = payload.get("task", {})
             check("doctor: task block in sorted task-seat order (deterministic)",
                   list(task.keys()) == sorted(_seats.task_seats()),
@@ -7815,6 +7815,16 @@ def test_seat_roster_drift_guard():
     check("a global config REDEFINES that same resolution (isolation is load-bearing)",
           configured == ["codex", "codex-terra"] and configured != _BUILTIN_FIVE,
           "['codex', 'codex-terra']", str(configured))
+
+    # --- 4b. The cursor GROUP token expands to the SORTED cursor seats --------
+    # The fan-out order for `--seats cursor` is stable by name (not by catalog
+    # position), so a reordered seats.toml can never quietly reshuffle it.
+    with crew_config():
+        expanded = cli._expand_seat_groups(["cursor"])
+        cursor_members = set(seats.group_tokens()["cursor"])
+    check("_expand_seat_groups(['cursor']) returns the sorted cursor seats",
+          expanded == sorted(cursor_members) and set(expanded) == cursor_members,
+          str(sorted(cursor_members)), str(expanded))
 
     # --- 5. Byte-identical CLI captures --------------------------------------
     # The fixtures are the ORACLE: they are a photograph of today's behavior, and

@@ -61,36 +61,6 @@ from multiagent.providers import (
     get_provider,
     known_seat_names,
 )
-# The BUILTIN subprocess panel: the SHIPPED catalog's executor-bearing seats that
-# are not opt-in, in catalog order. ORDER IS LOAD-BEARING (panel fan-out order;
-# the drift guard pins the exact tuple), which is why the catalog file's order is
-# too. Shipped-only on purpose: this is the floor when NOTHING is configured — the
-# configured default panel (config.default_panel() + [panels]) resolves through
-# _resolve_seats. WHY each seat is/isn't opt-in -> docs/engine-notes.md.
-_DEFAULT_SUBPROCESS_PANEL = tuple(
-    n for n, s in seats.shipped_catalog().items() if s.has_executor and not s.opt_in
-)
-
-
-def _default_subprocess_seats() -> list[str]:
-    """The BUILTIN subprocess-seat fallback (registry-filtered).
-
-    The engine only knows subprocess seats (codex-*/agy/cursor-*;
-    opus/sonnet Task seats are owned by the orchestrator). The allowlist is REGISTRY-DERIVED:
-    ``known_seat_names()`` returns every registered subprocess seat, so adding a
-    seat to the registry makes it usable here automatically — no hardcoded list
-    to keep in sync. The CONFIGURED default panel (``config.default_panel()`` +
-    ``[panels]``) routes through ``_resolve_seats`` / ``_panel_seat_list``; this
-    helper is just the built-in floor.
-
-    Safe BECAUSE a failed seat NEVER sinks the panel: any seat failure (nonzero
-    exit, hang/timeout, empty output, auth/error banner, unavailable) degrades to
-    an ``ok=False`` result while the other seats still return (see ``cmd_review``).
-    """
-    known = set(known_seat_names())
-    return [s for s in _DEFAULT_SUBPROCESS_PANEL if s in known]
-
-
 # One-time stderr notes for panel/availability resolution (mirrors config.py's
 # memoized-warn posture; keyed so each distinct note fires at most once/process).
 _warned: set[str] = set()
@@ -236,14 +206,15 @@ def _run_seat(name: str, prompt: str, timeout: int) -> ProviderResult:
 
 def _expand_seat_groups(names: list[str]) -> list[str]:
     """Expand group tokens to seat names. ``cursor`` -> every cursor seat in the
-    catalog, so the group grows with the catalog (a declared cursor seat joins it).
-    Non-group names pass through unchanged.
+    catalog, SORTED, so the group grows with the catalog (a declared cursor seat
+    joins it) and the fan-out order is stable by name rather than by catalog
+    position. Non-group names pass through unchanged.
     """
     groups = seats.group_tokens()
     out: list[str] = []
     for n in names:
         if n in groups:
-            out.extend(groups[n])
+            out.extend(sorted(groups[n]))
         else:
             out.append(n)
     return out
@@ -2052,13 +2023,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     ``subprocess`` map, then adds a static ``task`` map (the subscription-backed
     Claude seats, in ``sorted(task_seats())`` order for deterministic JSON).
 
-    The ``agent`` binary is identical across every ``cursor-*`` seat, so the
-    cursor identity probe runs EXACTLY ONCE — the single result is fanned to all
-    cursor seats (calling each one's ``is_available()`` would spawn
-    ``agent --version`` up to 6x). codex/agy keep their own pure-``which``
-    checks; the codex seats share one ``codex`` binary and
-    each run ``shutil.which`` per seat: unlike cursor's spawned version probe,
-    ``which`` is a cheap in-process PATH scan, so no fan-out dedupe is needed.
+    Availability is probed once per provider KIND, not once per seat: seats of one
+    kind share a binary and answer identically, so the first seat's result is
+    reused for the rest. This matters for cursor, whose ``is_available`` SPAWNS
+    ``agent --version`` — without the dedupe it would spawn once per cursor seat
+    (6x today, more as seats are declared). codex/agy use a cheap in-process
+    ``shutil.which`` where the dedupe is a harmless micro-optimization.
 
     NON-BILLABLE: no metered/network call. stdout carries ONLY the JSON; every
     diagnostic/error goes to stderr. File-write destination follows the D1 matrix
@@ -2066,14 +2036,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     printed to stdout regardless.
     """
     subprocess_map: dict[str, dict] = {}
-    cursor_result: tuple[bool, str] | None = None
+    avail_by_kind: dict[str, tuple[bool, str]] = {}
     for name in known_seat_names():
-        if name.startswith("cursor-"):
-            if cursor_result is None:
-                cursor_result = get_provider(name).is_available()
-            avail, diag = cursor_result
-        else:
-            avail, diag = get_provider(name).is_available()
+        kind = seats.seat_spec(name).provider
+        if kind not in avail_by_kind:
+            avail_by_kind[kind] = get_provider(name).is_available()
+        avail, diag = avail_by_kind[kind]
         subprocess_map[name] = {"available": bool(avail), "diag": diag}
 
     task_map: dict[str, dict] = {}
@@ -2357,15 +2325,21 @@ def _render_config_template(
     L.append('# model = "Gemini 3.1 Pro (High)"')
     L.append('# print_timeout = "8m"           # agy-only knob (read only from [seats.agy])')
     L.append("")
-    for seat, default_model in (("cursor-auto", "auto"), ("cursor-composer", "composer")):
+    # The default (non-opt-in) cursor seats, catalog-derived: the list AND the
+    # model hint grow with seats.toml. The opt-in cursor seats are emitted below
+    # by the premium_off_seats() loop, so they are skipped here.
+    for seat in seats.group_tokens().get("cursor", []):
+        spec = seats.seat_spec(seat)
+        if spec.opt_in:
+            continue
         a = av(seat)
         if a is not None:
             L.append(f"[seats.{seat}]")
             L.append(_avail_line(a))
-            L.append(f'# model = "{default_model}"')
+            L.append(f'# model = "{spec.model}"')
         else:
             L.append(f"# [seats.{seat}]")
-            L.append(f'# model = "{default_model}"')
+            L.append(f'# model = "{spec.model}"')
         L.append("")
     for seat in seats.premium_off_seats():
         a = av(seat)

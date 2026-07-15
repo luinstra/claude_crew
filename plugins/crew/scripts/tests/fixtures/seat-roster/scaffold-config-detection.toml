@@ -41,7 +41,7 @@ seat = "codex"
 # model = "auto"
 
 # [seats.cursor-composer]
-# model = "composer"
+# model = "composer-2.5"
 
 [seats.codex-terra]
 available = false   # opt-in; see docs/engine-notes.md for why
