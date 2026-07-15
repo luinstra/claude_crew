@@ -63,7 +63,7 @@ Before any analysis, gather context via parallel tool calls:
 | Excuse | Reality |
 |--------|---------|
 | "I can see the problem without reading the code" | You see A problem. Read the code. |
-| "This is probably the cause" | Probably is not proven. Use `superpowers:systematic-debugging` |
+| "This is probably the cause" | Probably is not proven. Reproduce it, then trace the actual failure path |
 | "The user already told me what's wrong" | Users describe symptoms, not causes |
 | "Time pressure means I should guess" | Wrong guesses waste more time |
 | "This looks like a common issue" | Confirm it, don't assume it |

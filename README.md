@@ -14,36 +14,6 @@ A Claude Code plugin for persistence, specialized agents, and tech-stack guidanc
 - **Tech-Stack Skills** — Auto-injected guidance for Kotlin, Exposed, Gradle, Trino (via `sk` plugin)
 - **Session Restoration** — Resume where you left off after restarts
 
-## Works With Superpowers
-
-Claude Crew integrates with the [superpowers](https://github.com/obra/superpowers) plugin. Each handles different concerns:
-
-| Plugin | Handles |
-|--------|---------|
-| **Superpowers** | Universal workflow disciplines (TDD, debugging, verification, brainstorming) |
-| **Claude Crew** | Specialized agents, tech-stack patterns, persistence |
-
-### Plugin Responsibility Split
-
-**Use superpowers skills for workflow disciplines:**
-- `superpowers:systematic-debugging` — 4-phase root cause analysis
-- `superpowers:test-driven-development` — RED-GREEN-REFACTOR cycle
-- `superpowers:verification-before-completion` — Rigorous "done" criteria
-- `superpowers:brainstorming` — Design exploration before implementation
-
-**Use sk for tech-stack patterns:**
-- `sk:kotlin` — Kotlin patterns (null safety, data classes, extensions)
-- `sk:exposed` — Exposed ORM patterns
-- `sk:gradle` — Gradle Kotlin DSL patterns
-- `sk:trino` — Trino query patterns
-
-**Use crew agents for specialized work:**
-- Complex analysis → advisor agent
-- Implementation → executor agent
-- Documentation → document-writer agent
-
-This split is automatically injected into every session via the session-start hook.
-
 ## Installation
 
 ### From GitHub (Recommended)
@@ -283,7 +253,9 @@ print_timeout = "8m"
 
 [tuning]
 timeout = 600                     # global per-seat wall-clock seconds
-deadline_minutes = 120            # the persistence loops' wall clock (1-240); read by `crew state init`
+deadline_minutes = 240            # the persistence loops' wall clock (1-1440); read by `crew state init`.
+                                  # 0 = no deadline exists but is honored ONLY in the global
+                                  # ~/.crew-config.toml (this repo file sits in the tree the agent edits)
 ```
 
 #### Global per-user config
