@@ -2,11 +2,10 @@
 
 One Cursor subscription exposes many models (`agent models`); we run several as
 distinct panel seats for cross-model diversity at one price. Each seat is a
-``CursorProvider`` instance pinned to a model string. Adding a model is a
-ONE-LINE ``Seat(...)`` change to ``CURSOR_SEATS`` below — the registry, the
-engine's subprocess-seat allowlist (which is registry-derived), and `--seats` all
-pick it up automatically. ``Seat.opt_in`` is the default-vs-opt-in truth (a bare
-``Seat("model")`` defaults, ``opt_in=True`` registers it opt-in).
+``CursorProvider`` instance pinned to a model string. The seats themselves live
+in the catalog (``multiagent/seats.toml``, or a user's own config), and the
+registry builds one instance per catalog row: the engine's subprocess-seat
+allowlist is registry-derived, so a new cursor row is usable everywhere at once.
 
 Adapted to OUR executor `Provider` ABC (`is_available()` + `run()`), NOT the
 Enterprise fork's prompt-builder `BaseProvider` — prompt-building stays in
@@ -31,8 +30,7 @@ import re
 import shutil
 import time
 
-from multiagent import config
-from multiagent.providers import Provider, ProviderResult, Seat
+from multiagent.providers import Provider, ProviderResult
 from multiagent.providers._proc import TIMEOUT, run_reaped
 
 # ANSI escape code pattern for stripping terminal colour sequences.
@@ -45,23 +43,6 @@ _ARG_MAX_BYTES = 256 * 1024
 # (e.g. "2026.06.24-00-45-58-9f61de7") — NO literal "cursor" — so this regex,
 # not a "cursor" substring, is what positively identifies the binary.
 _VERSION_DATESTAMP_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}-")
-
-# === The cursor panel seats — SINGLE SOURCE OF TRUTH ==========================
-# name -> Seat(model[, opt_in]). Model = the string `agent --model` accepts
-# (verified via `agent models`). Add a model = add ONE line here: Seat("model")
-# for a DEFAULT-panel seat, Seat("model", opt_in=True) for a registered-but-opt-in
-# one. The Seat.opt_in flag is the SINGLE default-vs-opt-in truth: cli derives
-# both _DEFAULT_SUBPROCESS_PANEL and _PREMIUM_OFF_SEATS from it (per-seat WHY a
-# seat is opt-in -> docs/engine-notes.md). Retune a seat without code via
-# [seats.<name>].model in .crew/config.toml or the global ~/.crew-config.toml.
-CURSOR_SEATS: dict[str, Seat] = {
-    "cursor-gpt":      Seat("gpt-5.5-extra-high", opt_in=True),
-    "cursor-gemini":   Seat("gemini-3.1-pro", opt_in=True),
-    "cursor-glm":      Seat("glm-5.2-max", opt_in=True),
-    "cursor-grok":     Seat("grok-4.5-xhigh", opt_in=True),
-    "cursor-auto":     Seat("auto"),
-    "cursor-composer": Seat("composer-2.5"),
-}
 
 # Auth-failure substrings for Cursor-specific error detection.
 _AUTH_MARKERS = (
@@ -114,10 +95,9 @@ def _auth_failure_marker(text: str) -> str | None:
 class CursorProvider(Provider):
     """A review-panel seat backed by the Cursor Agent CLI subprocess.
 
-    Pinned to one model. Multiple named instances run as distinct seats; see
-    ``CURSOR_SEATS`` for the roster. Default-vs-opt-in is the ``Seat.opt_in`` flag
-    on each ``CURSOR_SEATS`` value (cli derives both the default panel and the
-    premium-off set from it), with the per-seat WHY in the canonical docs.
+    Pinned to one model. Multiple named instances run as distinct seats; the
+    roster (and each seat's opt-in flag) lives in the catalog, and the seat's name
+    and model arrive from its ``SeatSpec`` through the registry factory.
     """
 
     # EXPLICIT opt-in (fail-CLOSED ABC default is False): cursor honors
@@ -181,14 +161,9 @@ class CursorProvider(Provider):
         enabled`` additionally blocks network + out-of-workspace access. Only
         ``sandbox="workspace-write"`` drops ``--mode plan`` (writes permitted).
         """
-        # Precedence: explicit model (CLI --model) > per-repo .crew/config.toml >
-        # global ~/.crew-config.toml ([seats.<name>].model, both via
-        # config.seat_model) > the seat's built-in default.
-        chosen_model = (
-            model
-            or config.seat_model(self.name)
-            or self._default_model
-        )
+        # Precedence: explicit model (CLI --model) > the seat's resolved model
+        # (the catalog already folded the config layers over the shipped pin).
+        chosen_model = model or self._default_model
         if not chosen_model:
             return ProviderResult(
                 name=self.name, model=None, ok=False, output="",
@@ -273,13 +248,11 @@ class CursorProvider(Provider):
 
 # =============================================================================
 # To add another Cursor model as a panel seat:
-#   1. Add ONE line to CURSOR_SEATS above: "cursor-<x>": Seat("<model>") for a
-#      default seat, or Seat("<model>", opt_in=True) for a registered-but-opt-in
-#      one. (Find the model string with `agent models`.) Seat.opt_in is the
-#      default-vs-opt-in truth: cli derives the default panel + the premium-off
-#      set from it, so a default add ALSO needs the PANEL_PRESETS["full"] literal
-#      entry (seats.py) that the drift guard pins.
-#   2. That's it. providers/__init__._build_registry() registers every
-#      CURSOR_SEATS entry, the engine's subprocess-seat allowlist is derived from
-#      the registry, and `--seats cursor-<x>` works.
+#   1. Add a [seats.cursor-<x>] table to multiagent/seats.toml with
+#      provider = "cursor" and the model string (`agent models` lists them);
+#      opt_in = true keeps it out of the default panels. A DEFAULT seat also needs
+#      its entry in the [panels] full list, which the drift guard pins.
+#   2. That's it. The registry builds every executor-bearing catalog row, the
+#      engine's subprocess-seat allowlist is derived from the registry, the
+#      `cursor` group token picks the seat up, and `--seats cursor-<x>` works.
 # =============================================================================

@@ -30,7 +30,8 @@ decision.
 
 ## Why some registered seats are opt-in
 
-The default panel roster of record is scripts/CLAUDE.md + `seats.PANEL_PRESETS`
+The default panel roster of record is scripts/CLAUDE.md + `seats.toml`'s `[panels]`
+table (loaded via `seats.merged_panels()`)
 (the two DEFAULT codex seats are distinct OpenAI voices, `gpt-5.6-sol` and
 `gpt-5.6-luna`, on the one codex CLI — a deliberate same-lineage pairing at
 different reasoning styles). Seats fall out of the default panel for two distinct
@@ -92,14 +93,14 @@ inline. The RULE each names is still stated in the command docs; only the label
 gloss lives here.
 
 - **Decision-H** — persist EACH normalized Task seat through `crew persist-seat`
-  (engine-owned dot-stripped slug + six-field shape), NOT a hand-rolled Write-tool
-  `<seat>.json`.
+  (engine-owned filename + six-field shape; a catalog seat's name is its own
+  slug), NOT a hand-rolled Write-tool `<seat>.json`.
 - **Decision-I** — the WHOLE panel (subprocess AND Task seats) flows through ONE
   grouped `collect`, including the Claude-only branch (subprocess seats empty),
   which collects over the Task seats alone. There is NO "synthesize from raw Task
   returns" path.
 - **Decision-J** — `<ran_seats>` order is `subprocess_seats` (resolved prep order)
-  THEN the dot-stripped `task_seats`.
+  THEN the `task_seats` (verbatim: the `name == slug(name)` invariant means no dot-stripping).
 
 ## T3a reference-spawn (why Task seats fetch their prompt by file)
 

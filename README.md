@@ -103,8 +103,7 @@ repo-relative path.
 
 ### Requirements
 
-- **Python 3.10+** — macOS 12+ and most modern Linux distributions include this. Check with `python3 --version`.
-  - The optional per-repo `.crew/config.toml` (see [Per-repo config](#per-repo-config)) needs **Python 3.11+** (stdlib `tomllib`); on 3.10 the config file is gracefully ignored and everything else works.
+- **Python 3.11+**: the engine parses its TOML config with stdlib `tomllib`, which lands in 3.11. macOS 13+ and most modern Linux distributions include it. Check with `python3 --version`; below 3.11 the `crew` engine exits with a one-line diagnostic.
 
 ## Usage
 
@@ -250,14 +249,12 @@ single seat is plenty for routine work.
 #### Per-repo config
 
 `full` is the **built-in** default panel. An optional, personal per-repo
-`.crew/config.toml` (already gitignored under `.crew/`) can override that default and tune per-seat
+`.crew/config.toml` (already gitignored under `.crew/`) can override that default, tune per-seat
 models (plus codex `reasoning_effort`, agy `print_timeout`) and the global
-per-seat `timeout`. When you name no panel, `default_panel` resolves from
+per-seat `timeout`, and declare brand-new model seats ([Add a model seat](#add-a-model-seat)). When you name no panel, `default_panel` resolves from
 config, falling back to built-in `full`; the per-seat tuning knobs follow
-**CLI flag > per-repo config > global config > built-in**. Needs Python 3.11+
-(stdlib `tomllib`); on 3.10 the file is gracefully ignored — with a one-time
-stderr note, so a `default_panel = "lite"` set to save cost can't silently hand
-you the full panel.
+**CLI flag > per-repo config > global config > built-in**. A malformed file is
+ignored with a one-time stderr note, so a config typo never takes down a panel.
 
 `/crew:debate` honors config too, with its own `[debate].panel` override so a
 repo can default its debates fuller than its reviews (debate's value is
@@ -300,8 +297,8 @@ file — set them globally in `~/.crew-config.toml` or per-repo in
 per-repo value wins over the global one, which wins over the built-in default
 (`CLI flag > per-repo .crew/config.toml > global ~/.crew-config.toml >
 built-in`). For `[seats.<name>]` tables this is per-seat-per-key, so a seat tuned
-only in the global file still applies. Same TOML/`tomllib`/one-time-stderr-note
-posture as the per-repo file.
+only in the global file still applies. Same TOML/one-time-stderr-note posture as
+the per-repo file.
 
 ```toml
 # ~/.crew-config.toml
@@ -322,6 +319,27 @@ seats, or the `cursor` group token); an unknown name is dropped with a one-time
 note. An unavailable seat is filtered out of any resolved panel **after** panel
 resolution and **before** the run; if a filter would empty a panel entirely, crew
 warns once and runs the unfiltered panel rather than nothing.
+
+#### Add a model seat
+
+A new model seat is pure config — no code, no version bump, no plugin reinstall.
+Give a `[seats.<name>]` table a `provider` (`codex`, `cursor`, `agy`, or
+`claude-code`) and the `model` string that provider accepts, in either config
+file:
+
+```toml
+[seats.codex-nano]
+provider = "codex"
+model = "gpt-5.6-nano"
+```
+
+That's the whole thing: the seat is registered on the next run, usable via
+`--seats codex-nano` or by adding it to a `[panels]` roster. A declared seat
+never joins the built-in panels on its own (that is the anti-silent-billing
+rule; `opt_in = true` just tags it premium/off-by-default in listings). The
+provider CLI must be installed and authed. `"${CLAUDE_PLUGIN_ROOT}/crew" seats`
+prints the resolved default panel's external seats (not the whole catalog);
+`crew doctor` shows every registered seat.
 
 #### Ad-hoc single-provider runs
 

@@ -3079,29 +3079,28 @@ def main():
 
             repo_config = crew_dir / "config.toml"
             builtin_deadline = models_module.DEFAULT_DEADLINE_MINUTES
-            if sys.version_info >= (3, 11):  # tomllib; below it the file is ignored
-                for toml_body, flag, expected, label in (
-                    ("[tuning]\ndeadline_minutes = 90\n", [], 90,
-                     "per-repo [tuning].deadline_minutes is the init default"),
-                    ("[tuning]\ndeadline_minutes = 90\n", ["--deadline-minutes", "30"], 30,
-                     "an explicit --deadline-minutes beats the config"),
-                    ("[tuning]\ndeadline_minutes = 999\n", [], builtin_deadline,
-                     "an out-of-policy config deadline is dropped for the builtin"),
-                    ("[tuning]\ndeadline_minutes = \"soon\"\n", [], builtin_deadline,
-                     "a non-int config deadline is dropped for the builtin"),
-                ):
-                    _clear_state_files()
-                    repo_config.write_text(toml_body)
-                    _, err, code = run_crew_state(
-                        ["init", "bl", "--prompt", "deadline task"] + flag, test_path)
-                    after = _read_state_json(crew_dir / "build-state.json")
-                    if code == 0 and after.get("deadline_minutes") == expected:
-                        log_pass(f"init deadline: {label} ({expected})")
-                    else:
-                        log_fail(f"init deadline: {label} ({expected})",
-                                 f"deadline_minutes={expected}",
-                                 f"code={code} deadline={after.get('deadline_minutes')!r} err={err[:120]}")
-                repo_config.unlink(missing_ok=True)
+            for toml_body, flag, expected, label in (
+                ("[tuning]\ndeadline_minutes = 90\n", [], 90,
+                 "per-repo [tuning].deadline_minutes is the init default"),
+                ("[tuning]\ndeadline_minutes = 90\n", ["--deadline-minutes", "30"], 30,
+                 "an explicit --deadline-minutes beats the config"),
+                ("[tuning]\ndeadline_minutes = 999\n", [], builtin_deadline,
+                 "an out-of-policy config deadline is dropped for the builtin"),
+                ("[tuning]\ndeadline_minutes = \"soon\"\n", [], builtin_deadline,
+                 "a non-int config deadline is dropped for the builtin"),
+            ):
+                _clear_state_files()
+                repo_config.write_text(toml_body)
+                _, err, code = run_crew_state(
+                    ["init", "bl", "--prompt", "deadline task"] + flag, test_path)
+                after = _read_state_json(crew_dir / "build-state.json")
+                if code == 0 and after.get("deadline_minutes") == expected:
+                    log_pass(f"init deadline: {label} ({expected})")
+                else:
+                    log_fail(f"init deadline: {label} ({expected})",
+                             f"deadline_minutes={expected}",
+                             f"code={code} deadline={after.get('deadline_minutes')!r} err={err[:120]}")
+            repo_config.unlink(missing_ok=True)
 
             _clear_state_files()
 

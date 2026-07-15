@@ -2,7 +2,9 @@
 
 > **Type:** Claude Code Plugin Marketplace
 > **Plugins:** `crew` (agents, commands, persistence), `sk` (tech-stack skills)
-> **Python:** 3.10+ required for hook scripts
+> **Python:** the lifecycle hooks run on 3.10+; the engine (the `multiagent`
+> package and `crew state`, both reached through the `crew` dispatcher) needs
+> 3.11+ because it parses TOML config with stdlib `tomllib`
 
 ## Overview
 

@@ -46,8 +46,6 @@ import re
 import shutil
 import time
 
-from multiagent import config
-
 from . import Provider, ProviderResult
 from ._proc import TIMEOUT, run_reaped
 
@@ -56,7 +54,9 @@ from ._proc import TIMEOUT, run_reaped
 # rest of argv + the environment block.
 AGY_PROMPT_MAX_BYTES = 256 * 1024  # 256 KB
 
-# Default print-timeout when [seats.agy].print_timeout is unset (the sole 8m source).
+# Fallbacks for a seat whose catalog row pins neither. --model must always be SET
+# (see the module docstring: unset routes to the wrong quota group).
+DEFAULT_MODEL = "Gemini 3.1 Pro (High)"
 DEFAULT_PRINT_TIMEOUT = "8m"
 
 # Grace margin (seconds) added on top of --print-timeout for teardown so the
@@ -170,7 +170,6 @@ def detect_auth_or_error(cleaned: str) -> str | None:
 
 
 class AgyProvider(Provider):
-    name = "agy"
     # EXPLICIT opt-in (fail-CLOSED ABC default is False): agy is a valid
     # /crew:dispatch write seat. NUANCE — agy has a SINGLE confined --sandbox
     # mode (it cannot express codex's read-only vs workspace-write split), so the
@@ -179,24 +178,31 @@ class AgyProvider(Provider):
     # only way it can. The cwd pin below still applies in write mode.
     supports_workspace_write = True
 
+    def __init__(
+        self,
+        name: str = "agy",
+        default_model: str | None = None,
+        print_timeout: str | None = None,
+    ) -> None:
+        # The seat's identity is a CTOR arg, not a class literal: a seat declared
+        # in a user's config with provider = "agy" must keep its own name (and its
+        # own model), the way the codex and cursor seats do.
+        self.name = name
+        self._default_model = default_model
+        self._print_timeout_pin = print_timeout
+
     def is_available(self) -> tuple[bool, str]:
         if shutil.which("agy"):
             return (True, "")
         return (False, "agy not found on PATH")
 
     def _resolved_model(self, model: str | None) -> str:
-        # Precedence: explicit model (CLI) > per-repo .crew/config.toml > global
-        # ~/.crew-config.toml ([seats.agy].model, both via config.seat_model) >
-        # built-in Gemini default.
-        if model:
-            return model
-        return config.seat_model("agy") or "Gemini 3.1 Pro (High)"
+        # Precedence: explicit model (CLI) > the seat's resolved model (the catalog
+        # already folded the config layers over the shipped pin) > the fallback.
+        return model or self._default_model or DEFAULT_MODEL
 
     def _print_timeout(self) -> str:
-        # Precedence: per-repo .crew/config.toml > global ~/.crew-config.toml
-        # ([seats.agy].print_timeout, both via config.agy_print_timeout) >
-        # built-in 8m default.
-        return config.agy_print_timeout() or DEFAULT_PRINT_TIMEOUT
+        return self._print_timeout_pin or DEFAULT_PRINT_TIMEOUT
 
     def effective_timeout(self, timeout: int) -> float:
         """Wall-clock timeout >= --print-timeout (BLOCKING #1).

@@ -39,10 +39,11 @@ $ARGUMENTS
   repo can default its debates fuller than its reviews — debate's value is
   cross-model diversity. An explicit `--panel`/`--seats` always wins, exactly as
   before.
-- **Opt-in `fable` Claude seat** — a premium Mythos-class Claude voice
-  (`model="fable"`, a first-class alias like opus/sonnet). NOT in any default so
-  a routine debate never silently spends the premium tier; add it explicitly
-  (e.g. `--seats opus,sonnet,fable`) for the hardest questions.
+- **Opt-in `fable` Claude seat** — a premium Mythos-class Claude Task seat. NOT
+  in any default so a routine debate never silently spends the premium tier; add
+  it explicitly (e.g. `--seats opus,sonnet,fable`) for the hardest questions. Like
+  every Task seat, its model comes from the catalog (`task_seat_models`), not from
+  its name.
 - **Mode** — inferred, not flagged: a free-form **question** → **discuss** mode
   (seats give a take; dispatch `crew:panelist`). An argument naming a **diff /
   branch / plan `.md`** → **review** mode (seats score it; dispatch
@@ -59,35 +60,43 @@ $ARGUMENTS
 > `run-<id>/` dir — the filename + dir layout the `rounds.py` reader
 > (`render --run-id`) expects.
 
-Resolve the flags to a **seat list**, strip them from `$ARGUMENTS` (the remainder
-is the question/target). **When the user named NEITHER `--panel` NOR `--seats`,
-do NOT assume `full`** — ask the engine for the config-aware default seat list
-(it reads `.crew/config.toml`, which the markdown cannot, and applies the debate
-precedence `[debate].panel` → `default_panel` → built-in `full`):
+Resolve the flags to the **roster split**, strip them from `$ARGUMENTS` (the
+remainder is the question/target). **When the user named NEITHER `--panel` NOR
+`--seats`, do NOT assume `full`** — ask the engine for the config-aware split (it
+reads `.crew/config.toml`, which the markdown cannot, and applies the debate
+precedence `[debate].panel` → `default_panel` → built-in `full`). Pass `--json` so
+the engine returns the panel ALREADY split, the same `{subprocess_seats,
+task_seats, task_seat_models}` shape `review-prep` prints — so this command never
+classifies a seat name or hardcodes a model pin:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate
+"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --json
 ```
 
-When the user DID name `--panel`/`--seats`, pass it through so the explicit
-choice wins (`--seats` over `--panel`):
+When the user DID name `--panel`/`--seats`, pass it through so the explicit choice
+wins (`--seats` over `--panel`); `--json` still returns the split:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --panel <preset>     # explicit preset
-"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --seats <list>       # explicit seat list
+"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --panel <preset> --json   # explicit preset
+"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --seats <list> --json     # explicit seat list
 ```
 
-`seats --debate` prints the FULL resolved panel — one seat per line, group
-tokens (`cursor`) already expanded, including the Claude voices — so it is the
-single seat list to split. Then split it: the external-CLI
-entries are **subprocess seats** (the Python engine); `opus`/`sonnet`/`fable`
-are **task seats** (`crew:panelist`
-for discuss / `crew:reviewer` for review, via the Task tool — in-session, on the
-subscription, no `claude -p`, no API key; every current Task seat pins its own
-name as the model, e.g. `fable` → `model="fable"`).
-Seat the models in the resolved list only. For `--panel cursor` the subprocess
-seats are all cursor-* (pass `--seats cursor` to the engine, which expands it to
-every cursor-* seat) and the Task-seats step is SKIPPED (no Claude Task seats). A failed/skipped seat NEVER sinks the debate (see "Never choke" below) — the
+`seats --debate --json` resolves the FULL panel (group tokens like `cursor`
+already expanded, the Claude voices included), then splits it exactly as
+`review-prep` does:
+
+- **`subprocess_seats`** — the external-CLI entries (the Python engine); fan these
+  out one `crew run <seat>` per seat.
+- **`task_seats`** — the Claude voices (`crew:panelist` for discuss /
+  `crew:reviewer` for review, via the Task tool — in-session, on the subscription,
+  no `claude -p`, no API key).
+- **`task_seat_models`** — each Task seat's model pin, read FROM the catalog. Spawn
+  each Task seat with `model = task_seat_models[<seat>]`; NEVER hardcode a pin or
+  assume the seat name is its model.
+
+Seat only the models in this split. For `--panel cursor` the subprocess seats are
+all cursor-* and `task_seats` is empty, so the Task-seats step is SKIPPED. A
+failed/skipped seat NEVER sinks the debate (see "Never choke" below) — the
 synthesis is built from whichever seats succeed; only an all-empty panel aborts.
 
 > **Reference code, don't paste it.** Every seat runs in the repo. If the
@@ -137,15 +146,15 @@ and `/crew:review` Step 3 use, instead of one opaque `debate` call hiding them i
 an internal thread pool). Use the bare-script path (its top-of-file `sys.path`
 guard makes package imports resolve).
 
-**A2.0 — isolate the subprocess seats.** The `seats --debate` output you split
-above is ALREADY group-expanded (the engine expands `cursor` → every registered
-`cursor-*` seat before printing), so the external-CLI entries are
-already concrete seat names — just take those entries from the resolved panel and
-loop. No second expansion call is needed. (If you ever need to re-expand a bare
-group token in isolation — e.g. you only have `--panel cursor` and not the
-`--debate` output — `crew seats --seats cursor` expands it to every registered
-`cursor-*` seat, keeping the registry authoritative with no hardcoded cursor list
-in this command.)
+**A2.0 — isolate the subprocess seats.** `subprocess_seats` from the
+`seats --debate --json` split above is ALREADY group-expanded (the engine expands
+`cursor` → every registered `cursor-*` seat before splitting) and holds only the
+external-CLI entries — already concrete seat names, so just loop over them. No
+second expansion call is needed. (If you ever need to re-expand a bare group token
+in isolation — e.g. you only have `--panel cursor` and not the `--debate --json`
+split — `crew seats --seats cursor` expands it to every registered `cursor-*`
+seat, keeping the registry authoritative with no hardcoded cursor list in this
+command.)
 
 **A2.1 — render each seat's prompt.** Discuss-mode council prompts carry a
 per-seat label, so render ONE prompt per seat from the single builder (the same
@@ -186,28 +195,26 @@ into A4 alongside the Task seats.
 
 ## A3 — Fan out task seats (parallel)
 
-**Skip this step if the resolved panel has no Task seat** (e.g. `--panel cursor`)
-— go straight to A4. Otherwise, for each Claude-seat entry (`opus`, `sonnet`, or
-opt-in `fable`) in the panel, render its prompt from the ONE builder — **one
-render line per Claude seat in the panel** — then dispatch the discuss seat
-(`crew:panelist`) in parallel:
+**Skip this step if `task_seats` is empty** (e.g. `--panel cursor`) — go straight
+to A4. Otherwise, for EACH `<seat>` in `task_seats` (from the `seats --debate
+--json` split), render its prompt from the ONE builder — **one render line per
+Task seat in the panel** — then dispatch the discuss seat (`crew:panelist`) in
+parallel:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role opus -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-opus.txt
-"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role sonnet -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-sonnet.txt
-# opt-in — only if fable is in the panel:
-"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role fable -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-fable.txt
+# for each <seat> in task_seats:
+"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role <seat> -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-<seat>.txt
 ```
 
 Dispatch each seat **by reference** — point the panelist at its rendered file and
 let it `Read` it (reference, not payload; `crew:panelist` has `Read`), NOT the
-inlined contents:
+inlined contents. Pin each seat's model from `task_seat_models[<seat>]` (the
+catalog is the single source — do NOT hardcode a pin or assume the seat name is
+its model):
 
 ```
-Task(subagent_type="crew:panelist", model="opus",   prompt="You are the opus seat. Read .crew/debates/<dir>/.prompt-opus.txt and follow it exactly.")
-Task(subagent_type="crew:panelist", model="sonnet", prompt="You are the sonnet seat. Read .crew/debates/<dir>/.prompt-sonnet.txt and follow it exactly.")
-# opt-in fable — premium tier; only if it's in the panel:
-Task(subagent_type="crew:panelist", model="fable", prompt="You are the fable seat. Read .crew/debates/<dir>/.prompt-fable.txt and follow it exactly.")
+# for each <seat> in task_seats:
+Task(subagent_type="crew:panelist", model="<task_seat_models[<seat>]>", prompt="You are the <seat> seat. Read .crew/debates/<dir>/.prompt-<seat>.txt and follow it exactly.")
 ```
 
 (Review mode: render with `--mode review <target>` instead of `-f question`, and
@@ -282,9 +289,9 @@ and folds them in as injection-guarded DATA — on round 1 there is no prior):
   -o .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt
 ```
 
-Render EVERY seat in the panel — subprocess AND task, including the opt-in
-`fable` Task seat when present — exactly as A3 renders one prompt per Claude
-seat; keep the render `-o` and the matching Task `Read .../.prompt-<seat>-r<n>.txt`
+Render EVERY seat in the panel — every `subprocess_seats` entry AND every
+`task_seats` entry from the split — exactly as A3 renders one prompt per seat;
+keep the render `-o` and the matching Task `Read .../.prompt-<seat>-r<n>.txt`
 reference pointed at the same file.
 
 Then run the round's seats (in parallel where possible):
@@ -293,20 +300,17 @@ Then run the round's seats (in parallel where possible):
   ```bash
   "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt --json -o .crew/debates/<run-id>/<seat>-r<n>.json
   ```
-- **Task seats** (`opus`/`sonnet`/opt-in `fable`): dispatch one `crew:panelist`
-  per Claude seat in the panel, **pinning each seat by its model id** — `opus` →
-  `model="opus"`, `sonnet` → `model="sonnet"`, `fable` → `model="fable"` (every
-  current Task seat pins its own name; the Task tool validates the model value,
-  so a full version-locked id would be rejected at spawn). This is the SAME
-  task-seat set and SAME pinning A3 uses, so single-round and multi-round stay
-  in lockstep.
+- **Task seats** (`task_seats` from the split): dispatch one `crew:panelist` per
+  Task seat in the panel, **pinning each seat's model from `task_seat_models[<seat>]`**
+  (the catalog is the single source; the Task tool validates the model value, so a
+  full version-locked id would be rejected at spawn). This is the SAME task-seat
+  set and SAME pinning A3 uses, so single-round and multi-round stay in lockstep.
   Dispatch each **by reference** (`crew:panelist` has `Read` — point it at the
-  rendered file, do NOT inline the contents):
+  rendered file, do NOT inline the contents), and do NOT hardcode a pin or assume
+  the seat name is its model:
   ```
-  Task(subagent_type="crew:panelist", model="opus",            prompt="You are the opus seat. Read .crew/debates/<run-id>/.prompt-opus-r<n>.txt and follow it exactly.")
-  Task(subagent_type="crew:panelist", model="sonnet",          prompt="You are the sonnet seat. Read .crew/debates/<run-id>/.prompt-sonnet-r<n>.txt and follow it exactly.")
-  # opt-in fable — only if it's in the panel:
-  Task(subagent_type="crew:panelist", model="fable",           prompt="You are the fable seat. Read .crew/debates/<run-id>/.prompt-fable-r<n>.txt and follow it exactly.")
+  # for each <seat> in task_seats:
+  Task(subagent_type="crew:panelist", model="<task_seat_models[<seat>]>", prompt="You are the <seat> seat. Read .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt and follow it exactly.")
   ```
   Use each Task's RETURNED result as its take and completion signal — never an output-file size or other proxy (see A3).
 

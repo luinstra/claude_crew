@@ -1,9 +1,9 @@
 """Multi-model review engine for the crew plugin (subprocess seats only).
 
-This package drives the *subprocess* seats registered in ``providers/``
-(``CODEX_SEATS`` / ``CURSOR_SEATS`` / ``agy``) of a multi-model
-review panel. Task seats (Claude voices — ``seats.TASK_SEAT_NAMES``: opus,
-sonnet, plus opt-in fable) are driven from inside Claude Code by the
+This package drives the *subprocess* seats of a multi-model review panel — the
+executor-bearing seats in the catalog (``multiagent/seats.toml``: the codex, agy,
+and cursor rows). Task seats (Claude voices — the catalog's ``claude-code`` rows:
+opus, sonnet, plus opt-in fable) are driven from inside Claude Code by the
 orchestrating command markdown, NOT by this engine.
 
 Both seat kinds resolve to ONE normalized result shape — the six-field

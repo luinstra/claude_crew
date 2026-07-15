@@ -1,0 +1,94 @@
+# The SHIPPED seat catalog: every built-in seat and every built-in panel.
+#
+# This file is DATA, loaded by seats.py and merged with the user's config layers
+# (per-repo .crew/config.toml, then global ~/.crew-config.toml). A user's
+# [seats.<name>] table tunes a seat here, or declares a new one of its own; the
+# resolution is per-seat-per-key (repo > global > this file).
+#
+# Seat keys:
+#   provider          which kind drives the seat (see PROVIDER_KINDS in seats.py):
+#                     codex / cursor / agy run an external CLI; claude-code seats
+#                     are the in-session Task voices the orchestrator dispatches.
+#   model             the model string that provider accepts (`codex exec --model`,
+#                     `agent --model`, `agy --model`); for a claude-code seat it
+#                     must be a Task-tool alias (TASK_MODEL_ALIASES).
+#   opt_in            true keeps the seat OUT of every built-in panel: it is
+#                     registered but only runs when named (--seats <name>). WHY
+#                     each one is opt-in (premium cost bucket, redundancy) lives
+#                     in docs/engine-notes.md.
+#   reasoning_effort  codex only. Unset means the provider's own default.
+#   print_timeout     agy only. Unset means the provider's own default.
+#
+# ORDER IS LOAD-BEARING: the built-in subprocess panel, the premium-off set, and
+# the scaffolded config all read this table in the order written here.
+
+[seats.codex]
+provider = "codex"
+model = "gpt-5.6-sol"
+
+[seats.codex-luna]
+provider = "codex"
+model = "gpt-5.6-luna"
+
+[seats.codex-terra]
+provider = "codex"
+model = "gpt-5.6-terra"
+opt_in = true
+
+[seats.agy]
+provider = "agy"
+model = "Gemini 3.1 Pro (High)"
+
+[seats.cursor-gpt]
+provider = "cursor"
+model = "gpt-5.5-extra-high"
+opt_in = true
+
+[seats.cursor-gemini]
+provider = "cursor"
+model = "gemini-3.1-pro"
+opt_in = true
+
+[seats.cursor-glm]
+provider = "cursor"
+model = "glm-5.2-max"
+opt_in = true
+
+[seats.cursor-grok]
+provider = "cursor"
+model = "grok-4.5-xhigh"
+opt_in = true
+
+[seats.cursor-auto]
+provider = "cursor"
+model = "auto"
+
+[seats.cursor-composer]
+provider = "cursor"
+model = "composer-2.5"
+
+# The Claude (Task) seats. Same catalog, different driver: the orchestrator
+# spawns these in-session on the subscription, so they carry no CLI and the
+# engine never executes them.
+[seats.opus]
+provider = "claude-code"
+model = "opus"
+
+[seats.sonnet]
+provider = "claude-code"
+model = "sonnet"
+
+[seats.fable]
+provider = "claude-code"
+model = "fable"
+opt_in = true
+
+# The built-in panels. `cursor` holds the literal GROUP TOKEN, not an expanded
+# cursor-* list: the token is expanded at resolution time so it grows with the
+# catalog. A [panels] table in a user config redefines a panel by name.
+[panels]
+full = ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer", "opus", "sonnet"]
+quick = ["codex", "sonnet"]
+lite = ["opus", "sonnet"]
+solo = ["opus"]
+cursor = ["cursor"]

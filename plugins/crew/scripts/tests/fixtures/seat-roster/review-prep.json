@@ -1,0 +1,1 @@
+{"prompt_path": ".crew/reviews/FIXED-CAPTURE-ID/prompt-seat.txt", "subprocess_seats": ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"], "task_seats": ["opus", "sonnet"], "task_seat_models": {"opus": "opus", "sonnet": "sonnet"}}

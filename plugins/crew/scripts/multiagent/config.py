@@ -2,10 +2,10 @@
 
 Two small, optional, PERSONAL config files tune the default panel choice (when
 the user names no panel), the panel ROSTER (``[panels]`` — what's *in* a preset),
-per-seat AVAILABILITY (``available`` opt-out), per-seat tuning (model pins,
-codex ``reasoning_effort``, agy ``print_timeout``, and the global per-seat
-``timeout``), and the persistence loops' wall clock
-(``[tuning].deadline_minutes``):
+the SEAT catalog (``[seats.<name>]`` — availability, model pins, per-provider
+tunes, and whole new seats: resolved in ``seats.py`` over ``raw_layers()``, not
+by a getter here), the global per-seat ``timeout``, and the persistence loops'
+wall clock (``[tuning].deadline_minutes``):
 
   * per-repo  ``<project>/.crew/config.toml`` (resolved against
     ``CLAUDE_PROJECT_DIR`` → cwd — the SAME resolution the other ``.crew/`` paths
@@ -32,16 +32,13 @@ predictable). The ``CREW_MA_*`` env surface is RETIRED — it is consulted nowhe
 
 Error handling (a review seat must NEVER die because of a config typo):
   * Missing file → no-op; getters return ``None`` (callers use defaults).
-  * No ``tomllib`` (Python < 3.11) → file ignored; behaves as today, PLUS a
-    MANDATORY one-time stderr note (so a user who set ``default_panel="lite"`` to
-    SAVE cost isn't silently given the full panel on the minimum interpreter).
   * Malformed TOML (``TOMLDecodeError``) → warn once, ignore the WHOLE file.
   * Bad individual field (wrong type / out-of-range) → that getter drops the
     field and keeps the built-in default, warning once; siblings unaffected.
   * Unknown ``default_panel``/``[panels]`` name or unknown seat in a roster list
-    → validated against ``seats.PANEL_PRESETS`` ∪ ``panels()`` keys / the known
-    seat names; returns ``None`` / drops the entry (with a one-time warn) so
-    callers never hit a raw ``KeyError``.
+    → validated against ``seats.merged_panels()`` keys / the known seat names;
+    returns ``None`` / drops the entry (with a one-time warn) so callers never hit
+    a raw ``KeyError``.
 
 ALL diagnostics go to STDERR (never stdout — the orchestrator parses stdout
 JSON). Warnings fire AT MOST ONCE per process: each memoized load plus a
@@ -57,10 +54,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-try:
-    import tomllib  # Python 3.11+
-except ModuleNotFoundError:  # < 3.11: file gracefully ignored (see _load_uncached)
-    tomllib = None  # type: ignore[assignment]
+import tomllib  # stdlib 3.11+; the dispatcher (plugins/crew/crew) enforces that floor
 
 
 # Sentinel distinguishing "never loaded" from a legitimately empty ({}) config.
@@ -121,24 +115,14 @@ def _load_uncached(path: Path) -> dict:
     """Read + parse the config file at ``path``, returning ``{}`` on any failure.
 
     Shared by BOTH the per-repo and global loaders so the parse/error posture
-    (missing → ``{}``; no-tomllib → one-time note; malformed → warn + ``{}``) is
-    written once. Warn keys are path-qualified so the per-repo and global files
-    each warn independently.
+    (missing → ``{}``; malformed → warn + ``{}``) is written once. Warn keys are
+    path-qualified so the per-repo and global files each warn independently.
     """
     try:
         raw = path.read_bytes()
     except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
         return {}
     except OSError:
-        return {}
-
-    # The file EXISTS. On Python < 3.11 there is no tomllib — emit the mandatory
-    # one-time note and ignore the file (behavior identical to today otherwise).
-    if tomllib is None:
-        _warn_once(
-            f"no-tomllib:{path}",
-            f"found {path} but TOML parsing requires Python 3.11+; ignoring",
-        )
         return {}
 
     try:
@@ -168,12 +152,34 @@ def _global_load() -> dict:
     return _global_cache
 
 
+def raw_layers() -> list[tuple[str, dict]]:
+    """The config layers as raw dicts, HIGHEST precedence first: per-repo, global.
+
+    The one way out of this module for un-validated config data. The seat catalog
+    (``seats.py``) does its own per-seat-per-key resolution over these, because a
+    seat's tunes belong to the seat, not to a getter per key.
+    """
+    return [("repo", _load()), ("global", _global_load())]
+
+
 def _reset_cache_for_tests() -> None:
-    """Clear the memoized configs + one-time-warning guards (TESTS ONLY)."""
+    """Clear the memoized configs + one-time-warning guards (TESTS ONLY).
+
+    The ONE reset path: it also clears everything DERIVED from the config, since a
+    stale derived cache outlives the config it was built from. That means the seat
+    catalog + its own warn guard (``seats._reset_for_tests``) and the provider
+    registry, whose factories are bound to the catalog's rows. The registry import
+    is function-local so this module stays a leaf that providers can import.
+    """
     global _cache, _global_cache
     _cache = _UNLOADED
     _global_cache = _UNLOADED
     _warned.clear()
+
+    from multiagent import providers, seats
+
+    seats._reset_for_tests()
+    providers._REGISTRY = None
 
 
 def _first(*vals: Any) -> Any:
@@ -184,27 +190,15 @@ def _first(*vals: Any) -> Any:
     return None
 
 
-def _seat_table(seat: str, data: dict) -> dict | None:
-    """The ``[seats.<seat>]`` table in ``data``, or ``None`` if absent/not a table."""
-    seats_tbl = data.get("seats")
-    if not isinstance(seats_tbl, dict):
-        return None
-    tbl = seats_tbl.get(seat)
-    return tbl if isinstance(tbl, dict) else None
-
-
-# --- panel-name validation set (PANEL_PRESETS ∪ configured [panels] keys) ----
+# --- panel-name validation set (shipped panels ∪ configured [panels] keys) ---
 
 def _known_panel_names() -> set[str]:
-    """Valid panel names: built-in ``PANEL_PRESETS`` keys ∪ configured ``[panels]``
-    keys. Lazy-imports ``seats`` so this module stays a pure leaf at load."""
+    """Valid panel names: the shipped panels ∪ the configured ``[panels]`` keys,
+    which is exactly what the catalog's ``merged_panels()`` resolves. Lazy-imports
+    ``seats`` so this module stays a pure leaf at load."""
     from multiagent import seats
 
-    names = set(seats.PANEL_PRESETS)
-    roster = panels()
-    if roster:
-        names |= set(roster)
-    return names
+    return set(seats.merged_panels())
 
 
 # --- default_panel ------------------------------------------------------------
@@ -224,9 +218,10 @@ def _extract_default_panel(data: dict, layer: str) -> str | None:
 
 
 def default_panel() -> str | None:
-    """The configured default panel name, validated against ``PANEL_PRESETS`` ∪
-    ``panels()`` keys. ``None`` when unset/invalid in BOTH layers so the caller
-    falls back to ``full`` and never hits a raw ``KeyError`` (per-repo wins)."""
+    """The configured default panel name, validated against the resolved panel
+    names (``seats.merged_panels()``). ``None`` when unset/invalid in BOTH layers so
+    the caller falls back to ``full`` and never hits a raw ``KeyError`` (per-repo
+    wins)."""
     return _first(
         _extract_default_panel(_load(), "repo"),
         _extract_default_panel(_global_load(), "global"),
@@ -254,8 +249,9 @@ def _extract_debate_panel(data: dict, layer: str) -> str | None:
 
 def debate_panel() -> str | None:
     """The configured ``/crew:debate`` default panel (``[debate].panel``), validated
-    against ``PANEL_PRESETS`` ∪ ``panels()`` keys (per-repo wins). ``None`` when
-    unset/invalid so the caller falls back to ``default_panel()`` then ``full``."""
+    against the resolved panel names (``seats.merged_panels()``, per-repo wins).
+    ``None`` when unset/invalid so the caller falls back to ``default_panel()`` then
+    ``full``."""
     return _first(
         _extract_debate_panel(_load(), "repo"),
         _extract_debate_panel(_global_load(), "global"),
@@ -302,88 +298,6 @@ def dispatch_seat() -> str | None:
     return _first(
         _extract_dispatch_seat(_load(), "repo"),
         _extract_dispatch_seat(_global_load(), "global"),
-    )
-
-
-# --- per-seat model -----------------------------------------------------------
-
-def _extract_seat_model(data: dict, layer: str, seat: str) -> str | None:
-    tbl = _seat_table(seat, data)
-    if tbl is None:
-        return None
-    val = tbl.get("model")
-    if val is None:
-        return None
-    if not isinstance(val, str) or not val.strip():
-        _warn_once(
-            f"seat_model:{layer}:{seat}",
-            f"[seats.{seat}].model must be a non-empty string; ignoring {val!r}",
-        )
-        return None
-    return val
-
-
-def seat_model(seat: str) -> str | None:
-    """The ``[seats.<seat>].model`` pin (per-repo over global), or ``None``."""
-    return _first(
-        _extract_seat_model(_load(), "repo", seat),
-        _extract_seat_model(_global_load(), "global", seat),
-    )
-
-
-# --- codex reasoning_effort ---------------------------------------------------
-
-def _extract_codex_reasoning_effort(data: dict, layer: str, seat: str) -> str | None:
-    tbl = _seat_table(seat, data)
-    if tbl is None:
-        return None
-    val = tbl.get("reasoning_effort")
-    if val is None:
-        return None
-    if not isinstance(val, str) or not val.strip():
-        _warn_once(
-            f"codex_reasoning_effort:{layer}:{seat}",
-            f"[seats.{seat}].reasoning_effort must be a non-empty string; "
-            f"ignoring {val!r}",
-        )
-        return None
-    return val
-
-
-def codex_reasoning_effort(seat: str = "codex") -> str | None:
-    """``[seats.<seat>].reasoning_effort`` (per-repo over global), or ``None``.
-
-    Per-seat lookup: each codex seat reads its own table.
-    The ``seat`` default keeps existing bare-``codex`` callers unchanged."""
-    return _first(
-        _extract_codex_reasoning_effort(_load(), "repo", seat),
-        _extract_codex_reasoning_effort(_global_load(), "global", seat),
-    )
-
-
-# --- agy print_timeout --------------------------------------------------------
-
-def _extract_agy_print_timeout(data: dict, layer: str) -> str | None:
-    tbl = _seat_table("agy", data)
-    if tbl is None:
-        return None
-    val = tbl.get("print_timeout")
-    if val is None:
-        return None
-    if not isinstance(val, str) or not val.strip():
-        _warn_once(
-            f"agy_print_timeout:{layer}",
-            f"[seats.agy].print_timeout must be a non-empty string; ignoring {val!r}",
-        )
-        return None
-    return val
-
-
-def agy_print_timeout() -> str | None:
-    """``[seats.agy].print_timeout`` (per-repo over global), or ``None``."""
-    return _first(
-        _extract_agy_print_timeout(_load(), "repo"),
-        _extract_agy_print_timeout(_global_load(), "global"),
     )
 
 
@@ -459,10 +373,10 @@ def deadline_minutes() -> int | None:
 def _extract_panels(data: dict, layer: str) -> dict[str, list[str]] | None:
     """Validate one layer's ``[panels]`` table → ``{name: [seat, ...]}`` or ``None``.
 
-    Each entry must be a list of KNOWN seat names (registry subprocess seats ∪
-    ``TASK_SEAT_NAMES`` ∪ the ``cursor`` group token, for parity with ``--seats``);
-    unknown names are dropped (warn once). An entry that isn't a list, or whose
-    every element drops, is omitted. A present-but-non-table ``[panels]`` → ``None``
+    Each entry must be a list of KNOWN seat names (registry subprocess seats ∪ the
+    catalog's Task seats ∪ the group tokens, for parity with ``--seats``); unknown
+    names are dropped (warn once). An entry that isn't a list, or whose every
+    element drops, is omitted. A present-but-non-table ``[panels]`` → ``None``
     (warn once)."""
     tbl = data.get("panels")
     if tbl is None:
@@ -475,7 +389,8 @@ def _extract_panels(data: dict, layer: str) -> dict[str, list[str]] | None:
     from multiagent import seats
     from multiagent.providers import known_seat_names
 
-    valid = set(known_seat_names()) | set(seats.TASK_SEAT_NAMES) | {"cursor"}
+    valid = (set(known_seat_names()) | set(seats.task_seats())
+             | set(seats.group_tokens()))
     out: dict[str, list[str]] = {}
     for name, members in tbl.items():
         if not isinstance(members, list):
@@ -512,35 +427,3 @@ def panels() -> dict[str, list[str]] | None:
     if repo:
         merged.update(repo)  # per-repo wins per NAME
     return merged or None
-
-
-# --- per-seat availability (new, opt-out) -------------------------------------
-
-def _extract_seat_available(data: dict, layer: str, seat: str) -> bool | None:
-    tbl = _seat_table(seat, data)
-    if tbl is None:
-        return None
-    val = tbl.get("available")
-    if val is None:
-        return None
-    if not isinstance(val, bool):
-        # Availability is opt-OUT: a misconfigured value must NEVER silently HIDE a
-        # seat (a quietly-degraded panel), so a non-bool is treated as available.
-        _warn_once(
-            f"seat_available:{layer}:{seat}",
-            f"[seats.{seat}].available must be a boolean; ignoring {val!r} "
-            f"(treating the seat as available)",
-        )
-        return True
-    return val
-
-
-def seat_available(seat: str) -> bool:
-    """Whether ``seat`` is available (per-repo ``available`` over global), default
-    ``True`` (opt-out). An unavailable seat is filtered out of any resolved panel
-    (with a skip-note when explicitly named)."""
-    val = _first(
-        _extract_seat_available(_load(), "repo", seat),
-        _extract_seat_available(_global_load(), "global", seat),
-    )
-    return True if val is None else val
