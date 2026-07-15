@@ -1,11 +1,9 @@
 """CodexProvider — drives ``codex exec`` as a subprocess seat.
 
 One codex binary exposes several models; we run more than one as distinct panel
-seats (see ``CODEX_SEATS`` below, mirroring cursor's ``CURSOR_SEATS``). Each
-seat is a ``CodexProvider`` instance pinned to a model string; adding a model
-is a one-line ``Seat(...)`` change to ``CODEX_SEATS`` (the registry and
-``--seats`` pick it up automatically). ``Seat.opt_in`` is the default-vs-opt-in
-truth: a bare ``Seat("model")`` defaults, ``opt_in=True`` registers it opt-in.
+seats. Each seat is a ``CodexProvider`` instance pinned to a model string; the
+seats themselves live in the catalog (``multiagent/seats.toml``, or a user's own
+config), and the registry builds one instance per catalog row.
 
 Invocation (verified against codex-cli 0.142.2 `codex exec --help`):
     codex exec - --ignore-user-config -c model_reasoning_effort=xhigh \
@@ -32,35 +30,21 @@ import shutil
 import tempfile
 import time
 
-from multiagent import config
-
-from . import Provider, ProviderResult, Seat
+from . import Provider, ProviderResult
 from ._proc import TIMEOUT, run_reaped
 
-# === The codex panel seats: SINGLE SOURCE OF TRUTH ===========================
-# name -> Seat(model[, opt_in]). Model = the string `codex exec --model` accepts.
-# OpenAI voices at different reasoning styles on the one codex subscription. Add a
-# seat = ONE line here: Seat("model") for a DEFAULT-panel seat, Seat("model",
-# opt_in=True) for a registered-but-opt-in one (run via --seats <name>). The
-# Seat.opt_in flag is the SINGLE default-vs-opt-in truth: cli derives both
-# _DEFAULT_SUBPROCESS_PANEL and _PREMIUM_OFF_SEATS from it (per-seat WHY a seat is
-# opt-in -> docs/engine-notes.md). Retune a seat without code via
-# [seats.<name>].model in .crew/config.toml or the global ~/.crew-config.toml.
-CODEX_SEATS: dict[str, Seat] = {
-    "codex":       Seat("gpt-5.6-sol"),
-    "codex-luna":  Seat("gpt-5.6-luna"),
-    "codex-terra": Seat("gpt-5.6-terra", opt_in=True),
-}
+# Re-pinned in code because --ignore-user-config drops the config's own value;
+# the seat's [seats.<name>].reasoning_effort overrides it through the catalog.
+DEFAULT_REASONING_EFFORT = "xhigh"
 
 
 class CodexProvider(Provider):
     """A panel seat backed by the codex CLI subprocess.
 
-    Pinned to one model. Multiple named instances (see ``CODEX_SEATS``) run as
-    distinct seats: ``codex`` + ``codex-luna`` are DEFAULT, ``codex-terra`` is
-    registered but OPT-IN (run via ``--seats codex-terra``). Default-vs-opt-in is
-    the ``Seat.opt_in`` flag on each ``CODEX_SEATS`` value, which cli derives both
-    the default panel and the premium-off set from, not a separate hardcode.
+    Pinned to one model. Multiple named instances run as distinct seats (the codex
+    rows of the catalog): the seat's name, model, and reasoning_effort all arrive
+    from its ``SeatSpec`` through the registry factory, so a seat declared in a
+    user's config is a first-class codex seat.
     """
 
     # EXPLICIT opt-in (fail-CLOSED ABC default is False): codex honors
@@ -72,9 +56,11 @@ class CodexProvider(Provider):
         self,
         name: str = "codex",
         default_model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         self.name = name
         self._default_model = default_model
+        self._reasoning_effort = reasoning_effort
 
     def is_available(self) -> tuple[bool, str]:
         # PATH only — no auth probe, no spawning codex.
@@ -92,16 +78,11 @@ class CodexProvider(Provider):
     ) -> ProviderResult:
         start = time.monotonic()
 
-        # Precedence: explicit model (CLI --model) > per-repo .crew/config.toml >
-        # global ~/.crew-config.toml ([seats.<name>].model, both via
-        # config.seat_model) > the seat's built-in CODEX_SEATS pin. Unlike
-        # cursor, a None result is not an error: codex falls back to its own
-        # CLI default when --model is omitted.
-        chosen_model = (
-            model
-            or config.seat_model(self.name)
-            or self._default_model
-        )
+        # Precedence: explicit model (CLI --model) > the seat's resolved model
+        # (the catalog already folded the config layers over the shipped pin).
+        # Unlike cursor, a None result is not an error: codex falls back to its
+        # own CLI default when --model is omitted.
+        chosen_model = model or self._default_model
 
         # The -o temp file receives the clean final message.
         fd, out_path = tempfile.mkstemp(prefix="crew_codex_", suffix=".txt")
@@ -112,12 +93,9 @@ class CodexProvider(Provider):
         # Cuts ~40k startup tokens and keeps the seat reproducible. Because that
         # also drops the config's model_reasoning_effort, we RE-PIN it in code
         # via -c so reviews keep deep reasoning without the user-config bloat.
-        # reasoning_effort: [seats.<this seat>].reasoning_effort wins (per-repo
-        # .crew/config.toml over global ~/.crew-config.toml, both via
-        # config.codex_reasoning_effort, resolved per codex seat), else the
-        # built-in xhigh default (re-pinned because --ignore-user-config drops
-        # the config's own value).
-        effort = config.codex_reasoning_effort(self.name) or "xhigh"
+        # reasoning_effort: the seat's own tune (the catalog resolved the config
+        # layers), else the built-in default.
+        effort = self._reasoning_effort or DEFAULT_REASONING_EFFORT
         argv = ["codex", "exec", "-"]
         # --ignore-user-config makes a READ-ONLY review seat hermetic (skips
         # ~/.codex/config.toml + AGENTS.md + project conventions/skills, ~40k

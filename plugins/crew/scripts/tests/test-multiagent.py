@@ -171,6 +171,15 @@ def project_config(toml_text, *, write_file=True):
     return crew_config(project=toml_text if write_file else None)
 
 
+def shipped_seats(provider):
+    """The SHIPPED catalog rows for one provider, in catalog order — the roster as
+    seats.toml declares it, with no config layer folded in. Config-independent, so
+    an assertion about the built-in roster stays true on a machine that declares
+    seats of its own."""
+    from multiagent import seats as _seats
+    return {n: s for n, s in _seats.shipped_catalog().items() if s.provider == provider}
+
+
 def global_home(toml_text, *, write_file=True):
     """Global ~/.crew-config.toml ctxmgr (no per-repo file). ``write_file=False`` =
     no global file."""
@@ -378,7 +387,11 @@ def test_agy_oversized():
 
 
 def _run_agy_with_fake(script_body: str, prompt="PROMPT", timeout=10, env_extra=None):
-    prov = AgyProvider()
+    # Build the agy seat THROUGH the catalog so a [seats.agy] config table (model
+    # or print_timeout) reaches it — the registry binds the resolved tunes, which
+    # a bare AgyProvider() no longer reads.
+    from multiagent.providers import get_provider
+    prov = get_provider("agy")
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
         capture = d / "capture.json"
@@ -526,7 +539,7 @@ def test_agy_is_available():
 def test_default_seats():
     log_section("default subprocess seats")
     from multiagent.cli import _default_subprocess_seats, _resolve_seats  # noqa: E402
-    from multiagent.providers.cursor import CURSOR_SEATS  # noqa: E402
+    CURSOR_SEATS = shipped_seats("cursor")
     # The BUILTIN fallback (registry-filtered) — no config, no env (retired).
     with project_config("", write_file=False):
         seats = _default_subprocess_seats()
@@ -751,7 +764,9 @@ def test_registry():
     check("available_seats returns instances", len(seats) == 2, "2", str(len(seats)))
     # Cursor model-seats are registered (one per CURSOR_SEATS entry).
     from multiagent.providers import known_seat_names
-    from multiagent.providers.cursor import CursorProvider, CURSOR_SEATS
+    from multiagent.providers.cursor import CursorProvider
+
+    CURSOR_SEATS = shipped_seats("cursor")
     for seat_name, spec in CURSOR_SEATS.items():
         check(f"get_provider('{seat_name}') -> CursorProvider pinned to {spec.model}",
               isinstance(get_provider(seat_name), CursorProvider)
@@ -766,7 +781,7 @@ def test_registry():
           "grok-4.5-xhigh", str(CURSOR_SEATS.get("cursor-grok")))
     # Codex model-seats mirror cursor: one CodexProvider per CODEX_SEATS entry,
     # each pinned to its model (codex + codex-luna default, codex-terra opt-in).
-    from multiagent.providers.codex import CODEX_SEATS
+    CODEX_SEATS = shipped_seats("codex")
     for seat_name, spec in CODEX_SEATS.items():
         check(f"get_provider('{seat_name}') -> CodexProvider pinned to {spec.model}",
               isinstance(get_provider(seat_name), CodexProvider)
@@ -2365,9 +2380,11 @@ def test_render_subcommand():
 
 def test_cursor():
     log_section("CursorProvider (live multi-model seat)")
-    from multiagent.providers import cursor, known_seat_names
-    from multiagent.providers.cursor import CursorProvider, CURSOR_SEATS
+    from multiagent.providers import cursor, get_provider, known_seat_names
+    from multiagent.providers.cursor import CursorProvider
     from multiagent import cli
+
+    CURSOR_SEATS = shipped_seats("cursor")
 
     check("all cursor-* seats are registered",
           all(s in known_seat_names() for s in CURSOR_SEATS),
@@ -2442,15 +2459,17 @@ def test_cursor():
                   "no --mode plan", str(argv_w))
 
             # config [seats.<seat>].model overrides the pinned default (env retired).
+            # The catalog folds the config over the shipped pin, so the override
+            # rides the seat BUILT for that config (get_provider), not a provider
+            # pinned before the config existed.
             with project_config('[seats.cursor-glm]\nmodel = "glm-override"\n'):
-                r2 = prov.run("X", timeout=10)
+                r2 = get_provider("cursor-glm").run("X", timeout=10)
             check("[seats.<seat>].model config overrides the pinned model",
                   r2.model == "glm-override", "glm-override", str(r2.model))
 
             # cursor-auto's config model override (mirrors the glm case).
-            prov_auto = CursorProvider("cursor-auto", "auto")
             with project_config('[seats.cursor-auto]\nmodel = "auto-override"\n'):
-                r3 = prov_auto.run("X", timeout=10)
+                r3 = get_provider("cursor-auto").run("X", timeout=10)
             check("[seats.cursor-auto].model config overrides cursor-auto's pinned model",
                   r3.model == "auto-override", "auto-override", str(r3.model))
         finally:
@@ -3132,7 +3151,8 @@ def test_config():
     log_section("layered config loaders + typed getters (config.py)")
     import io  # noqa: E402
     from contextlib import redirect_stderr  # noqa: E402
-    from multiagent import config  # noqa: E402
+    from multiagent import config, seats  # noqa: E402
+    from multiagent.providers import get_provider  # noqa: E402
     from multiagent.providers.cursor import CursorProvider  # noqa: E402
 
     # `project` = the module-level per-repo ctxmgr (global layer neutralized so a
@@ -3162,44 +3182,54 @@ def test_config():
         timeout = 777
     """)
 
-    # 1. Valid TOML -> every getter returns its value.
+    # 1. Valid TOML -> the catalog folds each [seats.<name>] table over the shipped
+    #    pin; default_panel/default_timeout keep their own getters.
     with project(VALID):
         check("config valid: default_panel() -> 'lite'",
               config.default_panel() == "lite", "lite", str(config.default_panel()))
-        check("config valid: seat_model('codex') -> 'gpt-5.5'",
-              config.seat_model("codex") == "gpt-5.5", "gpt-5.5", str(config.seat_model("codex")))
-        check("config valid: seat_model('agy') -> 'Gemini Config Model'",
-              config.seat_model("agy") == "Gemini Config Model",
-              "Gemini Config Model", str(config.seat_model("agy")))
-        check("config valid: seat_model('cursor-glm') -> 'glm-config-max'",
-              config.seat_model("cursor-glm") == "glm-config-max",
-              "glm-config-max", str(config.seat_model("cursor-glm")))
-        check("config valid: codex_reasoning_effort() -> 'high'",
-              config.codex_reasoning_effort() == "high", "high", str(config.codex_reasoning_effort()))
-        # Per-seat effort lookup: each codex seat reads ITS OWN table; the
-        # luna value does not bleed into the bare codex seat (and vice versa).
-        check("config valid: codex_reasoning_effort('codex-luna') -> 'low'",
-              config.codex_reasoning_effort("codex-luna") == "low",
-              "low", str(config.codex_reasoning_effort("codex-luna")))
-        check("config valid: seat_model('codex-luna') -> 'luna-config'",
-              config.seat_model("codex-luna") == "luna-config",
-              "luna-config", str(config.seat_model("codex-luna")))
-        check("config valid: agy_print_timeout() -> '3m'",
-              config.agy_print_timeout() == "3m", "3m", str(config.agy_print_timeout()))
+        check("config valid: seat_spec('codex').model -> 'gpt-5.5'",
+              seats.seat_spec("codex").model == "gpt-5.5",
+              "gpt-5.5", str(seats.seat_spec("codex").model))
+        check("config valid: seat_spec('agy').model -> 'Gemini Config Model'",
+              seats.seat_spec("agy").model == "Gemini Config Model",
+              "Gemini Config Model", str(seats.seat_spec("agy").model))
+        check("config valid: seat_spec('cursor-glm').model -> 'glm-config-max'",
+              seats.seat_spec("cursor-glm").model == "glm-config-max",
+              "glm-config-max", str(seats.seat_spec("cursor-glm").model))
+        check("config valid: seat_spec('codex').reasoning_effort -> 'high'",
+              seats.seat_spec("codex").reasoning_effort == "high",
+              "high", str(seats.seat_spec("codex").reasoning_effort))
+        # Per-seat lookup: each codex seat reads ITS OWN table; the luna value
+        # does not bleed into the bare codex seat (and vice versa).
+        check("config valid: seat_spec('codex-luna').reasoning_effort -> 'low'",
+              seats.seat_spec("codex-luna").reasoning_effort == "low",
+              "low", str(seats.seat_spec("codex-luna").reasoning_effort))
+        check("config valid: seat_spec('codex-luna').model -> 'luna-config'",
+              seats.seat_spec("codex-luna").model == "luna-config",
+              "luna-config", str(seats.seat_spec("codex-luna").model))
+        check("config valid: seat_spec('agy').print_timeout -> '3m'",
+              seats.seat_spec("agy").print_timeout == "3m",
+              "3m", str(seats.seat_spec("agy").print_timeout))
         check("config valid: default_timeout() -> 777",
               config.default_timeout() == 777, "777", str(config.default_timeout()))
-        # A seat with no table -> None (no crash).
-        check("config valid: seat_model('nonexistent') -> None",
-              config.seat_model("cursor-gpt") is None, "None", str(config.seat_model("cursor-gpt")))
+        # A seat the config does not tune keeps its shipped pin and no per-provider
+        # tune (cursor-gpt is opt-in, untouched here).
+        check("config valid: an untuned seat keeps its shipped model, no tune",
+              seats.seat_spec("cursor-gpt").model == "gpt-5.5-extra-high"
+              and seats.seat_spec("codex-terra").reasoning_effort is None,
+              "shipped pin, tune None",
+              f"{seats.seat_spec('cursor-gpt').model} / "
+              f"{seats.seat_spec('codex-terra').reasoning_effort}")
 
-    # 2. Missing file -> every getter returns None/default (no crash, no warn).
+    # 2. Missing file -> default_panel/default_timeout None (no crash, no warn); an
+    #    untuned seat carries no per-provider tune.
     with project("", write_file=False):
         buf = io.StringIO()
         with redirect_stderr(buf):
-            vals = (config.default_panel(), config.seat_model("codex"),
-                    config.codex_reasoning_effort(), config.agy_print_timeout(),
-                    config.default_timeout())
-        check("config missing file: all getters None, no stderr noise",
+            vals = (config.default_panel(), config.default_timeout(),
+                    seats.seat_spec("codex").reasoning_effort,
+                    seats.seat_spec("agy").print_timeout)
+        check("config missing file: getters/tunes None, no stderr noise",
               all(v is None for v in vals) and buf.getvalue() == "",
               "all None + silent", f"vals={vals} stderr={buf.getvalue()!r}")
 
@@ -3239,11 +3269,11 @@ def test_config():
         buf = io.StringIO()
         with redirect_stderr(buf):
             dp = config.default_panel()
-            re_ = config.codex_reasoning_effort()
-            pt = config.agy_print_timeout()
+            re_ = seats.seat_spec("codex").reasoning_effort
+            pt = seats.seat_spec("agy").print_timeout
             tmo = config.default_timeout()
-            kept = config.seat_model("codex")
-        check("config bad fields: each invalid getter -> None",
+            kept = seats.seat_spec("codex").model
+        check("config bad fields: each invalid field dropped (tune/getter -> None)",
               dp is None and re_ is None and pt is None and tmo is None,
               "all None", f"dp={dp} re={re_} pt={pt} tmo={tmo}")
         check("config bad fields: a VALID sibling (seats.codex.model) still returns",
@@ -3295,7 +3325,13 @@ def test_config():
               config.debate_panel() is None, "None", str(config.debate_panel()))
 
     # ---- Precedence: per-repo BEATS global BEATS built-in (env retired) ----------
-    from multiagent.cli import _resolve_timeout, _codex_model  # noqa: E402
+    from multiagent.cli import _resolve_timeout  # noqa: E402
+
+    def _codex_model(seat="codex"):
+        # The catalog now owns per-seat model resolution (config over the shipped
+        # pin); this shim keeps the precedence assertions reading the same value
+        # the deleted config.seat_model getter used to return.
+        return seats.seat_spec(seat).model
 
     # 7a. per-repo [tuning].timeout beats global; explicit arg beats both layers.
     with crew_config(project="[tuning]\ntimeout = 777\n", glob="[tuning]\ntimeout = 120\n"):
@@ -3355,7 +3391,7 @@ def test_config():
             old_path = os.environ["PATH"]
             os.environ["PATH"] = str(d) + os.pathsep + old_path
             try:
-                CodexProvider().run("PROMPT", timeout=15)
+                get_provider("codex").run("PROMPT", timeout=15)
             finally:
                 os.environ["PATH"] = old_path
             argv = json.loads(cap.read_text())
@@ -3453,14 +3489,14 @@ def test_config():
         os.environ["CURSOR_CAPTURE"] = str(cap)
         try:
             with project("[seats.cursor-glm]\nmodel = \"glm-from-config\"\n"):
-                r = CursorProvider("cursor-glm", "glm-5.2-max").run("P", timeout=10)
+                r = get_provider("cursor-glm").run("P", timeout=10)
                 argv = json.loads(cap.read_text())
                 check("per-seat: config cursor model reaches run() --model argv",
                       "glm-from-config" in argv and r.model == "glm-from-config",
                       "glm-from-config", f"argv_model={'glm-from-config' in argv} r.model={r.model}")
             with crew_config(project="[seats.cursor-glm]\nmodel = \"glm-repo\"\n",
                              glob="[seats.cursor-glm]\nmodel = \"glm-global\"\n"):
-                r2 = CursorProvider("cursor-glm", "glm-5.2-max").run("P", timeout=10)
+                r2 = get_provider("cursor-glm").run("P", timeout=10)
                 check("per-seat: per-repo cursor model BEATS global ~/.crew-config.toml",
                       r2.model == "glm-repo", "glm-repo", str(r2.model))
         finally:
@@ -3562,15 +3598,16 @@ def test_global_roster_availability():
     log_section("global ~/.crew-config.toml + [panels] roster + seat availability (getters)")
     import io  # noqa: E402
     from contextlib import redirect_stderr  # noqa: E402
-    from multiagent import config  # noqa: E402
+    from multiagent import config, seats  # noqa: E402
 
     # --- Global-only value applies (no per-repo file) -------------------------
     with global_home('default_panel = "lite"\n'):
         check("global-only default_panel applies when no per-repo file",
               config.default_panel() == "lite", "lite", str(config.default_panel()))
     with global_home('[seats.agy]\nmodel = "Global Agy"\n'):
-        check("global-only [seats.agy].model applies",
-              config.seat_model("agy") == "Global Agy", "Global Agy", str(config.seat_model("agy")))
+        check("global-only [seats.agy].model applies (via the catalog)",
+              seats.seat_spec("agy").model == "Global Agy",
+              "Global Agy", str(seats.seat_spec("agy").model))
 
     # --- panels() roster ------------------------------------------------------
     # Override a built-in preset AND define a custom one.
@@ -3618,29 +3655,31 @@ def test_global_roster_availability():
               p == {"full": ["codex"], "extra": ["sonnet"]},
               "{'full': ['codex'], 'extra': ['sonnet']}", str(p))
 
-    # --- seat_available -------------------------------------------------------
+    # --- seat availability (catalog `available` flag) -------------------------
+    def avail(seat):
+        return seats.seat_spec(seat).available
     with project_config("", write_file=False):
-        check("seat_available default True (no config)",
-              config.seat_available("cursor-glm") is True, "True", str(config.seat_available("cursor-glm")))
+        check("seat available default True (no config)",
+              avail("cursor-glm") is True, "True", str(avail("cursor-glm")))
     with project_config('[seats.cursor-glm]\navailable = false\n'):
-        check("seat_available explicit False",
-              config.seat_available("cursor-glm") is False, "False", str(config.seat_available("cursor-glm")))
+        check("seat available explicit False",
+              avail("cursor-glm") is False, "False", str(avail("cursor-glm")))
     # per-repo available overrides global.
     with crew_config(project='[seats.cursor-glm]\navailable = true\n',
                      glob='[seats.cursor-glm]\navailable = false\n'):
-        check("seat_available: per-repo True beats global False",
-              config.seat_available("cursor-glm") is True, "True", str(config.seat_available("cursor-glm")))
+        check("seat available: per-repo True beats global False",
+              avail("cursor-glm") is True, "True", str(avail("cursor-glm")))
     with crew_config(glob='[seats.cursor-glm]\navailable = false\n'):
-        check("seat_available: global-only False applies",
-              config.seat_available("cursor-glm") is False, "False", str(config.seat_available("cursor-glm")))
+        check("seat available: global-only False applies",
+              avail("cursor-glm") is False, "False", str(avail("cursor-glm")))
     # Non-bool available -> treated as available (never silently HIDE a seat) + warn.
     with project_config('[seats.cursor-glm]\navailable = "yes"\n'):
         buf = io.StringIO()
         with redirect_stderr(buf):
-            avail = config.seat_available("cursor-glm")
-        check("seat_available: non-bool -> True (opt-out safety) + warn",
-              avail is True and "available" in buf.getvalue().lower(),
-              "True + warn", f"avail={avail} stderr={buf.getvalue()[:120]!r}")
+            a = avail("cursor-glm")
+        check("seat available: non-bool -> True (opt-out safety) + warn",
+              a is True and "available" in buf.getvalue().lower(),
+              "True + warn", f"avail={a} stderr={buf.getvalue()[:120]!r}")
 
 
 def _clean_env(proj: str) -> dict:
@@ -4389,96 +4428,82 @@ def test_debate_panel_resolver():
 
 
 def test_panel_catalog():
-    log_section("plain-data panel catalog (seats.py)")
+    log_section("seat catalog loader (seats.py)")
     from multiagent import seats  # noqa: E402
     from multiagent import cli  # noqa: E402
 
-    # Keys present, exactly the five presets.
-    check("PANEL_PRESETS keys == {full, lite, solo, cursor, quick}",
-          set(seats.PANEL_PRESETS.keys()) == {"full", "lite", "solo", "cursor", "quick"},
-          "{full, lite, solo, cursor, quick}", str(set(seats.PANEL_PRESETS.keys())))
+    with crew_config():  # isolated: assert the SHIPPED roster, no personal config
+        panels = seats.merged_panels()
+        # Keys present, exactly the five shipped panels.
+        check("merged_panels() keys == {full, lite, solo, cursor, quick}",
+              set(panels) == {"full", "lite", "solo", "cursor", "quick"},
+              "{full, lite, solo, cursor, quick}", str(set(panels)))
 
-    # Task seats (strings): exactly the known Claude seats incl. the opt-in
-    # fable. The REMOVED opus-4.6 must NOT reappear (its version-locked pin is
-    # rejected by the Task tool's model validation — the seat can't be seated).
-    check("TASK_SEAT_NAMES == {opus, sonnet, fable} (opus-4.6 removed)",
-          set(seats.TASK_SEAT_NAMES) == {"opus", "sonnet", "fable"},
-          "{opus, sonnet, fable}", str(seats.TASK_SEAT_NAMES))
+        # Task seats: exactly the known Claude seats incl. the opt-in fable. The
+        # REMOVED opus-4.6 must NOT reappear (its version-locked pin is rejected by
+        # the Task tool's model validation — the seat can't be seated).
+        check("task_seats() == [opus, sonnet, fable] (opus-4.6 removed)",
+              seats.task_seats() == ["opus", "sonnet", "fable"],
+              "[opus, sonnet, fable]", str(seats.task_seats()))
 
-    # No override today — every seat pins its own name. The mechanism still
-    # resolves an entry when one exists (guarded with a temporary fake entry).
-    check("MODEL_OVERRIDES is empty (every seat pins its own name)",
-          seats.MODEL_OVERRIDES == {}, "{}", str(seats.MODEL_OVERRIDES))
-    _saved = dict(seats.MODEL_OVERRIDES)
-    try:
-        seats.MODEL_OVERRIDES["fake-1.0"] = "claude-fake-1-0"
-        check("resolve_model honors a MODEL_OVERRIDES entry when present",
-              seats.resolve_model("fake-1.0") == "claude-fake-1-0",
-              "claude-fake-1-0", seats.resolve_model("fake-1.0"))
-    finally:
-        seats.MODEL_OVERRIDES.clear()
-        seats.MODEL_OVERRIDES.update(_saved)
+        # A Task seat's model is its catalog pin, which IS its own name (a
+        # first-class Task-tool alias) — no separate override table.
+        check("seat_spec('fable').model == 'fable' (a Task-tool alias, pins its name)",
+              seats.seat_spec("fable").model == "fable",
+              "fable", str(seats.seat_spec("fable").model))
 
-    # fable is a first-class model alias — NO override, pins its own name.
-    check("resolve_model('fable') == 'fable' (alias, no MODEL_OVERRIDES entry)",
-          seats.resolve_model("fable") == "fable"
-          and "fable" not in seats.MODEL_OVERRIDES,
-          "fable, no override", str(seats.MODEL_OVERRIDES.get("fable")))
+        # fable is opt-in — in NO shipped panel (the default panel never silently
+        # spends the premium tier).
+        check("fable is in NO shipped panel (opt-in only)",
+              all("fable" not in v for v in panels.values()),
+              "absent from all panels", str(panels))
 
-    # fable is opt-in — in NO preset (the default panel never silently spends
-    # the premium tier).
-    check("fable is in NO panel preset (opt-in only)",
-          all("fable" not in v for v in seats.PANEL_PRESETS.values()),
-          "absent from all presets", str(seats.PANEL_PRESETS))
+        # ROSTER-FIDELITY: the subprocess subset of full (the names that are NOT
+        # Task seats) equals cli._DEFAULT_SUBPROCESS_PANEL as a sequence.
+        task_names = set(seats.task_seats())
+        subprocess_subset = [n for n in panels["full"] if n not in task_names]
+        check("full's subprocess subset == cli._DEFAULT_SUBPROCESS_PANEL (sequence)",
+              subprocess_subset == list(cli._DEFAULT_SUBPROCESS_PANEL),
+              str(list(cli._DEFAULT_SUBPROCESS_PANEL)), str(subprocess_subset))
 
-    # ROSTER-FIDELITY drift guard: the subprocess subset of full (the names that
-    # are NOT Task seats) equals cli._DEFAULT_SUBPROCESS_PANEL as a sequence.
-    subprocess_subset = [n for n in seats.PANEL_PRESETS["full"]
-                         if n not in seats.TASK_SEAT_NAMES]
-    check("full's subprocess subset == cli._DEFAULT_SUBPROCESS_PANEL (sequence)",
-          subprocess_subset == list(cli._DEFAULT_SUBPROCESS_PANEL),
-          str(list(cli._DEFAULT_SUBPROCESS_PANEL)), str(subprocess_subset))
+        # INDEPENDENT-literal drift pins: cli's default panel + premium-off set are
+        # DERIVED from the catalog's opt_in flags, so pin both against a
+        # hand-literal so a derivation-logic bug (wrong order / wrong filter) fails
+        # NAMING it, not just when it drifts in lockstep with the panels literal.
+        catalog = seats.merged_catalog()
+        check("_DEFAULT_SUBPROCESS_PANEL == exact tuple (order pinned)",
+              cli._DEFAULT_SUBPROCESS_PANEL
+              == ("codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"),
+              "('codex', 'codex-luna', 'agy', 'cursor-auto', 'cursor-composer')",
+              str(cli._DEFAULT_SUBPROCESS_PANEL))
+        check("premium_off_seats() == the opt-in SET (no dupes/drops)",
+              set(seats.premium_off_seats())
+              == {"cursor-glm", "cursor-gpt", "cursor-gemini", "cursor-grok", "codex-terra"}
+              and len(seats.premium_off_seats()) == 5,
+              "5 opt-in seats", str(seats.premium_off_seats()))
+        # opt_in agreement: the derived sets tie back to the one flag.
+        _sub_opt = {n for n, s in catalog.items() if s.has_executor and s.opt_in}
+        check("premium_off_seats() == {subprocess seats with opt_in=True}",
+              set(seats.premium_off_seats()) == _sub_opt,
+              "opt_in True set", str(sorted(set(seats.premium_off_seats()))))
+        check("_DEFAULT_SUBPROCESS_PANEL minus agy == {subprocess seats with opt_in=False}",
+              set(cli._DEFAULT_SUBPROCESS_PANEL) - {"agy"}
+              == {n for n, s in catalog.items()
+                  if s.has_executor and not s.opt_in and n != "agy"},
+              "opt_in False set", str(sorted(set(cli._DEFAULT_SUBPROCESS_PANEL) - {"agy"})))
 
-    # INDEPENDENT-literal drift pins: the two cli panels are now DERIVED from the
-    # Seat.opt_in flags (codex.py / cursor.py), so pin both against a hand-literal
-    # so a derivation-logic bug (wrong order / wrong filter) fails NAMING it, not
-    # just when it drifts in lockstep with the PANEL_PRESETS literal.
-    from multiagent.providers.codex import CODEX_SEATS
-    from multiagent.providers.cursor import CURSOR_SEATS
-    _both = {**CODEX_SEATS, **CURSOR_SEATS}
-    check("_DEFAULT_SUBPROCESS_PANEL == exact tuple (order pinned)",
-          cli._DEFAULT_SUBPROCESS_PANEL
-          == ("codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"),
-          "('codex', 'codex-luna', 'agy', 'cursor-auto', 'cursor-composer')",
-          str(cli._DEFAULT_SUBPROCESS_PANEL))
-    check("_PREMIUM_OFF_SEATS == the opt-in SET (no dupes/drops)",
-          set(cli._PREMIUM_OFF_SEATS)
-          == {"cursor-glm", "cursor-gpt", "cursor-gemini", "cursor-grok", "codex-terra"}
-          and len(cli._PREMIUM_OFF_SEATS) == 5,
-          "5 opt-in seats", str(cli._PREMIUM_OFF_SEATS))
-    # opt_in agreement: both derived panels tie back to the one flag.
-    check("_PREMIUM_OFF_SEATS == {seats with opt_in=True}",
-          set(cli._PREMIUM_OFF_SEATS) == {n for n, s in _both.items() if s.opt_in},
-          "opt_in True set", str(sorted(set(cli._PREMIUM_OFF_SEATS))))
-    check("_DEFAULT_SUBPROCESS_PANEL minus agy == {seats with opt_in=False}",
-          set(cli._DEFAULT_SUBPROCESS_PANEL) - {"agy"}
-          == {n for n, s in _both.items() if not s.opt_in},
-          "opt_in False set", str(sorted(set(cli._DEFAULT_SUBPROCESS_PANEL) - {"agy"})))
-
-    # The other presets, verbatim. cursor is the literal group TOKEN, NOT an
-    # expanded cursor-* list (seats.py is pure data; cli.py expands it later).
-    check("lite == ['opus', 'sonnet']",
-          seats.PANEL_PRESETS["lite"] == ["opus", "sonnet"],
-          "['opus', 'sonnet']", str(seats.PANEL_PRESETS["lite"]))
-    check("solo == ['opus']",
-          seats.PANEL_PRESETS["solo"] == ["opus"],
-          "['opus']", str(seats.PANEL_PRESETS["solo"]))
-    check("cursor == ['cursor'] (literal group token, unexpanded)",
-          seats.PANEL_PRESETS["cursor"] == ["cursor"],
-          "['cursor']", str(seats.PANEL_PRESETS["cursor"]))
-    check("quick preset is codex+sonnet",
-          seats.PANEL_PRESETS["quick"] == ["codex", "sonnet"],
-          "['codex', 'sonnet']", str(seats.PANEL_PRESETS["quick"]))
+        # The other panels, verbatim. cursor is the literal group TOKEN, NOT an
+        # expanded cursor-* list (the token is expanded at resolution in cli.py).
+        check("lite == ['opus', 'sonnet']",
+              panels["lite"] == ["opus", "sonnet"],
+              "['opus', 'sonnet']", str(panels["lite"]))
+        check("solo == ['opus']",
+              panels["solo"] == ["opus"], "['opus']", str(panels["solo"]))
+        check("cursor == ['cursor'] (literal group token, unexpanded)",
+              panels["cursor"] == ["cursor"], "['cursor']", str(panels["cursor"]))
+        check("quick panel is codex+sonnet",
+              panels["quick"] == ["codex", "sonnet"],
+              "['codex', 'sonnet']", str(panels["quick"]))
 
     # NO-PROVIDER-IMPORT, enforced STRUCTURALLY in a CLEAN subprocess: importing
     # seats must NOT pull in multiagent.providers / build the registry. (A clean
@@ -4501,19 +4526,80 @@ def test_panel_catalog():
           "rc=0 stdout=OK", f"rc={proc.returncode} stdout={proc.stdout!r} stderr={proc.stderr!r}")
 
 
+def test_catalog_cache_reset():
+    log_section("catalog cold-cache build + one reset clears every derived cache")
+    from multiagent import config, seats  # noqa: E402
+    from multiagent import providers  # noqa: E402
+
+    # --- Cold-cache recursion: the entry point must build from a fully-cleared
+    # state without re-entering itself. merged_catalog -> reserved_tokens ->
+    # group/panel tokens reads seats.toml ALONE (pre-merge), so a cold call cannot
+    # cycle back through config.panels -> known_seat_names -> merged_catalog.
+    with crew_config():
+        config._reset_cache_for_tests()  # every cache cold
+        try:
+            catalog = seats.merged_catalog()   # THE cold entry point
+            built = "codex" in catalog and "opus" in catalog
+        except RecursionError:
+            built = False
+        check("merged_catalog() builds on a fully-cold cache (no recursion)",
+              built, "catalog built", "RecursionError or missing seats")
+        # The same cold path through cli._resolve_seats (which reaches the panels).
+        from multiagent import cli  # noqa: E402
+        config._reset_cache_for_tests()
+        try:
+            resolved = cli._resolve_seats(None)
+            ok = resolved == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
+        except RecursionError:
+            ok = False
+        check("_resolve_seats(None) resolves on a cold cache (no recursion)",
+              ok, "built-in five", str(locals().get("resolved", "RecursionError")))
+
+    # --- One reset clears ALL SIX caches (AC 24). Warm every cache, then reset,
+    # and assert each is back to its unloaded/None sentinel.
+    with crew_config():
+        seats.merged_catalog()          # warms catalog + premium-off + registry
+        seats.premium_off_seats()
+        providers.get_provider("codex")
+        seats._warn_once("probe", "warm the loader warn guard")
+        config.default_panel()          # warms config caches + config._warned via nothing
+        # Confirm they are warm before the reset.
+        warm = (seats._catalog is not None and seats._premium_off is not None
+                and providers._REGISTRY is not None and "probe" in seats._warned)
+        check("caches warm before reset", warm, "all warm",
+              f"catalog={seats._catalog is not None} premium={seats._premium_off is not None} "
+              f"registry={providers._REGISTRY is not None} warned={'probe' in seats._warned}")
+        config._reset_cache_for_tests()
+        cleared = (
+            config._cache is config._UNLOADED
+            and config._global_cache is config._UNLOADED
+            and seats._catalog is None
+            and seats._premium_off is None
+            and providers._REGISTRY is None
+            and seats._warned == set()
+        )
+        check("one reset clears all six: config caches, catalog, premium-off, registry, loader warn guard",
+              cleared, "all six cleared",
+              f"config._cache={config._cache!r} catalog={seats._catalog!r} "
+              f"premium={seats._premium_off!r} registry={providers._REGISTRY!r} "
+              f"warned={seats._warned!r}")
+
+
 def test_catalog_registry_disjoint():
-    log_section("TASK_SEAT_NAMES ⟂ subprocess registry (the safety the catalog buys)")
+    log_section("Task seats ⟂ subprocess registry (the safety the catalog buys)")
     from multiagent import seats  # noqa: E402
     from multiagent.providers import known_seat_names, get_provider  # noqa: E402
 
+    task_names = set(seats.task_seats())
+
     # The invariant: no Task-seat NAME is a registered subprocess seat.
-    check("TASK_SEAT_NAMES ∩ known_seat_names() == ∅ (disjoint)",
-          set(seats.TASK_SEAT_NAMES) & set(known_seat_names()) == set(),
+    check("task_seats() ∩ known_seat_names() == ∅ (disjoint)",
+          task_names & set(known_seat_names()) == set(),
           "empty intersection",
-          str(set(seats.TASK_SEAT_NAMES) & set(known_seat_names())))
+          str(task_names & set(known_seat_names())))
 
     # Each Task-seat name fails to resolve through the executor registry.
-    for n in seats.TASK_SEAT_NAMES:
+    for n in task_names:
         raised = False
         try:
             get_provider(n)
@@ -4524,9 +4610,9 @@ def test_catalog_registry_disjoint():
 
     # CONVERSE guard: the SUBPROCESS entries of a preset (codex + cursor-*, i.e.
     # the non-Task-seat names) ARE registry seats and DO resolve. This proves the
-    # disjointness assertion is scoped to TASK_SEAT_NAMES ONLY, not over-broad.
-    subprocess_entries = [n for n in seats.PANEL_PRESETS["full"]
-                          if n not in seats.TASK_SEAT_NAMES]
+    # disjointness assertion is scoped to the Task seats ONLY, not over-broad.
+    subprocess_entries = [n for n in seats.merged_panels()["full"]
+                          if n not in task_names]
     for n in subprocess_entries:
         in_registry = n in known_seat_names()
         resolves = False
@@ -4804,23 +4890,24 @@ def _roster_scan(root: Path, report):
     check: rosters are token-parsed and compared exactly. The two deliberate
     substring uses are LOCATORS (finding markers) and the pinned prose spans."""
     from multiagent import seats
-    from multiagent.cli import _DEFAULT_SUBPROCESS_PANEL, _PREMIUM_OFF_SEATS
+    from multiagent.cli import _DEFAULT_SUBPROCESS_PANEL
     from multiagent.providers import known_seat_names
-    from multiagent.providers.codex import CODEX_SEATS
-    from multiagent.providers.cursor import CURSOR_SEATS
 
     # Provider membership (the single truth): a line enumerating 2+ seats of the
     # SAME provider is a stale-enumeration hazard the >=4 / stale-mix checks miss.
-    CODEX_KEYS = set(CODEX_SEATS)
-    CURSOR_KEYS = set(CURSOR_SEATS)
+    catalog = seats.merged_catalog()
+    CODEX_KEYS = {n for n, s in catalog.items() if s.provider == "codex"}
+    CURSOR_KEYS = {n for n, s in catalog.items() if s.provider == "cursor"}
 
-    FULL = seats.PANEL_PRESETS["full"]
+    task_names = set(seats.task_seats())
+    FULL = seats.merged_panels()["full"]
     known = known_seat_names()
     OPT_SUB = [n for n in known if n not in set(_DEFAULT_SUBPROCESS_PANEL)]
-    OPT_TASK = sorted(seats.TASK_SEAT_NAMES - set(FULL))
-    ALL_SEATS = set(known) | set(seats.TASK_SEAT_NAMES)
+    OPT_TASK = sorted(task_names - set(FULL))
+    ALL_SEATS = set(known) | task_names
     UNIVERSE = ALL_SEATS
-    truths = (FULL, OPT_SUB, OPT_TASK, _PREMIUM_OFF_SEATS, ALL_SEATS, seats.PANEL_PRESETS)
+    truths = (FULL, OPT_SUB, OPT_TASK, seats.premium_off_seats(), ALL_SEATS,
+              seats.merged_panels())
 
     scan_files = _roster_scan_files(root)
     file_lines = {}
@@ -4943,7 +5030,7 @@ def _roster_check_scaffold(FULL):
         det.write_text(json.dumps({
             "subprocess": {n: {"available": True, "diag": ""} for n in known_seat_names()},
             "task": {n: {"available": True, "diag": ""}
-                     for n in sorted(_seats.TASK_SEAT_NAMES)},
+                     for n in sorted(_seats.task_seats())},
         }))
         args = cli.build_parser().parse_args(
             ["scaffold-config", "--out", "-", "--detection", str(det)])
@@ -5062,10 +5149,10 @@ def test_roster_doc_sync():
     from multiagent.providers import known_seat_names
 
     root = _roster_repo_root()
-    FULL = seats.PANEL_PRESETS["full"]
+    FULL = seats.merged_panels()["full"]
     known = known_seat_names()
     OPT_SUB = [n for n in known if n not in set(_DEFAULT_SUBPROCESS_PANEL)]
-    ALL_SEATS = set(known) | set(seats.TASK_SEAT_NAMES)
+    ALL_SEATS = set(known) | set(seats.task_seats())
 
     # --- Part 0: derivation self-checks (a wrong truth can't agree with a wrong
     # doc). The opt-in set derived from _DEFAULT_SUBPROCESS_PANEL must equal the
@@ -5931,9 +6018,9 @@ def test_doctor():
                       for s in sub if s.startswith("cursor-")),
                   "all cursor true", str({k: v for k, v in sub.items() if k.startswith("cursor-")}))
             task = payload.get("task", {})
-            check("doctor: task block in sorted(TASK_SEAT_NAMES) order (deterministic)",
-                  list(task.keys()) == sorted(_seats.TASK_SEAT_NAMES),
-                  str(sorted(_seats.TASK_SEAT_NAMES)), str(list(task.keys())))
+            check("doctor: task block in sorted task-seat order (deterministic)",
+                  list(task.keys()) == sorted(_seats.task_seats()),
+                  str(sorted(_seats.task_seats())), str(list(task.keys())))
         # stdout carries ONLY JSON (no stray non-JSON line).
         check("doctor stdout is JSON-only (no extra lines)",
               proc.stdout.strip().startswith("{") and proc.stdout.strip().endswith("}"),
@@ -6347,11 +6434,13 @@ def test_scaffold_config():
         check("detection: --disable-seat opus (TASK seat) -> [seats.opus].available=false",
               seats_tbl.get("opus", {}).get("available") is False, "opus false", str(seats_tbl.get("opus")))
         # the opus-disabled output loads clean via the real loader.
+        from multiagent import seats as _seats  # noqa: E402
         config.global_config_path().write_text(out)
         config._reset_cache_for_tests()
-        check("detection: --disable-seat opus output loads + seat_available('opus') False",
-              config.seat_available("opus") is False and not config._warned,
-              "opus unavailable, no warnings", f"{config.seat_available('opus')} warned={config._warned}")
+        _opus_avail = _seats.seat_spec("opus").available
+        check("detection: --disable-seat opus output loads + opus seat available False",
+              _opus_avail is False and not config._warned,
+              "opus unavailable, no warnings", f"{_opus_avail} warned={config._warned}")
 
     # --- input validation rejects bad values (nonzero + stderr, no file) ------
     with crew_config() as proj:
@@ -7575,9 +7664,12 @@ def test_process_group_reaping():
               lambda t: CursorProvider("cursor-test", "some-model").run("PROMPT", timeout=t),
               timeout=2)
     # agy's wall-clock floor = print_timeout + grace; pin print_timeout low so the
-    # kill fires fast (mirrors the existing agy hang test).
+    # kill fires fast (mirrors the existing agy hang test). Built via the catalog
+    # so the config's print_timeout reaches the seat (a bare AgyProvider() no
+    # longer reads config).
+    from multiagent.providers import get_provider as _get_provider  # noqa: E402
     _run_case("agy", "agy",
-              lambda t: AgyProvider().run("PROMPT", timeout=t),
+              lambda t: _get_provider("agy").run("PROMPT", timeout=t),
               timeout=1, config_toml='[seats.agy]\nprint_timeout = "1s"\n')
 
 
@@ -7633,9 +7725,6 @@ def test_seat_roster_drift_guard():
     log_section("seat-roster drift guard (roster + panels pinned, isolated config)")
     from multiagent import cli, seats  # noqa: E402
     from multiagent.providers import get_provider  # noqa: E402
-    from multiagent.providers.agy import AgyProvider  # noqa: E402
-    from multiagent.providers.codex import CODEX_SEATS  # noqa: E402
-    from multiagent.providers.cursor import CURSOR_SEATS  # noqa: E402
 
     # --- 1. The subprocess roster, as a hand-written literal ------------------
     # name / provider class / model / opt_in, in fan-out ORDER. Hand-written
@@ -7653,39 +7742,39 @@ def test_seat_roster_drift_guard():
         ("cursor-auto",     "CursorProvider", "auto",                  False),
         ("cursor-composer", "CursorProvider", "composer-2.5",          False),
     ]
-    _specs = {**CODEX_SEATS, **CURSOR_SEATS}
-
+    # The actual is read from the catalog loader (the deleted CODEX_SEATS /
+    # CURSOR_SEATS dicts are gone); the EXPECTED above stays a hand-written literal
+    # so a seat added to seats.toml without updating it fails HERE, naming the seat.
     def _row(name):
         provider = type(get_provider(name)).__name__
-        if name == "agy":
-            # agy carries no Seat entry (one flat-rate seat, no model-family
-            # variants): its model pin lives in the provider, and it defaults on.
-            return (name, provider, AgyProvider()._resolved_model(None), False)
-        spec = _specs[name]
+        spec = seats.seat_spec(name)
         return (name, provider, spec.model, spec.opt_in)
 
     with crew_config():
-        actual_subprocess = [
-            _row(n) for n in [*CODEX_SEATS, "agy", *CURSOR_SEATS]
-        ]
+        subprocess_names = [n for n, s in seats.shipped_catalog().items()
+                            if s.has_executor]
+        actual_subprocess = [_row(n) for n in subprocess_names]
     check("subprocess roster pinned (name/provider/model/opt_in/order)",
           actual_subprocess == expected_subprocess,
           str(expected_subprocess), str(actual_subprocess))
 
     # --- 2. The Task (Claude) seats -------------------------------------------
-    # No provider and no Seat entry: a Task seat's model is resolve_model(), and
-    # "opt-in" means "in no preset" (fable is the premium tier, so no default
-    # panel can spend it without being named).
+    # A Task seat's model is its catalog pin (its own name, a Task-tool alias), and
+    # "opt-in" means "in no preset" (fable is the premium tier, so no default panel
+    # can spend it without being named). Expected stays a hand-written literal.
     expected_task = [("opus", "opus", False), ("sonnet", "sonnet", False),
                      ("fable", "fable", True)]
-    actual_task = [
-        (n, seats.resolve_model(n),
-         all(n not in preset for preset in seats.PANEL_PRESETS.values()))
-        for n in ("opus", "sonnet", "fable")
-    ]
+    with crew_config():
+        panel_lists = list(seats.merged_panels().values())
+        actual_task = [
+            (n, seats.seat_spec(n).model,
+             all(n not in preset for preset in panel_lists))
+            for n in ("opus", "sonnet", "fable")
+        ]
+        task_names = set(seats.task_seats())
     check("Task-seat roster pinned (name/model/opt-in)",
-          actual_task == expected_task and set(seats.TASK_SEAT_NAMES) == {"opus", "sonnet", "fable"},
-          str(expected_task), f"{actual_task} names={sorted(seats.TASK_SEAT_NAMES)}")
+          actual_task == expected_task and task_names == {"opus", "sonnet", "fable"},
+          str(expected_task), f"{actual_task} names={sorted(task_names)}")
 
     # --- 3. All five presets, verbatim ---------------------------------------
     expected_presets = {
@@ -7696,9 +7785,11 @@ def test_seat_roster_drift_guard():
         "solo": ["opus"],
         "cursor": ["cursor"],  # the literal group token, unexpanded
     }
-    check("PANEL_PRESETS == the five pinned presets (verbatim)",
-          seats.PANEL_PRESETS == expected_presets,
-          str(expected_presets), str(seats.PANEL_PRESETS))
+    with crew_config():
+        actual_presets = seats.merged_panels()
+    check("shipped panels == the five pinned presets (verbatim)",
+          actual_presets == expected_presets,
+          str(expected_presets), str(actual_presets))
 
     # --- 4. The billing gate: what actually runs when nobody names a panel ----
     # _resolve_seats(None) is the path every ad-hoc panel takes, so it is the one
@@ -7773,9 +7864,12 @@ def test_seat_roster_drift_guard():
     # make the fixture red on any box with a different set. One seat is marked
     # unavailable so the `available = false` emission is actually exercised.
     det = json.loads((_ROSTER_FIXTURES / "detection-input.json").read_text())
+    _shipped = seats.shipped_catalog()  # config-independent (seats.toml alone)
+    _shipped_sub = {n for n, s in _shipped.items() if s.has_executor}
+    _shipped_task = {n for n, s in _shipped.items() if not s.has_executor}
     check("detection fixture covers every seat and exercises an unavailable one",
-          set(det["subprocess"]) == set(_specs) | {"agy"}
-          and set(det["task"]) == set(seats.TASK_SEAT_NAMES)
+          set(det["subprocess"]) == _shipped_sub
+          and set(det["task"]) == _shipped_task
           and any(not v["available"] for v in det["subprocess"].values()),
           "all seats, one unavailable",
           f"{sorted(det['subprocess'])} / {sorted(det['task'])}")
@@ -7821,6 +7915,7 @@ def main():
     test_review_prep()
     test_debate_panel_resolver()
     test_panel_catalog()
+    test_catalog_cache_reset()
     test_seat_roster_drift_guard()
     test_catalog_registry_disjoint()
     test_no_dotkept_staged_filename()

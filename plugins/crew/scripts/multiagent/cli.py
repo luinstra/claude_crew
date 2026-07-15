@@ -61,21 +61,15 @@ from multiagent.providers import (
     get_provider,
     known_seat_names,
 )
-from multiagent.providers.codex import CODEX_SEATS
-from multiagent.providers.cursor import CURSOR_SEATS
-
-# The default subprocess panel + the premium-off set both DERIVE from the one
-# Seat.opt_in flag (per-provider dicts in codex.py / cursor.py); WHY each seat
-# is/isn't defaulted -> docs/engine-notes.md. A bare Seat("model") defaults;
-# opt_in=True pulls it out. agy is the sole flat-rate Gemini seat (no
-# model-family variants, so no per-provider Seat dict): it is spliced at its
-# historical slot (after the codex block, before cursor). ORDER IS LOAD-BEARING
-# (panel fan-out order; the drift guard pins the exact tuple). This tuple is the
-# BUILTIN subprocess fallback; the configured default panel (config.default_panel()
-# + [panels]) is resolved in _resolve_seats — this is the floor when nothing is set.
-_DEFAULT_CODEX = [n for n, s in CODEX_SEATS.items() if not s.opt_in]
-_DEFAULT_CURSOR = [n for n, s in CURSOR_SEATS.items() if not s.opt_in]
-_DEFAULT_SUBPROCESS_PANEL = tuple(_DEFAULT_CODEX + ["agy"] + _DEFAULT_CURSOR)
+# The BUILTIN subprocess panel: the SHIPPED catalog's executor-bearing seats that
+# are not opt-in, in catalog order. ORDER IS LOAD-BEARING (panel fan-out order;
+# the drift guard pins the exact tuple), which is why the catalog file's order is
+# too. Shipped-only on purpose: this is the floor when NOTHING is configured — the
+# configured default panel (config.default_panel() + [panels]) resolves through
+# _resolve_seats. WHY each seat is/isn't opt-in -> docs/engine-notes.md.
+_DEFAULT_SUBPROCESS_PANEL = tuple(
+    n for n, s in seats.shipped_catalog().items() if s.has_executor and not s.opt_in
+)
 
 
 def _default_subprocess_seats() -> list[str]:
@@ -113,27 +107,38 @@ def _panel_seat_list(name: str) -> list[str]:
     """Resolve a panel NAME to its RAW seat-name list — the SINGLE shared roster
     resolution point every panel-consuming path routes through.
 
-    Resolution: ``config.panels()`` (per-repo → global merged) → built-in
-    ``seats.PANEL_PRESETS`` → unknown name: a configured ``[panels].full`` if one
-    exists, else the built-in ``full`` (one-time warn). Returns the raw list
-    (group tokens like ``cursor`` left VERBATIM — callers expand via
-    ``_expand_seat_groups``). NEVER raises ``KeyError``.
+    Resolution: ``seats.merged_panels()`` (a configured ``[panels]`` entry over the
+    shipped one, per name) → unknown name: ``full`` (one-time warn), which is the
+    configured ``full`` when there is one. Returns the raw list (group tokens like
+    ``cursor`` left VERBATIM — callers expand via ``_expand_seat_groups``). NEVER
+    raises ``KeyError``.
     """
-    roster = config.panels() or {}
+    roster = seats.merged_panels()
     if name in roster:
         return list(roster[name])
-    if name in seats.PANEL_PRESETS:
-        return list(seats.PANEL_PRESETS[name])
     _warn_once(
         f"unknown-panel:{name}",
         f"crew config: panel {name!r} is not a known preset or [panels] entry; "
         "falling back to 'full'",
     )
-    # Unknown-name fallback resolves a CONFIGURED [panels].full if present, NOT a
-    # bypass to the built-in full.
-    if "full" in roster:
-        return list(roster["full"])
-    return list(seats.PANEL_PRESETS["full"])
+    return list(roster.get("full", []))
+
+
+def _seat_available(name: str) -> bool:
+    """Whether ``name`` is available (its catalog ``available`` flag). A name with
+    no catalog row is treated as available: availability is opt-OUT, and a name the
+    catalog does not know is dropped by the registry filter, not hidden here."""
+    spec = seats.seat_spec(name)
+    return True if spec is None else spec.available
+
+
+def _task_seat_model(name: str) -> str:
+    """The model a Task seat is spawned with: its catalog pin, else its own name
+    (every shipped Task seat pins its own name, which IS a Task-tool alias). An
+    --task-seats override names a seat the catalog need not know, so it falls back
+    rather than raising."""
+    spec = seats.seat_spec(name)
+    return (spec.model if spec and spec.model else name)
 
 
 def _drop_unavailable(names: list[str], explicit: set[str]) -> list[str]:
@@ -152,7 +157,7 @@ def _drop_unavailable(names: list[str], explicit: set[str]) -> list[str]:
     """
     kept: list[str] = []
     for n in names:
-        if config.seat_available(n):
+        if _seat_available(n):
             kept.append(n)
         elif n in explicit:
             _warn_once(
@@ -213,15 +218,6 @@ def _resolve_timeout(arg: int | None) -> int:
     return 600
 
 
-def _codex_model(seat: str = "codex") -> str | None:
-    # Precedence: per-repo .crew/config.toml > global ~/.crew-config.toml
-    # ([seats.<seat>].model, both via config.seat_model) > the seat's built-in
-    # CODEX_SEATS pin (the Seat's .model). An explicit CLI --model is applied
-    # ABOVE this at the call sites. Resolved per codex seat.
-    spec = CODEX_SEATS.get(seat)
-    return config.seat_model(seat) or (spec.model if spec else None)
-
-
 def _run_seat(name: str, prompt: str, timeout: int) -> ProviderResult:
     provider = available_seats([name])[0]
     avail, diag = provider.is_available()
@@ -233,20 +229,21 @@ def _run_seat(name: str, prompt: str, timeout: int) -> ProviderResult:
             name=name, model=None, ok=False, output="",
             error=f"skipped: {diag}", elapsed=0.0,
         )
-    model = _codex_model(name) if name in CODEX_SEATS else None
-    return provider.run(prompt, model=model, timeout=timeout)
+    # No model override: the registry bound each seat's resolved model (config over
+    # the catalog pin) when it built the provider.
+    return provider.run(prompt, timeout=timeout)
 
 
 def _expand_seat_groups(names: list[str]) -> list[str]:
-    """Expand group tokens to seat names. ``cursor`` -> every registered
-    ``cursor-*`` seat (registry-derived, so it grows automatically as cursor
-    models are added to CURSOR_SEATS). Non-group names pass through unchanged.
+    """Expand group tokens to seat names. ``cursor`` -> every cursor seat in the
+    catalog, so the group grows with the catalog (a declared cursor seat joins it).
+    Non-group names pass through unchanged.
     """
-    cursor_seats = [n for n in known_seat_names() if n.startswith("cursor-")]
+    groups = seats.group_tokens()
     out: list[str] = []
     for n in names:
-        if n == "cursor":
-            out.extend(cursor_seats)
+        if n in groups:
+            out.extend(groups[n])
         else:
             out.append(n)
     return out
@@ -287,7 +284,7 @@ def _resolve_debate_panel_name(panel_arg: str | None) -> str:
         > built-in ``full``
 
     ``config.debate_panel()`` reads ``[debate].panel`` and ``config.default_panel()``
-    reads ``default_panel`` — both validate against ``seats.PANEL_PRESETS`` ∪ the
+    reads ``default_panel`` — both validate against the resolved panel names (``seats.merged_panels()``,
     configured ``[panels]`` keys and return ``None`` on a missing/unknown value.
     The returned name is resolved to seats through ``_panel_seat_list`` (which
     handles an unknown ``--panel`` name → ``full``), so no caller hits a raw
@@ -322,7 +319,7 @@ def _resolve_debate_seats(panel_arg: str | None, seats_arg: str | None) -> list[
 
     Explicit ``--seats`` entries are VALIDATED after group expansion by EXACT
     membership in the fixed UNION allowlist ``known_seat_names() ∪
-    seats.TASK_SEAT_NAMES``. The union is the key — it KEEPS the Task seats
+    seats.task_seats()``. The union is the key — it KEEPS the Task seats
     (opus/sonnet/fable, which are NOT in the registry) while REJECTING garbage. Membership in
     this enumerated allowlist IS the path-safety guarantee (strictly stronger than
     a charset filter — no path-unsafe string can be a member), so no separate
@@ -339,7 +336,7 @@ def _resolve_debate_seats(panel_arg: str | None, seats_arg: str | None) -> list[
     if seats_arg is not None:
         names = [s.strip() for s in seats_arg.split(",") if s.strip()]
         names = _expand_seat_groups(names)
-        valid = set(known_seat_names()) | seats.TASK_SEAT_NAMES
+        valid = set(known_seat_names()) | set(seats.task_seats())
         for n in names:
             if n not in valid:
                 print(
@@ -734,7 +731,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     so debate's explicit paths and ad-hoc stdout use are untouched.
     """
     seat = args.seat
-    if seat in seats.TASK_SEAT_NAMES:
+    if seat in seats.task_seats():
         print(
             f"error: '{seat}' is a Task seat — owned by the orchestrator, not "
             f"runnable by the engine (engine runs subprocess seats only: "
@@ -801,7 +798,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         prompt = args.prompt
 
     # NOTE (config `available` interaction): `run <seat>` is an EXPLICIT single-seat
-    # call, so it does NOT apply config.seat_available() — the seat is always run.
+    # call, so it does NOT apply the catalog `available` filter — the seat is always run.
     # The panel-level availability filter lives upstream in _filter_available
     # (review-prep / _resolve_seats / debate): a non-explicit unavailable seat is
     # dropped THERE and never reaches this fan-out, while an EXPLICITLY-named
@@ -816,17 +813,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             error=f"skipped: {diag}", elapsed=0.0,
         )
     else:
-        # Same model resolution as the review path: --model overrides the
-        # config/built-in default; agy resolves its own default internally.
-        if args.model:
-            model = args.model
-        elif seat in CODEX_SEATS:
-            model = _codex_model(seat)
-        else:
-            model = None
+        # Same model resolution as the review path: --model overrides the seat's
+        # resolved model, which the registry already bound from its catalog row.
         timeout = _resolve_timeout(args.timeout)
         result = provider.run(
-            prompt, sandbox=args.sandbox, model=model, timeout=timeout,
+            prompt, sandbox=args.sandbox, model=args.model, timeout=timeout,
         )
 
     if args.json:
@@ -987,7 +978,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     repo_dir = os.environ.get("CLAUDE_WORKING_DIRECTORY") or os.getcwd()
 
     # (b) Seat-name guards — pre-run, exit 2, NO envelope (parity with cmd_run).
-    if seat in seats.TASK_SEAT_NAMES:
+    if seat in seats.task_seats():
         print(
             f"error: '{seat}' is a Task seat — owned by the orchestrator, not "
             f"runnable by the engine (engine runs subprocess seats only: "
@@ -1003,7 +994,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    # An EXPLICIT --seat / configured [dispatch].seat BYPASSES config.seat_available()
+    # An EXPLICIT --seat / configured [dispatch].seat BYPASSES the catalog `available` filter
     # (parity with cmd_run's explicit single-seat path) — a config-disabled seat
     # still runs when named directly. is_available() (step e) is the distinct
     # "is the CLI installed" check.
@@ -1083,15 +1074,9 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         head_after, staged_after, branch_after = head_before, staged_before, branch_before
     else:
         # (f) Run the seat in workspace-write. Model precedence mirrors cmd_run.
-        if args.model:
-            model = args.model
-        elif seat in CODEX_SEATS:
-            model = _codex_model(seat)
-        else:
-            model = None
         timeout = _resolve_timeout(args.timeout)
         result = provider.run(
-            prompt, sandbox="workspace-write", model=model, timeout=timeout,
+            prompt, sandbox="workspace-write", model=args.model, timeout=timeout,
         )
         # (g) Capture git AFTER-state (all in repo_dir).
         head_after = _git_head(repo_dir)
@@ -1834,8 +1819,8 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     prose seat-splitting): (a) resolve the target via the SAME ``targets.resolve``
     path ``render``/``review`` use; (b) resolve ``--panel``/``--seats`` into the
     SUBPROCESS seats (through the registry) AND the TASK seats (the Claude voices,
-    via ``seats.PANEL_PRESETS`` + ``seats.TASK_SEAT_NAMES``); (c) build the
-    ``task_seat_models`` map (``seats.MODEL_OVERRIDES`` is the SINGLE source of
+    via ``seats.merged_panels()`` + ``seats.task_seats()``); (c) build the
+    ``task_seat_models`` map (the catalog's per-seat ``model`` is the SINGLE source of
     every model pin); (d) stage the ONE shared subprocess prompt via the SAME
     ``_build_render_text`` + ``_stage_path`` machinery ``render --mode review
     --stage`` uses — so ``prompt_path``'s file is BYTE-IDENTICAL to ``render
@@ -1888,7 +1873,7 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     #    preset_names is the SINGLE panel-resolved backing list feeding BOTH the
     #    subprocess (2a) and task (2b) splits (refinement 5). Panel-name resolution
     #    goes through the shared _panel_seat_list (consults [panels] before
-    #    PANEL_PRESETS; unknown name → 'full', never a raw KeyError). Availability
+    #    the shipped panels; unknown name → 'full', never a raw KeyError). Availability
     #    is applied WHOLE-PANEL: each split is drop-filtered (skip-noting an
     #    explicitly-named unavailable seat) WITHOUT a per-split empty-fallback, and
     #    the unfiltered-panel fallback fires ONCE, only when the ENTIRE resolved
@@ -1896,7 +1881,7 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     #    seat-KIND (e.g. both task seats in `full`) drops it for real instead of
     #    re-adding it because the other kind still has seats. A name classifies as
     #    exactly one of: a registry subprocess seat (-> subprocess_seats), a
-    #    seats.TASK_SEAT_NAMES member (-> task_seats), or NEITHER (silently DROPPED;
+    #    catalog Task seat (-> task_seats), or NEITHER (silently DROPPED;
     #    never loud-error). A NAMED --panel's members are EXPLICIT (an unavailable one
     #    is skipped WITH a note); a default_panel's are silent drops (refinement 3).
     seats_given = args.seats is not None
@@ -1940,6 +1925,7 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     #     opaque override is in play the task list bypasses availability entirely
     #     (task_raw stays empty so 2d's whole-panel fallback considers ONLY the
     #     subprocess seats — the override IS the task panel).
+    task_names = set(seats.task_seats())
     explicit_task_seats = [
         s.strip() for s in (args.task_seats or "").split(",") if s.strip()
     ]
@@ -1949,7 +1935,7 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
         task_explicit: set[str] = set()
     else:
         seats_task_names = (
-            [n for n in _expand_seat_groups(source_names) if n in seats.TASK_SEAT_NAMES]
+            [n for n in _expand_seat_groups(source_names) if n in task_names]
             if seats_given else []
         )
         if seats_given and seats_task_names:
@@ -1957,7 +1943,7 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
             task_explicit = set(_expand_seat_groups(source_names))
         elif preset_names is not None:
             preset_expanded = _expand_seat_groups(preset_names)
-            task_raw = [n for n in preset_expanded if n in seats.TASK_SEAT_NAMES]
+            task_raw = [n for n in preset_expanded if n in task_names]
             task_explicit = set(preset_expanded) if panel_named else set()
         else:
             task_raw = []
@@ -1988,10 +1974,10 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     subprocess_seats = _dedup(sub_kept)
     task_seats = explicit_task_seats if override_task else _dedup(task_kept)
 
-    # 2c. task_seat_models: the per-seat model pin for each Task seat. MODEL_OVERRIDES
-    #     is the SINGLE source — a seat not in the map pins its own name. The
+    # 2c. task_seat_models: the per-seat model pin for each Task seat. The CATALOG
+    #     is the SINGLE source (a seat's `model` is a Task-tool alias). The
     #     orchestrator reads `model` FROM here; it never hardcodes a pin.
-    task_seat_models = {n: seats.MODEL_OVERRIDES.get(n, n) for n in task_seats}
+    task_seat_models = {n: _task_seat_model(n) for n in task_seats}
 
     # 4. Stage the shared SUBPROCESS prompt ONLY when subprocess seats exist —
     #    via the SAME machinery cmd_render --stage uses, so prompt_path's file is
@@ -2047,16 +2033,6 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
 # the machine payload (doctor JSON / {target,wrote,diverted} envelope / `--out -`
 # TOML); EVERY note/error goes to stderr (init.md parses stdout).
 
-# Opt-in seats — emitted available=false (unless the user opts one back in).
-# DERIVED from the one Seat.opt_in flag (codex opt-ins then cursor opt-ins, each
-# in registry insertion order). Order is NOT load-bearing (all uses are
-# membership or scaffold block emission; the drift guard asserts SET equality).
-# WHY each seat is opt-in (premium-bucket cost / redundancy) -> docs/engine-notes.md.
-_PREMIUM_OFF_SEATS = tuple(
-    [n for n, s in CODEX_SEATS.items() if s.opt_in]
-    + [n for n, s in CURSOR_SEATS.items() if s.opt_in]
-)
-
 # Generic trailer for every opt-in seat's scaffold line — the curated per-seat WHY
 # lives in ONE place (docs/engine-notes.md's "Why some registered seats are opt-in").
 _OPT_IN_COMMENT = "opt-in; see docs/engine-notes.md for why"
@@ -2074,7 +2050,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     Iterates ``known_seat_names()`` → ``get_provider(n).is_available()`` into a
     ``subprocess`` map, then adds a static ``task`` map (the subscription-backed
-    Claude seats, in ``sorted(TASK_SEAT_NAMES)`` order for deterministic JSON).
+    Claude seats, in ``sorted(task_seats())`` order for deterministic JSON).
 
     The ``agent`` binary is identical across every ``cursor-*`` seat, so the
     cursor identity probe runs EXACTLY ONCE — the single result is fanned to all
@@ -2101,7 +2077,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         subprocess_map[name] = {"available": bool(avail), "diag": diag}
 
     task_map: dict[str, dict] = {}
-    for name in sorted(seats.TASK_SEAT_NAMES):
+    for name in sorted(seats.task_seats()):
         task_map[name] = {
             "available": True,
             "diag": _TASK_SEAT_DIAGS.get(name, "Claude subscription (in-session)"),
@@ -2175,7 +2151,7 @@ def cmd_probe(args: argparse.Namespace) -> int:
         print("error: name at least one seat, or pass --all", file=sys.stderr)
         return 2
     for n in names:
-        if n in seats.TASK_SEAT_NAMES:
+        if n in seats.task_seats():
             print(
                 f"error: {n!r} is a Task seat — orchestrator-dispatched, "
                 "not probeable by the engine",
@@ -2221,12 +2197,11 @@ def cmd_probe(args: argparse.Namespace) -> int:
         if not avail:
             results[n] = {"status": "skipped", "detail": diag, "elapsed": 0.0}
             continue
-        # Provider invocation copied from cmd_run's real call: same model
-        # precedence (codex seats resolve config/pin; None elsewhere, and probe
-        # exposes no --model override) and the same _resolve_timeout chain.
-        model = _codex_model(n) if n in CODEX_SEATS else None
+        # Provider invocation copied from cmd_run's real call: the seat's own
+        # resolved model (probe exposes no --model override) and the same
+        # _resolve_timeout chain.
         timeout = _resolve_timeout(args.timeout)
-        r = provider.run(_PROBE_PROMPT, model=model, timeout=timeout)
+        r = provider.run(_PROBE_PROMPT, timeout=timeout)
         out = (r.output or "").strip()
         if r.ok and any(ln.strip() == "PROBE-OK" for ln in out.splitlines()):
             status, detail = "pass", ""
@@ -2300,7 +2275,7 @@ def _seat_avail(
         det = _det_lookup(detection, seat)
         if det is not None and det.get("available") is False:
             return ("false", "not found on PATH")
-        if seat in _PREMIUM_OFF_SEATS:
+        if seat in seats.premium_off_seats():
             return ("false", _OPT_IN_COMMENT)
     return None
 
@@ -2392,7 +2367,7 @@ def _render_config_template(
             L.append(f"# [seats.{seat}]")
             L.append(f'# model = "{default_model}"')
         L.append("")
-    for seat in _PREMIUM_OFF_SEATS:
+    for seat in seats.premium_off_seats():
         a = av(seat)
         if a is not None:
             L.append(f"[seats.{seat}]")
@@ -2415,7 +2390,7 @@ def _render_config_template(
 
     # Task seats: only an explicit --disable-seat (opt-out) emits a line.
     task_blocks: list[str] = []
-    for seat in sorted(seats.TASK_SEAT_NAMES):
+    for seat in sorted(seats.task_seats()):
         a = av(seat)
         if a is not None:
             task_blocks.append("")
@@ -2716,7 +2691,7 @@ def cmd_scaffold_config(args: argparse.Namespace) -> int:
 
     # 1. Validate inputs BEFORE any emit (reject nonzero + stderr message).
     default_panel = args.default_panel or "full"
-    valid_panels = set(seats.PANEL_PRESETS) | set(config.panels() or {})
+    valid_panels = set(seats.merged_panels())
     if default_panel not in valid_panels:
         print(
             f"error: --default-panel {default_panel!r} is not a known panel "
@@ -2734,7 +2709,7 @@ def cmd_scaffold_config(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    avail_union = known | set(seats.TASK_SEAT_NAMES)
+    avail_union = known | set(seats.task_seats())
     opted_in: set[str] = set()
     for s in (args.add_seat or []):
         if s not in avail_union:
@@ -2999,7 +2974,7 @@ def build_parser() -> argparse.ArgumentParser:
     seats_p.add_argument(
         "--panel", default=None,
         help="named preset (only used with --debate): resolved via the configured "
-             "[panels] roster then seats.PANEL_PRESETS (e.g. full/lite/solo/cursor/quick "
+             "[panels] roster then the shipped panels (e.g. full/lite/solo/cursor/quick "
              "or a custom [panels] name) into the full debate seat list; an unknown "
              "name falls back to 'full'",
     )
@@ -3120,7 +3095,7 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument(
         "--panel", dest="panel", default=None,
         help="named preset resolved via the configured [panels] roster then "
-             "seats.PANEL_PRESETS (e.g. full/lite/solo/cursor/quick or a custom [panels] "
+             "the shipped panels (e.g. full/lite/solo/cursor/quick or a custom [panels] "
              "name; unknown → 'full') into BOTH subprocess and task seats. Default "
              "absent (None): with no --seats either, review-prep resolves the "
              "default_panel (per-repo .crew/config.toml → global ~/.crew-config.toml), "
@@ -3134,7 +3109,7 @@ def build_parser() -> argparse.ArgumentParser:
              "explicit '' => no subprocess seats (Claude-only lite/solo: "
              "subprocess_seats=[], no subprocess prompt staged); non-empty => "
              "split into subprocess_seats (registry-resolved) + task_seats "
-             "(seats.TASK_SEAT_NAMES members), unknown names dropped. Both --seats "
+             "(catalog Task seats), unknown names dropped. Both --seats "
              "and --panel omitted => the per-repo config's default_panel "
              "(.crew/config.toml), falling back to the built-in `full`.",
     )
@@ -3388,7 +3363,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sc.add_argument(
         "--default-panel", dest="default_panel", default=None,
-        help="default_panel value (validated vs PANEL_PRESETS ∪ configured [panels]; "
+        help="default_panel value (validated vs the shipped panels ∪ configured [panels]; "
              "default full)",
     )
     sc.add_argument(
@@ -3399,12 +3374,12 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument(
         "--add-seat", dest="add_seat", action="append", default=None,
         help="opt a seat IN (omit its available=false); repeatable. Validated vs "
-             "known_seat_names() ∪ TASK_SEAT_NAMES (task seats are correctable).",
+             "known_seat_names() ∪ the catalog Task seats (task seats are correctable).",
     )
     sc.add_argument(
         "--disable-seat", dest="disable_seat", action="append", default=None,
         help="opt a seat OUT (emit available=false); repeatable. Validated vs "
-             "known_seat_names() ∪ TASK_SEAT_NAMES.",
+             "known_seat_names() ∪ the catalog Task seats.",
     )
     sc.add_argument(
         "--detection", dest="detection", default=None,

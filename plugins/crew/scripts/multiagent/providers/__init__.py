@@ -13,25 +13,6 @@ from dataclasses import dataclass
 
 
 # =============================================================================
-# Seat metadata — the enriched VALUE in CODEX_SEATS / CURSOR_SEATS
-# =============================================================================
-
-@dataclass(frozen=True)
-class Seat:
-    """One registered subprocess seat's metadata. opt_in is the flagged
-    EXCEPTION: a bare Seat("model") is a DEFAULT-panel seat; opt_in=True pulls it
-    out of the default (WHY per seat -> docs/engine-notes.md). The one flag drives
-    both cli._DEFAULT_SUBPROCESS_PANEL and cli._PREMIUM_OFF_SEATS.
-
-    frozen=True makes each instance immutable, and (unlike a NamedTuple) a Seat is
-    NOT tuple-unpackable, so a stale `for name, model in DICT.items()` that forgot
-    to read `.model` fails loudly instead of binding a Seat to `model`.
-    """
-    model: str
-    opt_in: bool = False
-
-
-# =============================================================================
 # Normalized result shape (Step 1.0 / 1.1) — the ONE shape both seat kinds use
 # =============================================================================
 
@@ -195,40 +176,44 @@ class Provider(ABC):
 
 
 # =============================================================================
-# Registry — adding a fifth subprocess seat is a one-line change here
+# Registry — every executor-bearing seat in the catalog, through ONE factory
 # =============================================================================
 
 def _build_registry() -> dict:
     # Imported lazily to avoid a circular import (codex.py / agy.py import this
-    # module for ProviderResult / Provider).
-    from .codex import CodexProvider, CODEX_SEATS
-    from .agy import AgyProvider
-    from .cursor import CursorProvider, CURSOR_SEATS
+    # module for ProviderResult / Provider). The catalog is the ONLY source of
+    # seats: a seat declared in a user's config registers exactly like a shipped
+    # one, and no name here is special-cased.
+    from multiagent import seats as catalog
 
-    # agy is the flat-rate Gemini seat (Antigravity); the codex seats below are
-    # the live OpenAI seats (some default, some opt-in).
-    registry: dict = {
-        "agy": AgyProvider,
+    from .agy import AgyProvider
+    from .codex import CodexProvider
+    from .cursor import CursorProvider
+
+    # The executor classes, keyed by the kind they implement. The ctor shapes
+    # differ (each takes the tunes its CLI actually has), so each kind also says
+    # which of the spec's tunes to bind.
+    classes = {
+        "codex": (CodexProvider, lambda spec: {"reasoning_effort": spec.reasoning_effort}),
+        "cursor": (CursorProvider, lambda spec: {}),
+        "agy": (AgyProvider, lambda spec: {"print_timeout": spec.print_timeout}),
     }
 
-    # Each codex model is its own seat (distinct OpenAI voices).
-    # Same closure-bound zero-arg factory pattern as cursor below; adding a
-    # model is a one-line edit to CODEX_SEATS (codex.py).
-    def _codex_factory(seat: str, model: str):
-        return lambda: CodexProvider(seat, model)
+    def _factory(spec):
+        # The registry maps name -> ZERO-ARG factory (get_provider calls
+        # factory()), so bind the seat's tunes in a closure. Every per-seat tune
+        # reaches the provider HERE, which is why no provider reads the config.
+        cls, tunes = classes[spec.provider]
+        kwargs = tunes(spec)
+        return lambda: cls(spec.name, spec.model, **kwargs)
 
-    for seat, spec in CODEX_SEATS.items():
-        registry[seat] = _codex_factory(seat, spec.model)
-
-    # Each Cursor model is its own seat. The registry maps name -> ZERO-ARG
-    # factory (get_provider calls factory()), so bind each seat's model in a
-    # closure. Adding a model is a one-line edit to CURSOR_SEATS (cursor.py).
-    def _cursor_factory(seat: str, model: str):
-        return lambda: CursorProvider(seat, model)
-
-    for seat, spec in CURSOR_SEATS.items():
-        registry[seat] = _cursor_factory(seat, spec.model)
-    return registry
+    return {
+        name: _factory(spec)
+        for name, spec in catalog.merged_catalog().items()
+        # A kind with no executor (the Claude Task seats) is orchestrator-owned:
+        # it has no CLI to drive, so it never enters the registry.
+        if spec.has_executor and spec.provider in classes
+    }
 
 
 _REGISTRY: dict | None = None
