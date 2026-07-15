@@ -1524,7 +1524,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
       * ``--group`` — the deduped GROUPED digest (``findings.render_digest``):
         VERDICTS roster + CRITERIA MATRIX + GROUPED FINDINGS ``M/N`` + RAW seats.
         ``--full <path>`` ALSO writes the faithful sibling. Both the subprocess
-        AND the (orchestrator-persisted, dot-stripped) Task seats flow through it.
+        AND the (orchestrator-persisted) Task seats flow through it.
       * ``--report-unparsed`` — print ONLY the ran-but-non-findings-parsed seat
         names (the haiku-repair candidates, Part 2); write no digest.
 
@@ -2997,7 +2997,8 @@ def build_parser() -> argparse.ArgumentParser:
     coll.add_argument(
         "--seats", dest="seats", default="",
         help="comma-separated resolved seat names: subprocess (codex/agy/cursor-*) "
-             "AND the (dot-stripped) Task seats (opus, sonnet, fable). collect reads "
+             "AND the Task seats (opus/sonnet/fable plus any config-declared "
+             "claude-code seat). collect reads "
              "EXACTLY <seat>.json for each; a missing seat renders as a SKIPPED "
              "block; stale/foreign files are never read. (collect never globs.)",
     )
@@ -3054,8 +3055,9 @@ def build_parser() -> argparse.ArgumentParser:
              "written path (exit 0); exit 2 on usage errors (empty seat, unreadable "
              "-f, placeholder/unresolvable session id).",
     )
-    ps.add_argument("seat", help="seat/role name; the slug (dot-stripped) is BOTH "
-                                 "the filename and the `name` field")
+    ps.add_argument("seat", help="seat/role name; its slug (the name itself for "
+                                 "catalog seats) is BOTH the filename and the "
+                                 "`name` field")
     ps.add_argument("--session-id", dest="session_id", default=None,
                     help="session id for .crew/reviews/<session-id>/ "
                          "(default: CLAUDE_SESSION_ID env)")

@@ -144,7 +144,8 @@ existing verdict. Two seat kinds:
 
 - **subprocess seats** — the external-CLI entries of the resolved
   panel, via the Python engine.
-- **task seats** — the `opus`/`sonnet` entries, each a `crew:reviewer` spawned via
+- **task seats** — the Claude-voice entries (built-in `opus`/`sonnet`, plus any
+  config-declared claude-code seat), each a `crew:reviewer` spawned via
   the Task tool (in-session, on the subscription — no `claude -p`, no API key).
 
 The panel is whatever the flags resolved to (the configured default panel:

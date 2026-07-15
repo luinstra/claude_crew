@@ -334,9 +334,12 @@ model = "gpt-5.6-nano"
 ```
 
 That's the whole thing: the seat is registered on the next run, usable via
-`--seats codex-nano`. Add `opt_in = true` to keep it out of the built-in panels
-(registered, but only when named). The provider CLI must be installed and authed;
-`"${CLAUDE_PLUGIN_ROOT}/crew" seats` lists every resolved seat.
+`--seats codex-nano` or by adding it to a `[panels]` roster. A declared seat
+never joins the built-in panels on its own (that is the anti-silent-billing
+rule; `opt_in = true` just tags it premium/off-by-default in listings). The
+provider CLI must be installed and authed. `"${CLAUDE_PLUGIN_ROOT}/crew" seats`
+prints the resolved default panel's external seats (not the whole catalog);
+`crew doctor` shows every registered seat.
 
 #### Ad-hoc single-provider runs
 

@@ -93,8 +93,8 @@ inline. The RULE each names is still stated in the command docs; only the label
 gloss lives here.
 
 - **Decision-H** — persist EACH normalized Task seat through `crew persist-seat`
-  (engine-owned dot-stripped slug + six-field shape), NOT a hand-rolled Write-tool
-  `<seat>.json`.
+  (engine-owned filename + six-field shape; a catalog seat's name is its own
+  slug), NOT a hand-rolled Write-tool `<seat>.json`.
 - **Decision-I** — the WHOLE panel (subprocess AND Task seats) flows through ONE
   grouped `collect`, including the Claude-only branch (subprocess seats empty),
   which collects over the Task seats alone. There is NO "synthesize from raw Task

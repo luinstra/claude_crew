@@ -175,9 +175,10 @@ Key contracts (do NOT regress):
   `render --stage --seat-role <role>` calls into ONE — and the role list they
   pass is the **comma-joined `task_seats`** from the `review-prep` JSON (NOT a
   hardcoded `opus,sonnet`), so staging, spawn, and model pins all derive from the
-  one catalog and the staged filename always matches what the spawn reads (a
-  `.`-bearing role — none in the current roster — would stage AND be read as its
-  dot-stripped filename).
+  one catalog and the staged filename always matches what the spawn reads
+  (catalog seats satisfy `name == slug(name)`, so a registered seat's staged
+  filename is the name itself; only a free-form role LABEL with stripped
+  characters stages and is read as its normalized slug).
   Each role gets its own
   "acting as the **<role>** seat" label; the special role `seat` maps to
   `seat_role=None` (no label — matching the shared `prompt-seat.txt`). It reuses
@@ -218,7 +219,8 @@ Key contracts (do NOT regress):
   opaque echo the commands ignored.)
 - After the fan-out, the orchestrator persists EACH normalized Task seat (opus/sonnet/fable) via `crew
   persist-seat <seat> --session-id <id> --model <pin> -f <text>` (or `--failed --error <diag>` for a
-  seat that errored) — the engine owns the dot-stripped slug AND the six-field shape, so the command
+  seat that errored) — the engine owns the `<seat>.json` filename (the seat name itself; catalog
+  names are their own slug) AND the six-field shape, so the command
   markdown no longer hand-assembles the `<seat>.json` with the Write tool.
 
 ### Repair & collect
