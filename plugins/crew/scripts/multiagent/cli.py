@@ -2331,43 +2331,30 @@ def _render_config_template(
     L.append("# already skips a CLI that isn't installed, so these flags are mainly for DISCOVERABILITY,")
     L.append("# a DELIBERATE opt-out, and capturing your confirmed preferences — NOT a requirement.")
     L.append("")
-    L.append("[seats.codex]")
-    a = av("codex")
-    if a is not None:
-        L.append(_avail_line(a))
-    L.append('# model = "gpt-5.6-sol"          # override codex\'s pinned model')
-    L.append('# reasoning_effort = "xhigh"     # codex-seat knob (read per seat: [seats.codex] here)')
-    L.append("")
-    # codex-luna shares the codex binary, so detection tracks codex's PATH probe.
-    L.append("[seats.codex-luna]")
-    a = av("codex-luna")
-    if a is not None:
-        L.append(_avail_line(a))
-    L.append('# model = "gpt-5.6-luna"         # override codex-luna\'s pinned model')
-    L.append('# reasoning_effort = "xhigh"     # codex-seat knob (read per seat: [seats.codex-luna] here)')
-    L.append("")
-    L.append("[seats.agy]")
-    a = av("agy")
-    if a is not None:
-        L.append(_avail_line(a))
-    L.append('# model = "Gemini 3.1 Pro (High)"')
-    L.append('# print_timeout = "8m"           # agy-only knob (read only from [seats.agy])')
-    L.append("")
-    # The default (non-opt-in) cursor seats, catalog-derived: the list AND the
-    # model hint grow with seats.toml. The opt-in cursor seats are emitted below
-    # by the premium_off_seats() loop, so they are skipped here.
-    for seat in seats.group_tokens().get("cursor", []):
-        spec = seats.seat_spec(seat)
-        if spec.opt_in:
+    # The default (non-opt-in) executor seats, catalog-derived: the list, the
+    # model hint, and the per-kind tuning knob all grow with seats.toml. The knob
+    # comment keys off the provider KIND (codex kinds carry reasoning_effort, agy
+    # carries print_timeout); a kind with no knob emits none. The opt-in executor
+    # seats are emitted below by the premium_off_seats() loop, so they are skipped
+    # here.
+    for name, spec in seats.merged_catalog().items():
+        if not spec.has_executor or spec.declared or spec.opt_in:
             continue
-        a = av(seat)
+        L.append(f"[seats.{name}]")
+        a = av(name)
         if a is not None:
-            L.append(f"[seats.{seat}]")
             L.append(_avail_line(a))
-            L.append(f'# model = "{spec.model}"')
-        else:
-            L.append(f"# [seats.{seat}]")
-            L.append(f'# model = "{spec.model}"')
+        L.append(f'# model = "{spec.model}"')
+        if spec.provider == "codex":
+            L.append(
+                f'# reasoning_effort = "xhigh"     # codex-seat knob '
+                f'(read per seat: [seats.{name}] here)'
+            )
+        elif spec.provider == "agy":
+            L.append(
+                f'# print_timeout = "8m"           # agy-only knob '
+                f'(read only from [seats.{name}])'
+            )
         L.append("")
     for seat in seats.premium_off_seats():
         a = av(seat)

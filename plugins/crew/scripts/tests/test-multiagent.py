@@ -8022,6 +8022,375 @@ def test_seat_roster_drift_guard():
           f"{sorted(det['subprocess'])} / {sorted(det['task'])}")
 
 
+def test_config_declared_seats():
+    """A seat that exists NOWHERE in the Python source registers, on EVERY
+    provider kind, from a config file alone (the headline capability).
+
+    Every seat here has a FRESH name: a shipped name (codex, agy) would be a TUNE
+    of an existing seat, not a declaration. demo-cursor is deliberately NOT named
+    cursor-* so its group membership can only come from the provider KIND, never a
+    startswith("cursor-") prefix (a cursor-demo name would pass vacuously)."""
+    log_section("seats declared purely from config (every provider kind)")
+    import io  # noqa: E402
+    import types  # noqa: E402
+    from contextlib import redirect_stdout  # noqa: E402
+    from multiagent import cli, seats  # noqa: E402
+    from multiagent import providers  # noqa: E402
+    from multiagent.providers import (  # noqa: E402
+        get_provider, known_seat_names, ProviderResult,
+    )
+
+    declared = (
+        '[seats.demo-cursor]\nprovider = "cursor"\nmodel = "composer-2.5"\n\n'
+        '[seats.codex-demo]\nprovider = "codex"\nmodel = "gpt-5.6-sol"\n'
+        'reasoning_effort = "high"\n\n'
+        '[seats.agy-demo]\nprovider = "agy"\nmodel = "Gemini 3.1 Pro (High)"\n'
+        'print_timeout = "3m"\n\n'
+        '[seats.opus-demo]\nprovider = "claude-code"\nmodel = "haiku"\n'
+    )
+    names = ("demo-cursor", "codex-demo", "agy-demo", "opus-demo")
+    models = {"demo-cursor": "composer-2.5", "codex-demo": "gpt-5.6-sol",
+              "agy-demo": "Gemini 3.1 Pro (High)", "opus-demo": "haiku"}
+
+    with global_home(declared):
+        catalog = seats.merged_catalog()
+        for n in names:
+            check(f"{n!r} registers from config alone (declared=True)",
+                  n in catalog and catalog[n].declared is True,
+                  "present + declared", str(catalog.get(n)))
+            check(f"{n!r} model resolves to its declared pin",
+                  n in catalog and catalog[n].model == models[n],
+                  models[n], str(catalog.get(n) and catalog[n].model))
+
+        # The three executor kinds are registered SUBPROCESS seats; the
+        # claude-code one is a Task seat the engine NEVER runs.
+        known = set(known_seat_names())
+        for n in ("demo-cursor", "codex-demo", "agy-demo"):
+            check(f"{n!r} is a registered subprocess seat", n in known,
+                  "in registry", "absent")
+        check("opus-demo is a Task seat, NOT in the subprocess registry",
+              "opus-demo" not in known and "opus-demo" in seats.task_seats(),
+              "task seat only",
+              f"in_registry={'opus-demo' in known} task={'opus-demo' in seats.task_seats()}")
+        raised = False
+        try:
+            get_provider("opus-demo")
+        except ValueError:
+            raised = True
+        check("get_provider('opus-demo') raises (a Task seat is never engine-run)",
+              raised, "ValueError", "no raise")
+
+        # demo-cursor joins the cursor GROUP by KIND, not by name (it is NOT cursor-*).
+        group = seats.group_tokens()["cursor"]
+        check("demo-cursor joins the cursor group by provider KIND "
+              "(name is demo-cursor, not cursor-demo)",
+              "demo-cursor" in group and not "demo-cursor".startswith("cursor-"),
+              "in cursor group, non-prefixed name", str(group))
+        expanded = cli._expand_seat_groups(["cursor"])
+        check("--seats cursor expands to include demo-cursor",
+              "demo-cursor" in expanded, "demo-cursor in expansion", str(expanded))
+
+        # None of them ride the default panel: --panel full is the shipped roster,
+        # and a declared seat never silently joins it.
+        full_sub = cli._resolve_seats(None)
+        full_panel = seats.merged_panels()["full"]
+        for n in names:
+            check(f"{n!r} is ABSENT from --panel full",
+                  n not in full_sub and n not in full_panel,
+                  "absent from full", f"subprocess_subset={full_sub}")
+
+        # The per-seat tunes BIND onto the provider instance...
+        cdx = get_provider("codex-demo")
+        check("codex-demo binds reasoning_effort='high' from config",
+              cdx._reasoning_effort == "high", "high", str(cdx._reasoning_effort))
+        agyp = get_provider("agy-demo")
+        check("agy-demo binds print_timeout='3m' (impossible before per-seat tuning)",
+              agyp._print_timeout_pin == "3m", "3m", str(agyp._print_timeout_pin))
+
+        # ...and ROUTE to the CLI argv (fake-bin capture, no billable call).
+        def _capture_argv(seat, binname):
+            with tempfile.TemporaryDirectory() as bd:
+                cap = Path(bd) / "argv.json"
+                body = f"""
+                import sys, json
+                args = sys.argv[1:]
+                out = None
+                for i, a in enumerate(args):
+                    if a == "-o":
+                        out = args[i + 1]
+                open({str(cap)!r}, "w").write(json.dumps(args))
+                if out:
+                    open(out, "w").write("REVIEW OK")
+                else:
+                    print("REVIEW OK")
+                sys.exit(0)
+                """
+                make_fake_bin(Path(bd), binname, body)
+                saved = os.environ["PATH"]
+                os.environ["PATH"] = str(bd) + os.pathsep + saved
+                try:
+                    res = get_provider(seat).run("PROMPT", timeout=20)
+                finally:
+                    os.environ["PATH"] = saved
+                return json.loads(cap.read_text()), res
+
+        cargs, _ = _capture_argv("codex-demo", "codex")
+        check("codex-demo reasoning_effort ROUTES to argv "
+              "(-c model_reasoning_effort=high) and its model too",
+              "model_reasoning_effort=high" in cargs
+              and "--model" in cargs and "gpt-5.6-sol" in cargs,
+              "model_reasoning_effort=high + --model gpt-5.6-sol", str(cargs))
+        aargs, _ = _capture_argv("agy-demo", "agy")
+        check("agy-demo print_timeout ROUTES to argv (--print-timeout 3m)",
+              "--print-timeout" in aargs and "3m" in aargs,
+              "--print-timeout 3m", str(aargs))
+
+        # demo-cursor produces a real ok=true review with the SUBPROCESS CALL
+        # STUBBED: a fake executor patched over the registry factory. The seat is
+        # genuinely catalog-registered (the loader built its real factory); only
+        # its billable CLI is replaced. The live `crew run demo-cursor` stays a
+        # MANUAL smoke, not a CI gate.
+        providers._registry()
+
+        class _FakeExec(providers.Provider):
+            name = "demo-cursor"
+            supports_workspace_write = True
+
+            def is_available(self):
+                return (True, "")
+
+            def run(self, prompt, *, sandbox="read-only", model=None, timeout=300):
+                return ProviderResult(name="demo-cursor", model="composer-2.5",
+                                      ok=True, output="LGTM", error=None, elapsed=0.01)
+
+        providers._REGISTRY["demo-cursor"] = lambda: _FakeExec()
+        dres = get_provider("demo-cursor").run("x")
+        check("crew run demo-cursor returns a real ok=true review (subprocess stubbed)",
+              dres.ok is True and dres.output == "LGTM",
+              "ok=True 'LGTM'", f"ok={dres.ok} out={dres.output!r}")
+
+    # No EXTRA doctor probe. doctor probes once per KIND, so a declared cursor seat
+    # adds no second `agent --version`. Fresh isolation block (unpatched registry):
+    # count the cursor is_available() calls across a full doctor run.
+    with global_home(declared):
+        from multiagent.providers.cursor import CursorProvider  # noqa: E402
+        calls = {"n": 0}
+        orig = CursorProvider.is_available
+        CursorProvider.is_available = (
+            lambda self: (calls.__setitem__("n", calls["n"] + 1) or (True, "")))
+        try:
+            with tempfile.TemporaryDirectory() as od:
+                outp = str(Path(od) / "doctor.json")
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    cli.cmd_doctor(types.SimpleNamespace(out=outp, session_id=None))
+                payload = json.loads(buf.getvalue())
+        finally:
+            CursorProvider.is_available = orig
+        check("doctor probes the cursor KIND exactly once even with demo-cursor declared",
+              calls["n"] == 1, "1 probe", str(calls["n"]))
+        check("doctor lists demo-cursor (cursor kind) in the subprocess map",
+              "demo-cursor" in payload.get("subprocess", {}),
+              "present", str(sorted(payload.get("subprocess", {}))))
+
+
+def test_config_declared_negative():
+    """Every never-choke row at its RIGHT scope. The shipped-vs-declared asymmetry
+    is the point: the SAME malformed input is a field-level drop on a shipped seat
+    (the seat survives) but a seat-level drop on a declared one."""
+    log_section("config-declared seats: never-choke negative paths")
+    import io  # noqa: E402
+    from contextlib import redirect_stderr  # noqa: E402
+    from pathlib import Path as _Path  # noqa: E402
+    from multiagent import cli, config, seats  # noqa: E402
+    from multiagent.providers import get_provider, known_seat_names  # noqa: E402
+
+    def load(project=None, glob=None):
+        """(catalog, stderr, full-panel) under the suite's config isolation, so no
+        real ~/.crew-config.toml can make a negative case pass by accident."""
+        with crew_config(project=project, glob=glob):
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                cat = dict(seats.merged_catalog())
+                full = list(seats.merged_panels()["full"])
+            return cat, buf.getvalue(), full
+
+    # --- THE ASYMMETRY: one malformed input, two scopes -----------------------
+    # A wrong-TYPE provider. On a SHIPPED seat the bad key is dropped and the seat
+    # keeps its shipped provider (field-level). On a DECLARED seat that same bad
+    # type leaves it with no provider at all, so the whole seat drops (seat-level).
+    cat, warn, full = load(glob='[seats.codex]\nprovider = 123\n')
+    check("shipped seat + bad-type provider: KEY dropped, seat SURVIVES as codex",
+          "codex" in cat and cat["codex"].provider == "codex" and "codex" in full
+          and "provider" in warn,
+          "codex survives, full unchanged, warn", str(cat.get("codex")))
+    cat, warn, full = load(glob='[seats.brandnew]\nprovider = 123\n')
+    check("declared seat + SAME bad-type provider: WHOLE SEAT dropped (seat-level)",
+          "brandnew" not in cat, "absent", "present")
+
+    # A valid-type cross-provider value is NOT a bad row: the merge is per-key
+    # (repo/global over shipped) for provider like any other key, so a config
+    # layer can repurpose a shipped seat's provider. The seat survives and stays
+    # in full; only a wrong-TYPE or unknown-kind value is a drop.
+    cat, warn, full = load(glob='[seats.codex]\nprovider = "agy"\n')
+    check("shipped [seats.codex] provider='agy': per-key override, codex stays in full",
+          cat["codex"].provider == "agy" and "codex" in full,
+          "codex provider overridden to agy, still in full", str(cat.get("codex")))
+
+    # --- wrong type on EVERY tune key of a SHIPPED seat: key dropped, shipped
+    #     value kept, codex stays in full (field-level, one row per key). ---
+    base_codex = load()[0]["codex"]
+    for body, key in (
+        ("model = 123", "model"),
+        ('opt_in = "yes"', "opt_in"),
+        ('available = "no"', "available"),
+        ("reasoning_effort = 5", "reasoning_effort"),
+        ("print_timeout = true", "print_timeout"),
+    ):
+        cat, warn, full = load(glob=f"[seats.codex]\n{body}\n")
+        kept = (cat["codex"].model == base_codex.model
+                and cat["codex"].opt_in is False
+                and cat["codex"].available is True)
+        check(f"shipped codex bad-type {key}: key dropped, shipped value kept, codex in full",
+              kept and "codex" in full and key in warn,
+              "shipped value kept + warn + in full",
+              f"spec={cat.get('codex')} warn={warn[:80]!r}")
+
+    # --- seat-level drops (declared seat only): each bad input drops the WHOLE
+    #     seat with a warn, and the panel still resolves. ---
+    seat_level = (
+        ("unknown kind", '[seats.x]\nprovider = "fake"\n', "x"),
+        ("kind case-variant (EXACT match, no .lower())", '[seats.x]\nprovider = "Cursor"\n', "x"),
+        ("kind whitespace (EXACT match, no .strip())", '[seats.x]\nprovider = " cursor"\n', "x"),
+        ("no provider, unknown name", "[seats.x]\n", "x"),
+        ("claude-code missing model", '[seats.x]\nprovider = "claude-code"\n', "x"),
+        ("claude-code bad alias", '[seats.x]\nprovider = "claude-code"\nmodel = "opus-4.6"\n', "x"),
+        ("reserved token cursor", '[seats.cursor]\nprovider = "cursor"\n', "cursor"),
+    )
+    for label, body, name in seat_level:
+        cat, warn, full = load(glob=body)
+        check(f"declared seat dropped + panel still resolves: {label}",
+              name not in cat and warn.strip() != "" and "codex" in full,
+              "seat dropped, warn, panel intact",
+              f"present={name in cat} warn={warn[:70]!r}")
+
+    # The reserved-token seat is rejected, but the shipped cursor GROUP still
+    # expands to every cursor-* seat (rejecting the seat did not break the token).
+    with crew_config(glob='[seats.cursor]\nprovider = "cursor"\n'):
+        expanded = cli._expand_seat_groups(["cursor"])
+        has_cursor_seat = "cursor" in seats.merged_catalog()
+    check("[seats.cursor] rejected AND the cursor group still expands to cursor-* seats",
+          not has_cursor_seat and len(expanded) >= 2
+          and all(s.startswith("cursor-") for s in expanded),
+          "group intact", f"cursor_seat={has_cursor_seat} expanded={expanded}")
+
+    # --- the name invariant: every unsafe name is rejected (all given a VALID
+    #     provider so only the NAME can be the reason for the drop). The empty name
+    #     must NOT slug to the literal 'seat' fallback and register. ---
+    for nm in ("a.b", "a b", "a+b", "café", "../x", "a/b", ".", "..", ""):
+        cat, warn, full = load(glob=f'[seats."{nm}"]\nprovider = "codex"\n')
+        check(f"unsafe seat name {nm!r} rejected (name != slug, or empty)",
+              nm not in cat and "codex" in full,
+              "name rejected, shipped codex intact", f"present={nm in cat}")
+    cat, warn, full = load(glob='[seats.""]\nprovider = "codex"\n')
+    check("empty seat name [seats.\"\"] does NOT slug to 'seat' and register",
+          "" not in cat and "seat" not in cat,
+          "empty rejected, no 'seat' seat", f"empty_in={'' in cat} seat_in={'seat' in cat}")
+
+    # --- the compatibility hinge: a provider-LESS [seats.codex] TUNES the shipped
+    #     seat (marks it declared), registers NOTHING new, and codex STAYS in full.
+    #     "declared" means "absent from the shipped catalog", NOT "came from config". ---
+    no_config_n = len(load()[0])
+    cat, warn, full = load(glob='[seats.codex]\nmodel = "gpt-5.6-sol"\n')
+    check("provider-less [seats.codex] tunes codex (declared), adds no seat, stays in full",
+          "codex" in cat and cat["codex"].declared is True and "codex" in full
+          and len(cat) == no_config_n,
+          "codex tuned + in full + no new seat",
+          f"declared={cat.get('codex')} n={len(cat)} vs {no_config_n}")
+
+    # --- collision matrix: codex/agy are SEATS, not group tokens, so they pass
+    #     through _expand_seat_groups unchanged; full/quick resolve to the pinned
+    #     roster. ---
+    with crew_config():
+        check("_expand_seat_groups(['codex']) == ['codex'] (a seat, not a token)",
+              cli._expand_seat_groups(["codex"]) == ["codex"],
+              "['codex']", str(cli._expand_seat_groups(["codex"])))
+        check("_expand_seat_groups(['agy']) == ['agy']",
+              cli._expand_seat_groups(["agy"]) == ["agy"],
+              "['agy']", str(cli._expand_seat_groups(["agy"])))
+        panels = seats.merged_panels()
+        check("full/quick resolve to the exact pinned roster",
+              panels["full"] == ["codex", "codex-luna", "agy", "cursor-auto",
+                                 "cursor-composer", "opus", "sonnet"]
+              and panels["quick"] == ["codex", "sonnet"],
+              "pinned full + quick", f"{panels['full']} / {panels['quick']}")
+
+    # --- cross-layer resolution (per-key, repo over global) -------------------
+    # global DECLARES a provider, repo TUNES a model: the effective table is the
+    # single arbiter, so the seat registers with BOTH.
+    cat, warn, full = load(glob='[seats.xseat]\nprovider = "codex"\n',
+                           project='[seats.xseat]\nmodel = "gpt-5.6-sol"\n')
+    check("cross-layer: global declares provider, repo tunes model -> registers with both",
+          "xseat" in cat and cat["xseat"].provider == "codex"
+          and cat["xseat"].model == "gpt-5.6-sol",
+          "xseat codex + model", str(cat.get("xseat")))
+    # both layers declare in AGREEMENT.
+    cat, warn, full = load(glob='[seats.yseat]\nprovider = "cursor"\n',
+                           project='[seats.yseat]\nprovider = "cursor"\nmodel = "auto"\n')
+    check("cross-layer: both layers declare the same provider -> registers",
+          "yseat" in cat and cat["yseat"].provider == "cursor",
+          "yseat cursor", str(cat.get("yseat")))
+    # a NON-provider cross-layer conflict resolves repo-over-global, silently.
+    cat, warn, full = load(glob='[seats.zseat]\nprovider = "codex"\nmodel = "gpt-5.6-sol"\n',
+                           project='[seats.zseat]\nprovider = "codex"\nmodel = "gpt-5.6-luna"\n')
+    check("cross-layer non-provider conflict resolves repo-over-global, silently",
+          cat.get("zseat") and cat["zseat"].model == "gpt-5.6-luna" and "model" not in warn,
+          "repo model wins, no warn",
+          f"model={cat.get('zseat') and cat['zseat'].model} warn={warn[:60]!r}")
+
+    # --- AC 25: a config-declared executor seat is a legal [dispatch].seat WRITE
+    #     seat straight from config. It is the ONE place a config file grants
+    #     working-tree write access, so it is asserted explicitly. ---
+    with crew_config(glob='[seats.dispatch-demo]\nprovider = "cursor"\n'
+                          'model = "composer-2.5"\n\n'
+                          '[dispatch]\nseat = "dispatch-demo"\n'):
+        seat = config.dispatch_seat()
+        prov = get_provider("dispatch-demo")
+        check("a config-declared cursor seat is accepted as the [dispatch].seat WRITE seat",
+              seat == "dispatch-demo" and "dispatch-demo" in known_seat_names()
+              and prov.supports_workspace_write is True,
+              "declared seat is a legal write seat",
+              f"dispatch_seat={seat!r} write={getattr(prov, 'supports_workspace_write', None)}")
+
+    # --- shipped-catalog degradation: a missing/malformed shipped seats.toml
+    #     DEGRADES to an empty catalog with a one-time stderr warn (it never
+    #     raises mid-panel). (_shipped_raw is a separate module cache the config
+    #     reset does not clear, so it is reset by hand here.) ---
+    orig_path = seats._SHIPPED_CATALOG_PATH
+    for label, make in (
+        ("missing", lambda d: _Path(d) / "nope.toml"),
+        ("malformed", lambda d: _write(_Path(d) / "bad.toml", "= = not toml [[[")),
+    ):
+        with tempfile.TemporaryDirectory() as d, crew_config():
+            try:
+                seats._SHIPPED_CATALOG_PATH = make(d)
+                seats._shipped_raw = None
+                buf = io.StringIO()
+                with redirect_stderr(buf):
+                    shipped = seats.shipped_catalog()
+                degraded = len(shipped) == 0 and "shipped catalog" in buf.getvalue()
+            finally:
+                seats._SHIPPED_CATALOG_PATH = orig_path
+                seats._shipped_raw = None
+        check(f"shipped catalog {label}: degrades to empty + stderr warn (never raises)",
+              degraded, "empty catalog + warn", str(degraded))
+
+
+def _write(path, text):
+    path.write_text(text)
+    return path
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -8063,6 +8432,8 @@ def main():
     test_debate_panel_resolver()
     test_debate_oracle_removed()
     test_panel_catalog()
+    test_config_declared_seats()
+    test_config_declared_negative()
     test_catalog_cache_reset()
     test_seat_roster_drift_guard()
     test_catalog_registry_disjoint()

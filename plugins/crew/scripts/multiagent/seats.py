@@ -14,11 +14,12 @@ provider name to decide behavior.
 
 Never-choke, as everywhere else in the config path: a bad row is DROPPED with a
 one-time stderr warn, never an exception, so one typo cannot take down a panel.
-A seat is dropped when it names an unknown provider, when its name would not
-survive the staged-filename slug (``name != slug(name)``: the dot-strip is not
-injective, so two seats could collide on one prompt file), when its name is a
-reserved token (a panel name or a group token, which resolve to seat LISTS), or
-when a ``claude-code`` seat pins a model the Task tool would reject.
+A seat is dropped when it names an unknown provider, when its name is empty or
+would not survive the staged-filename slug (``name != slug(name)``: the dot-strip
+is not injective, so two seats could collide on one prompt file, and an empty
+name falls back to the literal ``seat`` slug), when its name is a reserved token
+(a panel name or a group token, which resolve to seat LISTS), or when a
+``claude-code`` seat pins a model the Task tool would reject.
 """
 
 from __future__ import annotations
@@ -270,11 +271,16 @@ def _spec_from_table(name: str, tbl: dict, layer: str, base: SeatSpec | None) ->
 def _validate(spec: SeatSpec, layer: str) -> bool:
     """Whether ``spec`` may enter the catalog (warn-once + drop when not)."""
     name = spec.name
-    if _SLUG_CHARSET.sub("", name) != name:
+    # The name must be non-empty AND survive the slug unchanged: an empty name
+    # slugs to the literal "seat" fallback, and any stripped character changes the
+    # prompt/result file names the seat is written to (the strip is not injective,
+    # so two names could collide on one file).
+    if not name or _SLUG_CHARSET.sub("", name) != name:
         _warn_once(
             f"seat-name:{layer}:{name}",
-            f"seat name {name!r} contains characters that are stripped from the "
-            f"file names the seat's prompt and result are written to; ignoring it",
+            f"seat name {name!r} is empty or contains characters that are stripped "
+            f"from the file names the seat's prompt and result are written to; "
+            f"ignoring it",
         )
         return False
     if name in reserved_tokens():

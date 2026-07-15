@@ -26,21 +26,21 @@ seat = "codex"
 # a DELIBERATE opt-out, and capturing your confirmed preferences — NOT a requirement.
 
 [seats.codex]
-# model = "gpt-5.6-sol"          # override codex's pinned model
+# model = "gpt-5.6-sol"
 # reasoning_effort = "xhigh"     # codex-seat knob (read per seat: [seats.codex] here)
 
 [seats.codex-luna]
-# model = "gpt-5.6-luna"         # override codex-luna's pinned model
+# model = "gpt-5.6-luna"
 # reasoning_effort = "xhigh"     # codex-seat knob (read per seat: [seats.codex-luna] here)
 
 [seats.agy]
 # model = "Gemini 3.1 Pro (High)"
 # print_timeout = "8m"           # agy-only knob (read only from [seats.agy])
 
-# [seats.cursor-auto]
+[seats.cursor-auto]
 # model = "auto"
 
-# [seats.cursor-composer]
+[seats.cursor-composer]
 # model = "composer-2.5"
 
 [seats.codex-terra]
