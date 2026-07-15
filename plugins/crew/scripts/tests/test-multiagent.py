@@ -4424,6 +4424,95 @@ def test_debate_panel_resolver():
           and "cursor-auto" not in proc.stderr,
           "dropped, no skip-note", f"lines={dlines} stderr={proc.stderr[:120]!r}")
 
+    # 10. --json split: the SAME resolved panel, returned as review-prep's
+    #     {subprocess_seats, task_seats, task_seat_models} instead of one per line —
+    #     so debate.md consumes the split without classifying seat names itself.
+    def resolve_json(config_toml=None, extra_args=()):
+        with tempfile.TemporaryDirectory() as td:
+            if config_toml is not None:
+                crew = Path(td) / ".crew"
+                crew.mkdir(parents=True)
+                (crew / "config.toml").write_text(config_toml)
+            env = {**_neutral_env(), "CLAUDE_PROJECT_DIR": td}
+            proc = _run_dispatcher(["seats", "--debate", "--json", *extra_args],
+                                   env=env, cwd=td, timeout=30)
+            try:
+                payload = json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                payload = None
+            return proc.returncode, payload, proc.stderr
+
+    rc, payload, _ = resolve_json(None)
+    check("seats --debate --json: built-in full -> exact review-prep shape + split",
+          rc == 0 and payload == {
+              "subprocess_seats": ["codex", "codex-luna", "agy",
+                                   "cursor-auto", "cursor-composer"],
+              "task_seats": ["opus", "sonnet"],
+              "task_seat_models": {"opus": "opus", "sonnet": "sonnet"},
+          }, "the three-field split with model pins", f"rc={rc} {payload}")
+
+    # The JSON split is the SAME panel the plain listing prints, just partitioned:
+    # subprocess_seats + task_seats (in order) reconstructs the one-per-line output.
+    _rc_plain, plain_lines = resolve(None)
+    check("seats --debate --json split == the plain one-per-line panel (partitioned)",
+          rc == 0 and _rc_plain == 0
+          and payload["subprocess_seats"] + payload["task_seats"] == plain_lines,
+          str(plain_lines),
+          f"{payload['subprocess_seats'] + payload['task_seats']}")
+
+    # A subprocess-only panel (cursor) -> task_seats empty, no model pins.
+    rc, payload, _ = resolve_json("[debate]\npanel = \"cursor\"\n")
+    check("seats --debate --json --panel cursor -> task_seats empty, all cursor subprocess",
+          rc == 0 and payload["task_seats"] == []
+          and payload["task_seat_models"] == {}
+          and sorted(payload["subprocess_seats"]) == _cursor_all,
+          "empty task split, cursor subprocess", f"rc={rc} {payload}")
+
+    # An explicit --seats keeps its Task seats in the split, each pinned from the
+    # catalog (the load-bearing fix: a catalog [seats.opus].model would appear HERE).
+    rc, payload, _ = resolve_json(None, ["--seats", "codex,opus,sonnet,fable"])
+    check("seats --debate --json --seats codex,opus,sonnet,fable -> Task seats split + pinned",
+          rc == 0 and payload["subprocess_seats"] == ["codex"]
+          and payload["task_seats"] == ["opus", "sonnet", "fable"]
+          and payload["task_seat_models"] == {
+              "opus": "opus", "sonnet": "sonnet", "fable": "fable"},
+          "codex subprocess; opus/sonnet/fable task+pins", f"rc={rc} {payload}")
+
+    # A rejected --seats (path traversal) fails the same under --json (nonzero, no JSON).
+    rc, payload, _ = resolve_json(None, ["--seats", "cursor-../../x"])
+    check("seats --debate --json --seats cursor-../../x -> REJECTED (nonzero, no payload)",
+          rc != 0, "rc!=0", f"rc={rc} {payload}")
+
+    # 11. --json WITHOUT --debate errors (it only shapes the debate split).
+    with tempfile.TemporaryDirectory() as td:
+        env = {**_neutral_env(), "CLAUDE_PROJECT_DIR": td}
+        proc = _run_dispatcher(["seats", "--json"], env=env, cwd=td, timeout=30)
+    check("seats --json WITHOUT --debate -> errors (nonzero, stderr mentions --json)",
+          proc.returncode != 0 and proc.stdout.strip() == ""
+          and "--json" in proc.stderr,
+          "rc!=0, no stdout, stderr mentions --json",
+          f"rc={proc.returncode} stdout={proc.stdout!r} stderr={proc.stderr!r}")
+
+
+def test_debate_oracle_removed():
+    log_section("debate.md resolves its panel from the engine (fifth oracle dead)")
+    # (a) NEGATIVE grep, in the suite: after the refactor, debate.md hardcodes NO
+    #     Task-seat model literal. It returned several before the fix, so this gate
+    #     genuinely fails before and passes after — it is not vacuous. Assert on
+    #     ZERO, not a delta from a pinned "before" count (another number to drift).
+    debate_md = (SCRIPT_DIR.parent / "commands" / "debate.md").read_text(encoding="utf-8")
+    oracle_re = re.compile(r'model="(?:opus|sonnet|fable)"')
+    hits = oracle_re.findall(debate_md)
+    check("debate.md has ZERO hardcoded model=\"opus|sonnet|fable\" literals",
+          hits == [], "no model= Task-seat literals", f"{len(hits)} found: {hits}")
+
+    # (b) POSITIVE grep, in the suite: debate.md drives the split off the engine's
+    #     `seats --debate --json`, and cli.py implements that subcommand+flag.
+    check("debate.md invokes `seats --debate --json`",
+          "seats --debate --json" in debate_md, "present", "MISSING")
+    check("debate.md reads task_seat_models for the Task-seat model pin",
+          "task_seat_models[" in debate_md, "present", "MISSING")
+
 
 def test_panel_catalog():
     log_section("seat catalog loader (seats.py)")
@@ -4625,6 +4714,54 @@ def test_catalog_registry_disjoint():
               in_registry and resolves,
               "in known_seat_names() + get_provider ok",
               f"in_registry={in_registry} resolves={resolves}")
+
+
+def test_catalog_call_graph_invariant():
+    log_section("merged_catalog() bottoms out at raw_layers() — no panels/providers")
+    from multiagent import config, seats, providers  # noqa: E402
+
+    # The call graph is cycle-ADJACENT even though the import graph is clean:
+    #   config.panels() -> known_seat_names() -> _build_registry() ->
+    #   merged_catalog() -> config.raw_layers(),  and  merged_panels() ->
+    #   config.panels().
+    # So the catalog loader MUST bottom out at raw_layers() and never reach back up
+    # through the panel/provider surface — else the first future edit that reads
+    # panels from inside the loader recurses forever with both caches cold. Watch
+    # ALL FOUR (config.panels, merged_panels, group_tokens, a providers entry:
+    # group_tokens needs the MERGED catalog, so the loader uses the pre-merge
+    # _shipped_group_tokens() instead) under a COLD-cache merged_catalog() call.
+    watched = {
+        (config, "panels"),
+        (seats, "merged_panels"),
+        (seats, "group_tokens"),
+        (providers, "known_seat_names"),
+        (providers, "get_provider"),
+    }
+    called: list[str] = []
+    originals = {(mod, attr): getattr(mod, attr) for mod, attr in watched}
+
+    def _spy(mod, attr, orig):
+        def wrapper(*a, **k):
+            called.append(f"{mod.__name__.split('.')[-1]}.{attr}")
+            return orig(*a, **k)
+        return wrapper
+
+    with crew_config():
+        config._reset_cache_for_tests()   # every cache COLD (clears seats memos too)
+        for (mod, attr), orig in originals.items():
+            setattr(mod, attr, _spy(mod, attr, orig))
+        try:
+            catalog = seats.merged_catalog()   # THE cold entry point, under the spies
+            built = "codex" in catalog and "opus" in catalog
+        finally:
+            for (mod, attr), orig in originals.items():
+                setattr(mod, attr, orig)
+
+    check("cold merged_catalog() still builds the catalog under the spies",
+          built, "catalog built", "missing seats")
+    check("cold merged_catalog() calls NONE of panels()/merged_panels()/"
+          "group_tokens()/providers.*",
+          called == [], "no watched call", f"called: {called}")
 
 
 def test_no_dotkept_staged_filename():
@@ -7924,10 +8061,12 @@ def main():
     test_panel_availability_consistency()
     test_review_prep()
     test_debate_panel_resolver()
+    test_debate_oracle_removed()
     test_panel_catalog()
     test_catalog_cache_reset()
     test_seat_roster_drift_guard()
     test_catalog_registry_disjoint()
+    test_catalog_call_graph_invariant()
     test_no_dotkept_staged_filename()
     test_persist_seat_doc_sync()
     test_roster_doc_sync()

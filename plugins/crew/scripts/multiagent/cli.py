@@ -1468,9 +1468,37 @@ def cmd_seats(args: argparse.Namespace) -> int:
             resolved = _resolve_debate_seats(args.panel, args.seats)
         except _DebateSeatError as e:
             return e.code
+        if args.json:
+            # Split the ONE resolved debate panel into the same three fields
+            # review-prep emits, so debate.md consumes an identical shape and never
+            # classifies seat names itself. The debate resolver already applied
+            # precedence + availability + expansion, so this only partitions: a
+            # registry name is a subprocess seat, a catalog Task seat is a task seat
+            # (the union is exhaustive — _resolve_debate_seats validates against it).
+            known = set(known_seat_names())
+            task_names = set(seats.task_seats())
+            subprocess_seats = [s for s in resolved if s in known]
+            task_seats = [s for s in resolved if s in task_names]
+            task_seat_models = {n: _task_seat_model(n) for n in task_seats}
+            payload = {
+                "subprocess_seats": subprocess_seats,
+                "task_seats": task_seats,
+                "task_seat_models": task_seat_models,
+            }
+            print(json.dumps(payload, ensure_ascii=False))
+            return 0
         for s in resolved:
             print(s)
         return 0
+    if args.json:
+        # --json only shapes the --debate split; without --debate the subprocess
+        # panel is a plain one-per-line list. Fail loud rather than silently ignore.
+        print(
+            "error: --json is only valid with --debate; without --debate, "
+            "`seats` prints one seat per line.",
+            file=sys.stderr,
+        )
+        return 2
     if args.panel is not None:
         # --panel only steers the DEBATE panel resolver; without --debate it would
         # be silently ignored (the default path resolves the subprocess panel from
@@ -2959,6 +2987,12 @@ def build_parser() -> argparse.ArgumentParser:
              "config.debate_panel() ([debate].panel) > config.default_panel() > "
              "built-in 'full'. The engine hook that lets debate.md honor "
              ".crew/config.toml when no --panel/--seats is named.",
+    )
+    seats_p.add_argument(
+        "--json", action="store_true",
+        help="with --debate: emit {subprocess_seats, task_seats, task_seat_models} "
+             "as JSON (mirrors review-prep's split) instead of one seat per line, so "
+             "debate.md reads the roster split without classifying seat names itself.",
     )
     seats_p.set_defaults(func=cmd_seats)
 
