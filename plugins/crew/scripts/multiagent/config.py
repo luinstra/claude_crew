@@ -341,18 +341,38 @@ def _extract_deadline_minutes(data: dict, layer: str) -> int | None:
         return None
     # Lazy import (call-time) keeps this module a pure leaf at load, and keeps the
     # policy ceiling single-sourced with the one `crew state init` enforces.
-    from models import MAX_DEADLINE_MINUTES
+    from models import MAX_DEADLINE_MINUTES, NO_DEADLINE
 
-    # bool is an int subclass: reject it explicitly. The bounds are the same ones
-    # `--deadline-minutes` is policed by, because a config file is no more
-    # trustworthy than the flag: a non-positive value would read as "no deadline"
-    # in the Stop hook, deleting the only cost ceiling in the system.
+    # bool is an int subclass: reject it explicitly. The bounds are the same
+    # ones `--deadline-minutes` is policed by. Exactly 0 is the deliberate
+    # clock-off opt-out (the stop-fires cap keeps bounding the loop), honored
+    # from the GLOBAL layer only: ~/.crew-config.toml lives outside the project
+    # and takes an out-of-band edit, while the per-repo .crew/config.toml sits
+    # in the tree the bounded agent writes to routinely, which would make the
+    # opt-out one Write away from the thing it bounds.
+    #
+    # This closes the ROUTINE channels (templated CLI, in-tree config), which is
+    # the whole promise: like every bound here, it is a convention, not a
+    # sandbox. A caller that fakes HOME or hand-writes the state marker has left
+    # the sanctioned paths as deliberately and visibly as one that edits the
+    # real global file, and no config-layer logic can attest filesystem
+    # identity.
+    if (not isinstance(val, bool) and isinstance(val, int)
+            and val == NO_DEADLINE):
+        if layer == "global":
+            return NO_DEADLINE
+        _warn_once(
+            f"deadline_minutes:{layer}",
+            f"[tuning].deadline_minutes = 0 (no deadline) is honored only in "
+            f"the global ~/.crew-config.toml; ignoring it here",
+        )
+        return None
     if (isinstance(val, bool) or not isinstance(val, int)
             or val <= 0 or val > MAX_DEADLINE_MINUTES):
         _warn_once(
             f"deadline_minutes:{layer}",
             f"[tuning].deadline_minutes must be an integer between 1 and "
-            f"{MAX_DEADLINE_MINUTES}; ignoring {val!r}",
+            f"{MAX_DEADLINE_MINUTES} (or 0, global file only); ignoring {val!r}",
         )
         return None
     return val

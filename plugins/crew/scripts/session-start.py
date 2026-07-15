@@ -39,6 +39,7 @@ from models import (
     read_hook_input,
     effective_count,
     effective_deadline,
+    NO_DEADLINE,
     elapsed_minutes,
     get_file_age_days,
     count_incomplete_todos,
@@ -424,11 +425,14 @@ def loop_budget_line(data: dict) -> str:
     """
     minutes = elapsed_minutes(data.get("started_at", ""))
     elapsed = f"{minutes:.0f}" if minutes is not None else "?"
-    deadline = effective_deadline(data.get("deadline_minutes", DEFAULT_DEADLINE_MINUTES))
+    deadline = effective_deadline(
+        data.get("deadline_minutes", DEFAULT_DEADLINE_MINUTES),
+        opted_out=data.get("no_deadline") is True)
+    limit = "none" if deadline == NO_DEADLINE else str(deadline)
     fires = effective_count(data.get("stop_fires", 0), 0)
     max_fires = effective_count(
         data.get("max_stop_fires", DEFAULT_MAX_STOP_FIRES), DEFAULT_MAX_STOP_FIRES)
-    return f"Budget: stop fires {fires}/{max_fires} · elapsed {elapsed}/{deadline} min"
+    return f"Budget: stop fires {fires}/{max_fires} · elapsed {elapsed}/{limit} min"
 
 
 def build_session_status(

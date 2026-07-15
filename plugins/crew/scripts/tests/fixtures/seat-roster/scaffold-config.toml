@@ -55,8 +55,10 @@ seat = "codex"
 
 # [tuning].timeout — per-seat wall-clock default (positive integer seconds).
 # [tuning].deadline_minutes: the persistence loops' wall clock, read by
-#   `crew state init` (1-240; an out-of-range value is
-#   dropped with a warning, never silently clamped).
+#   `crew state init` (1-1440; 0 = no deadline, honored from the
+#   global ~/.crew-config.toml only, and the stop-fires cap still bounds
+#   the loop. An out-of-range value is dropped with a warning, never
+#   silently clamped).
 # [tuning]
 # timeout = 600
-# deadline_minutes = 120
+# deadline_minutes = 240

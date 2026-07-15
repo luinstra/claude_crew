@@ -24,14 +24,19 @@ After running both commands, report the status in this format:
 
 A loop has no round counter: the only bounds that can end it are `stop_fires` and
 the wall clock, so report those as the budget (compute elapsed from `started_at`).
+The wall clock can be OFF: when the state carries BOTH `deadline_minutes: 0` AND
+`no_deadline: true` (the operator's global-config opt-out), report the deadline
+as "none (clock off, stop-fires cap still applies)", never as elapsed-vs-0. A
+lone `deadline_minutes: 0` without the marker is a corruption-shaped value the
+hook treats as the bounded default, so report the default in that case.
 
 **Build Loop:**
 - Status: [Active/Inactive]
-- If active: `stop_fires`/`max_stop_fires`, elapsed vs `deadline_minutes`, Task: "..."
+- If active: `stop_fires`/`max_stop_fires`, elapsed vs `deadline_minutes` (or "none", per the marker rule above), Task: "..."
 
 **Measure-Twice Loop:**
 - Status: [Active/Inactive]
-- If active: `stop_fires`/`max_stop_fires`, elapsed vs `deadline_minutes`, Task: "...", Plan: "...", last verdict
+- If active: `stop_fires`/`max_stop_fires`, elapsed vs `deadline_minutes` (or "none", per the marker rule above), Task: "...", Plan: "...", last verdict
 
 **Context Snapshot:**
 - Check if `.crew/context-snapshot.md` exists

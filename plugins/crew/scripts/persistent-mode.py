@@ -42,6 +42,7 @@ from models import (
     effective_count,
     effective_deadline,
     effective_started_at,
+    NO_DEADLINE,
     DEFAULT_MAX_STOP_FIRES,
     DEFAULT_MAX_PARKED_FIRES,
     FORCE_EXIT_KEY,
@@ -160,7 +161,13 @@ def _termination_reason(state):
             f"livelock circuit breaker: {state.stop_fires} Stop fires without "
             f"the loop finishing (limit {state.max_stop_fires})"
         )
-    deadline = effective_deadline(state.deadline_minutes)
+    deadline = effective_deadline(
+        state.deadline_minutes,
+        opted_out=getattr(state, "no_deadline", False) is True)
+    if deadline == NO_DEADLINE:
+        # The operator opted the clock off at init (both marker halves present);
+        # the stop-fires cap remains the bound.
+        return None
     minutes = elapsed_minutes(state.started_at)
     if minutes is not None and minutes >= deadline:
         return (
@@ -173,8 +180,11 @@ def _termination_reason(state):
 def _elapsed_note(state) -> str:
     """One-line budget line for the nudge, so a runaway loop is VISIBLE."""
     minutes = elapsed_minutes(state.started_at)
-    deadline = effective_deadline(state.deadline_minutes)
-    clock = f"{minutes:.0f}/{deadline} min" if minutes is not None else "unknown"
+    deadline = effective_deadline(
+        state.deadline_minutes,
+        opted_out=getattr(state, "no_deadline", False) is True)
+    limit = "none" if deadline == NO_DEADLINE else str(deadline)
+    clock = f"{minutes:.0f}/{limit} min" if minutes is not None else "unknown"
     return f"Elapsed: {clock} · stop fires: {state.stop_fires}/{state.max_stop_fires}"
 
 

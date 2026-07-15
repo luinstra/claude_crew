@@ -939,14 +939,20 @@ def main():
             # budget (the two bounds that can end the loop), never a round
             # counter: nothing writes one, so it could only report a frozen lie.
             stdout, stderr, code = run_crew_state(["show", "bl"], test_path)
+            # The expected bound comes off the state file init just wrote, so
+            # this stays green if the built-in default moves again.
+            written_deadline = json.loads(
+                (crew_dir / "build-state.json").read_text()).get("deadline_minutes")
             if (code == 0 and stdout.startswith("loop=bl") and "active=true" in stdout
                     and "fires=0/150" in stdout and "elapsed=" in stdout
-                    and "/120min" in stdout and 'task=' in stdout
+                    and f"/{written_deadline}min" in stdout
+                    and 'task=' in stdout
                     and "iter=" not in stdout):
                 log_pass("show bl - compact summary reports fires/elapsed budget, no round counter")
             else:
                 log_fail("show bl - compact summary reports fires/elapsed budget, no round counter",
-                         "loop=bl active=true fires=0/150 elapsed=N/120min task=…, no iter=", stdout)
+                         f"loop=bl active=true fires=0/150 elapsed=N/{written_deadline}min task=…, no iter=",
+                         stdout)
 
             # Compact show: exactly one line
             if code == 0 and len(stdout.strip().splitlines()) == 1:
@@ -1021,13 +1027,14 @@ def main():
             else:
                 log_fail("init bl without --prompt - exits with error", "exit 1 with error message", f"exit {code}, stderr: {stderr}")
 
-            # --deadline-minutes is the ONLY cost ceiling and `init` is invoked BY
-            # the agent, so an out-of-policy bound is rejected at parse time with
-            # NO state file created. A negative value used to survive (truthy),
-            # land as a negative, and read as "no deadline" in the Stop hook.
+            # --deadline-minutes is a cost ceiling and `init` is invoked BY the
+            # agent, so an out-of-policy bound is rejected at parse time with NO
+            # state file created. 0 is in this list DELIBERATELY: the flag is
+            # the agent's channel, and a bound the bounded thing can delete is
+            # not a bound. The no-deadline opt-out is config-only (tested below).
             for loop_arg, text_flag, text in (("bl", "--prompt", "bounded"),
                                               ("mt", "--task", "bounded")):
-                for bad in ("-1", "0", "241"):
+                for bad in ("-1", "0", "1441"):
                     for f in crew_dir.glob("*-state*.json"):
                         f.unlink()
                     extra = [] if loop_arg == "bl" else ["--plan-file", ".crew/plans/b.md"]
@@ -1047,15 +1054,64 @@ def main():
                     f.unlink()
                 extra = [] if loop_arg == "bl" else ["--plan-file", ".crew/plans/b.md"]
                 _, stderr, code = run_crew_state(
-                    ["init", loop_arg, text_flag, text, "--deadline-minutes", "240"] + extra,
+                    ["init", loop_arg, text_flag, text, "--deadline-minutes", "1440"] + extra,
                     test_path)
                 stdout_dl, _, _ = run_crew_state(["show", loop_arg, "--verbose"], test_path)
-                if code == 0 and '"deadline_minutes": 240' in stdout_dl:
-                    log_pass(f"init {loop_arg} --deadline-minutes 240 - accepted at the policy maximum")
+                if code == 0 and '"deadline_minutes": 1440' in stdout_dl:
+                    log_pass(f"init {loop_arg} --deadline-minutes 1440 - accepted at the policy maximum")
                 else:
-                    log_fail(f"init {loop_arg} --deadline-minutes 240 - accepted at the policy maximum",
-                             "exit 0, deadline_minutes=240",
+                    log_fail(f"init {loop_arg} --deadline-minutes 1440 - accepted at the policy maximum",
+                             "exit 0, deadline_minutes=1440",
                              f"exit {code}, stderr={stderr[:120]!r}, state={stdout_dl[:160]}")
+
+                # The no-deadline opt-out arrives ONLY via the GLOBAL config
+                # (the per-repo file sits in the tree the agent writes to): a
+                # global [tuning].deadline_minutes = 0 init writes BOTH marker
+                # halves, and `show` reports the clock as off instead of a
+                # bound that will never trip.
+                for f in crew_dir.glob("*-state*.json"):
+                    f.unlink()
+                global_cfg = Path(_NEUTRAL_HOME) / ".crew-config.toml"
+                global_cfg.write_text("[tuning]\ndeadline_minutes = 0\n")
+                try:
+                    _, stderr, code = run_crew_state(
+                        ["init", loop_arg, text_flag, text] + extra, test_path)
+                    stdout_dl, _, _ = run_crew_state(["show", loop_arg, "--verbose"], test_path)
+                    stdout_line, _, _ = run_crew_state(["show", loop_arg], test_path)
+                finally:
+                    global_cfg.unlink()
+                if (code == 0 and '"deadline_minutes": 0' in stdout_dl
+                        and '"no_deadline": true' in stdout_dl
+                        and "elapsed=" in stdout_line and "/none" in stdout_line):
+                    log_pass(f"init {loop_arg} GLOBAL config deadline 0 - writes BOTH marker halves, show reports none")
+                else:
+                    log_fail(f"init {loop_arg} GLOBAL config deadline 0 - writes BOTH marker halves, show reports none",
+                             "exit 0, deadline_minutes=0 + no_deadline=true, show line has /none",
+                             f"exit {code}, stderr={stderr[:120]!r}, line={stdout_line[:120]!r}")
+
+                # A PER-REPO 0 is refused with a warn and the bound stays: the
+                # repo config is agent-writable, so honoring 0 there would put
+                # the opt-out one Write away from the loop it bounds.
+                for f in crew_dir.glob("*-state*.json"):
+                    f.unlink()
+                repo_cfg = crew_dir / "config.toml"
+                repo_cfg.write_text("[tuning]\ndeadline_minutes = 0\n")
+                try:
+                    _, stderr, code = run_crew_state(
+                        ["init", loop_arg, text_flag, text] + extra, test_path)
+                    stdout_dl, _, _ = run_crew_state(["show", loop_arg, "--verbose"], test_path)
+                finally:
+                    repo_cfg.unlink()
+                written = json.loads(
+                    (crew_dir / f"{'build-state' if loop_arg == 'bl' else 'measure-twice-state'}.json")
+                    .read_text()) if code == 0 else {}
+                if (code == 0 and written.get("deadline_minutes", 0) > 0
+                        and written.get("no_deadline") is False):
+                    log_pass(f"init {loop_arg} PER-REPO config deadline 0 - refused, bound kept")
+                else:
+                    log_fail(f"init {loop_arg} PER-REPO config deadline 0 - refused, bound kept",
+                             "a positive deadline_minutes and no_deadline=false",
+                             f"exit {code}, state={stdout_dl[:160]!r}")
 
             for f in crew_dir.glob("*-state*.json"):
                 f.unlink()
@@ -2015,6 +2071,26 @@ def main():
             ss_spec.loader.exec_module(ss_module)
             cleanup_stale_debate_dirs = ss_module.cleanup_stale_debate_dirs
 
+            # The restore banner is a third deadline consumer: the no-deadline
+            # opt-out must read as the clock being OFF, never as "elapsed X/0"
+            # (an exhausted limit), and bounded values render unchanged.
+            line_off = ss_module.loop_budget_line(
+                {"started_at": "", "deadline_minutes": 0, "no_deadline": True,
+                 "stop_fires": 3})
+            line_lone0 = ss_module.loop_budget_line(
+                {"started_at": "", "deadline_minutes": 0, "stop_fires": 3})
+            line_on = ss_module.loop_budget_line(
+                {"started_at": "", "deadline_minutes": 90, "stop_fires": 3})
+            default_dl = str(ss_module.DEFAULT_DEADLINE_MINUTES)
+            if ("/none min" in line_off and "/0 min" not in line_off
+                    and f"/{default_dl} min" in line_lone0
+                    and "/90 min" in line_on):
+                log_pass("loop_budget_line: marker renders none, lone 0 stays bounded")
+            else:
+                log_fail("loop_budget_line: marker renders none, lone 0 stays bounded",
+                         f"'/none min' with marker, '/{default_dl} min' for lone 0, '/90 min' for 90",
+                         f"off={line_off!r} lone0={line_lone0!r} on={line_on!r}")
+
             debate_crew_dir = test_path / "debate-test" / ".crew"
             debates_dir = debate_crew_dir / "debates"
             debates_dir.mkdir(parents=True, exist_ok=True)
@@ -2549,6 +2625,46 @@ def main():
                     log_fail(f"{loop}: the Stop after a stop_fires force-exit ALLOWS (never wedges)",
                              "{}", out_after_trip[:200])
 
+                # --- no-deadline opt-out: an ancient clock NEVER trips when
+                # BOTH marker halves init writes are present (deadline_minutes
+                # exactly 0 AND no_deadline true; the stop-fires cap remains the
+                # bound), and the nudge reports the clock as off. ---
+                _clear_state_files()
+                ancient_start = (_dt.now(_tz.utc) - _td(minutes=100000)).isoformat()
+                state_path = _write_loop_state(
+                    loop, started_at=ancient_start, deadline_minutes=0,
+                    no_deadline=True, stop_fires=0)
+                out_nodl = json.loads(run_script(persistent_mode, stop_payload))
+                after_nodl = _read_state_json(state_path)
+                nodl_reason = out_nodl.get("reason", "")
+                if (out_nodl.get("decision") == "block"
+                        and "deadline reached" not in nodl_reason
+                        and "/none min" in nodl_reason
+                        and after_nodl.get("active") is True):
+                    log_pass(f"{loop}: deadline_minutes=0 never trips the clock (nudge shows /none)")
+                else:
+                    log_fail(f"{loop}: deadline_minutes=0 never trips the clock (nudge shows /none)",
+                             "block nudge, no deadline reason, '/none min' in nudge, active stays True",
+                             f"decision={out_nodl.get('decision')}, active={after_nodl.get('active')}, "
+                             f"reason={nodl_reason[:120]!r}")
+
+                # ...while a corruption-shaped value (negative) still reads as
+                # the BOUNDED default, never as the opt-out.
+                _clear_state_files()
+                state_path = _write_loop_state(
+                    loop, started_at=ancient_start, deadline_minutes=-5, stop_fires=0)
+                out_neg = json.loads(run_script(persistent_mode, stop_payload))
+                after_neg = _read_state_json(state_path)
+                if (out_neg.get("decision") == "block"
+                        and "deadline reached" in out_neg.get("reason", "")
+                        and after_neg.get("active") is False):
+                    log_pass(f"{loop}: a NEGATIVE deadline still reads as bounded (default), not as opt-out")
+                else:
+                    log_fail(f"{loop}: a NEGATIVE deadline still reads as bounded (default), not as opt-out",
+                             "deadline force-exit at the default bound",
+                             f"decision={out_neg.get('decision')}, active={after_neg.get('active')}, "
+                             f"reason={out_neg.get('reason', '')[:120]!r}")
+
                 # --- wall-clock deadline: force-exit, then RELEASE ---
                 _clear_state_files()
                 stale_start = (_dt.now(_tz.utc) - _td(minutes=90)).isoformat()
@@ -2584,11 +2700,16 @@ def main():
                     log_fail(f"{loop}: the Stop after a deadline force-exit ALLOWS (never wedges)",
                              "{}", out_after_deadline[:200])
 
-                # --- a hand-edited deadline cannot DELETE the ceiling: a
-                # non-positive or non-int value on disk must read as the default
-                # (DEFAULT_DEADLINE_MINUTES), not as "unbounded". The elapsed
-                # clock below is set past that default so a deleted ceiling would
-                # show up as a MISSING force-exit. ---
+                # --- a hand-edited deadline cannot DELETE the ceiling by
+                # ACCIDENT: a negative, non-int, or LONE-ZERO value on disk must
+                # read as the default (DEFAULT_DEADLINE_MINUTES), never as
+                # "unbounded". 0 is in this list deliberately: without the
+                # paired no_deadline marker only init writes, it is
+                # corruption-shaped (and under the pre-opt-out semantics a 0 on
+                # disk was ALWAYS bounded, so honoring a lone 0 would flip the
+                # meaning of pre-upgrade bytes). The elapsed clock below is set
+                # past the default so a deleted ceiling would show up as a
+                # MISSING force-exit. ---
                 default_deadline = models_module.DEFAULT_DEADLINE_MINUTES
                 for bad_deadline in (0, -1, "soon", True, None):
                     _clear_state_files()
@@ -3084,8 +3205,10 @@ def main():
                  "per-repo [tuning].deadline_minutes is the init default"),
                 ("[tuning]\ndeadline_minutes = 90\n", ["--deadline-minutes", "30"], 30,
                  "an explicit --deadline-minutes beats the config"),
-                ("[tuning]\ndeadline_minutes = 999\n", [], builtin_deadline,
+                ("[tuning]\ndeadline_minutes = 2000\n", [], builtin_deadline,
                  "an out-of-policy config deadline is dropped for the builtin"),
+                ("[tuning]\ndeadline_minutes = 0\n", [], builtin_deadline,
+                 "a PER-REPO no-deadline 0 is refused for the builtin (global-only opt-out)"),
                 ("[tuning]\ndeadline_minutes = \"soon\"\n", [], builtin_deadline,
                  "a non-int config deadline is dropped for the builtin"),
             ):

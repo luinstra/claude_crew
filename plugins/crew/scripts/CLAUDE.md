@@ -318,9 +318,14 @@ Key contracts (do NOT regress):
   OR declares a brand-new first-class seat by giving `provider` + `model`, plus
   optional `opt_in` to keep it out of the built-in panels), `[tuning].timeout`,
   `[tuning].deadline_minutes` (the persistence loops' wall clock, read by `crew
-  state init` when `--deadline-minutes` is not passed; validated 1..240, so a
-  non-int, a non-positive value, or one past the ceiling is dropped with a
-  one-time warn, never clamped silently), and the global-tier `[panels]` roster.
+  state init` when `--deadline-minutes` is not passed; validated 1..1440, plus
+  exactly 0 as the deliberate no-deadline opt-out for remote or
+  intermittently-attended sessions, honored from the GLOBAL file ONLY: the
+  per-repo file sits in the tree the bounded agent writes to, so a repo 0 is
+  dropped with a warn and cannot mask a global bound. The stop-fires cap still
+  bounds an unclocked loop; a non-int, a negative value, or one past the
+  ceiling is dropped with a one-time warn, never clamped silently), and the
+  global-tier `[panels]` roster.
   Resolution is PER-KEY (per-seat-per-key
   for `[seats.<name>]`): CLI flag > per-repo > global > builtin. The old tuning
   env surface is RETIRED — consulted at no call site. `[panels]` redefines a
@@ -489,8 +494,10 @@ crew state init mt --task "Add user profiles" --auto-plan --session-id abc123
 # successful init (the session-start orphan-cleanup patterns do NOT cover these task files).
 crew state init bl -f .crew/task-bl-abc123.txt --session-id abc123
 
-# The loop's wall clock: --deadline-minutes (1..240) > [tuning].deadline_minutes
-# (per-repo, then global) > the built-in 120. `init` REFUSES (exit 1) when the
+# The loop's wall clock: --deadline-minutes (1..1440; the flag REJECTS 0, the
+# agent invokes init) > [tuning].deadline_minutes (per-repo, then global; 0 here
+# is the operator's no-deadline opt-out) > the built-in 240. With the clock off
+# the stop-fires cap still bounds the loop. `init` REFUSES (exit 1) when the
 # state file it would replace records a force-exit (the Stop hook's bound tripped),
 # because a fresh loop zeroes stop_fires and restarts the clock: that IS the way
 # around a safety limit, so it takes an explicit --force.
@@ -617,7 +624,8 @@ class BuildState:
     stop_fires: int = 0           # hook-owned livelock circuit breaker
     max_stop_fires: int = 150
     started_at: str = ""          # hook-owned wall clock (ISO, UTC)
-    deadline_minutes: int = 120   # 1..MAX_DEADLINE_MINUTES (240), validated at init
+    deadline_minutes: int = 240   # 1..MAX_DEADLINE_MINUTES (1440) at init; 0 only with no_deadline
+    no_deadline: bool = False     # 2nd half of the config-only opt-out marker; only init writes it
     parked_fires: int = 0         # hook-owned CONSECUTIVE parked-Stop counter
     max_parked_fires: int = 20
 
@@ -643,7 +651,8 @@ class MeasureTwiceState:
     stop_fires: int = 0           # hook-owned livelock circuit breaker
     max_stop_fires: int = 150
     started_at: str = ""          # hook-owned wall clock (ISO, UTC)
-    deadline_minutes: int = 120   # 1..MAX_DEADLINE_MINUTES (240), validated at init
+    deadline_minutes: int = 240   # 1..MAX_DEADLINE_MINUTES (1440) at init; 0 only with no_deadline
+    no_deadline: bool = False     # 2nd half of the config-only opt-out marker; only init writes it
     parked_fires: int = 0         # hook-owned CONSECUTIVE parked-Stop counter
     max_parked_fires: int = 20
 
@@ -666,7 +675,9 @@ rules are load-bearing; each one is a bug that already happened.
    closed.** `crew state set` writes ONLY `AGENT_SETTABLE` (exit 2 for anything
    else), it writes that ONE key field-level so an allowlisted write can't carry
    back a stale snapshot of the counters, `--deadline-minutes` is validated to
-   1..240 at `init`, and `init` refuses to start a fresh loop over a force-exited
+   1..1440 at `init` (the no-deadline opt-out is config-only, the flag is
+   agent-invoked), and `init`
+   refuses to start a fresh loop over a force-exited
    one without `--force`. A safety limit the agent can rewrite is not a safety
    limit: a live loop, cornered by a cap it kept hitting merely for WAITING, reset
    its own counter 30 times and made the force-exit unreachable. `active` is
@@ -720,7 +731,9 @@ fires and no bound (deadline included) is ever evaluated. That case is bounded b
 `max_parked_fires` once the session takes turns again, and by the session-start
 orphan sweep (an active state file is force-deleted after 7 days), NOT by the
 deadline. The deadline is an absolute ceiling on a loop that keeps *running*, not
-on one that is asleep.
+on one that is asleep, and only while the clock is ON: the global-config
+no-deadline opt-out turns it off entirely, leaving the stop-fires cap as the
+sole running-loop bound.
 
 Deliberately NOT added: a stall timer. A single panel seat legitimately takes
 minutes, so a stall timer risks killing healthy work, and any late-landing seat

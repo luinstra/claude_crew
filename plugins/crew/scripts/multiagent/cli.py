@@ -2371,8 +2371,10 @@ def _render_config_template(
 
     L.append("# [tuning].timeout — per-seat wall-clock default (positive integer seconds).")
     L.append("# [tuning].deadline_minutes: the persistence loops' wall clock, read by")
-    L.append(f"#   `crew state init` (1-{MAX_DEADLINE_MINUTES}; an out-of-range value is")
-    L.append("#   dropped with a warning, never silently clamped).")
+    L.append(f"#   `crew state init` (1-{MAX_DEADLINE_MINUTES}; 0 = no deadline, honored from the")
+    L.append("#   global ~/.crew-config.toml only, and the stop-fires cap still bounds")
+    L.append("#   the loop. An out-of-range value is dropped with a warning, never")
+    L.append("#   silently clamped).")
     L.append("# [tuning]")
     L.append("# timeout = 600")
     L.append(f"# deadline_minutes = {DEFAULT_DEADLINE_MINUTES}")

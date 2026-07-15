@@ -276,15 +276,28 @@ DEFAULT_MAX_STOP_FIRES = 150
 # The absolute wall clock, and the only cost ceiling in the system: every other
 # bound is denominated in a unit the agent controls. Deliberately NOT a stall
 # timer: a single seat legitimately takes minutes, and any late seat would reset
-# a stall clock forever. Sized for the real job it has to survive: a multi-round
-# build with a 7-seat panel, where one round alone costs many minutes of seat
-# wait. Overridable per repo/user via `[tuning].deadline_minutes`.
-DEFAULT_DEADLINE_MINUTES = 120
+# a stall clock forever. Sized for a remote or intermittently-attended operator:
+# a multi-round build with a 7-seat panel plus an hour-plus approval latency
+# must fit inside one window. Overridable per repo/user via
+# `[tuning].deadline_minutes`.
+DEFAULT_DEADLINE_MINUTES = 240
 
 # The policy ceiling on that wall clock. `init` is invoked BY the agent, so the
 # deadline it may request is bounded on BOTH ends: a bound the bounded thing can
 # widen (or delete with a negative) is not a bound.
-MAX_DEADLINE_MINUTES = 240
+MAX_DEADLINE_MINUTES = 1440
+
+# The deliberate no-deadline opt-out, accepted ONLY from
+# [tuning].deadline_minutes at init time. Config is the operator's channel; the
+# CLI flag REJECTS 0 because init is invoked by the agent (the loop commands
+# template that call), and a bound the bounded thing can delete is not a bound.
+# On disk the opt-out
+# is a TWO-field marker that only init writes: deadline_minutes == 0 AND
+# no_deadline == true. A lone 0 (a hand-edit, bitrot, or a pre-upgrade file,
+# where 0 always read as the bounded default) still reads as the bounded
+# default, so no accident and no upgrade can delete the ceiling; the stop-fires
+# cap keeps bounding the loop even with the clock off.
+NO_DEADLINE = 0
 
 # Consecutive parked Stops (see StopInput.is_parked) allowed before the hook
 # nudges anyway. Generous on purpose: a genuine seat wait costs one or two parked
@@ -319,15 +332,24 @@ def effective_count(value, default: int) -> int:
     return value
 
 
-def effective_deadline(value) -> int:
+def effective_deadline(value, opted_out=False) -> int:
     """The wall clock actually enforced, in minutes (same threat model as above).
+    Returns NO_DEADLINE (0) for the deliberate opt-out; callers treat 0 as
+    "clock off" and rely on the stop-fires cap.
 
-    A non-positive or non-integer value must NOT read as "unbounded" (that would
-    delete the only cost ceiling in the system), and a too-large one is clamped to
-    the policy ceiling `crew state init` already enforces. Single-sourced here so
-    the Stop hook, `crew state show`, and the SessionStart banner can never report
-    a different bound than the one that ends the loop.
+    The opt-out requires BOTH halves of the marker init writes: value exactly 0
+    AND the state's no_deadline flag (passed as ``opted_out``). A lone 0 reads
+    as the bounded default, exactly as it did before the opt-out existed: under
+    the old semantics 0 was corruption-shaped and bounded, so honoring it alone
+    would let a pre-upgrade or hand-edited file silently delete the ceiling on
+    upgrade. A negative, non-integer, or too-large value stays bounded/clamped
+    as before. Single-sourced here so the Stop hook, `crew state show`, and the
+    SessionStart banner can never report a different bound than the one that
+    ends the loop.
     """
+    if (opted_out is True and value == NO_DEADLINE
+            and isinstance(value, int) and not isinstance(value, bool)):
+        return NO_DEADLINE
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return DEFAULT_DEADLINE_MINUTES
     return min(value, MAX_DEADLINE_MINUTES)
@@ -561,6 +583,9 @@ class BuildState:
     max_stop_fires: int = DEFAULT_MAX_STOP_FIRES
     started_at: str = ""
     deadline_minutes: int = DEFAULT_DEADLINE_MINUTES
+    # Second half of the no-deadline marker: honored only together with
+    # deadline_minutes == 0, written only by init (see NO_DEADLINE).
+    no_deadline: bool = False
     parked_fires: int = 0
     max_parked_fires: int = DEFAULT_MAX_PARKED_FIRES
 
@@ -592,6 +617,7 @@ class BuildState:
             max_stop_fires=data.get("max_stop_fires", DEFAULT_MAX_STOP_FIRES),
             started_at=data.get("started_at", ""),
             deadline_minutes=data.get("deadline_minutes", DEFAULT_DEADLINE_MINUTES),
+            no_deadline=data.get("no_deadline", False) is True,
             parked_fires=data.get("parked_fires", 0),
             max_parked_fires=data.get("max_parked_fires", DEFAULT_MAX_PARKED_FIRES),
         ), LOAD_OK
@@ -698,6 +724,8 @@ class MeasureTwiceState:
     max_stop_fires: int = DEFAULT_MAX_STOP_FIRES
     started_at: str = ""
     deadline_minutes: int = DEFAULT_DEADLINE_MINUTES
+    # Second half of the no-deadline marker (see BuildState / NO_DEADLINE).
+    no_deadline: bool = False
     parked_fires: int = 0
     max_parked_fires: int = DEFAULT_MAX_PARKED_FIRES
 
@@ -726,6 +754,7 @@ class MeasureTwiceState:
             max_stop_fires=data.get("max_stop_fires", DEFAULT_MAX_STOP_FIRES),
             started_at=data.get("started_at", ""),
             deadline_minutes=data.get("deadline_minutes", DEFAULT_DEADLINE_MINUTES),
+            no_deadline=data.get("no_deadline", False) is True,
             parked_fires=data.get("parked_fires", 0),
             max_parked_fires=data.get("max_parked_fires", DEFAULT_MAX_PARKED_FIRES),
         ), LOAD_OK

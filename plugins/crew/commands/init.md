@@ -147,7 +147,7 @@ command -v diff && diff -u <target> <target>.new
 
 Point the user at the knobs: the commented config file they just got is the reference —
 per-seat tuning (`model`, codex `reasoning_effort`, agy `print_timeout`, `[tuning].timeout`,
-`[tuning].deadline_minutes`, the persistence loops' wall clock, 1-240)
+`[tuning].deadline_minutes`, the persistence loops' wall clock, 1-1440, or 0 for no deadline in the global file only)
 and `[panels]` rosters are documented inline. For the project
 operating-instructions doc (a different file), mention `/crew:crew-config`.
 

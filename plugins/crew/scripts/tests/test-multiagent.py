@@ -593,7 +593,8 @@ def test_resolve_timeout():
 
 
 def test_deadline_minutes():
-    """[tuning].deadline_minutes: the persistence loops' wall clock.
+    """[tuning].deadline_minutes: the persistence loops' wall clock. Exactly 0 is
+    the deliberate no-deadline opt-out; corruption-shaped values stay bounded.
 
     Same two-layer precedence and same never-crash posture as every other key.
     Validated against the SAME ceiling `crew state init` polices the flag with: a
@@ -624,11 +625,37 @@ def test_deadline_minutes():
         check(f"[tuning].deadline_minutes at the policy ceiling ({MAX_DEADLINE_MINUTES}) is accepted",
               config.deadline_minutes() == MAX_DEADLINE_MINUTES,
               str(MAX_DEADLINE_MINUTES), str(config.deadline_minutes()))
-    # Every out-of-policy shape is DROPPED (None -> builtin), never clamped, and
-    # never raises: a bad value must not delete the only cost ceiling in the loop.
+    # Exactly 0 is the deliberate no-deadline opt-out, honored from the GLOBAL
+    # file only: the per-repo config sits in the tree the bounded agent writes
+    # to, so a repo 0 is refused with a warn and the bound stays.
+    with crew_config(glob="[tuning]\ndeadline_minutes = 0\n"):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            val = config.deadline_minutes()
+        check("GLOBAL [tuning].deadline_minutes 0 -> the no-deadline opt-out, no warn",
+              val == 0 and "deadline_minutes" not in buf.getvalue(),
+              "0, no warn", f"val={val!r} stderr={buf.getvalue()[:120]!r}")
+    with project_config("[tuning]\ndeadline_minutes = 0\n"):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            val = config.deadline_minutes()
+        check("PER-REPO [tuning].deadline_minutes 0 -> refused with warn (agent-writable layer)",
+              val is None and "global" in buf.getvalue(),
+              "None + warn naming the global file", f"val={val!r} stderr={buf.getvalue()[:120]!r}")
+    # A repo 0 must not MASK a valid global bound either: the key is dropped,
+    # so the global value still applies.
+    with crew_config(project="[tuning]\ndeadline_minutes = 0\n",
+                     glob="[tuning]\ndeadline_minutes = 90\n"):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            val = config.deadline_minutes()
+        check("repo 0 over global 90 -> the global bound survives",
+              val == 90, "90", str(val))
+    # Every corruption-shaped value is DROPPED (None -> builtin), never clamped,
+    # never read as the opt-out, and never raises: a bad value must not delete
+    # the cost ceiling by accident.
     for body, label in (
         (f"[tuning]\ndeadline_minutes = {MAX_DEADLINE_MINUTES + 1}\n", "past the ceiling"),
-        ("[tuning]\ndeadline_minutes = 0\n", "zero"),
         ("[tuning]\ndeadline_minutes = -5\n", "negative"),
         ("[tuning]\ndeadline_minutes = true\n", "bool (an int subclass)"),
         ("[tuning]\ndeadline_minutes = \"soon\"\n", "non-int"),

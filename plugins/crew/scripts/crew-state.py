@@ -21,6 +21,7 @@ from models import (
     update_state_json,
     utc_now_iso,
     DEFAULT_DEADLINE_MINUTES,
+    NO_DEADLINE,
     DEFAULT_MAX_STOP_FIRES,
     FORCE_EXIT_KEY,
     MAX_DEADLINE_MINUTES,
@@ -181,12 +182,15 @@ def _budget_summary(state) -> str:
     unparseable (a legacy file the hook has not stamped yet).
     """
     minutes = elapsed_minutes(getattr(state, "started_at", ""))
-    deadline = effective_deadline(getattr(state, "deadline_minutes", DEFAULT_DEADLINE_MINUTES))
+    deadline = effective_deadline(
+        getattr(state, "deadline_minutes", DEFAULT_DEADLINE_MINUTES),
+        opted_out=getattr(state, "no_deadline", False) is True)
+    limit = "none" if deadline == NO_DEADLINE else f"{deadline}min"
     elapsed = f"{minutes:.0f}" if minutes is not None else "?"
     fires = effective_count(getattr(state, "stop_fires", 0), 0)
     max_fires = effective_count(
         getattr(state, "max_stop_fires", DEFAULT_MAX_STOP_FIRES), DEFAULT_MAX_STOP_FIRES)
-    return f"fires={fires}/{max_fires} elapsed={elapsed}/{deadline}min"
+    return f"fires={fires}/{max_fires} elapsed={elapsed}/{limit}"
 
 
 def _compact_show(state, canonical: str) -> str:
@@ -435,10 +439,12 @@ def _resolve_deadline(args) -> int:
     """The loop's wall clock: CLI flag > per-repo > global > builtin.
 
     Same precedence as every other crew config key. The config value is already
-    validated (1..MAX_DEADLINE_MINUTES) by the getter, and the flag by argparse,
-    so nothing out of policy reaches the state file.
+    validated (0, or 1..MAX_DEADLINE_MINUTES) by the getter, and the flag by
+    argparse, so nothing out of policy reaches the state file. Compared with
+    `is not None`, never truthiness: 0 is the explicit no-deadline opt-out and
+    must win exactly like any other explicit value.
     """
-    if args.deadline_minutes:
+    if args.deadline_minutes is not None:
         return args.deadline_minutes
     configured = config.deadline_minutes()
     return configured if configured is not None else DEFAULT_DEADLINE_MINUTES
@@ -509,13 +515,15 @@ def cmd_init(args):
         if not prompt or not prompt.strip():
             print("Error: --prompt or -f required for build loop", file=sys.stderr)
             sys.exit(1)
+        deadline = _resolve_deadline(args)
         state = BuildState(
             active=True,
             prompt=prompt,
             completion_promise="DONE",
             session_id=session_id,
             started_at=utc_now_iso(),
-            deadline_minutes=_resolve_deadline(args),
+            deadline_minutes=deadline,
+            no_deadline=deadline == NO_DEADLINE,
         )
     else:  # mt
         task = _resolve_init_text(args, args.task, "--task")
@@ -536,6 +544,7 @@ def cmd_init(args):
             print("Error: --plan-file or --auto-plan required for measure-twice", file=sys.stderr)
             sys.exit(1)
 
+        deadline = _resolve_deadline(args)
         state = MeasureTwiceState(
             active=True,
             task_description=task,
@@ -543,7 +552,8 @@ def cmd_init(args):
             last_verdict="",
             session_id=session_id,
             started_at=utc_now_iso(),
-            deadline_minutes=_resolve_deadline(args),
+            deadline_minutes=deadline,
+            no_deadline=deadline == NO_DEADLINE,
         )
         # Output the plan file path so caller can use it
         if args.auto_plan:
@@ -563,11 +573,12 @@ def cmd_init(args):
 def deadline_minutes_arg(value: str) -> int:
     """argparse type for --deadline-minutes, validated BEFORE any state is written.
 
-    The wall clock is the only cost ceiling in the system and `init` is invoked
-    by the agent, so the requested bound is policed on both ends: a non-positive
-    value would read as "no deadline" in the Stop hook (deleting the ceiling),
-    and an arbitrarily large one would evade it. Out-of-range is an ERROR
-    (argparse exits 2 with no state file created), never a silent clamp.
+    The wall clock is a cost ceiling and `init` is invoked BY THE AGENT (the
+    loop commands template this call), so the flag is policed on both ends and
+    the no-deadline opt-out is NOT accepted here: a bound the bounded thing can
+    delete is not a bound. The opt-out lives only in the operator's channel,
+    `[tuning].deadline_minutes = 0` in a crew config file. Out-of-range is an
+    ERROR (argparse exits 2 with no state file created), never a silent clamp.
     """
     try:
         minutes = int(value)
@@ -575,7 +586,8 @@ def deadline_minutes_arg(value: str) -> int:
         raise argparse.ArgumentTypeError(f"expected an integer, got {value!r}")
     if minutes <= 0 or minutes > MAX_DEADLINE_MINUTES:
         raise argparse.ArgumentTypeError(
-            f"must be between 1 and {MAX_DEADLINE_MINUTES} minutes, got {minutes}"
+            f"must be between 1 and {MAX_DEADLINE_MINUTES} minutes, got "
+            f"{minutes} (no-deadline is config-only: [tuning].deadline_minutes = 0)"
         )
     return minutes
 
@@ -668,7 +680,8 @@ def main():
         "--deadline-minutes", dest="deadline_minutes", type=deadline_minutes_arg,
         help=f"Absolute wall-clock bound on the loop, 1-{MAX_DEADLINE_MINUTES} "
              f"minutes (default: [tuning].deadline_minutes, else "
-             f"{DEFAULT_DEADLINE_MINUTES})",
+             f"{DEFAULT_DEADLINE_MINUTES}; the no-deadline opt-out is "
+             f"config-only)",
     )
     p_init.add_argument(
         "--force", action="store_true", default=False,
