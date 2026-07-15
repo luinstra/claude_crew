@@ -316,7 +316,10 @@ available = false                 # not authed here -> dropped from any panel;
 
 A `[panels]` entry names known seats (registry subprocess seats, the Claude Task
 seats, or the `cursor` group token); an unknown name is dropped with a one-time
-note. An unavailable seat is filtered out of any resolved panel **after** panel
+note. Panel names and seat names share ONE namespace: a `[panels]` entry named
+after a live seat is ignored with a note (the seat wins), so `--panel` and
+`--seats` can never resolve the same word to two different rosters. Group
+tokens are exempt (redefining the built-in `cursor` preset stays legal). An unavailable seat is filtered out of any resolved panel **after** panel
 resolution and **before** the run; if a filter would empty a panel entirely, crew
 warns once and runs the unfiltered panel rather than nothing.
 

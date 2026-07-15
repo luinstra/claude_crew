@@ -97,6 +97,10 @@ Ask ONLY what detection can't infer. Keep it short:
    as opt-IN `--add-seat` only, with that note (per-seat WHY → engine-notes).
 4. **`[dispatch].seat`** — the default `/crew:dispatch` WRITE seat (default `codex`;
    must be a subprocess seat).
+5. **Declared seats** — mention (do not interview for it) that the generated config can
+   also REGISTER brand-new seats: a `[seats.<name>]` table with `provider` (codex/cursor/
+   agy/claude-code) and an explicit `model` adds a first-class seat with no code change;
+   the README's "Add a model seat" section has the recipe.
 
 ## Step 4 — Scaffold the config
 

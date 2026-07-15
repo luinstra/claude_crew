@@ -389,14 +389,28 @@ def _extract_panels(data: dict, layer: str) -> dict[str, list[str]] | None:
     from multiagent import seats
     from multiagent.providers import known_seat_names
 
-    valid = (set(known_seat_names()) | set(seats.task_seats())
-             | set(seats.group_tokens()))
+    seat_names = set(known_seat_names()) | set(seats.task_seats())
+    valid = seat_names | set(seats.group_tokens())
     out: dict[str, list[str]] = {}
     for name, members in tbl.items():
         if not isinstance(members, list):
             _warn_once(
                 f"panels:{layer}:{name}",
                 f"[panels].{name} must be a list of seat names; ignoring {members!r}",
+            )
+            continue
+        # Panel names and SEAT names are one namespace (--panel vs --seats would
+        # otherwise resolve the same word to two different rosters). The seat
+        # wins: a panel row named after a live seat is dropped. Group tokens are
+        # deliberately NOT in this check: `cursor` is both a group token and a
+        # built-in preset name, and redefining the built-in presets via [panels]
+        # is a documented capability (no seat can bear a group-token name, so no
+        # real collision is possible there).
+        if name in seat_names:
+            _warn_once(
+                f"panels:{layer}:{name}:seat-collision",
+                f"[panels].{name} collides with a seat of the same name; "
+                f"ignoring the panel (the seat wins)",
             )
             continue
         kept: list[str] = []

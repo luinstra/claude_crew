@@ -8298,14 +8298,15 @@ def test_config_declared_negative():
           "empty rejected, no 'seat' seat", f"empty_in={'' in cat} seat_in={'seat' in cat}")
 
     # --- the compatibility hinge: a provider-LESS [seats.codex] TUNES the shipped
-    #     seat (marks it declared), registers NOTHING new, and codex STAYS in full.
-    #     "declared" means "absent from the shipped catalog", NOT "came from config". ---
+    #     seat (which stays declared=False), registers NOTHING new, and codex
+    #     STAYS in full. "declared" means "absent from the shipped catalog",
+    #     NOT "came from config". ---
     no_config_n = len(load()[0])
     cat, warn, full = load(glob='[seats.codex]\nmodel = "gpt-5.6-sol"\n')
-    check("provider-less [seats.codex] tunes codex (declared), adds no seat, stays in full",
-          "codex" in cat and cat["codex"].declared is True and "codex" in full
+    check("provider-less [seats.codex] tunes codex (declared=False), adds no seat, stays in full",
+          "codex" in cat and cat["codex"].declared is False and "codex" in full
           and len(cat) == no_config_n,
-          "codex tuned + in full + no new seat",
+          "codex tuned + in full + no new seat + still shipped",
           f"declared={cat.get('codex')} n={len(cat)} vs {no_config_n}")
 
     # --- collision matrix: codex/agy are SEATS, not group tokens, so they pass
@@ -8440,6 +8441,141 @@ def test_config_split_seat_layers():
           "badsplit" not in cat and "not a known provider" in warn
           and "names no known seat" in warn,
           "absent + both warns", f"present={'badsplit' in cat} warn={warn[:120]!r}")
+
+    # A claude-code seat may ALSO be split (provider in one layer, model in the
+    # other): the alias rule must judge the MERGED spec, not the mid-fold one.
+    cat, warn = load(glob='[seats.myfable]\nprovider = "claude-code"\n',
+                     project='[seats.myfable]\nmodel = "fable"\n')
+    check("split claude-code seat: alias validated on the merged spec, registers",
+          cat.get("myfable") and cat["myfable"].model == "fable"
+          and "is not a Task-tool model alias" not in warn,
+          "myfable registers as fable", str(cat.get("myfable")))
+
+    # A declared seat needs an EXPLICIT model, judged after all layers folded: a
+    # provider-only declaration would otherwise register and fail at run time.
+    cat, warn = load(glob='[seats.nomodel]\nprovider = "cursor"\n')
+    check("declared seat with no model in ANY layer: dropped with the no-model warn",
+          "nomodel" not in cat and "needs an explicit model" in warn,
+          "absent + warn", f"present={'nomodel' in cat} warn={warn[:80]!r}")
+
+    # Panel and seat names are ONE namespace, resolved on the PANEL side (the
+    # seat wins): a [panels] row named after a live seat is dropped by config's
+    # panel parsing, so --panel and --seats can never resolve the same word to
+    # two different rosters. Assert BOTH final states.
+    def load_both(project=None, glob=None):
+        with crew_config(project=project, glob=glob):
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                cat = dict(seats.merged_catalog())
+                panels = dict(seats.merged_panels())
+            return cat, panels, buf.getvalue()
+
+    cat2, panels2, warn2 = load_both(
+        glob='[panels]\nclash = ["codex"]\n\n'
+             '[seats.clash]\nprovider = "codex"\nmodel = "gpt-5.6-sol"\n')
+    check("[panels] row named after a declared seat: seat registers, panel dropped",
+          cat2.get("clash") is not None and "clash" not in panels2
+          and "the seat wins" in warn2,
+          "seat in catalog, panel absent, warn",
+          f"seat={'clash' in cat2} panel={'clash' in panels2} warn={warn2[:80]!r}")
+    # Same rule for a SELF-referential row: seat survives, panel dropped, and
+    # the final catalog+panels state is consistent (nothing half-alive).
+    cat2, panels2, warn2 = load_both(
+        glob='[panels]\nselfref = ["selfref"]\n\n'
+             '[seats.selfref]\nprovider = "codex"\nmodel = "gpt-5.6-sol"\n')
+    check("self-referential [panels] row: seat survives, panel dropped",
+          cat2.get("selfref") is not None and "selfref" not in panels2,
+          "seat in catalog, panel absent",
+          f"seat={'selfref' in cat2} panel={'selfref' in panels2}")
+    # A [panels] row named after a SHIPPED seat is dropped the same way.
+    cat2, panels2, warn2 = load_both(glob='[panels]\ncodex = ["opus"]\n')
+    check("[panels] row named after a shipped seat: panel dropped, seat intact",
+          cat2.get("codex") is not None and "codex" not in panels2
+          and "the seat wins" in warn2,
+          "codex seat intact, panel absent",
+          f"seat={'codex' in cat2} panel={'codex' in panels2}")
+
+    # declared marks catalog ABSENCE, not config contact: tuning a shipped seat
+    # must not flip it (the scaffold filter and premium-off derivation key on it).
+    cat, warn = load(glob='[seats.codex]\nreasoning_effort = "high"\n')
+    check("tuned SHIPPED seat keeps declared=False",
+          cat.get("codex") and cat["codex"].declared is False
+          and cat["codex"].reasoning_effort == "high",
+          "declared=False, tune applied", str(cat.get("codex")))
+
+    # Repo-over-global holds for the ALIAS rule too: a bad global alias a repo
+    # layer overrides must not drop the declared seat (merged-spec judgement).
+    cat, warn = load(glob='[seats.myvoice]\nprovider = "claude-code"\n'
+                          'model = "not-an-alias"\n',
+                     project='[seats.myvoice]\nmodel = "haiku"\n')
+    check("bad global alias overridden by valid repo alias: seat registers",
+          cat.get("myvoice") and cat["myvoice"].model == "haiku",
+          "myvoice registers as haiku", str(cat.get("myvoice")))
+    # ...and a bad alias NO layer fixes still drops the seat at the final sweep.
+    cat, warn = load(glob='[seats.badvoice]\nprovider = "claude-code"\n'
+                          'model = "not-an-alias"\n')
+    check("bad alias no layer fixes: dropped at the merged sweep",
+          "badvoice" not in cat and "not a Task-tool model alias" in warn,
+          "absent + warn", f"present={'badvoice' in cat}")
+
+    # The INVERSE precedence direction degrades per KEY, not per seat: a bad
+    # repo override falls back to the valid global value beneath it.
+    cat, warn = load(glob='[seats.myvoice]\nprovider = "claude-code"\n'
+                          'model = "haiku"\n',
+                     project='[seats.myvoice]\nmodel = "not-an-alias"\n')
+    check("bad repo alias over a valid global one: falls back per key",
+          cat.get("myvoice") and cat["myvoice"].model == "haiku"
+          and "falling back to 'haiku'" in warn,
+          "myvoice keeps haiku + warn", str(cat.get("myvoice")))
+
+    # A MALFORMED [panels] row never harms the same-named seat either (shape
+    # check precedes the collision check in config's panel parsing).
+    for label, row in (("malformed (non-list)", 'okseat = "not-a-list"'),
+                       ("empty list", "okseat = []"),
+                       ("all-invalid members", 'okseat = ["nosuchseat", 7]')):
+        cat2, panels2, warn2 = load_both(
+            glob=f'[panels]\n{row}\n\n'
+                 '[seats.okseat]\nprovider = "codex"\nmodel = "gpt-5.6-sol"\n')
+        check(f"{label} [panels] row: seat registers, no panel",
+              cat2.get("okseat") is not None and "okseat" not in panels2,
+              "okseat in catalog, panel absent",
+              f"seat={'okseat' in cat2} panel={'okseat' in panels2}")
+
+    # SHIPPED-seat split merges are judged on the merged spec too: a provider
+    # conversion in one layer + the alias in the other makes ONE claude-code
+    # seat, never a part-applied executor running the alias as its model.
+    cat, warn = load(glob='[seats.codex]\nprovider = "claude-code"\n',
+                     project='[seats.codex]\nmodel = "fable"\n')
+    check("shipped seat split-converted across layers: merged claude-code seat",
+          cat.get("codex") and cat["codex"].provider == "claude-code"
+          and cat["codex"].model == "fable",
+          "codex converted to claude-code/fable", str(cat.get("codex")))
+    # ...and a bad alias TUNE on a shipped Task seat degrades per key: the model
+    # falls back to the shipped value while INDEPENDENT tunes survive (an
+    # explicit available = false must never be undone by an unrelated typo).
+    cat, warn = load(glob='[seats.opus]\nmodel = "opus-4.6"\navailable = false\n')
+    check("shipped Task seat, bad alias tune: model reverts, available=false kept",
+          cat.get("opus") and cat["opus"].model == "opus"
+          and cat["opus"].available is False
+          and "falling back to 'opus'" in warn,
+          "opus model reverted, still disabled", str(cat.get("opus")))
+    # A conversion to claude-code with NO valid alias anywhere reverts the
+    # provider/model PAIR and keeps the rest.
+    cat, warn = load(glob='[seats.codex]\nprovider = "claude-code"\n'
+                          'opt_in = true\n')
+    check("shipped seat converted with no valid alias: conversion ignored, tune kept",
+          cat.get("codex") and cat["codex"].provider == "codex"
+          and cat["codex"].model == "gpt-5.6-sol" and cat["codex"].opt_in is True
+          and "ignoring the conversion" in warn,
+          "codex stays codex, opt_in tune kept", str(cat.get("codex")))
+
+    # Group tokens are NOT in the panel-collision namespace: [panels].cursor is
+    # the documented built-in-preset redefinition and must keep working.
+    cat2, panels2, warn2 = load_both(glob='[panels]\ncursor = ["cursor-auto"]\n')
+    check("[panels].cursor redefinition still works (group token, not a seat)",
+          panels2.get("cursor") == ["cursor-auto"]
+          and "seat-collision" not in warn2 and "the seat wins" not in warn2,
+          "cursor panel redefined", str(panels2.get("cursor")))
 
 
 def _write(path, text):

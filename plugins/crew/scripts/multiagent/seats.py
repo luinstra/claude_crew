@@ -5,7 +5,11 @@ and every panel, in order. This module reads it, merges the user's
 ``[seats.<name>]`` / ``[panels]`` tables over it (per-repo > global > shipped,
 resolved per-seat-per-key), and hands back ``SeatSpec`` rows. Adding a seat is a
 TOML edit, in this repo OR in a personal config: a declared seat with a known
-``provider`` is a first-class seat (registry entry, panel member, dispatch seat).
+``provider`` and an explicit ``model`` is a first-class seat (registry entry,
+panel member, dispatch seat). Its fields may be SPLIT across the two config
+files: rows are folded per key across the layers before any requirement is
+judged, so the provider in one file and the tunes in the other still make one
+seat.
 
 This module stays a LEAF: it imports nothing from ``providers/`` or ``cli``.
 ``PROVIDER_KINDS`` is the DATA half of that split (what a provider kind can do);
@@ -18,8 +22,12 @@ A seat is dropped when it names an unknown provider, when its name is empty or
 would not survive the staged-filename slug (``name != slug(name)``: the dot-strip
 is not injective, so two seats could collide on one prompt file, and an empty
 name falls back to the literal ``seat`` slug), when its name is a reserved token
-(a panel name or a group token, which resolve to seat LISTS), or when a
-``claude-code`` seat pins a model the Task tool would reject.
+(a shipped panel name or a group token, which resolve to seat LISTS), when it
+declares a provider but never (in any layer) an explicit model, or when a
+``claude-code`` seat's MERGED spec pins a model the Task tool would reject (a
+SHIPPED seat whose tune fails that rule reverts to its shipped row instead).
+A configured ``[panels]`` entry named after a live seat is resolved on the
+PANEL side: config's panel parsing drops that row, the seat wins.
 """
 
 from __future__ import annotations
@@ -89,9 +97,10 @@ class SeatSpec:
     the registry factory, so no provider reads the config itself and a declared
     seat gets the same tunes a shipped one does.
 
-    declared: a config layer had a ``[seats.<name>]`` table for it (whether that
-    table tuned a shipped seat or introduced a new one). It is what tells the
-    premium-off derivation that the user already knows about this seat.
+    declared: the seat is ABSENT from the shipped catalog, i.e. a config layer
+    introduced it. Tuning a shipped seat does NOT set it: the scaffold filter and
+    the premium-off derivation key on it, and pinning a knob on a built-in seat
+    must not change their answer.
     """
     name: str
     provider: str
@@ -249,8 +258,12 @@ def _spec_from_table(name: str, tbl: dict, layer: str, base: SeatSpec | None) ->
         )
         return None
 
-    spec = base or SeatSpec(name=name, provider=provider or "")
-    fields: dict[str, Any] = {"declared": True}
+    # declared marks a seat ABSENT from the shipped catalog, not "a config layer
+    # touched it": a tuned shipped seat keeps declared=False, so the consumers
+    # keyed on it (the scaffold filter, the premium-off derivation) do not change
+    # their answer just because the user pinned a knob on a built-in seat.
+    spec = base or SeatSpec(name=name, provider=provider or "", declared=True)
+    fields: dict[str, Any] = {}
     if provider is not None:
         fields["provider"] = provider
     for key in ("model", "reasoning_effort", "print_timeout"):
@@ -290,7 +303,12 @@ def _validate(spec: SeatSpec, layer: str) -> bool:
             f"a list of seats); ignoring it",
         )
         return False
-    if spec.kind.model_rule == "alias" and spec.model not in TASK_MODEL_ALIASES:
+    # The alias rule is judged on the MERGED spec in the final sweep, never on a
+    # config fold: a bad or not-yet-complete value one layer holds may be fixed
+    # by the next (repo over global, per key), and rejecting mid-fold leaves a
+    # part-applied seat. Only the shipped file's own rows are checked here.
+    if spec.kind.model_rule == "alias" and layer == "shipped" \
+            and spec.model not in TASK_MODEL_ALIASES:
         _warn_once(
             f"task-model:{layer}:{name}",
             f"[seats.{name}].model={spec.model!r} is not a Task-tool model alias "
@@ -326,6 +344,17 @@ def merged_catalog() -> dict[str, SeatSpec]:
     global _catalog
     if _catalog is None:
         catalog = shipped_catalog()
+        # Kept verbatim for the final sweep's per-key fallback: a shipped seat
+        # whose merged provider/model combination fails validation falls back to
+        # these two keys (independent tunes like `available` are preserved).
+        shipped_specs = dict(catalog)
+        # Per-seat model candidates in precedence order (shipped first, then the
+        # config layers low to high): the final alias sweep picks the highest
+        # VALID one, so a bad override degrades to the previous value per key,
+        # never to a dropped seat or a silently-reverted row.
+        model_candidates: dict[str, list[str]] = {
+            name: [s.model] for name, s in catalog.items() if s.model is not None
+        }
         # Low precedence FIRST: each layer folds over the previous, so a per-repo
         # value lands last and wins, per key.
         #
@@ -355,9 +384,15 @@ def merged_catalog() -> dict[str, SeatSpec]:
                         # rows fold first and this row's keys still win, per key.
                         base = SeatSpec(name=name, provider=provider, declared=True)
                         for p_layer, p_tbl in pending.pop(name, []):
+                            pm = _str_field(p_tbl, "model", name, p_layer)
+                            if pm is not None:
+                                model_candidates.setdefault(name, []).append(pm)
                             base = _spec_from_table(name, p_tbl, p_layer, base) or base
                 spec = _spec_from_table(name, tbl, layer, base)
                 if spec is not None and _validate(spec, layer):
+                    m = _str_field(tbl, "model", name, layer)
+                    if m is not None:
+                        model_candidates.setdefault(name, []).append(m)
                     catalog[name] = spec
         for name, rows in pending.items():
             for layer, _tbl in rows:
@@ -366,6 +401,61 @@ def merged_catalog() -> dict[str, SeatSpec]:
                     f"[seats.{name}] names no known seat and declares no provider; "
                     f"ignoring it",
                 )
+        # Final-state validation, judged on the MERGED spec so a requirement one
+        # layer satisfies is never enforced mid-fold. A failing DECLARED seat is
+        # dropped; a failing SHIPPED seat degrades per key (a config typo must
+        # never remove a built-in seat).
+        # (Seat-name/panel-name collisions are NOT handled here: config's
+        # [panels] parsing drops a panel row named after a live seat, so the
+        # seat wins and the namespace stays unambiguous without this module
+        # re-deriving panel validity.)
+        for name, spec in list(catalog.items()):
+            if spec.declared and spec.model is None:
+                _warn_once(
+                    f"no-model:{name}",
+                    f"[seats.{name}] declares provider {spec.provider!r} but no "
+                    f"model; a declared seat needs an explicit model, ignoring it",
+                )
+                del catalog[name]
+            elif spec.kind.model_rule == "alias" and spec.model not in TASK_MODEL_ALIASES:
+                # Per-key fallback: the highest-precedence VALID candidate wins,
+                # so a bad override degrades to the value beneath it and every
+                # independent field (available, opt_in, ...) is preserved.
+                chosen = next((m for m in reversed(model_candidates.get(name, []))
+                               if m in TASK_MODEL_ALIASES), None)
+                if chosen is not None:
+                    _warn_once(
+                        f"task-model:merged:{name}",
+                        f"[seats.{name}].model={spec.model!r} is not a Task-tool "
+                        f"model alias ({', '.join(sorted(TASK_MODEL_ALIASES))}); "
+                        f"falling back to {chosen!r}",
+                    )
+                    catalog[name] = replace(spec, model=chosen)
+                elif spec.declared:
+                    _warn_once(
+                        f"task-model:merged:{name}",
+                        f"[seats.{name}].model={spec.model!r} is not a Task-tool "
+                        f"model alias ({', '.join(sorted(TASK_MODEL_ALIASES))}); "
+                        f"the Task tool would reject it at spawn, so the seat "
+                        f"is ignored",
+                    )
+                    del catalog[name]
+                else:
+                    # A shipped seat converted to claude-code with no valid alias
+                    # anywhere: the conversion itself is the invalid part, so
+                    # provider and model revert to the shipped pair and the
+                    # independent tunes stay.
+                    _warn_once(
+                        f"task-model:merged:{name}",
+                        f"[seats.{name}] converts a shipped seat to claude-code "
+                        f"but {spec.model!r} is not a Task-tool model alias; "
+                        f"ignoring the conversion",
+                    )
+                    catalog[name] = replace(
+                        spec,
+                        provider=shipped_specs[name].provider,
+                        model=shipped_specs[name].model,
+                    )
         _catalog = catalog
     return _catalog
 
@@ -413,8 +503,9 @@ def task_seats() -> list[str]:
 
 
 def premium_off_seats() -> tuple[str, ...]:
-    """The opt-in subprocess seats the user has NOT declared: what the scaffolder
-    writes an ``available = false`` line for. Derived, memoized (never an
+    """The SHIPPED opt-in subprocess seats: what the scaffolder writes an
+    ``available = false`` line for. Config-declared seats are excluded (the user
+    who declared one needs no reminder it exists). Derived, memoized (never an
     import-time constant: the catalog is not final until the config is read)."""
     global _premium_off
     if _premium_off is None:
