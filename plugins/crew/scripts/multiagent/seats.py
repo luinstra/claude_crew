@@ -328,6 +328,14 @@ def merged_catalog() -> dict[str, SeatSpec]:
         catalog = shipped_catalog()
         # Low precedence FIRST: each layer folds over the previous, so a per-repo
         # value lands last and wins, per key.
+        #
+        # A declared seat may be SPLIT across layers: its tunes (model, available,
+        # ...) in one file and its provider in the other. A provider-less row for
+        # an unknown name is therefore DEFERRED, not dropped: dropping it at its
+        # own layer would silently lose the tunes (including an explicit
+        # available = false) the moment a later layer completes the seat. Only a
+        # row no layer ever completes is the typo'd-name case worth a warn.
+        pending: dict[str, list[tuple[str, dict]]] = {}
         for layer, data in reversed(config.raw_layers()):
             for name, tbl in _seat_tables(data).items():
                 if not isinstance(tbl, dict):
@@ -336,9 +344,28 @@ def merged_catalog() -> dict[str, SeatSpec]:
                         f"[seats.{name}] must be a table; ignoring {tbl!r}",
                     )
                     continue
-                spec = _spec_from_table(name, tbl, layer, catalog.get(name))
+                base = catalog.get(name)
+                if base is None:
+                    provider = _str_field(tbl, "provider", name, layer)
+                    if provider is None:
+                        pending.setdefault(name, []).append((layer, tbl))
+                        continue
+                    if provider in PROVIDER_KINDS:
+                        # Seed with the provider so the deferred lower-precedence
+                        # rows fold first and this row's keys still win, per key.
+                        base = SeatSpec(name=name, provider=provider, declared=True)
+                        for p_layer, p_tbl in pending.pop(name, []):
+                            base = _spec_from_table(name, p_tbl, p_layer, base) or base
+                spec = _spec_from_table(name, tbl, layer, base)
                 if spec is not None and _validate(spec, layer):
                     catalog[name] = spec
+        for name, rows in pending.items():
+            for layer, _tbl in rows:
+                _warn_once(
+                    f"unknown-seat:{layer}:{name}",
+                    f"[seats.{name}] names no known seat and declares no provider; "
+                    f"ignoring it",
+                )
         _catalog = catalog
     return _catalog
 

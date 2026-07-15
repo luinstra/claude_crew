@@ -8386,6 +8386,62 @@ def test_config_declared_negative():
               degraded, "empty catalog + warn", str(degraded))
 
 
+def test_config_split_seat_layers():
+    """A declared seat SPLIT across layers: tunes in one file, provider in the
+    other. The provider-less row must be DEFERRED until every layer has folded,
+    not dropped at its own layer, or the tunes (including an explicit
+    available = false, the cost-safety opt-out) silently vanish."""
+    log_section("config-declared seats: definitions split across layers")
+    import io  # noqa: E402
+    from contextlib import redirect_stderr  # noqa: E402
+    from multiagent import seats  # noqa: E402
+
+    def load(project=None, glob=None):
+        with crew_config(project=project, glob=glob):
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                cat = dict(seats.merged_catalog())
+            return cat, buf.getvalue()
+
+    # THE bug shape: global carries the tunes (no provider), repo declares the
+    # provider. Every global key must survive the merge.
+    cat, warn = load(glob='[seats.splitseat]\nmodel = "composer-2.5"\n'
+                          'available = false\nopt_in = true\n',
+                     project='[seats.splitseat]\nprovider = "cursor"\n')
+    s = cat.get("splitseat")
+    check("split seat: global tunes + repo provider -> ALL global keys survive",
+          s is not None and s.provider == "cursor" and s.model == "composer-2.5"
+          and s.available is False and s.opt_in is True,
+          "provider=cursor model=composer-2.5 available=False opt_in=True", str(s))
+    check("split seat: no unknown-seat warn once a layer completes it",
+          "names no known seat" not in warn, "no warn", warn[:80] or "(none)")
+
+    # Precedence unchanged: a key present in BOTH layers still resolves
+    # repo-over-global after the deferral fold.
+    cat, warn = load(glob='[seats.splitseat]\nmodel = "gpt-5.6-sol"\n',
+                     project='[seats.splitseat]\nprovider = "codex"\n'
+                             'model = "gpt-5.6-luna"\n')
+    check("split seat: repo key still wins over the deferred global key",
+          cat.get("splitseat") and cat["splitseat"].model == "gpt-5.6-luna",
+          "gpt-5.6-luna", str(cat.get("splitseat") and cat["splitseat"].model))
+
+    # A provider-less row NO layer ever completes is still the typo'd-name case:
+    # dropped with the same one-time warn as before.
+    cat, warn = load(glob='[seats.orphan]\nmodel = "auto"\n')
+    check("provider-less row no layer completes: dropped with the unknown-seat warn",
+          "orphan" not in cat and "names no known seat" in warn,
+          "absent + warn", f"present={'orphan' in cat} warn={warn[:60]!r}")
+
+    # The completing row's provider must still be a KNOWN kind: an unknown kind
+    # drops that row, and the deferred tunes fall back to the typo'd-name warn.
+    cat, warn = load(glob='[seats.badsplit]\nmodel = "auto"\n',
+                     project='[seats.badsplit]\nprovider = "nope"\n')
+    check("split seat completed by an UNKNOWN provider: both rows drop, both warns",
+          "badsplit" not in cat and "not a known provider" in warn
+          and "names no known seat" in warn,
+          "absent + both warns", f"present={'badsplit' in cat} warn={warn[:120]!r}")
+
+
 def _write(path, text):
     path.write_text(text)
     return path
@@ -8434,6 +8490,7 @@ def main():
     test_panel_catalog()
     test_config_declared_seats()
     test_config_declared_negative()
+    test_config_split_seat_layers()
     test_catalog_cache_reset()
     test_seat_roster_drift_guard()
     test_catalog_registry_disjoint()
