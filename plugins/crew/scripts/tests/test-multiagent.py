@@ -8569,6 +8569,20 @@ def test_config_split_seat_layers():
           and "ignoring the conversion" in warn,
           "codex stays codex, opt_in tune kept", str(cat.get("codex")))
 
+    # Seat names must be LOWERCASE: result file names are not case-sensitive on
+    # every filesystem (macOS APFS, Windows), so a declared [seats.Opus] would
+    # share Opus.json/opus.json with the shipped opus seat and clobber or be
+    # read back as ITS review.
+    cat, warn = load(glob='[seats.Opus]\nprovider = "claude-code"\nmodel = "haiku"\n')
+    check("mixed-case seat name rejected (case-insensitive fs file collision)",
+          "Opus" not in cat and "opus" in cat and "must be lowercase" in warn,
+          "Opus dropped, shipped opus intact, warn",
+          f"Opus={'Opus' in cat} opus={'opus' in cat} warn={warn[:70]!r}")
+    cat, warn = load(glob='[seats.Cursor-Fast]\nprovider = "cursor"\nmodel = "auto"\n')
+    check("mixed-case executor seat name rejected too",
+          "Cursor-Fast" not in cat and "must be lowercase" in warn,
+          "dropped + warn", f"present={'Cursor-Fast' in cat}")
+
     # Group tokens are NOT in the panel-collision namespace: [panels].cursor is
     # the documented built-in-preset redefinition and must keep working.
     cat2, panels2, warn2 = load_both(glob='[panels]\ncursor = ["cursor-auto"]\n')

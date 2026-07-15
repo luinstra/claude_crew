@@ -21,7 +21,9 @@ one-time stderr warn, never an exception, so one typo cannot take down a panel.
 A seat is dropped when it names an unknown provider, when its name is empty or
 would not survive the staged-filename slug (``name != slug(name)``: the dot-strip
 is not injective, so two seats could collide on one prompt file, and an empty
-name falls back to the literal ``seat`` slug), when its name is a reserved token
+name falls back to the literal ``seat`` slug), when it is not lowercase (result
+file names are not case-sensitive on every filesystem, so a case-variant of an
+existing seat would collide with that seat's files), when its name is a reserved token
 (a shipped panel name or a group token, which resolve to seat LISTS), when it
 declares a provider but never (in any layer) an explicit model, or when a
 ``claude-code`` seat's MERGED spec pins a model the Task tool would reject (a
@@ -294,6 +296,18 @@ def _validate(spec: SeatSpec, layer: str) -> bool:
             f"seat name {name!r} is empty or contains characters that are stripped "
             f"from the file names the seat's prompt and result are written to; "
             f"ignoring it",
+        )
+        return False
+    # Lowercase only: seat names become file names, and on a case-insensitive
+    # filesystem (macOS APFS, Windows) `Opus.json` IS `opus.json`, so a
+    # case-variant of an existing seat would silently clobber that seat's
+    # result and be read back as its review.
+    if name != name.lower():
+        _warn_once(
+            f"seat-case:{layer}:{name}",
+            f"seat name {name!r} must be lowercase (result file names are not "
+            f"case-sensitive on every filesystem, so {name.lower()!r} and "
+            f"{name!r} would collide on one file); ignoring it",
         )
         return False
     if name in reserved_tokens():

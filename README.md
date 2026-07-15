@@ -328,7 +328,9 @@ warns once and runs the unfiltered panel rather than nothing.
 A new model seat is pure config — no code, no version bump, no plugin reinstall.
 Give a `[seats.<name>]` table a `provider` (`codex`, `cursor`, `agy`, or
 `claude-code`) and the `model` string that provider accepts, in either config
-file:
+file. Seat names are lowercase (`[A-Za-z0-9_-]` minus uppercase: result file
+names are not case-sensitive on every filesystem, so `Opus` would collide with
+`opus` on disk):
 
 ```toml
 [seats.codex-nano]
