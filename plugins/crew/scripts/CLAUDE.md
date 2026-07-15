@@ -29,8 +29,10 @@ scripts/
 
 The engine that powers `/crew:review`, `/crew:debate`, and the review steps of
 `/crew:build` and `/crew:measure-twice`. It drives **subprocess seats** only —
-the registered external-CLI seats (`CODEX_SEATS` + `agy` + `CURSOR_SEATS`; the
-premium cursor model-seats are opt-in via `--seats`). The **Claude seats** are NOT
+the registered external-CLI seats (the codex, agy, and cursor rows of the shipped
+catalog `multiagent/seats.toml`, merged with the user's config layers by
+`seats.merged_catalog()`; the premium cursor model-seats are opt-in via
+`--seats`). The **Claude seats** are NOT
 in here: they're spawned by the orchestrating command as `crew:reviewer` Task
 subagents (in-session, on the subscription), and the orchestrator normalizes
 their results into the same six-field shape the engine returns.
@@ -41,13 +43,15 @@ multiagent/
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
+├── seats.py             # The seat CATALOG loader: reads shipped `seats.toml`, merges the user's config layers per-seat-per-key, exposes merged_catalog()/merged_panels()/seat_spec()/task_seats()/group_tokens()/premium_off_seats() + PROVIDER_KINDS + the SeatSpec dataclass
+├── seats.toml           # DATA — the shipped seat + panel catalog (`[seats.<name>]` rows, `[panels]` rosters); merged with per-repo/global config. The one place a built-in model seat is declared
 ├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel, [debate].panel, [dispatch].seat validated vs known_seat_names(), per-seat tuning, [panels] roster, seat `available`); per-repo>global>builtin; pure leaf, no cli/providers import; parses with stdlib tomllib (the 3.11 floor the `crew` dispatcher asserts)
 ├── render.py            # side-by-side panel + --json rendering (the faithful projection + raw-fallback)
 ├── findings.py          # PURE parser + complete-linkage grouping + grouped-digest renderer (no I/O, no model calls, never raises); powers `collect --group`
 └── providers/
     ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC (executor: run() + supports_workspace_write capability, fail-CLOSED/opt-in for /crew:dispatch), registry + known_seat_names()
-    ├── codex.py         # CodexProvider — the live codex model-seats (`codex exec - --sandbox read-only -o <tmp>`, prompt via stdin); CODEX_SEATS is the one-line-to-extend source of truth
-    ├── cursor.py        # CursorProvider — the live cursor model-seats; CURSOR_SEATS is the one-line-to-extend source of truth
+    ├── codex.py         # CodexProvider — the live codex model-seats (`codex exec - --sandbox read-only -o <tmp>`, prompt via stdin); each seat's name/model/reasoning_effort arrives from its SeatSpec, so a `[seats.<name>]` codex row in config is a first-class seat
+    ├── cursor.py        # CursorProvider — the live cursor model-seats; each seat is driven by its SeatSpec, so a `[seats.<name>]` cursor row in config is a first-class seat
     └── agy.py           # AgyProvider (default panel) — `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions)
 ```
 
@@ -103,8 +107,8 @@ Key contracts (do NOT regress):
 ### Presets & config precedence
 
 - **Panel selection** — the commands accept `--panel full|lite|solo|cursor|quick` / `--seats <subset>`
-  and pass them STRAIGHT to `crew review-prep`, which OWNS the resolution (`seats.PANEL_PRESETS` +
-  `seats.MODEL_OVERRIDES`): it splits the preset/`--seats` into `subprocess_seats` (the
+  and pass them STRAIGHT to `crew review-prep`, which OWNS the resolution (`seats.merged_panels()`
+  for the roster + `seats.merged_catalog()` for each seat's provider/model): it splits the preset/`--seats` into `subprocess_seats` (the
   external-CLI entries), `task_seats` (the Claude voices), and `task_seat_models` (each Task
   seat's model pin), and the orchestrator just reads that JSON — it no longer classifies seat names,
   defines presets, or hardcodes a model pin (the engine still EXECUTES only the subprocess subset,
@@ -133,7 +137,7 @@ Key contracts (do NOT regress):
 ### Availability filtering
 
 - Panel-NAME resolution AND the `available` filter funnel through ONE shared point in `cli.py`
-  (`_panel_seat_list` consults `config.panels()` before `seats.PANEL_PRESETS`).
+  (`_panel_seat_list` consults `config.panels()` before `seats.merged_panels()`).
 - Two availability shapes share the same `available=false` drop + explicit-name skip-note: the
   single-list chokepoint `_resolve_seats` (ad-hoc `crew review`/`council`/`seats` + the debate resolver)
   uses `_filter_available`, which falls back to the unfiltered panel if the one list would empty;
@@ -146,11 +150,11 @@ Key contracts (do NOT regress):
 ### Group tokens & staging
 
 - `--panel cursor` = `--seats cursor` (every registered cursor-* seat, grows with
-  CURSOR_SEATS; no codex, no Claude).
+  the cursor rows of the catalog; no codex, no Claude).
 - The engine itself only knows subprocess seats, and its subprocess-seat allowlist is registry-derived
   via `known_seat_names()` (no hardcoded codex/agy list). The `cursor` GROUP TOKEN (in `--seats` and
   `[panels]` rosters) expands to every registered `cursor-*` seat via `_expand_seat_groups`, so it grows
-  with `CURSOR_SEATS`.
+  with the cursor rows of the catalog (`seats.group_tokens()` supplies the expansion members).
 - `render --stage --session-id <id>` stages a seat prompt to
   `.crew/reviews/<session-id>/prompt-<seat-role>.txt` (session resolved in Python — arg →
   `CLAUDE_SESSION_ID` env — so the command carries no `${…}` expansion).
@@ -308,7 +312,9 @@ Key contracts (do NOT regress):
   loaders). Knobs: `default_panel`, `[debate].panel`, `[dispatch].seat`
   (the `/crew:dispatch` default seat, validated against `known_seat_names()` —
   a panel name / group token like `cursor` is rejected), `[seats.<name>]`
-  (`model`/`reasoning_effort`/`print_timeout`/`available`), `[tuning].timeout`,
+  (tunes an existing seat's `model`/`reasoning_effort`/`print_timeout`/`available`,
+  OR declares a brand-new first-class seat by giving `provider` + `model`, plus
+  optional `opt_in` to keep it out of the built-in panels), `[tuning].timeout`,
   `[tuning].deadline_minutes` (the persistence loops' wall clock, read by `crew
   state init` when `--deadline-minutes` is not passed; validated 1..240, so a
   non-int, a non-positive value, or one past the ceiling is dropped with a
@@ -328,7 +334,7 @@ Key contracts (do NOT regress):
   carries ONLY the machine payload; EVERY note/error goes to stderr** (init.md parses
   stdout).
   - **`doctor`** iterates `known_seat_names()` → `get_provider(n).is_available()` into a
-    `{subprocess, task}` JSON map (the `task` block in `sorted(TASK_SEAT_NAMES)` order →
+    `{subprocess, task}` JSON map (the `task` block in `sorted(seats.task_seats())` order →
     deterministic). NON-billable: the PATH-check seats' `is_available()` are pure `shutil.which`;
     Cursor's local `agent --version` identity probe runs EXACTLY ONCE and is fanned to
     every `cursor-*` seat (not 6×). Takes `--session-id` (writes
@@ -348,8 +354,8 @@ Key contracts (do NOT regress):
     `[dispatch].seat` / per-seat `available`): only safely-recognized simple shapes are
     edited; any inline-table / dotted-key / multiline / array-of-tables target is left
     verbatim + a stderr note (an unparseable global is rejected). Inputs validated before
-    emit: `--default-panel` vs `PANEL_PRESETS ∪ panels()`; `--add-seat`/`--disable-seat`
-    vs `known_seat_names() ∪ TASK_SEAT_NAMES` (task seats correctable); `--dispatch-seat`
+    emit: `--default-panel` vs `merged_panels() ∪ panels()`; `--add-seat`/`--disable-seat`
+    vs `known_seat_names() ∪ task_seats()` (task seats correctable); `--dispatch-seat`
     vs `known_seat_names()` only.
 
 Run its tests with `python plugins/crew/scripts/tests/test-multiagent.py`.

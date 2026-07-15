@@ -30,7 +30,8 @@ decision.
 
 ## Why some registered seats are opt-in
 
-The default panel roster of record is scripts/CLAUDE.md + `seats.PANEL_PRESETS`
+The default panel roster of record is scripts/CLAUDE.md + `seats.toml`'s `[panels]`
+table (loaded via `seats.merged_panels()`)
 (the two DEFAULT codex seats are distinct OpenAI voices, `gpt-5.6-sol` and
 `gpt-5.6-luna`, on the one codex CLI — a deliberate same-lineage pairing at
 different reasoning styles). Seats fall out of the default panel for two distinct

@@ -127,7 +127,7 @@ per-seat `run` DERIVES its `-f` from `--session-id` (= `prompt_path`,
 `-f` yourself (see 3.2). **If `subprocess_seats` is empty** (a Claude-only
 `--panel lite`/`solo` → `prompt_path` is `""`, nothing staged), **SKIP only the 3.2
 per-seat loop** — go to Step 4; you STILL persist the Task seats (Step 5) and run
-the SAME grouped `collect` (Step 5.5) with `--seats <dot-stripped task_seats only>`.
+the SAME grouped `collect` (Step 5.5) with `--seats <task_seats only>`.
 
 **3.2 — run EACH seat in its own parallel shell.** First, **clear any pre-existing
 `<seat>.json`** for the seats you are about to run — the session dir
@@ -180,10 +180,10 @@ ALL Task seats in ONE `--stage-all` call over the SAME resolved `<TARGET>` (and
 ```
 
 **Skip this `--stage-all` call entirely if `task_seats` is empty** (a
-subprocess-only panel like `--panel cursor`). A Task seat name with a `.` (none in
-the current roster) stages with the dot stripped from the filename — the same
-derivation the spawn below reads, so the staged file and the read file never
-diverge. (`<TARGET>` is the plan `.md` path or git scope from Step 1; `<BASE>` is
+subprocess-only panel like `--panel cursor`). A registered seat name is already
+filename-safe (the `name == slug(name)` invariant means it can carry no `.`), so
+each seat stages to `prompt-<seat>.txt` verbatim and the spawn below reads that
+same file. (`<TARGET>` is the plan `.md` path or git scope from Step 1; `<BASE>` is
 the Step 3 base — drop `--base` for a plan-file or working-tree target.)
 
 `--stage-all` stages one LABELED prompt PER comma-listed role in a SINGLE call —
@@ -207,7 +207,7 @@ payload; the reviewer has `Read`):
 
 ```
 # for each <seat> in task_seats:
-Task(subagent_type="crew:reviewer", model="<task_seat_models[<seat>]>", prompt="You are the <seat> seat. Read .crew/reviews/<session-id>/prompt-<seat, dot-stripped>.txt and follow it exactly.")
+Task(subagent_type="crew:reviewer", model="<task_seat_models[<seat>]>", prompt="You are the <seat> seat. Read .crew/reviews/<session-id>/prompt-<seat>.txt and follow it exactly.")
 ```
 
 The staged prompt already states plan-vs-code, tells the seat how to reach the
@@ -239,9 +239,8 @@ For each Task seat **in `task_seats`** (from the `review-prep` JSON — NOT a
 hardcoded `opus`/`sonnet` pair), normalize its return into the SAME six fields as
 the subprocess results:
 
-- `name` = the seat's dot-stripped name (the same `[A-Za-z0-9_-]`-only slug
-  `_seat_role_slug` in `cli.py` derives — the ONE canonical dot-strip source; for
-  the current roster the slug is the name itself).
+- `name` = the seat's name (a registered seat name is already `[A-Za-z0-9_-]`-only
+  by the `name == slug(name)` invariant, so it doubles as its own filename stem).
 - `model` = the pinned model from `task_seat_models[<seat>]` (e.g. `opus`,
   `sonnet`, `fable`).
 - `ok` = True if the seat's **returned result** is a usable review block; **False**
@@ -271,9 +270,9 @@ instead (never fabricate an ok result):
 "${CLAUDE_PLUGIN_ROOT}/crew" persist-seat <seat> --session-id <session-id> --model "<task_seat_models[<seat>]>" --failed --error "<one-line diagnostic>"
 ```
 
-The engine derives the dot-stripped filename and the six-field shape itself — the
+The engine derives the filename and the six-field shape itself — the
 printed path is the `<seat>.json` the Step-5.5 collect reads. The seat entry you
-pass to `collect --seats` is the seat's dot-stripped slug (the filename stem the
+pass to `collect --seats` is the seat name (the filename stem the
 engine printed).
 
 ## Step 5.5 — Wait-for-both, repair non-compliant seats, then collect ONCE
@@ -284,8 +283,8 @@ AND be persisted in Step 5. A seat whose `<seat>.json` is not written yet is STI
 RUNNING, not skipped — collecting early would silently drop it.
 
 Define `<ran_seats>` = the comma-join of `subprocess_seats` (resolved prep order)
-**then** the dot-stripped `task_seats`. In the Claude-only branch
-(`subprocess_seats` empty) `<ran_seats>` is just the dot-stripped `task_seats`.
+**then** `task_seats`. In the Claude-only branch
+(`subprocess_seats` empty) `<ran_seats>` is just `task_seats`.
 
 **Repair non-compliant seats (per-seat haiku reformat).** A seat that ignored the
 structured `## FINDINGS` schema can't be grouped — give it ONE cheap repair pass.

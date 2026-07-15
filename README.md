@@ -249,9 +249,9 @@ single seat is plenty for routine work.
 #### Per-repo config
 
 `full` is the **built-in** default panel. An optional, personal per-repo
-`.crew/config.toml` (already gitignored under `.crew/`) can override that default and tune per-seat
+`.crew/config.toml` (already gitignored under `.crew/`) can override that default, tune per-seat
 models (plus codex `reasoning_effort`, agy `print_timeout`) and the global
-per-seat `timeout`. When you name no panel, `default_panel` resolves from
+per-seat `timeout`, and declare brand-new model seats ([Add a model seat](#add-a-model-seat)). When you name no panel, `default_panel` resolves from
 config, falling back to built-in `full`; the per-seat tuning knobs follow
 **CLI flag > per-repo config > global config > built-in**. A malformed file is
 ignored with a one-time stderr note, so a config typo never takes down a panel.
@@ -319,6 +319,24 @@ seats, or the `cursor` group token); an unknown name is dropped with a one-time
 note. An unavailable seat is filtered out of any resolved panel **after** panel
 resolution and **before** the run; if a filter would empty a panel entirely, crew
 warns once and runs the unfiltered panel rather than nothing.
+
+#### Add a model seat
+
+A new model seat is pure config — no code, no version bump, no plugin reinstall.
+Give a `[seats.<name>]` table a `provider` (`codex`, `cursor`, `agy`, or
+`claude-code`) and the `model` string that provider accepts, in either config
+file:
+
+```toml
+[seats.codex-nano]
+provider = "codex"
+model = "gpt-5.6-nano"
+```
+
+That's the whole thing: the seat is registered on the next run, usable via
+`--seats codex-nano`. Add `opt_in = true` to keep it out of the built-in panels
+(registered, but only when named). The provider CLI must be installed and authed;
+`"${CLAUDE_PLUGIN_ROOT}/crew" seats` lists every resolved seat.
 
 #### Ad-hoc single-provider runs
 
