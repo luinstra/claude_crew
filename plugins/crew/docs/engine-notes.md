@@ -100,7 +100,7 @@ gloss lives here.
   which collects over the Task seats alone. There is NO "synthesize from raw Task
   returns" path.
 - **Decision-J** — `<ran_seats>` order is `subprocess_seats` (resolved prep order)
-  THEN the dot-stripped `task_seats`.
+  THEN the `task_seats` (verbatim: the `name == slug(name)` invariant means no dot-stripping).
 
 ## T3a reference-spawn (why Task seats fetch their prompt by file)
 

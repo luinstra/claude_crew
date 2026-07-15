@@ -45,7 +45,7 @@ multiagent/
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
 ├── seats.py             # The seat CATALOG loader: reads shipped `seats.toml`, merges the user's config layers per-seat-per-key, exposes merged_catalog()/merged_panels()/seat_spec()/task_seats()/group_tokens()/premium_off_seats() + PROVIDER_KINDS + the SeatSpec dataclass
 ├── seats.toml           # DATA — the shipped seat + panel catalog (`[seats.<name>]` rows, `[panels]` rosters); merged with per-repo/global config. The one place a built-in model seat is declared
-├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel, [debate].panel, [dispatch].seat validated vs known_seat_names(), per-seat tuning, [panels] roster, seat `available`); per-repo>global>builtin; pure leaf, no cli/providers import; parses with stdlib tomllib (the 3.11 floor the `crew` dispatcher asserts)
+├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel, [debate].panel, [dispatch].seat validated vs known_seat_names(), [panels] roster) + `raw_layers()` feeding seats.py's per-seat resolution (per-seat tuning + `available` live on `SeatSpec`, not here); per-repo>global>builtin; pure leaf, no cli/providers import; parses with stdlib tomllib (the 3.11 floor the `crew` dispatcher asserts)
 ├── render.py            # side-by-side panel + --json rendering (the faithful projection + raw-fallback)
 ├── findings.py          # PURE parser + complete-linkage grouping + grouped-digest renderer (no I/O, no model calls, never raises); powers `collect --group`
 └── providers/
@@ -137,7 +137,7 @@ Key contracts (do NOT regress):
 ### Availability filtering
 
 - Panel-NAME resolution AND the `available` filter funnel through ONE shared point in `cli.py`
-  (`_panel_seat_list` consults `config.panels()` before `seats.merged_panels()`).
+  (`_panel_seat_list` resolves via `seats.merged_panels()`, which merges a configured `[panels]` entry over the shipped one).
 - Two availability shapes share the same `available=false` drop + explicit-name skip-note: the
   single-list chokepoint `_resolve_seats` (ad-hoc `crew review`/`council`/`seats` + the debate resolver)
   uses `_filter_available`, which falls back to the unfiltered panel if the one list would empty;
