@@ -81,6 +81,7 @@ When skill context is provided, follow those project-specific patterns over gene
 | "I'll clean this up in the next commit" | Do it now |
 | "One more quick change" | Check the plan first |
 | "It works, no need to verify" | Always verify before marking complete. |
+| "Fix each review finding where it was reported" | First ask what the findings SHARE. Several findings with one structural cause mean the structure is the bug: change it once and re-check every finding against that change, or the next review round finds the same flaw in your patches. |
 
 ## Example Task Prompts
 

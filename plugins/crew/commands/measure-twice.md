@@ -442,6 +442,23 @@ review — all seats failed: <per-seat diagnostics>`.
 | **REVISE with only [MINOR]** | Complete the loop — minor issues are acceptable |
 | **REJECT** | Fundamentally rethink approach, create new plan, re-review |
 
+**On REVISE, diagnose the CLASS before revising.** When several findings share
+one structural cause (the same property violated at different sites, a value
+judged in the wrong place, one invariant enforced by two mechanisms), the
+revision instruction must name that shared cause and change the STRUCTURE once,
+re-deriving the findings from it. Patching each finding where it was reported
+mints new findings every round: each patch adds reviewable surface carrying the
+same underlying flaw, so the round count climbs while the design stands still.
+Two other convergence signals worth acting on: a round whose finding count goes
+UP on a more-specified plan usually means the review is now polishing prose,
+not design. That is a signal to SURFACE TO THE USER, never a self-granted exit:
+report the trajectory and ask whether to cap the loop, and a cap still requires
+every open BLOCKING to be either fixed or moved to an explicit deferred list
+the user approved (the loop itself ends only on APPROVED/minor-only, a safety
+trip, or the user's cancellation, exactly as the verdict table says). And a
+lone dissenting BLOCKING is high-signal but must be VERIFIED against the code
+before it forces a revision.
+
 ## Completing the Loop
 
 When the panel's verdict is **APPROVED** (or REVISE with only [MINOR] issues):

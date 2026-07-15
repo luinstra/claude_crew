@@ -405,6 +405,17 @@ diagnostics>`.
 
 ### Re-delegating on REVISE [BLOCKING]
 
+**Diagnose the CLASS before dispatching the fixes.** Before re-delegating, ask
+of the finding list: do several findings share one structural cause (the same
+property violated at different sites, the same value judged in the wrong place,
+the same two-mechanisms-one-invariant split)? If so, instruct the executor to
+fix the STRUCTURE once and re-derive the sites from it, not to patch each
+finding where it was reported. Site-by-site patches of a structural problem
+mint new findings every round (each patch adds reviewable surface with the same
+underlying flaw), and the loop converges only when the structure changes. One
+sentence in the prompt naming the shared cause is enough; when the findings are
+genuinely independent, say that instead and fix them as listed.
+
 ```
 Task(
   subagent_type="crew:executor",
@@ -414,6 +425,9 @@ Original task: <the task>
 
 The panel flagged these [BLOCKING] issues:
 [list each blocking issue verbatim]
+
+[If several findings share one structural cause, name it here and instruct:
+fix that structure once, then re-check every listed finding against the fix.]
 
 Address each issue. Report what you changed and what you verified."
 )
