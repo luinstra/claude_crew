@@ -43,6 +43,7 @@ multiagent/
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
+├── review_runs.py       # review-run lifecycle (pure leaf like rounds.py): run identity mint (content hash + review inputs), reviews-subdir session sanitizer (the ONE mechanism cli.py delegates to), write-once run.json + mint-conflict refusal, snapshot write/self-heal, the landed-and-valid seat predicate, preserve-valid seat writes (per-seat lock), pointer read/write. NO model calls.
 ├── seats.py             # The seat CATALOG loader: reads shipped `seats.toml`, merges the user's config layers per-seat-per-key, exposes merged_catalog()/merged_panels()/seat_spec()/task_seats()/group_tokens()/premium_off_seats() + PROVIDER_KINDS + the SeatSpec dataclass
 ├── seats.toml           # DATA — the shipped seat + panel catalog (`[seats.<name>]` rows, `[panels]` rosters); merged with per-repo/global config. The one place a built-in model seat is declared
 ├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel, [debate].panel, [dispatch].seat validated vs known_seat_names(), [panels] roster) + `raw_layers()` feeding seats.py's per-seat resolution (per-seat tuning + `available` live on `SeatSpec`, not here); per-repo>global>builtin; pure leaf, no cli/providers import; parses with stdlib tomllib (the 3.11 floor the `crew` dispatcher asserts)
@@ -64,15 +65,32 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
 - `seats` — resolve/print a panel; `--debate` prints the config-aware full debate panel.
 - `collect` — fold per-seat `<seat>.json` into a digest; `--group`/`--full`/`--report-unparsed`.
 - `repair-seat` — write the haiku repair to a seat's SEPARATE `repaired_output` field, never overwriting `output`.
-- `review-prep` — resolve target + split panel + stage the shared prompt; runs NOTHING.
-- `persist-seat` — write ONE normalized Task-seat result to the session dir (engine-owned slug + six-field shape).
+- `review-prep` — resolve target + split panel, mint the run-scoped review dir
+  (`review_runs.py`: identity from content hash + review inputs, write-once
+  `run.json`, frozen `target.md`/`target.diff` snapshot), stage EVERY seat prompt
+  against the snapshot, and print the JSON contract with the pending seat lists;
+  runs NOTHING.
+- `persist-seat` — write ONE normalized Task-seat result (engine-owned slug +
+  six-field core shape). With `--run-id` it lands stamped in that run's dir under
+  the preserve-valid rule; with NO `--run-id` while a session pointer exists it
+  REFUSES (exit 2) rather than attribute a completed seat by mutable pointer;
+  with neither, the flat session dir, unchanged.
 - `doctor` — `/crew:init` provider probe (NON-billable: installed-CLI detection).
 - `probe` — opt-in BILLABLE live seat smoke test (doctor proves the CLI is installed; probe proves it returns usable output).
 - `scaffold-config` — `/crew:init` commented-config generator.
 
 Key contracts (do NOT regress):
-- **Six-field `ProviderResult`** (`name, model, ok, output, error, elapsed`) — the
-  one shape every seat (subprocess AND normalized Task seat) returns.
+- **Six-field `ProviderResult` core** (`name, model, ok, output, error, elapsed`) — the
+  one shape every seat (subprocess AND normalized Task seat) returns; the six core
+  fields are unchanged and universally present. Additive-OPTIONAL fields follow the
+  `repaired_output` precedent (serialized by `to_dict` only when set, coerced by
+  `from_dict`, round-tripping through `repair-seat` untouched, ignored by `render`):
+  `repaired_output` (the haiku repair) plus the run-identity stamps `run_id` /
+  `target_sha256`, which `run` and `persist-seat` stamp from the run dir's own
+  `run.json` whenever a result lands in a run-scoped review dir (never from the
+  pointer, so a stamp always describes the dir the file physically sits in). The
+  ad-hoc flat layout never sets the stamps, so its JSON stays byte-identical
+  six-field.
 - **Provider = executor.** The `Provider` ABC's job is `run()` (invoke a CLI →
   `ProviderResult`). the subprocess providers are executors; opus/sonnet (Task seats) are NOT
   providers — they're owned by the orchestrator. (WHY not model Claude seats as
@@ -155,8 +173,9 @@ Key contracts (do NOT regress):
   via `known_seat_names()` (no hardcoded codex/agy list). The `cursor` GROUP TOKEN (in `--seats` and
   `[panels]` rosters) expands to every registered `cursor-*` seat via `_expand_seat_groups`, so it grows
   with the cursor rows of the catalog (`seats.group_tokens()` supplies the expansion members).
-- `render --stage --session-id <id>` stages a seat prompt to
-  `.crew/reviews/<session-id>/prompt-<seat-role>.txt` (session resolved in Python — arg →
+- `render --stage --session-id <id>` stages a seat prompt to the FLAT
+  `.crew/reviews/<session-id>/prompt-<seat-role>.txt`, pointer or no pointer: only `review-prep` may
+  write a run dir's frozen prompt files (session resolved in Python — arg →
   `CLAUDE_SESSION_ID` env — so the command carries no `${…}` expansion).
 - **Plugin-root `crew` dispatcher (canonical invocation).** Commands invoke the
   engine via the bare `"${CLAUDE_PLUGIN_ROOT}/crew" <sub> …` dispatcher (a thin
@@ -168,17 +187,14 @@ Key contracts (do NOT regress):
   `cli.py` path still works (the dispatcher just imports it), but shipped commands
   emit only `crew`. Users add ONE allowlist rule (`Bash(*/crew *)`) covering the
   engine AND `crew state …` (see below).
-- **`render --stage-all <comma-roles>` (N→1 collapse).** Stages one LABELED prompt
-  PER comma-listed role in a SINGLE call — `.crew/reviews/<session-id>/prompt-<role>.txt`
-  for each — and prints a JSON `{role: path}` map. The review-bearing commands
-  (`review`/`build`/`measure-twice`) use it to collapse their N per-seat
-  `render --stage --seat-role <role>` calls into ONE — and the role list they
-  pass is the **comma-joined `task_seats`** from the `review-prep` JSON (NOT a
-  hardcoded `opus,sonnet`), so staging, spawn, and model pins all derive from the
-  one catalog and the staged filename always matches what the spawn reads
-  (catalog seats satisfy `name == slug(name)`, so a registered seat's staged
-  filename is the name itself; only a free-form role LABEL with stripped
-  characters stages and is read as its normalized slug).
+- **`render --stage-all <comma-roles>` (N→1 collapse; ad-hoc only).** Stages one
+  LABELED prompt PER comma-listed role in a SINGLE call — one
+  `prompt-<role>.txt` each in the FLAT session dir (never a run dir; see the
+  `--stage` bullet) — and prints a JSON `{role: path}` map. The
+  review-bearing commands (`review`/`build`/`measure-twice`) NO LONGER call it:
+  `review-prep` stages every Task-seat prompt itself against the run's frozen
+  snapshot (`task_prompt_paths` in its JSON), because a separate render would
+  re-resolve the LIVE target and reopen the drift window the snapshot closes.
   Each role gets its own
   "acting as the **<role>** seat" label; the special role `seat` maps to
   `seat_role=None` (no label — matching the shared `prompt-seat.txt`). It reuses
@@ -195,40 +211,56 @@ Key contracts (do NOT regress):
 
 - The orchestrator preps the fan-out with ONE `crew review-prep <target> --panel <preset>` (or `--seats
   <spec>`) `--session-id <id>` call, which resolves the target, splits `--panel`/`--seats` into the
-  subprocess seat list AND the Task-seat split, stages the shared subprocess prompt once (`render
-  --stage` machinery, byte-identical), and PRINTS `{prompt_path, subprocess_seats, task_seats,
-  task_seat_models}` as JSON — it runs NOTHING.
+  subprocess seat list AND the Task-seat split (rejecting, exit 2 with nothing written: `--mode
+  discuss`, a duplicate name across the two kinds, a non-filename-safe task-seat name, and any seat
+  named after a run-dir control file (`run`/`current-run`)), mints the run-scoped review dir
+  `.crew/reviews/<id>/<run_id>/` (identity = content hash + replayable target spec + base + a per-seat
+  EXECUTION SIGNATURE for every seat, kind + config-resolved model, so a panel change, a kind flip, or
+  a `[seats.<name>].model` change on EITHER seat kind mints a new run; write-once `run.json` carrying
+  the full `identity_digest`; frozen snapshot `target.md`/`target.diff`; the
+  `current-run.json` pointer as a launch-time handoff), stages the shared subprocess prompt AND one
+  prompt per Task seat against the SNAPSHOT, and PRINTS `{prompt_path, subprocess_seats, task_seats,
+  task_seat_models, run_dir, run_id, target_sha256, task_prompt_paths, pending_subprocess_seats,
+  pending_task_seats}` as JSON — it runs NOTHING. A re-prep of an identical spec RESUMES the same dir
+  (`run.json` byte-untouched, landed-valid seats excluded from the pending lists); changed content or
+  review inputs mint a DIFFERENT dir, so stale results are unreachable rather than merely inadvisable.
 
 ### Subprocess fan-out
 
 - **Per-seat fan-out (visibility).** The review-bearing commands (`review`/`build`/`measure-twice`) fan
   subprocess seats out ONE `crew run <seat>` call PER seat — each a separate, visible, killable shell —
   rather than one opaque `crew review --seats <all>` call that hides them in the `_fan_out` thread pool.
-- The orchestrator then iterates `subprocess_seats`, running each via `run <seat> --session-id <id>
-  --json` — `run` DERIVES `-f` (`prompt-seat.txt`) and `-o` (`<seat>.json`) from the session dir when
-  they're omitted, so the fan-out line no longer types either path; explicit `-f`/`-o` still override
-  independently (debate's own `.crew/debates/` layout keeps passing explicit paths).
+- The orchestrator then iterates `pending_subprocess_seats`, running each via `run <seat> --session-id
+  <id> --run-id <run_id> --json` — `run` DERIVES `-f` (`prompt-seat.txt`) and `-o` (`<seat>.json`) from
+  the run dir (explicit `--run-id` > the session pointer > the flat session dir; resolved ONCE at
+  process start so a pointer flip cannot re-route a running seat), stamps the result with the run
+  identity read from the run dir's own `run.json`, and applies the preserve-valid rule (an incoming
+  failure never replaces a landed valid success; a fresh `ok=true` replaces anything). `--run-id` with
+  an explicit `-o` is rejected (contradictory routing); explicit `-f`/`-o` alone still override
+  independently (debate's own `.crew/debates/` layout keeps passing explicit paths, unstamped).
 - `run --json` always exits 0 with the six-field result, so per-seat never-choke is automatic (no
   all-failed abort to handle).
 
 ### Task-seat dispatch & persist
 
 - (`review-prep` resolves BOTH seat kinds but EXECUTES neither — the Claude Task seats stay
-  orchestrator-DISPATCHED; the commands now CONSUME `task_seats` + `task_seat_models` to stage via
-  `--stage-all` and spawn each Task seat with `model = task_seat_models[seat]`, so it is no longer the
+  orchestrator-DISPATCHED; the commands spawn each PENDING Task seat over its prep-staged prompt
+  (`task_prompt_paths[seat]`) with `model = task_seat_models[seat]`, so it is no longer the
   opaque echo the commands ignored.)
 - After the fan-out, the orchestrator persists EACH normalized Task seat (opus/sonnet/fable) via `crew
-  persist-seat <seat> --session-id <id> --model <pin> -f <text>` (or `--failed --error <diag>` for a
-  seat that errored) — the engine owns the `<seat>.json` filename (the seat name itself; catalog
-  names are their own slug) AND the six-field shape, so the command
-  markdown no longer hand-assembles the `<seat>.json` with the Write tool.
+  persist-seat <seat> --session-id <id> --run-id <run_id> --model <pin> -f <text>` (or `--failed
+  --error <diag>` for a seat that errored) — the engine owns the `<seat>.json` filename (the seat name
+  itself; catalog names are their own slug), the six-field core shape, the run-identity stamps, and the
+  preserve-valid write, so the command markdown no longer hand-assembles the `<seat>.json` with the
+  Write tool. Without `--run-id` while the session pointer exists, `persist-seat` exits 2 naming the
+  fix (completion-time attribution by mutable pointer is the TOCTOU bug this closes).
 
 ### Repair & collect
 
 - Each Task seat lands as a `<seat>.json` too, so the WHOLE panel (subprocess AND Task seats) flows
   through ONE `collect`. It then collapses the per-seat files into ONE GROUPED markdown digest with
-  `crew collect --session-id <id> --seats <comma-joined ran seats> --group -o panel.md --full
-  panel-full.md` and reads the deduped `panel.md` once.
+  `crew collect --session-id <id> --run-id <run_id> --seats <comma-joined ran seats> --group -o
+  <run_dir>/panel.md --full <run_dir>/panel-full.md` and reads the deduped `panel.md` once.
 - `collect` reads EXACTLY the named seats (never globs — a stale `<seat>.json` from an earlier panel in
   the reused session dir is never folded in), labels every block by its requested seat name (a missing,
   unreadable, non-JSON, or non-object file → a labeled SKIPPED block; a well-formed JSON object renders
@@ -261,7 +293,10 @@ Key contracts (do NOT regress):
   render the original `output` — so a degraded haiku rewrite can never overwrite the seat's genuine
   review, and a seat still non-compliant after repair renders its ORIGINAL text raw (graceful
   degradation, never worse than the original).
-- The orchestrator clears each expected `<seat>.json` BEFORE launching the per-seat run shells and WAITS
+- Seat results are RUN-SCOPED, so there is no pre-launch `rm -f` clear anymore: a changed target mints a
+  new run dir (an old panel's files are unreachable), and an unchanged target resumes with landed seats
+  excluded from the pending lists. `collect` gains `--run-id` (fallback: the session pointer; with
+  neither, the flat dir, byte-identical no-flag behavior). The orchestrator WAITS
   for BOTH every subprocess run shell AND every Task-seat persist before collecting. The `review`
   subcommand still exists for ad-hoc one-shot fan-out; the commands just don't use it. (`/crew:debate`
   fans out per-seat in BOTH paths now — its multi-round path always did, and the single-round path

@@ -51,7 +51,11 @@ read-only guarantee is YOUR discipline, not an enforced boundary. Hold it strict
 
 You received a DISCUSS prompt embedding a question/topic (and possibly prior
 rounds). Read it — read referenced files for context if it helps, staying
-read-only — then respond with EXACTLY these three things:
+read-only — then respond with EXACTLY these three things. If the prompt points
+you at a FROZEN snapshot file (a `target.md`/`target.diff` inside a
+`.crew/reviews/…` run dir), that snapshot is the authoritative content under
+discussion: read it rather than re-deriving the live target (the live path or
+diff command is supplementary context only).
 
 1. **DIRECT TAKE** — your direct answer / recommendation, stated plainly up front.
 2. **STRONGEST OBJECTION** — the single strongest objection to your own take, the

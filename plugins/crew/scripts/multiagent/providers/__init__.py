@@ -43,21 +43,33 @@ class ProviderResult:
     # None so an un-repaired seat's JSON keeps the byte-identical SIX-field shape.
     repaired_output: str | None = None
 
+    # OPTIONAL run-identity stamps, same additive contract as repaired_output
+    # (serialized only when set, coerced by from_dict, round-tripping through
+    # repair-seat untouched, ignored by render). `run` and `persist-seat` stamp
+    # both from the run dir's own run.json at write time whenever a result lands
+    # in a run-scoped review dir, so a result's stamp always describes the dir it
+    # physically sits in, so location and attribution cannot diverge. Everything
+    # that COUNTS a result validates these against the run's record; the ad-hoc
+    # flat layout never sets them.
+    run_id: str | None = None
+    target_sha256: str | None = None
+
     def to_dict(self) -> dict:
         """Return the seat's fields as a plain dict.
 
-        Mirrors the ``models.py`` convention (``asdict(self)``) BUT drops the
-        optional ``repaired_output`` when it is None, so an un-repaired seat's
-        JSON keeps the byte-identical SIX-field shape existing consumers expect
-        (the field only materializes after a `repair-seat`). The CLI/render layer
-        batches a list of these and calls ``json.dumps`` ONCE over the list for
-        ``--json`` output (see render.py / cli.py); we deliberately do NOT add a
-        per-result ``to_json()`` because the renderer owns the array-level
-        serialization.
+        Mirrors the ``models.py`` convention (``asdict(self)``) BUT drops each
+        optional field (``repaired_output``, ``run_id``, ``target_sha256``) when
+        it is None, so an un-repaired/un-stamped seat's JSON keeps the
+        byte-identical SIX-field shape existing consumers expect. The CLI/render
+        layer batches a list of these and calls ``json.dumps`` ONCE over the
+        list for ``--json`` output (see render.py / cli.py); we deliberately do
+        NOT add a per-result ``to_json()`` because the renderer owns the
+        array-level serialization.
         """
         d = dataclasses.asdict(self)
-        if self.repaired_output is None:
-            d.pop("repaired_output", None)
+        for opt in ("repaired_output", "run_id", "target_sha256"):
+            if getattr(self, opt) is None:
+                d.pop(opt, None)
         return d
 
     @classmethod
@@ -117,8 +129,17 @@ class ProviderResult:
         # / None -> the seat has no repaired projection (parse the original output).
         rep = d.get("repaired_output")
         repaired_output = None if rep is None else str(rep)
+
+        # OPTIONAL run-identity stamps, present only on run-scoped writes.
+        # Coerced like the other optionals so a repair round-trip cannot launder
+        # or mutate a stamp.
+        rid = d.get("run_id")
+        run_id = None if rid is None else str(rid)
+        tsha = d.get("target_sha256")
+        target_sha256 = None if tsha is None else str(tsha)
         return cls(name=name, model=model, ok=ok, output=output,
-                   error=error, elapsed=elapsed, repaired_output=repaired_output)
+                   error=error, elapsed=elapsed, repaired_output=repaired_output,
+                   run_id=run_id, target_sha256=target_sha256)
 
 
 # =============================================================================

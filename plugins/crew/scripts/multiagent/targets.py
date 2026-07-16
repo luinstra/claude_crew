@@ -47,6 +47,18 @@ class Target:
     # they run ``diff_cmd`` / read ``ref_path`` in the repo they already sit in.
     diff_cmd: str | None = None
     ref_path: str | None = None
+    # The BARE, replayable ``resolve()`` input that reproduces THIS resolution:
+    # the plan path itself, ``working-tree``, ``branch``, ``commit:<full-sha>``,
+    # or ``<shaA>..<shaB>`` (endpoints pinned). Each resolver populates it with
+    # its pinned canonical form as it resolves, so ``auto``, short SHAs, and
+    # branch-name ranges are normalized BEFORE anything persists the spec
+    # (never a labeled/descriptor form, never ``auto``).
+    replay_spec: str = ""
+    # Set by review-prep ONLY (never by a resolver): the run dir's frozen
+    # snapshot of ``content``. When set, the prompt builder makes the snapshot
+    # the reviewed content and demotes ``ref_path``/``diff_cmd`` (still the
+    # LIVE target) to supplementary context.
+    snapshot_path: str | None = None
 
 
 # =============================================================================
@@ -165,6 +177,7 @@ def _resolve_plan(path: str) -> Target:
         content=content,
         descriptor=f"plan: {p}",
         ref_path=str(p),
+        replay_spec=str(p),
     )
 
 
@@ -219,6 +232,7 @@ def _resolve_working_tree(cwd: str | None) -> Target:
             descriptor="code: working-tree (no commits yet)",
             notes=notes,
             diff_cmd=diff_cmd,
+            replay_spec="working-tree",
         )
 
     # Full uncommitted diff (staged + unstaged) to tracked files, plus
@@ -247,6 +261,7 @@ def _resolve_working_tree(cwd: str | None) -> Target:
         # them — hand the seat the compound command that includes them.
         # --no-pager guards against a TTY pager hang on a large diff.
         diff_cmd=_WORKTREE_DIFF_CMD if untracked else "git --no-pager diff HEAD",
+        replay_spec="working-tree",
     )
 
 
@@ -281,6 +296,9 @@ def _resolve_branch(base: str, cwd: str | None) -> Target:
         # Merge-base SHA is pinned, so this stays deterministic even as the base
         # branch advances. --no-pager guards against a TTY pager hang.
         diff_cmd=f"git --no-pager diff {mb}..HEAD",
+        # ``branch`` is the replay spec; the base ref travels alongside it (the
+        # caller records it separately), so a replay re-derives the merge-base.
+        replay_spec="branch",
     )
 
 
@@ -309,6 +327,7 @@ def _resolve_commit(sha: str, cwd: str | None) -> Target:
         descriptor=f"code: commit {resolved[:12]}",
         # Full SHA so the seat reproduces exactly this commit's diff.
         diff_cmd=diff_cmd,
+        replay_spec=f"commit:{resolved}",
     )
 
 
@@ -344,6 +363,8 @@ def _resolve_ref_range(spec: str, cwd: str | None) -> Target:
         descriptor=f"code: diff {spec}",
         notes=notes,
         diff_cmd=f"git --no-pager diff {diff_arg}",
+        # Both endpoints pinned to full SHAs (diff_arg is the pinned form).
+        replay_spec=diff_arg,
     )
 
 

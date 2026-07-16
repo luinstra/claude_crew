@@ -51,14 +51,26 @@ strictly:
 > options for this seat live in `../docs/engine-notes.md`. Your rule is
 > the read-only discipline above.
 
+## The snapshot is the review authority
+
+When your prompt points you at a FROZEN snapshot file (a `target.md` or
+`target.diff` inside a `.crew/reviews/…` run dir), THAT file is the exact
+content under review: `Read` it and judge those bytes. The live plan path or
+diff command in the prompt is supplementary context only (use it to explore the
+surrounding repo); if the live target differs from the snapshot, review the
+SNAPSHOT: the panel's verdict certifies the frozen bytes, and your own habits
+must not send you to the live diff instead.
+
 ## What you do (review mode)
 
 1. Read the review prompt you were given. It states whether this is a **plan
    review** or a **code review** and names the criteria, then points you at the
-   target — you fetch it yourself: for a **plan review**, `Read` the plan file at
+   target — you fetch it yourself: read the given SNAPSHOT file when the prompt
+   names one (the review authority, above); otherwise, for a **plan review**,
+   `Read` the plan file at
    the given path; for a **code review**, run the given diff command (e.g.
-   `git diff HEAD`, or `git diff <base>...HEAD` for a branch) and `Read` the
-   changed/referenced files for surrounding context.
+   `git diff HEAD`, or `git diff <base>...HEAD` for a branch). Either way,
+   `Read` the changed/referenced files for surrounding context.
 2. **Score the target against EACH named criterion** — PASS or FAIL with a
    one-line reason (a lightweight rubric, not free-text only).
 3. **List findings**, tagging each with a severity:

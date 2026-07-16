@@ -830,13 +830,35 @@ def test_result_contract():
     log_section("ProviderResult contract (Step 1.0 / 1.1)")
     r = ProviderResult(name="codex", model="o3", ok=True, output="x", error=None, elapsed=1.5)
     d = r.to_dict()
-    check("to_dict has exactly the six fields (repaired_output omitted when None)",
+    check("to_dict has exactly the six fields (optional fields omitted when None)",
           set(d.keys()) == {"name", "model", "ok", "output", "error", "elapsed"},
           "six fields", str(set(d.keys())))
     import dataclasses
-    check("to_dict equals asdict MINUS the None repaired_output",
-          d == {k: v for k, v in dataclasses.asdict(r).items() if k != "repaired_output"},
-          "equal (sans repaired_output)", "differ")
+    _OPTIONAL = {"repaired_output", "run_id", "target_sha256"}
+    check("to_dict equals asdict MINUS the None optional fields",
+          d == {k: v for k, v in dataclasses.asdict(r).items() if k not in _OPTIONAL},
+          "equal (sans optional fields)", "differ")
+
+    # The run-identity stamps follow the SAME additive contract as
+    # repaired_output: serialized only when set, coerced by from_dict, and the
+    # six core fields stay universally present.
+    stamped = ProviderResult(name="codex", model="o3", ok=True, output="x",
+                             error=None, elapsed=1.5,
+                             run_id="run-abc123def456", target_sha256="f" * 64)
+    sd = stamped.to_dict()
+    check("to_dict includes run_id/target_sha256 ONLY when set",
+          sd.get("run_id") == "run-abc123def456"
+          and sd.get("target_sha256") == "f" * 64
+          and {"name", "model", "ok", "output", "error", "elapsed"} <= set(sd.keys()),
+          "stamps present + six core fields", str(set(sd.keys())))
+    sback = ProviderResult.from_dict(sd)
+    check("run_id/target_sha256 round-trip through from_dict/to_dict",
+          sback.run_id == "run-abc123def456" and sback.target_sha256 == "f" * 64,
+          "round-trip holds", f"{sback.run_id!r}/{sback.target_sha256!r}")
+    check("from_dict defaults run_id/target_sha256 to None when absent",
+          ProviderResult.from_dict({"name": "x", "ok": True}).run_id is None
+          and ProviderResult.from_dict({"name": "x", "ok": True}).target_sha256 is None,
+          "None defaults", "?")
 
     # A REPAIRED seat carries the optional 7th field; it round-trips and does NOT
     # touch the original output.
@@ -3971,9 +3993,13 @@ def test_review_prep():
             check("review-prep prints valid JSON", False, "valid json",
                   f"{exc}: {proc.stdout[:150]!r} err={proc.stderr[:150]!r}")
         if obj is not None:
-            check("review-prep JSON keys are [prompt_path, subprocess_seats, task_seats, task_seat_models] IN ORDER, exit 0",
+            check("review-prep JSON keys keep the original four IN ORDER then append the run-scoped six, exit 0",
                   proc.returncode == 0
-                  and list(obj.keys()) == ["prompt_path", "subprocess_seats", "task_seats", "task_seat_models"],
+                  and list(obj.keys()) == [
+                      "prompt_path", "subprocess_seats", "task_seats",
+                      "task_seat_models", "run_dir", "run_id", "target_sha256",
+                      "task_prompt_paths", "pending_subprocess_seats",
+                      "pending_task_seats"],
                   "exact key order", f"rc={proc.returncode} keys={list(obj.keys()) if obj else None}")
         check("review-prep stdout has no \\uXXXX escaping (ensure_ascii=False)",
               "\\u" not in proc.stdout, "no \\u", repr(proc.stdout[:160]))
@@ -4014,58 +4040,78 @@ def test_review_prep():
         check("review-prep omitted --task-seats -> []",
               obj["task_seats"] == [], "[]", str(obj["task_seats"]))
 
-    # 3. prompt_path BYTE-IDENTICAL to `render --mode review --stage` (BOTH
-    #    inline-diff modes). Distinct session ids so the two writes don't share a
-    #    path (no self-compare).
-    for flag in ([], ["--inline-diff"]):
-        with tempfile.TemporaryDirectory() as td:
-            tdp = Path(td)
-            _write_plan(tdp)
-            prep = _run_dispatcher(
-                ["review-prep", "plan.md", "--seats", "codex",
-                 "--session-id", "pa", *flag], cwd=td, timeout=30)
-            stage = _run_dispatcher(
-                ["render", "plan.md", "--mode", "review", "--stage",
-                 "--session-id", "sb", *flag], cwd=td, timeout=30)
-            prep_path = json.loads(prep.stdout)["prompt_path"]
-            prep_f = tdp / prep_path
-            stage_f = tdp / ".crew" / "reviews" / "sb" / "prompt-seat.txt"
-            same = (prep_f.is_file() and stage_f.is_file()
-                    and prep_f.read_bytes() == stage_f.read_bytes())
-            label = "with --inline-diff" if flag else "no flag"
-            check(f"review-prep prompt_path file == render --stage file ({label}, byte-identical)",
-                  prep.returncode == 0 and stage.returncode == 0 and same,
-                  "identical bytes",
-                  f"prep={prep_f.is_file()} stage={stage_f.is_file()} equal={same}")
+    # 3. Reference mode: prep's staged prompt names the run dir's SNAPSHOT as the
+    #    reviewed content (render --stage still names the live plan). Inline mode:
+    #    content is embedded, so prep stays BYTE-IDENTICAL to `render --stage
+    #    --inline-diff`. Distinct session ids so the two writes don't share a path.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        prep = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex",
+             "--session-id", "pa"], cwd=td, timeout=30)
+        obj = json.loads(prep.stdout)
+        prep_f = tdp / obj["prompt_path"]
+        text = prep_f.read_text(encoding="utf-8") if prep_f.is_file() else ""
+        snap = f"{obj['run_dir']}/target.md"
+        check("review-prep staged subprocess prompt references the run-dir snapshot (reference mode)",
+              prep.returncode == 0 and prep_f.is_file()
+              and f"read:  {snap}" in text and "plan: plan.md" in text
+              and "Supplementary context ONLY" in text
+              and "read:  plan.md" in text,
+              f"read: {snap} + live plan as supplementary", text[:300])
+        snap_f = tdp / obj["run_dir"] / "target.md"
+        check("review-prep snapshot bytes == the plan body",
+              snap_f.is_file()
+              and snap_f.read_bytes() == (tdp / "plan.md").read_bytes(),
+              "snapshot == plan.md bytes", f"exists={snap_f.is_file()}")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        prep = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex",
+             "--session-id", "pa", "--inline-diff"], cwd=td, timeout=30)
+        stage = _run_dispatcher(
+            ["render", "plan.md", "--mode", "review", "--stage",
+             "--session-id", "sb", "--inline-diff"], cwd=td, timeout=30)
+        prep_f = tdp / json.loads(prep.stdout)["prompt_path"]
+        stage_f = tdp / ".crew" / "reviews" / "sb" / "prompt-seat.txt"
+        same = (prep_f.is_file() and stage_f.is_file()
+                and prep_f.read_bytes() == stage_f.read_bytes())
+        check("review-prep prompt_path file == render --stage file (--inline-diff, byte-identical)",
+              prep.returncode == 0 and stage.returncode == 0 and same,
+              "identical bytes",
+              f"prep={prep_f.is_file()} stage={stage_f.is_file()} equal={same}")
 
-    # 3b. WORKING-TREE byte-identity (locks the build.md/measure-twice git path —
-    #     the plan.md case above doesn't exercise targets.resolve's git diff).
-    #     Two IDENTICAL temp git repos (identical init + identical change) so
-    #     prep's staged .crew/ file can't perturb render's working-tree diff;
-    #     reference mode embeds the diff COMMAND, not content, so the prompts are
-    #     deterministic and byte-identical across the matched repos.
-    with tempfile.TemporaryDirectory() as tda, tempfile.TemporaryDirectory() as tdb:
-        for repo in (tda, tdb):
-            _init_repo(repo)                                   # commits a.txt=hello
-            (Path(repo) / "a.txt").write_text("hello\nchanged\n")
+    # 3b. WORKING-TREE reference mode (locks the build.md git path): the staged
+    #     prompt names the frozen target.diff snapshot as the review authority
+    #     AND keeps the live compound diff command as supplementary context; the
+    #     snapshot bytes equal the resolved diff.
+    with tempfile.TemporaryDirectory() as tda:
+        _init_repo(tda)                                   # commits a.txt=hello
+        (Path(tda) / "a.txt").write_text("hello\nchanged\n")
         prep = _run_dispatcher(
             ["review-prep", "working-tree", "--seats", "codex", "--session-id", "wa"],
             cwd=tda, timeout=30)
-        stage = _run_dispatcher(
-            ["render", "working-tree", "--mode", "review", "--stage",
-             "--session-id", "wb"], cwd=tdb, timeout=30)
-        prep_path = json.loads(prep.stdout)["prompt_path"] if prep.returncode == 0 else ""
-        prep_f = Path(tda) / prep_path if prep_path else Path(tda) / "missing"
-        stage_f = Path(tdb) / ".crew" / "reviews" / "wb" / "prompt-seat.txt"
-        same = (prep_f.is_file() and stage_f.is_file()
-                and prep_f.read_bytes() == stage_f.read_bytes())
-        check("review-prep working-tree prompt_path == render working-tree --stage (byte-identical)",
-              prep.returncode == 0 and stage.returncode == 0 and same
-              and prep_path == ".crew/reviews/wa/prompt-seat.txt",
-              "identical bytes (git working-tree path)",
-              f"prep={prep_f.is_file()} stage={stage_f.is_file()} equal={same} path={prep_path!r}")
+        obj = json.loads(prep.stdout) if prep.returncode == 0 else {}
+        prep_f = Path(tda) / obj.get("prompt_path", "missing")
+        text = prep_f.read_text(encoding="utf-8") if prep_f.is_file() else ""
+        snap = f"{obj.get('run_dir', '?')}/target.diff"
+        snap_f = Path(tda) / obj.get("run_dir", "?") / "target.diff"
+        check("review-prep working-tree prompt references target.diff snapshot + live diff cmd as supplementary",
+              prep.returncode == 0 and prep_f.is_file()
+              and f"read:  {snap}" in text
+              and "git --no-pager diff HEAD" in text
+              and "Supplementary context ONLY" in text,
+              "snapshot read + supplementary run", text[:300])
+        import hashlib as _hl
+        check("review-prep working-tree snapshot sha256 == target_sha256",
+              snap_f.is_file()
+              and _hl.sha256(snap_f.read_bytes()).hexdigest() == obj.get("target_sha256"),
+              "snapshot hash matches", f"exists={snap_f.is_file()}")
 
-    # 4. No internal fan-out / runs nothing / stages ONLY the subprocess prompt.
+    # 4. No internal fan-out / runs nothing / stages the subprocess prompt AND
+    #    one prompt per Task seat into the run dir.
     #    A fake codex on PATH that writes a sentinel must NEVER be invoked by prep.
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
@@ -4082,16 +4128,26 @@ def test_review_prep():
         proc = _run_dispatcher(
             ["review-prep", "plan.md", "--seats", "codex", "--session-id", "s4",
              "--task-seats", "opus,sonnet"], cwd=td, env=env, timeout=30)
-        prompt_seat = tdp / ".crew" / "reviews" / "s4" / "prompt-seat.txt"
-        opus_f = tdp / ".crew" / "reviews" / "s4" / "prompt-opus.txt"
-        sonnet_f = tdp / ".crew" / "reviews" / "s4" / "prompt-sonnet.txt"
+        obj = json.loads(proc.stdout) if proc.returncode == 0 else {}
+        run_d = tdp / obj.get("run_dir", "?")
+        prompt_seat = run_d / "prompt-seat.txt"
+        opus_f = run_d / "prompt-opus.txt"
+        sonnet_f = run_d / "prompt-sonnet.txt"
         check("review-prep never invokes a seat (fake codex sentinel absent — prep runs nothing)",
               proc.returncode == 0 and not sentinel.exists(),
               "no sentinel", f"rc={proc.returncode} sentinel={sentinel.exists()}")
-        check("review-prep stages ONLY the subprocess prompt-seat.txt (no per-role Task prompts)",
-              prompt_seat.is_file() and not opus_f.exists() and not sonnet_f.exists(),
-              "only prompt-seat.txt",
+        check("review-prep stages the subprocess prompt AND one prompt per Task seat into the run dir",
+              prompt_seat.is_file() and opus_f.is_file() and sonnet_f.is_file()
+              and obj.get("task_prompt_paths") == {
+                  "opus": str(Path(obj["run_dir"]) / "prompt-opus.txt"),
+                  "sonnet": str(Path(obj["run_dir"]) / "prompt-sonnet.txt")},
+              "prompt-seat + prompt-opus + prompt-sonnet in run dir",
               f"seat={prompt_seat.is_file()} opus={opus_f.exists()} sonnet={sonnet_f.exists()}")
+        opus_text = opus_f.read_text(encoding="utf-8") if opus_f.is_file() else ""
+        check("review-prep staged Task prompt carries its seat label AND the snapshot reference",
+              "acting as the **opus** seat" in opus_text
+              and f"read:  {obj.get('run_dir', '?')}/target.md" in opus_text,
+              "label + snapshot read line", opus_text[:200])
 
     # 5. Placeholder + traversal guards (SANITIZE, not raise).
     with tempfile.TemporaryDirectory() as td:
@@ -4106,13 +4162,15 @@ def test_review_prep():
         trav = _run_dispatcher(
             ["review-prep", "plan.md", "--seats", "codex",
              "--session-id", "../../x"], cwd=td, timeout=30)
-        # traversal id sanitizes/collapses to .crew/reviews/x (contained), not a raise.
-        staged = tdp / ".crew" / "reviews" / "x" / "prompt-seat.txt"
+        # traversal id sanitizes/collapses to .crew/reviews/x (contained), not a
+        # raise; the run dir nests under the CONTAINED session dir.
         prep_path = json.loads(trav.stdout)["prompt_path"] if trav.returncode == 0 else ""
-        check("review-prep traversal session id is CONTAINED (sanitized to .crew/reviews/x)",
+        staged = tdp / prep_path if prep_path else tdp / "missing"
+        check("review-prep traversal session id is CONTAINED (sanitized under .crew/reviews/x/)",
               trav.returncode == 0 and staged.is_file()
-              and prep_path == ".crew/reviews/x/prompt-seat.txt",
-              "contained sanitized path", f"rc={trav.returncode} path={prep_path!r} exists={staged.is_file()}")
+              and prep_path.startswith(".crew/reviews/x/run-")
+              and prep_path.endswith("/prompt-seat.txt"),
+              "contained sanitized run-dir path", f"rc={trav.returncode} path={prep_path!r} exists={staged.is_file()}")
 
     # 6. Group-token expansion: --seats cursor -> every registered cursor-* seat.
     with tempfile.TemporaryDirectory() as td:
@@ -4257,14 +4315,15 @@ def test_review_prep():
     with tempfile.TemporaryDirectory() as td:
         _write_plan(Path(td))
         proc, obj = _prep(["--session-id", "bo"], td)
-        staged = Path(td) / ".crew" / "reviews" / "bo" / "prompt-seat.txt"
+        staged = (Path(td) / obj["prompt_path"]) if obj and obj.get("prompt_path") else None
         check("review-prep both --panel and --seats omitted + no config -> built-in 'full' (subprocess AND task seats)",
               proc.returncode == 0 and obj is not None
               and obj["subprocess_seats"] == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"]
               and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"}
-              and obj["prompt_path"] == ".crew/reviews/bo/prompt-seat.txt"
-              and staged.exists(),
+              and obj["prompt_path"].startswith(".crew/reviews/bo/run-")
+              and obj["prompt_path"].endswith("/prompt-seat.txt")
+              and staged is not None and staged.exists(),
               "built-in full default both-omitted", str(obj))
 
     # 15. Precedence: explicit --task-seats OVERRIDES the panel-derived task list;
@@ -4288,25 +4347,25 @@ def test_review_prep():
               and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"},
               "seats override subprocess, panel supplies task", str(obj))
 
-    # 16. Staging<->spawn consistency: the comma-joined task_seats (incl. the
-    #     opt-in fable) fed to `render --stage-all` stages one prompt per seat —
-    #     the SAME filenames the spawn line reads, so they can never diverge.
+    # 16. Staging<->spawn consistency: prep ITSELF stages one prompt per task
+    #     seat (incl. the opt-in fable) into the run dir and prints the exact
+    #     paths in task_prompt_paths, so the spawn line reads the same files the
+    #     prep wrote (no separate render call, no filename to diverge).
     with tempfile.TemporaryDirectory() as td:
         _write_plan(Path(td))
         prep, obj = _prep(["--seats", "opus,sonnet,fable", "--session-id", "sc"], td)
-        joined = ",".join(obj["task_seats"]) if obj else ""
-        render = _run_dispatcher(
-            ["render", "plan.md", "--mode", "review", "--stage-all", joined,
-             "--session-id", "sc"], cwd=td, timeout=30)
-        fable = Path(td) / ".crew" / "reviews" / "sc" / "prompt-fable.txt"
-        opus = Path(td) / ".crew" / "reviews" / "sc" / "prompt-opus.txt"
-        sonnet = Path(td) / ".crew" / "reviews" / "sc" / "prompt-sonnet.txt"
-        check("review-prep task_seats join feeds --stage-all -> stages one prompt per seat",
-              prep.returncode == 0 and render.returncode == 0
+        paths = obj.get("task_prompt_paths", {}) if obj else {}
+        all_staged = bool(paths) and all(
+            (Path(td) / p).is_file() for p in paths.values())
+        check("review-prep stages one prompt per task seat (incl. fable) at task_prompt_paths",
+              prep.returncode == 0 and obj is not None
               and obj["task_seats"] == ["opus", "sonnet", "fable"]
-              and opus.is_file() and sonnet.is_file() and fable.is_file(),
-              "prompt-fable.txt staged from joined task_seats",
-              f"join={joined!r} rc={render.returncode} fable={fable.is_file()}")
+              and sorted(paths) == ["fable", "opus", "sonnet"]
+              and all(p == str(Path(obj["run_dir"]) / f"prompt-{s}.txt")
+                      for s, p in paths.items())
+              and all_staged,
+              "three staged prompts in the run dir",
+              f"paths={paths} staged={all_staged}")
 
 
 def test_debate_panel_resolver():
@@ -4855,11 +4914,12 @@ def test_persist_seat_doc_sync():
               "the exact six fields" not in text, "absent", "STILL PRESENT")
 
     # REFERENCE-SPAWN guard: the three review-bearing docs must
-    # spawn Task seats by REFERENCE to the staged prompt file — the seat Reads it
-    # itself — NOT by pasting the staged prompt's contents inline. A drift back to
-    # `prompt="<contents of …prompt-…>"` re-inflates every spawn and re-couples the
-    # orchestrator to the prompt body; this catches that regression.
-    REF_SPAWN = "Read .crew/reviews/<session-id>/prompt-"
+    # spawn Task seats by REFERENCE to the prep-staged prompt file in the run
+    # dir (the seat Reads it itself), NOT by pasting the staged prompt's
+    # contents inline. A drift back to `prompt="<contents of …prompt-…>"`
+    # re-inflates every spawn and re-couples the orchestrator to the prompt body;
+    # this catches that regression.
+    REF_SPAWN = "Read <run_dir>/prompt-"
     for rel in docs:
         text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
         check(f"{rel} spawns Task seats BY REFERENCE: {REF_SPAWN!r}",
@@ -8624,6 +8684,1047 @@ def _write(path, text):
     return path
 
 
+# =============================================================================
+# review_runs: the pure run-identity/run-dir leaf (unit, in-process)
+# =============================================================================
+
+def test_review_runs():
+    log_section("review_runs: run identity, write rules, pointer (pure leaf)")
+    from multiagent import review_runs  # noqa: E402
+    import hashlib as _hl
+    import threading
+
+    TSHA = _hl.sha256(b"content").hexdigest()
+    SIGS = {
+        "codex": {"kind": "subprocess", "model": "gpt-5.6-sol"},
+        "opus": {"kind": "task", "model": "opus"},
+        "sonnet": {"kind": "task", "model": "sonnet"},
+    }
+    BASE_KW = dict(target_sha256=TSHA, target_spec="plan.md",
+                   target_base="main", seat_signatures=SIGS)
+
+    # --- identity: deterministic, format-valid, input-sensitive ---------------
+    a, dig = review_runs.mint_identity(**BASE_KW)
+    b, dig2 = review_runs.mint_identity(**BASE_KW)
+    check("mint_identity is deterministic", a == b and dig == dig2, a, b)
+    check("mint_identity: run_id truncates the FULL digest and matches RUN_ID_RE",
+          bool(rounds.RUN_ID_RE.match(a)) and a == "run-" + dig[:12]
+          and len(dig) == 64,
+          "run-<digest[:12]> + 64-hex digest", f"{a} / {len(dig)}")
+    variants = {
+        "content": {**BASE_KW, "target_sha256": _hl.sha256(b"other").hexdigest()},
+        "spec": {**BASE_KW, "target_spec": "other.md"},
+        "base": {**BASE_KW, "target_base": "develop"},
+        "panel (seat added)": {**BASE_KW, "seat_signatures": {
+            **SIGS, "codex-luna": {"kind": "subprocess", "model": "gpt-5.6-luna"}}},
+        "SUBPROCESS seat's resolved model": {**BASE_KW, "seat_signatures": {
+            **SIGS, "codex": {"kind": "subprocess", "model": "gpt-other"}}},
+        "task seat's model pin": {**BASE_KW, "seat_signatures": {
+            **SIGS, "opus": {"kind": "task", "model": "fable"}}},
+        "seat's execution KIND (same name, same model)": {**BASE_KW,
+            "seat_signatures": {
+                **SIGS, "codex": {"kind": "task", "model": "gpt-5.6-sol"}}},
+    }
+    for label, kw in variants.items():
+        check(f"mint_identity changes when the {label} changes",
+              review_runs.mint_identity(**kw)[0] != a, "different id", "same id")
+    # The signature map is keyed by name and canonically sorted, so insertion
+    # order never splits an identity.
+    reordered_sigs = {
+        "sonnet": SIGS["sonnet"], "codex": SIGS["codex"], "opus": SIGS["opus"],
+    }
+    r_id, _ = review_runs.mint_identity(
+        **{**BASE_KW, "seat_signatures": reordered_sigs})
+    check("mint_identity is seat-order-insensitive", r_id == a, a, r_id)
+
+    # A malformed seat_signatures field in an otherwise-valid record raises the
+    # module's own error type, never a bare TypeError/ValueError.
+    for bad_sigs in (["codex"], "codex", 7):
+        try:
+            review_runs.recompute_identity({"seat_signatures": bad_sigs})
+            check(f"recompute_identity rejects malformed seat_signatures ({type(bad_sigs).__name__})",
+                  False, "ReviewRunError", "accepted")
+        except review_runs.ReviewRunError:
+            check(f"recompute_identity rejects malformed seat_signatures ({type(bad_sigs).__name__})",
+                  True)
+        except (TypeError, ValueError) as exc:
+            check(f"recompute_identity rejects malformed seat_signatures ({type(bad_sigs).__name__})",
+                  False, "ReviewRunError", f"bare {type(exc).__name__}")
+
+    # --- run-id validation (traversal guard) ---------------------------------
+    for bad in ("../../x", "run-a/b", "run-", "", "run-a.b", "notrun-abc"):
+        try:
+            review_runs.validate_run_id(bad)
+            check(f"validate_run_id rejects {bad!r}", False, "ReviewRunError", "accepted")
+        except review_runs.ReviewRunError:
+            check(f"validate_run_id rejects {bad!r}", True)
+    check("session_segment collapses traversal to a contained segment",
+          review_runs.session_segment("../../x") == "x"
+          and review_runs.session_segment("") == "",
+          "x / ''", review_runs.session_segment("../../x"))
+
+    # --- run.json write-once + mint-conflict refusal -------------------------
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / a
+        d.mkdir()
+        record = {"run_id": a, "identity_digest": dig, "target_sha256": TSHA,
+                  "target_spec": "plan.md", "target_base": "main",
+                  "target_descriptor": "plan: plan.md",
+                  "snapshot": "target.md", "subprocess_seats": ["codex"],
+                  "task_seats": ["opus", "sonnet"],
+                  "task_seat_models": {"opus": "opus", "sonnet": "sonnet"},
+                  "seat_signatures": SIGS,
+                  "created_at": "2026-01-01T00:00:00+00:00"}
+        check("write_run_json_once writes fresh",
+              review_runs.write_run_json_once(d, record) is True, "True", "False")
+        before = (d / "run.json").read_bytes()
+        check("same-identity re-write resumes (returns False) and leaves bytes untouched",
+              review_runs.write_run_json_once(d, record) is False
+              and (d / "run.json").read_bytes() == before,
+              "resume, byte-identical", "rewrote")
+
+        def _refuses(label, mutate):
+            data = json.loads(before)
+            mutate(data)
+            (d / "run.json").write_text(json.dumps(data), encoding="utf-8")
+            after = (d / "run.json").read_bytes()
+            try:
+                review_runs.write_run_json_once(d, record)
+                check(f"mint-conflict ({label}) refuses", False,
+                      "ReviewRunError", "accepted")
+            except review_runs.ReviewRunError as exc:
+                check(f"mint-conflict ({label}) refuses naming both sides",
+                      a in str(exc) and record["identity_digest"][:12] in str(exc),
+                      "both identities named", str(exc))
+            check(f"mint-conflict ({label}) leaves the file untouched",
+                  (d / "run.json").read_bytes() == after, "untouched", "modified")
+
+        # Tampered identity FIELDS: the record no longer recomputes to the
+        # proposed digest.
+        _refuses("tampered identity fields", lambda x: x.update(
+            target_sha256=_hl.sha256(b"tampered").hexdigest()))
+        # Tampered run_id FIELD alone: fields and stored digest still recompute
+        # clean, so only the stored-run_id comparison can catch it.
+        _refuses("tampered run_id field", lambda x: x.update(
+            run_id="run-000000000000"))
+        # Tampered stored digest alone: the full-digest comparison catches a
+        # truncation collision even when the 12-hex prefix would match.
+        _refuses("tampered identity_digest field", lambda x: x.update(
+            identity_digest=dig[:12] + "f" * 52))
+        # Restore the good record, then a resume still works after the refusals.
+        (d / "run.json").write_bytes(before)
+        check("a clean record still resumes after refusals",
+              review_runs.write_run_json_once(d, record) is False, "resume", "?")
+        # Unparseable run.json: also a refusal, never a silent overwrite.
+        (d / "run.json").write_text("{not json", encoding="utf-8")
+        try:
+            review_runs.write_run_json_once(d, record)
+            check("corrupt run.json refuses", False, "ReviewRunError", "accepted")
+        except review_runs.ReviewRunError:
+            check("corrupt run.json refuses", True)
+
+    # --- snapshot create / verify / self-heal --------------------------------
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        note = review_runs.ensure_snapshot(d, "target.md", "content", TSHA)
+        check("ensure_snapshot creates the snapshot with no note",
+              note is None and (d / "target.md").read_text() == "content",
+              "created silently", str(note))
+        check("ensure_snapshot resume with matching bytes is a silent no-op",
+              review_runs.ensure_snapshot(d, "target.md", "content", TSHA) is None,
+              "None", "note")
+        (d / "target.md").write_text("TAMPERED", encoding="utf-8")
+        note = review_runs.ensure_snapshot(d, "target.md", "content", TSHA)
+        check("ensure_snapshot rewrites a corrupted snapshot with a note",
+              note is not None and (d / "target.md").read_text() == "content",
+              "healed + note", f"note={note} body={(d / 'target.md').read_text()!r}")
+
+    # --- landed-and-valid predicate -------------------------------------------
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        ok_stamped = {"name": "codex", "ok": True, "run_id": a, "target_sha256": TSHA}
+        cases = [
+            ("valid stamped success", ok_stamped, True),
+            ("ok but wrong run_id", {**ok_stamped, "run_id": "run-000000000000"}, False),
+            ("ok but wrong target_sha256",
+             {**ok_stamped, "target_sha256": "0" * 64}, False),
+            ("ok but unstamped", {"name": "codex", "ok": True}, False),
+            ("stamped failure", {**ok_stamped, "ok": False}, False),
+        ]
+        for label, data, want in cases:
+            (d / "codex.json").write_text(json.dumps(data), encoding="utf-8")
+            got = review_runs.seat_landed_valid(d, "codex", a, TSHA)
+            check(f"seat_landed_valid: {label} -> {want}", got is want,
+                  str(want), str(got))
+        # Name binding: a valid same-run result COPIED to another seat's
+        # filename must never satisfy that seat's landed check.
+        (d / "sonnet.json").write_text(json.dumps(ok_stamped), encoding="utf-8")
+        check("seat_landed_valid: another seat's valid result under this filename -> False",
+              review_runs.seat_landed_valid(d, "sonnet", a, TSHA) is False,
+              "False", "True")
+        check("result_valid binds the stored name when one is expected",
+              review_runs.result_valid(ok_stamped, a, TSHA, name="codex") is True
+              and review_runs.result_valid(ok_stamped, a, TSHA, name="sonnet") is False
+              and review_runs.result_valid(ok_stamped, a, TSHA) is True,
+              "True/False/True (name unchecked when not given)", "?")
+        (d / "codex.json").write_text("{broken", encoding="utf-8")
+        check("seat_landed_valid: unparseable file -> False",
+              review_runs.seat_landed_valid(d, "codex", a, TSHA) is False,
+              "False", "True")
+        check("seat_landed_valid: missing file -> False",
+              review_runs.seat_landed_valid(d, "missing", a, TSHA) is False,
+              "False", "True")
+
+    # --- preserve-valid write: sequential rule --------------------------------
+    def _payload(ok, body="x"):
+        return json.dumps({"name": "codex", "ok": ok, "output": body,
+                           "run_id": a, "target_sha256": TSHA})
+
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "codex.json"
+        w, _ = review_runs.preserve_valid_write(
+            p, _payload(False), incoming_ok=False, run_id=a, target_sha256=TSHA,
+            name="codex")
+        check("preserve-valid: a failure with no prior file writes", w is True,
+              "written", "skipped")
+        w, _ = review_runs.preserve_valid_write(
+            p, _payload(True, "GOOD"), incoming_ok=True, run_id=a,
+            target_sha256=TSHA, name="codex")
+        check("preserve-valid: ok=true replaces a failure", w is True, "written", "skipped")
+        w, note = review_runs.preserve_valid_write(
+            p, _payload(False), incoming_ok=False, run_id=a, target_sha256=TSHA,
+            name="codex")
+        data = json.loads(p.read_text())
+        check("preserve-valid: a failure NEVER replaces a landed valid success (note emitted)",
+              w is False and note and data["ok"] is True and data["output"] == "GOOD",
+              "kept GOOD + note", f"w={w} data={data}")
+        w, _ = review_runs.preserve_valid_write(
+            p, _payload(True, "BETTER"), incoming_ok=True, run_id=a,
+            target_sha256=TSHA, name="codex")
+        check("preserve-valid: a fresh ok=true replaces anything (a better retry wins)",
+              w is True and json.loads(p.read_text())["output"] == "BETTER",
+              "BETTER", json.loads(p.read_text()).get("output"))
+        # Name binding: another seat's valid result copied under THIS filename
+        # earns no protection; the expected seat's failure still lands.
+        q = Path(td) / "sonnet.json"
+        q.write_text(_payload(True, "COPIED FROM CODEX"), encoding="utf-8")
+        w, note = review_runs.preserve_valid_write(
+            q, json.dumps({"name": "sonnet", "ok": False, "output": "",
+                           "run_id": a, "target_sha256": TSHA}),
+            incoming_ok=False, run_id=a, target_sha256=TSHA, name="sonnet")
+        qdata = json.loads(q.read_text())
+        check("preserve-valid: a copied foreign-name result does NOT block the seat's failure write",
+              w is True and note is None and qdata["ok"] is False
+              and qdata["name"] == "sonnet",
+              "failure written over the copy", f"w={w} data={qdata}")
+
+    # --- preserve-valid write: CONCURRENT regression ---------------------------
+    # Two duplicate launches of one seat racing: however the one success and the
+    # many failures interleave, the check and the write share one per-seat lock,
+    # so the failure path can never clobber the landed success. Without the lock
+    # a failure that passed its check before the success landed would replace it.
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "codex.json"
+        n_fail = 10
+        barrier = threading.Barrier(n_fail + 1)
+        errors = []
+
+        def _fail_writer():
+            barrier.wait()
+            try:
+                review_runs.preserve_valid_write(
+                    p, _payload(False), incoming_ok=False,
+                    run_id=a, target_sha256=TSHA, name="codex")
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                errors.append(exc)
+
+        def _ok_writer():
+            barrier.wait()
+            try:
+                review_runs.preserve_valid_write(
+                    p, _payload(True, "SURVIVES"), incoming_ok=True,
+                    run_id=a, target_sha256=TSHA, name="codex")
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_fail_writer) for _ in range(n_fail)]
+        threads.append(threading.Thread(target=_ok_writer))
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        final = json.loads(p.read_text())
+        check("preserve-valid concurrent: the landed success survives every racing failure",
+              not errors and final["ok"] is True and final["output"] == "SURVIVES",
+              "ok=true SURVIVES", f"errors={errors} final={final}")
+
+    # --- pointer read/write ----------------------------------------------------
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        check("read_pointer_run_id: missing pointer -> None",
+              review_runs.read_pointer_run_id(d) is None, "None", "value")
+        check("pointer_exists: missing -> False",
+              review_runs.pointer_exists(d) is False, "False", "True")
+        review_runs.write_pointer(d, run_id=a, target_sha256=TSHA,
+                                  created_at="2026-01-01T00:00:00+00:00")
+        check("write_pointer/read_pointer_run_id round-trip",
+              review_runs.read_pointer_run_id(d) == a and review_runs.pointer_exists(d),
+              a, str(review_runs.read_pointer_run_id(d)))
+        (d / review_runs.POINTER_NAME).write_text("{broken", encoding="utf-8")
+        check("read_pointer_run_id: corrupt pointer -> None, but pointer_exists -> True",
+              review_runs.read_pointer_run_id(d) is None
+              and review_runs.pointer_exists(d) is True,
+              "None + True", "?")
+        (d / review_runs.POINTER_NAME).write_text(
+            json.dumps({"run_id": "../../evil"}), encoding="utf-8")
+        check("read_pointer_run_id: invalid run-id in pointer -> None (traversal guard)",
+              review_runs.read_pointer_run_id(d) is None, "None", "value")
+
+
+# =============================================================================
+# Target.replay_spec: five-kind round-trip on real git
+# =============================================================================
+
+def test_replay_spec():
+    log_section("Target.replay_spec: pinned, replayable, never 'auto'")
+    from multiagent import review_runs  # noqa: E402
+
+    def _hash(t):
+        return review_runs.sha256_text(t.content)
+
+    # plan
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "plan.md"
+        p.write_text("# Plan\nbody")
+        t1 = targets.resolve(str(p))
+        t2 = targets.resolve(t1.replay_spec)
+        check("plan replay_spec is the path; round-trips to same kind + hash",
+              t1.replay_spec == str(p) and t2.kind == t1.kind == "plan"
+              and _hash(t1) == _hash(t2),
+              str(p), t1.replay_spec)
+
+    with tempfile.TemporaryDirectory() as td:
+        _init_repo(td)
+        head = _git(["rev-parse", "HEAD"], td).stdout.strip()
+        # a feature branch with one commit, so branch/range have real content
+        _git(["checkout", "-q", "-b", "feat"], td)
+        (Path(td) / "a.txt").write_text("hello\nfeat\n")
+        _git(["commit", "-qam", "feat change"], td)
+        feat = _git(["rev-parse", "HEAD"], td).stdout.strip()
+
+        # branch (clean tree)
+        t1 = targets.resolve("branch", base="main", cwd=td)
+        t2 = targets.resolve(t1.replay_spec, base="main", cwd=td)
+        check("branch replay_spec == 'branch'; round-trips to same kind + hash",
+              t1.replay_spec == "branch" and t2.descriptor == t1.descriptor
+              and _hash(t1) == _hash(t2) and t1.content.strip(),
+              "branch", t1.replay_spec)
+
+        # commit, resolved FROM a short sha: the spec must pin the full sha
+        t1 = targets.resolve(feat[:7], cwd=td)
+        t2 = targets.resolve(t1.replay_spec, cwd=td)
+        check("commit replay_spec pins the FULL sha; round-trips to same kind + hash",
+              t1.replay_spec == f"commit:{feat}" and _hash(t1) == _hash(t2),
+              f"commit:{feat}", t1.replay_spec)
+
+        # range, given as branch names: the spec must pin BOTH endpoints to shas
+        t1 = targets.resolve("main..feat", cwd=td)
+        t2 = targets.resolve(t1.replay_spec, cwd=td)
+        check("range replay_spec pins both endpoints to shas; round-trips",
+              t1.replay_spec == f"{head}..{feat}" and _hash(t1) == _hash(t2),
+              f"{head}..{feat}", t1.replay_spec)
+
+        # working-tree (dirty), and auto NEVER survives as a spec
+        (Path(td) / "a.txt").write_text("hello\ndirty\n")
+        t1 = targets.resolve("working-tree", cwd=td)
+        t2 = targets.resolve(t1.replay_spec, cwd=td)
+        check("working-tree replay_spec == 'working-tree'; round-trips",
+              t1.replay_spec == "working-tree" and _hash(t1) == _hash(t2),
+              "working-tree", t1.replay_spec)
+        ta = targets.resolve("auto", cwd=td)
+        check("auto resolves to a CONCRETE replay_spec (never 'auto')",
+              ta.replay_spec == "working-tree" and ta.replay_spec != "auto",
+              "working-tree", ta.replay_spec)
+
+    # unborn repo working-tree still carries the spec
+    with tempfile.TemporaryDirectory() as td:
+        _init_repo(td, with_commit=False)
+        (Path(td) / "new.txt").write_text("fresh\n")
+        t = targets.resolve("working-tree", cwd=td)
+        check("unborn-repo working-tree replay_spec == 'working-tree'",
+              t.replay_spec == "working-tree", "working-tree", t.replay_spec)
+
+
+# =============================================================================
+# Run-scoped review flow: prep resume/isolation, stamps, preserve-valid,
+# pointer semantics (dispatcher subprocess)
+# =============================================================================
+
+def _fake_codex_writer(bins: Path, body: str, exit_code: int = 0) -> None:
+    """A fake `codex` that writes ``body`` to its -o file and exits ``exit_code``
+    (nonzero -> the provider marks the seat ok=False)."""
+    make_fake_bin(bins, "codex", f"""
+    import sys
+    out = None
+    a = sys.argv[1:]
+    for i, x in enumerate(a):
+        if x == "-o":
+            out = a[i+1]
+    sys.stdin.read()
+    with open(out, "w") as f:
+        f.write({body!r})
+    sys.exit({exit_code})
+    """)
+
+
+def test_run_scoped_reviews():
+    log_section("run-scoped review dirs: mint/resume/isolation/stamps (CLI)")
+
+    def _prep_json(args, cwd, env=None):
+        proc = _run_dispatcher(["review-prep", *args], cwd=cwd, env=env, timeout=30)
+        obj = json.loads(proc.stdout) if proc.returncode == 0 and proc.stdout.strip() else None
+        return proc, obj
+
+    ARGS = ["plan.md", "--seats", "codex", "--task-seats", "opus,sonnet",
+            "--session-id", "S"]
+
+    # 1. Same-identity re-prep: same run_dir, run.json BYTE-UNTOUCHED
+    #    (created_at preserved), landed seat in place + excluded from pending;
+    #    changed content mints a DIFFERENT dir and the old seat is unreachable.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, o1 = _prep_json(ARGS, td)
+        run_json = tdp / o1["run_dir"] / "run.json"
+        bytes1 = run_json.read_bytes()
+        # land a valid opus seat via persist-seat --run-id
+        src = tdp / "r.txt"
+        src.write_text("## VERDICT\nAPPROVED\n", encoding="utf-8")
+        pp = _run_dispatcher(
+            ["persist-seat", "opus", "--session-id", "S", "--run-id", o1["run_id"],
+             "--model", "opus", "-f", str(src)], cwd=td, timeout=30)
+        opus_f = tdp / o1["run_dir"] / "opus.json"
+        odata = json.loads(opus_f.read_text()) if opus_f.exists() else {}
+        check("persist-seat --run-id lands in the run dir stamped from run.json",
+              pp.returncode == 0 and odata.get("ok") is True
+              and odata.get("run_id") == o1["run_id"]
+              and odata.get("target_sha256") == o1["target_sha256"],
+              "stamped ok result in run dir", str(odata)[:200])
+        p2, o2 = _prep_json(ARGS, td)
+        check("same-identity re-prep returns the SAME run_dir",
+              p2.returncode == 0 and o2["run_dir"] == o1["run_dir"],
+              o1["run_dir"], str(o2 and o2.get("run_dir")))
+        check("same-identity re-prep leaves run.json BYTE-UNTOUCHED (created_at preserved)",
+              run_json.read_bytes() == bytes1, "byte-identical", "rewritten")
+        check("same-identity re-prep keeps the landed seat and excludes it from pending",
+              opus_f.exists()
+              and o2["pending_task_seats"] == ["sonnet"]
+              and o2["pending_subprocess_seats"] == ["codex"],
+              "pending: sonnet + codex only",
+              f"pending_task={o2['pending_task_seats']} pending_sub={o2['pending_subprocess_seats']}")
+        # changed content -> different dir, old seat unreachable via new prep
+        (tdp / "plan.md").write_text("# Plan\nrevised body\n", encoding="utf-8")
+        p3, o3 = _prep_json(ARGS, td)
+        check("changed-content prep mints a DIFFERENT run_dir with full pending lists",
+              p3.returncode == 0 and o3["run_dir"] != o1["run_dir"]
+              and o3["pending_task_seats"] == ["opus", "sonnet"]
+              and not (tdp / o3["run_dir"] / "opus.json").exists(),
+              "new dir, no landed seats", str(o3 and o3.get("run_dir")))
+        # the old landed seat file itself is untouched in the old dir
+        check("old run dir keeps its landed seat untouched",
+              opus_f.exists(), "opus.json survives", "gone")
+
+    # 2. Same bytes, different panel -> different run; same roster with a
+    #    changed Task-seat model pin (per-repo [seats.opus].model) -> different run.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        env = _neutral_env()
+        env["CLAUDE_PROJECT_DIR"] = td
+        _, oa = _prep_json(["plan.md", "--seats", "codex",
+                            "--task-seats", "opus", "--session-id", "S"], td, env)
+        _, ob = _prep_json(["plan.md", "--seats", "codex,codex-luna",
+                            "--task-seats", "opus", "--session-id", "S"], td, env)
+        check("same content, different panel -> DIFFERENT run_dir",
+              oa and ob and oa["run_dir"] != ob["run_dir"]
+              and oa["target_sha256"] == ob["target_sha256"],
+              "different dirs, same hash", f"{oa and oa['run_dir']} vs {ob and ob['run_dir']}")
+        crew_dir = tdp / ".crew"
+        crew_dir.mkdir(exist_ok=True)
+        (crew_dir / "config.toml").write_text('[seats.opus]\nmodel = "fable"\n',
+                                              encoding="utf-8")
+        _, oc = _prep_json(["plan.md", "--seats", "codex",
+                            "--task-seats", "opus", "--session-id", "S"], td, env)
+        check("same roster with a changed Task-seat model pin -> DIFFERENT run_dir",
+              oc is not None and oc["run_dir"] != oa["run_dir"]
+              and oc["task_seat_models"] == {"opus": "fable"},
+              "different dir + fable pin", str(oc))
+        # A SUBPROCESS seat's config-resolved model is in the identity too: a
+        # [seats.codex].model flip must mint a new run, or an unchanged-content
+        # re-prep would resume the OLD model's landed result as this panel's.
+        (crew_dir / "config.toml").write_text(
+            '[seats.opus]\nmodel = "fable"\n[seats.codex]\nmodel = "gpt-other"\n',
+            encoding="utf-8")
+        _, od = _prep_json(["plan.md", "--seats", "codex",
+                            "--task-seats", "opus", "--session-id", "S"], td, env)
+        check("same roster with a changed SUBPROCESS seat model -> DIFFERENT run_dir",
+              od is not None and od["run_dir"] != oc["run_dir"],
+              "different dir", f"{oc['run_dir']} vs {od and od['run_dir']}")
+
+    # 3. Full rerun flow over `run`: land ok, re-prep unchanged, relaunch the
+    #    same seat with a FORCED FAILURE -> file still ok=true (preserve-valid);
+    #    a fresh ok=true replaces. Stamps come from the run dir's run.json.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        bins = tdp / "bin"
+        bins.mkdir()
+        env = path_with(bins)
+        env["CLAUDE_PROJECT_DIR"] = td
+        _, o1 = _prep_json(ARGS, td, env)
+        _fake_codex_writer(bins, "CODEX GOOD APPROVED", 0)
+        r1 = _run_dispatcher(["run", "codex", "--session-id", "S",
+                              "--run-id", o1["run_id"], "--json"],
+                             cwd=td, env=env, timeout=30)
+        codex_f = tdp / o1["run_dir"] / "codex.json"
+        data = json.loads(codex_f.read_text()) if codex_f.exists() else {}
+        check("run --run-id derives -f/-o from the run dir and stamps the result",
+              r1.returncode == 0 and data.get("ok") is True
+              and data.get("output") == "CODEX GOOD APPROVED"
+              and data.get("run_id") == o1["run_id"]
+              and data.get("target_sha256") == o1["target_sha256"],
+              "stamped ok in run dir", f"rc={r1.returncode} data={str(data)[:200]}")
+        _, o2 = _prep_json(ARGS, td, env)
+        check("re-prep after the seat landed excludes it from pending_subprocess_seats",
+              o2 is not None and o2["pending_subprocess_seats"] == []
+              and o2["run_dir"] == o1["run_dir"],
+              "codex excluded", str(o2 and o2["pending_subprocess_seats"]))
+        _fake_codex_writer(bins, "", 1)  # forced failure
+        r2 = _run_dispatcher(["run", "codex", "--session-id", "S",
+                              "--run-id", o1["run_id"], "--json"],
+                             cwd=td, env=env, timeout=30)
+        data = json.loads(codex_f.read_text())
+        check("preserve-valid via run: a forced failure exits 0 with a kept-existing note and the file stays ok=true",
+              r2.returncode == 0 and "kept existing valid result" in r2.stderr
+              and data.get("ok") is True and data.get("output") == "CODEX GOOD APPROVED",
+              "exit 0 + note + ok=true kept",
+              f"rc={r2.returncode} err={r2.stderr[:150]!r} ok={data.get('ok')}")
+        _fake_codex_writer(bins, "CODEX BETTER APPROVED", 0)
+        r3 = _run_dispatcher(["run", "codex", "--session-id", "S",
+                              "--run-id", o1["run_id"], "--json"],
+                             cwd=td, env=env, timeout=30)
+        data = json.loads(codex_f.read_text())
+        check("a fresh ok=true replaces the previous success (a better retry wins)",
+              r3.returncode == 0 and data.get("output") == "CODEX BETTER APPROVED",
+              "BETTER", str(data.get("output"))[:60])
+        # persist-seat --failed also cannot clobber a landed valid Task seat
+        src = tdp / "r.txt"
+        src.write_text("## VERDICT\nAPPROVED\n", encoding="utf-8")
+        _run_dispatcher(["persist-seat", "opus", "--session-id", "S",
+                         "--run-id", o1["run_id"], "--model", "opus",
+                         "-f", str(src)], cwd=td, env=env, timeout=30)
+        pf = subprocess.run(
+            [str(CREW_DISPATCHER), "persist-seat", "opus", "--session-id", "S",
+             "--run-id", o1["run_id"], "--model", "opus",
+             "--failed", "--error", "late duplicate"],
+            input="", capture_output=True, text=True, cwd=td, env=env,
+            timeout=30)
+        odata = json.loads((tdp / o1["run_dir"] / "opus.json").read_text())
+        check("preserve-valid via persist-seat: --failed keeps the landed success (exit 0 + note)",
+              pf.returncode == 0 and "kept existing valid result" in pf.stderr
+              and odata.get("ok") is True,
+              "exit 0 + note + ok=true kept",
+              f"rc={pf.returncode} err={pf.stderr[:150]!r} ok={odata.get('ok')}")
+
+    # 4. Pointer semantics: run WITHOUT --run-id follows the pointer (launch-time
+    #    default); persist-seat WITHOUT --run-id while a pointer exists exits 2;
+    #    a persist-seat --run-id into an OLD run lands there even after the
+    #    pointer flipped (the TOCTOU regression).
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        bins = tdp / "bin"
+        bins.mkdir()
+        _fake_codex_writer(bins, "VIA POINTER APPROVED", 0)
+        env = path_with(bins)
+        env["CLAUDE_PROJECT_DIR"] = td
+        _, o1 = _prep_json(ARGS, td, env)
+        rp = _run_dispatcher(["run", "codex", "--session-id", "S", "--json"],
+                             cwd=td, env=env, timeout=30)
+        codex_f = tdp / o1["run_dir"] / "codex.json"
+        data = json.loads(codex_f.read_text()) if codex_f.exists() else {}
+        check("run without --run-id follows the session pointer into the run dir (stamped)",
+              rp.returncode == 0 and data.get("ok") is True
+              and data.get("run_id") == o1["run_id"],
+              "stamped result in pointed run dir", str(data)[:150])
+        src = tdp / "r.txt"
+        src.write_text("late review", encoding="utf-8")
+        ref = _run_dispatcher(["persist-seat", "opus", "--session-id", "S",
+                               "--model", "opus", "-f", str(src)],
+                              cwd=td, env=env, timeout=30)
+        check("persist-seat WITHOUT --run-id while a pointer exists exits 2 naming the fix",
+              ref.returncode == 2 and "--run-id" in ref.stderr,
+              "exit 2 + fix named", f"rc={ref.returncode} err={ref.stderr[:150]!r}")
+        # pointer flip: re-prep changed content, then persist late seat into RUN 1
+        (tdp / "plan.md").write_text("# Plan\nrevised\n", encoding="utf-8")
+        _, o2 = _prep_json(ARGS, td, env)
+        late = _run_dispatcher(["persist-seat", "opus", "--session-id", "S",
+                                "--run-id", o1["run_id"], "--model", "opus",
+                                "-f", str(src)], cwd=td, env=env, timeout=30)
+        old_opus = tdp / o1["run_dir"] / "opus.json"
+        odata = json.loads(old_opus.read_text()) if old_opus.exists() else {}
+        check("a late persist-seat --run-id lands in the OLD run's dir with the OLD stamp after a pointer flip",
+              late.returncode == 0 and o2["run_dir"] != o1["run_dir"]
+              and odata.get("run_id") == o1["run_id"]
+              and not (tdp / o2["run_dir"] / "opus.json").exists(),
+              "old dir + old stamp, new dir clean", str(odata)[:150])
+
+    # 5. Stale-fold regression: a pre-change FLAT ok=true codex.json is never
+    #    seen once a run is live; the legacy collect invocation (no --run-id)
+    #    follows the pointer and renders codex as named-but-missing SKIPPED.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        flat = tdp / ".crew" / "reviews" / "S"
+        flat.mkdir(parents=True)
+        (flat / "codex.json").write_text(json.dumps(
+            {"name": "codex", "model": "m", "ok": True,
+             "output": "STALE APPROVED", "error": None, "elapsed": 1.0}),
+            encoding="utf-8")
+        _prep_json(ARGS, td)
+        cp = _run_dispatcher(["collect", "--session-id", "S", "--seats", "codex",
+                              "--group"], cwd=td, timeout=30)
+        check("stale-fold regression: pointer-routed collect renders the stale flat seat as SKIPPED",
+              cp.returncode == 0 and "STALE APPROVED" not in cp.stdout
+              and "SKIPPED" in cp.stdout,
+              "SKIPPED, no stale fold", cp.stdout[:200])
+        # explicit --run-id routes the same way
+        _, o1 = _prep_json(ARGS, td)
+        cr = _run_dispatcher(["collect", "--session-id", "S", "--seats", "codex",
+                              "--run-id", o1["run_id"]], cwd=td, timeout=30)
+        check("collect --run-id reads the run dir (stale flat file never seen)",
+              cr.returncode == 0 and "STALE APPROVED" not in cr.stdout,
+              "no stale fold", cr.stdout[:150])
+
+    # 6. Pointer-absent fallback: run/collect stay byte-flat (ad-hoc unchanged).
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        bins = tdp / "bin"
+        bins.mkdir()
+        _fake_codex_writer(bins, "FLAT OK", 0)
+        flat = tdp / ".crew" / "reviews" / "F"
+        flat.mkdir(parents=True)
+        (flat / "prompt-seat.txt").write_text("prompt", encoding="utf-8")
+        env = path_with(bins)
+        env["CLAUDE_PROJECT_DIR"] = td
+        rf = _run_dispatcher(["run", "codex", "--session-id", "F", "--json"],
+                             cwd=td, env=env, timeout=30)
+        data = json.loads((flat / "codex.json").read_text()) if (flat / "codex.json").exists() else {}
+        check("pointer-absent run falls back to the flat session dir, UNSTAMPED",
+              rf.returncode == 0 and data.get("ok") is True
+              and "run_id" not in data and "target_sha256" not in data,
+              "flat six-field result", str(data)[:150])
+        cf = _run_dispatcher(["collect", "--session-id", "F", "--seats", "codex"],
+                             cwd=td, timeout=30)
+        check("pointer-absent collect reads the flat session dir",
+              cf.returncode == 0 and "FLAT OK" in cf.stdout,
+              "FLAT OK rendered", cf.stdout[:150])
+
+    # 7. Hostile/contradictory inputs.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, o1 = _prep_json(ARGS, td)
+        bad = _run_dispatcher(["run", "codex", "--session-id", "S",
+                               "--run-id", "../../evil", "--json"],
+                              cwd=td, timeout=30)
+        check("run rejects a hostile --run-id (traversal guard, exit 2)",
+              bad.returncode == 2 and "invalid run-id" in bad.stderr,
+              "exit 2", f"rc={bad.returncode} err={bad.stderr[:120]!r}")
+        check("hostile --run-id wrote nothing outside .crew/reviews",
+              not (tdp.parent / "evil").exists() and not (tdp / "evil").exists(),
+              "no escape", "escaped")
+        badp = _run_dispatcher(
+            ["persist-seat", "opus", "--session-id", "S",
+             "--run-id", "run-nope00000000", "--model", "opus",
+             "-f", "plan.md"], cwd=td, timeout=30)
+        check("persist-seat rejects a --run-id with no minted run (exit 2)",
+              badp.returncode == 2 and "no run record" in badp.stderr,
+              "exit 2 + no run record", f"rc={badp.returncode} err={badp.stderr[:150]!r}")
+        badc = _run_dispatcher(["collect", "--session-id", "S", "--seats", "codex",
+                                "--run-id", "run-a/b"], cwd=td, timeout=30)
+        check("collect rejects a hostile --run-id (exit 2)",
+              badc.returncode == 2, "exit 2", str(badc.returncode))
+        oflag = _run_dispatcher(["run", "codex", "--session-id", "S",
+                                 "--run-id", o1["run_id"], "-o", "elsewhere.json",
+                                 "--json"], cwd=td, timeout=30)
+        check("run --run-id with an explicit -o is rejected as contradictory routing (exit 2)",
+              oflag.returncode == 2 and "contradictory" in oflag.stderr
+              and not (tdp / "elsewhere.json").exists(),
+              "exit 2, nothing written", f"rc={oflag.returncode} err={oflag.stderr[:150]!r}")
+        hostile_sid = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex", "--task-seats", "opus",
+             "--session-id", "../../esc"], cwd=td, timeout=30)
+        hobj = json.loads(hostile_sid.stdout) if hostile_sid.returncode == 0 else {}
+        check("hostile session id stays contained for the whole run-dir layout",
+              hostile_sid.returncode == 0
+              and hobj.get("run_dir", "").startswith(".crew/reviews/esc/run-")
+              and (tdp / hobj["run_dir"] / "run.json").is_file(),
+              "contained under .crew/reviews/esc/", str(hobj.get("run_dir")))
+
+    # 8. Manifest hygiene: duplicate seat names and non-slug task names refuse
+    #    with NOTHING written (no run dir, no run.json, no pointer).
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        dup = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex",
+             "--task-seats", "codex", "--session-id", "S"], cwd=td, timeout=30)
+        check("duplicate seat across subprocess+task exits 2",
+              dup.returncode == 2 and "duplicate" in dup.stderr.lower(),
+              "exit 2 + duplicate named", f"rc={dup.returncode} err={dup.stderr[:150]!r}")
+        check("duplicate-manifest rejection writes NOTHING (no run dir, no pointer)",
+              not (tdp / ".crew").exists(), ".crew absent", "artifacts written")
+        col = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex",
+             "--task-seats", "a.b,ab", "--session-id", "S"], cwd=td, timeout=30)
+        check("non-filename-safe task seat (slug collision class) exits 2, nothing written",
+              col.returncode == 2 and "a.b" in col.stderr
+              and not (tdp / ".crew").exists(),
+              "exit 2 + nothing written", f"rc={col.returncode} err={col.stderr[:150]!r}")
+        # Reserved filename stems: a seat named run/current-run would write
+        # its <seat>.json ONTO run.json / the pointer name, and a Task seat
+        # named "seat" would stage prompt-seat.txt ONTO the shared subprocess
+        # prompt.
+        for stem in ("run", "current-run", "seat"):
+            res = _run_dispatcher(
+                ["review-prep", "plan.md", "--seats", "codex",
+                 "--task-seats", stem, "--session-id", "S"], cwd=td, timeout=30)
+            check(f"reserved seat name {stem!r} exits 2 with nothing written",
+                  res.returncode == 2 and "reserved" in res.stderr
+                  and not (tdp / ".crew").exists(),
+                  "exit 2 + nothing written",
+                  f"rc={res.returncode} err={res.stderr[:150]!r}")
+        # Discuss never preps: a discuss prep would collide with the review
+        # run's identity and overwrite its staged prompts.
+        disc = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex", "--mode", "discuss",
+             "--session-id", "S"], cwd=td, timeout=30)
+        check("review-prep --mode discuss exits 2 (pointer at render) with nothing written",
+              disc.returncode == 2 and "render --mode discuss" in disc.stderr
+              and not (tdp / ".crew").exists(),
+              "exit 2 + render pointer + nothing written",
+              f"rc={disc.returncode} err={disc.stderr[:150]!r}")
+
+    # 8b. Name binding + write authority at the CLI: a valid result copied to
+    #     another seat's filename never satisfies that seat's pending check; a
+    #     reserved slug cannot be persisted into a run dir; ad-hoc render
+    #     staging never writes into a live run dir.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, o1 = _prep_json(ARGS, td)
+        src = tdp / "r.txt"
+        src.write_text("## VERDICT\nAPPROVED\n", encoding="utf-8")
+        _run_dispatcher(["persist-seat", "opus", "--session-id", "S",
+                         "--run-id", o1["run_id"], "--model", "opus",
+                         "-f", str(src)], cwd=td, timeout=30)
+        run_d = tdp / o1["run_dir"]
+        shutil.copyfile(run_d / "opus.json", run_d / "sonnet.json")
+        _, o2 = _prep_json(ARGS, td)
+        check("a valid result copied to another seat's filename does NOT satisfy its pending check",
+              o2 is not None and "sonnet" in o2["pending_task_seats"]
+              and "opus" not in o2["pending_task_seats"],
+              "sonnet pending, opus landed", str(o2 and o2["pending_task_seats"]))
+        resv = _run_dispatcher(
+            ["persist-seat", "run", "--session-id", "S",
+             "--run-id", o1["run_id"], "--model", "opus", "-f", str(src)],
+            cwd=td, timeout=30)
+        run_json_data = json.loads((run_d / "run.json").read_text())
+        check("persist-seat refuses a reserved slug into a run dir (run.json intact)",
+              resv.returncode == 2 and "reserved" in resv.stderr
+              and run_json_data.get("run_id") == o1["run_id"],
+              "exit 2 + run.json intact",
+              f"rc={resv.returncode} err={resv.stderr[:150]!r}")
+        # Ad-hoc render staging stays FLAT even while the pointer names a live
+        # run: only review-prep may write a run dir's frozen prompt files.
+        frozen = (run_d / "prompt-seat.txt").read_bytes()
+        st = _run_dispatcher(
+            ["render", "plan.md", "--mode", "review", "--stage",
+             "--session-id", "S"], cwd=td, timeout=30)
+        flat_prompt = tdp / ".crew" / "reviews" / "S" / "prompt-seat.txt"
+        check("render --stage with a live pointer stages FLAT; the run dir's frozen prompt is untouched",
+              st.returncode == 0
+              and st.stdout.strip() == ".crew/reviews/S/prompt-seat.txt"
+              and flat_prompt.is_file()
+              and (run_d / "prompt-seat.txt").read_bytes() == frozen,
+              "flat staged path + frozen bytes intact",
+              f"rc={st.returncode} out={st.stdout.strip()!r}")
+
+    # 8c. persist-seat --failed never reads stdin: with no -f and stdin left
+    #     OPEN (a pipe nobody writes to), the call must complete instead of
+    #     blocking an interactive terminal.
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            os.chmod(CREW_DISPATCHER, 0o755)
+        except OSError:
+            pass
+        proc = subprocess.Popen(
+            [str(CREW_DISPATCHER), "persist-seat", "sonnet", "--session-id", "S",
+             "--model", "sonnet", "--failed", "--error", "spawn timeout"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, cwd=td)
+        try:
+            proc.wait(timeout=15)
+            hung = False
+        except subprocess.TimeoutExpired:
+            hung = True
+            proc.kill()
+        finally:
+            if proc.stdin:
+                proc.stdin.close()
+            proc.wait(timeout=15)
+        p = Path(td) / ".crew" / "reviews" / "S" / "sonnet.json"
+        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        check("persist-seat --failed with no -f completes with stdin OPEN (never blocks)",
+              not hung and proc.returncode == 0 and data.get("ok") is False
+              and data.get("output") == "" and data.get("error") == "spawn timeout",
+              "exit 0, empty output, error recorded",
+              f"hung={hung} rc={proc.returncode} data={str(data)[:150]}")
+
+    # 8d. Writer-side manifest enforcement: a run-scoped write must come from
+    #     the run's own panel with the manifest's kind and model, over the
+    #     frozen prompt, in the catalog sandbox, as stamped JSON; anything
+    #     else exits 2 with nothing written and every existing run-dir file
+    #     intact.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        bins = tdp / "bin"
+        bins.mkdir()
+        _fake_codex_writer(bins, "MEMBER OK APPROVED", 0)
+        env = path_with(bins)
+        env["CLAUDE_PROJECT_DIR"] = td
+        _, o1 = _prep_json(ARGS, td, env)   # manifest: codex + opus,sonnet
+        run_d = tdp / o1["run_dir"]
+        src = tdp / "r.txt"
+        src.write_text("## VERDICT\nAPPROVED\n", encoding="utf-8")
+        _run_dispatcher(["persist-seat", "opus", "--session-id", "S",
+                         "--run-id", o1["run_id"], "--model", "opus",
+                         "-f", str(src)], cwd=td, env=env, timeout=30)
+        run_json_bytes = (run_d / "run.json").read_bytes()
+        opus_bytes = (run_d / "opus.json").read_bytes()
+
+        def _intact() -> bool:
+            return ((run_d / "run.json").read_bytes() == run_json_bytes
+                    and (run_d / "opus.json").read_bytes() == opus_bytes)
+
+        # run: non-member subprocess seat (registry-valid, not in this panel).
+        nm = _run_dispatcher(["run", "codex-luna", "--session-id", "S",
+                              "--run-id", o1["run_id"], "--json"],
+                             cwd=td, env=env, timeout=30)
+        check("run-scoped run with a NON-MEMBER seat exits 2, nothing written",
+              nm.returncode == 2 and "not a subprocess member" in nm.stderr
+              and not (run_d / "codex-luna.json").exists() and _intact(),
+              "exit 2 + no file", f"rc={nm.returncode} err={nm.stderr[:150]!r}")
+        # run: a task-kind name never reaches a run-scoped write (the engine
+        # refuses Task seats outright).
+        tk = _run_dispatcher(["run", "opus", "--session-id", "S",
+                              "--run-id", o1["run_id"], "--json"],
+                             cwd=td, env=env, timeout=30)
+        check("run-scoped run with a task-kind seat exits 2 (Task seats are orchestrator-owned)",
+              tk.returncode == 2 and "Task seat" in tk.stderr and _intact(),
+              "exit 2", f"rc={tk.returncode} err={tk.stderr[:150]!r}")
+        # run: explicit -f rejected (the frozen prompt is the only input).
+        ef = _run_dispatcher(["run", "codex", "--session-id", "S",
+                              "--run-id", o1["run_id"], "-f", str(src),
+                              "--json"], cwd=td, env=env, timeout=30)
+        check("run-scoped run with an explicit -f exits 2, nothing written",
+              ef.returncode == 2 and "sanctioned input" in ef.stderr
+              and not (run_d / "codex.json").exists() and _intact(),
+              "exit 2 + no file", f"rc={ef.returncode} err={ef.stderr[:150]!r}")
+        # run: without --json the plain path would write raw text into the
+        # run dir's <seat>.json.
+        nj = _run_dispatcher(["run", "codex", "--session-id", "S",
+                              "--run-id", o1["run_id"]],
+                             cwd=td, env=env, timeout=30)
+        check("run-scoped run without --json exits 2, nothing written",
+              nj.returncode == 2 and "requires --json" in nj.stderr
+              and not (run_d / "codex.json").exists() and _intact(),
+              "exit 2 + no file", f"rc={nj.returncode} err={nj.stderr[:150]!r}")
+        # run: an explicit --model differing from the manifest signature would
+        # stamp a result the identity does not describe.
+        mm = _run_dispatcher(["run", "codex", "--session-id", "S",
+                              "--run-id", o1["run_id"], "-m", "gpt-other",
+                              "--json"], cwd=td, env=env, timeout=30)
+        check("run-scoped run with a mismatched --model exits 2 naming the manifest model",
+              mm.returncode == 2 and "'gpt-5.6-sol'" in mm.stderr
+              and not (run_d / "codex.json").exists() and _intact(),
+              "exit 2 + manifest model named",
+              f"rc={mm.returncode} err={mm.stderr[:200]!r}")
+        # run: an explicit --sandbox override is not the catalog sandbox the
+        # stamp promises.
+        sb = _run_dispatcher(["run", "codex", "--session-id", "S",
+                              "--run-id", o1["run_id"], "-s", "workspace-write",
+                              "--json"], cwd=td, env=env, timeout=30)
+        check("run-scoped run with an explicit --sandbox exits 2, nothing written",
+              sb.returncode == 2 and "sandbox" in sb.stderr
+              and not (run_d / "codex.json").exists() and _intact(),
+              "exit 2 + no file", f"rc={sb.returncode} err={sb.stderr[:150]!r}")
+        # persist-seat: --model must equal the manifest signature model.
+        wm = _run_dispatcher(["persist-seat", "opus", "--session-id", "S",
+                              "--run-id", o1["run_id"], "--model", "sonnet",
+                              "-f", str(src)], cwd=td, env=env, timeout=30)
+        check("persist-seat with a mismatched --model exits 2 naming the manifest model",
+              wm.returncode == 2 and "'opus'" in wm.stderr and _intact(),
+              "exit 2 + expected model named",
+              f"rc={wm.returncode} err={wm.stderr[:200]!r}")
+        # persist-seat: a subprocess-kind member is not persistable.
+        sk = _run_dispatcher(["persist-seat", "codex", "--session-id", "S",
+                              "--run-id", o1["run_id"], "--model", "gpt-5.6-sol",
+                              "-f", str(src)], cwd=td, env=env, timeout=30)
+        check("persist-seat with a subprocess-kind seat exits 2",
+              sk.returncode == 2 and "not a task member" in sk.stderr
+              and not (run_d / "codex.json").exists() and _intact(),
+              "exit 2 + run.json intact", f"rc={sk.returncode} err={sk.stderr[:150]!r}")
+        # persist-seat: non-member task label.
+        nmp = _run_dispatcher(["persist-seat", "fable", "--session-id", "S",
+                               "--run-id", o1["run_id"], "--model", "fable",
+                               "-f", str(src)], cwd=td, env=env, timeout=30)
+        check("persist-seat with a non-member seat exits 2, nothing written",
+              nmp.returncode == 2 and "not a task member" in nmp.stderr
+              and not (run_d / "fable.json").exists() and _intact(),
+              "exit 2 + no file", f"rc={nmp.returncode} err={nmp.stderr[:150]!r}")
+        # The member subprocess seat over the frozen prompt still works.
+        ok = _run_dispatcher(["run", "codex", "--session-id", "S",
+                              "--run-id", o1["run_id"], "--json"],
+                             cwd=td, env=env, timeout=30)
+        cdata = json.loads((run_d / "codex.json").read_text()) if (run_d / "codex.json").exists() else {}
+        check("the manifest member still writes normally after the refusals",
+              ok.returncode == 0 and cdata.get("ok") is True
+              and cdata.get("run_id") == o1["run_id"],
+              "member write lands stamped", f"rc={ok.returncode} data={str(cdata)[:120]}")
+        # Copied-A-to-B no longer blocks B's failure write (name-bound
+        # preserve-valid): the failure lands, name and stamps its own.
+        shutil.copyfile(run_d / "opus.json", run_d / "sonnet.json")
+        bf = subprocess.run(
+            [str(CREW_DISPATCHER), "persist-seat", "sonnet", "--session-id", "S",
+             "--run-id", o1["run_id"], "--model", "sonnet",
+             "--failed", "--error", "seat errored"],
+            input="", capture_output=True, text=True, cwd=td, env=env,
+            timeout=30)
+        sdata = json.loads((run_d / "sonnet.json").read_text())
+        check("a copied foreign-name file does not block the seat's failure write (failure lands, name-bound)",
+              bf.returncode == 0 and sdata.get("ok") is False
+              and sdata.get("name") == "sonnet"
+              and sdata.get("error") == "seat errored",
+              "sonnet failure written over the copy", str(sdata)[:200])
+
+    # 8e. Base normalization + malformed-signature refusal at the CLI.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, ob1 = _prep_json(ARGS, td)
+        _, ob2 = _prep_json([*ARGS, "--base", "develop"], td)
+        check("a plan prep ignores --base in the identity (base-inert kind, same run_dir)",
+              ob1 is not None and ob2 is not None
+              and ob1["run_dir"] == ob2["run_dir"],
+              "same run_dir", f"{ob1 and ob1['run_dir']} vs {ob2 and ob2['run_dir']}")
+        run_json = tdp / ob1["run_dir"] / "run.json"
+        rec = json.loads(run_json.read_text())
+        rec["seat_signatures"] = "corrupted"
+        run_json.write_text(json.dumps(rec), encoding="utf-8")
+        p3 = _run_dispatcher(["review-prep", *ARGS], cwd=td, timeout=30)
+        check("malformed seat_signatures in run.json refuses the re-prep cleanly (exit 2, no traceback)",
+              p3.returncode == 2 and "error:" in p3.stderr
+              and "Traceback" not in p3.stderr,
+              "exit 2 + clean error", f"rc={p3.returncode} err={p3.stderr[:200]!r}")
+
+    # 8f. Write-failure error typing: an unwritable run dir surfaces as the
+    #     documented clean `error:` + exit 2 at both writers, never a bare
+    #     OSError traceback (the lock-file open is the first write to fail).
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        bins = tdp / "bin"
+        bins.mkdir()
+        _fake_codex_writer(bins, "WOULD LAND APPROVED", 0)
+        env = path_with(bins)
+        env["CLAUDE_PROJECT_DIR"] = td
+        _, o1 = _prep_json(ARGS, td, env)
+        run_d = tdp / o1["run_dir"]
+        src = tdp / "r.txt"
+        src.write_text("review body", encoding="utf-8")
+        os.chmod(run_d, 0o500)
+        try:
+            pw = _run_dispatcher(["persist-seat", "opus", "--session-id", "S",
+                                  "--run-id", o1["run_id"], "--model", "opus",
+                                  "-f", str(src)], cwd=td, env=env, timeout=30)
+            check("persist-seat into a read-only run dir exits 2 with a clean error (no traceback)",
+                  pw.returncode == 2 and "error:" in pw.stderr
+                  and "Traceback" not in pw.stderr,
+                  "exit 2 + clean error", f"rc={pw.returncode} err={pw.stderr[:200]!r}")
+            rw = _run_dispatcher(["run", "codex", "--session-id", "S",
+                                  "--run-id", o1["run_id"], "--json"],
+                                 cwd=td, env=env, timeout=30)
+            check("run into a read-only run dir exits 2 with a clean error (no traceback)",
+                  rw.returncode == 2 and "error:" in rw.stderr
+                  and "Traceback" not in rw.stderr,
+                  "exit 2 + clean error", f"rc={rw.returncode} err={rw.stderr[:200]!r}")
+        finally:
+            os.chmod(run_d, 0o700)
+
+    # 9. Mint-conflict refusal at the CLI: a run.json whose identity fields were
+    #    corrupted refuses the re-prep (exit 2), dir untouched.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, o1 = _prep_json(ARGS, td)
+        run_json = tdp / o1["run_dir"] / "run.json"
+        rec = json.loads(run_json.read_text())
+        rec["target_spec"] = "elsewhere.md"
+        run_json.write_text(json.dumps(rec), encoding="utf-8")
+        tampered_bytes = run_json.read_bytes()
+        p2 = _run_dispatcher(["review-prep", *ARGS], cwd=td, timeout=30)
+        check("mint-conflict: corrupted run.json identity refuses the re-prep (exit 2, dir untouched)",
+              p2.returncode == 2 and run_json.read_bytes() == tampered_bytes
+              and o1["run_id"] in p2.stderr,
+              "exit 2 + untouched + ids named",
+              f"rc={p2.returncode} err={p2.stderr[:200]!r}")
+
+    # 10. Snapshot self-heal on resume: corrupt the snapshot, re-prep -> correct
+    #     bytes rewritten with a stderr note.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, o1 = _prep_json(ARGS, td)
+        snap = tdp / o1["run_dir"] / "target.md"
+        snap.write_text("TAMPERED", encoding="utf-8")
+        p2 = _run_dispatcher(["review-prep", *ARGS], cwd=td, timeout=30)
+        check("corrupted snapshot is rewritten on resume with a stderr note",
+              p2.returncode == 0
+              and snap.read_bytes() == (tdp / "plan.md").read_bytes()
+              and "rewrote" in p2.stderr,
+              "healed + note", f"rc={p2.returncode} err={p2.stderr[:150]!r}")
+
+    # 11. `auto` never persists: a dirty-tree auto prep records the concrete
+    #     resolved spec, and the string "auto" appears nowhere in run.json
+    #     (panel chosen without cursor-auto so the roster can't false-positive).
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _init_repo(td)
+        (tdp / "a.txt").write_text("hello\nchanged\n")
+        proc, o1 = _prep_json(["auto", "--seats", "codex", "--task-seats", "opus",
+                               "--session-id", "S"], td)
+        rec_text = (tdp / o1["run_dir"] / "run.json").read_text(encoding="utf-8")
+        rec = json.loads(rec_text)
+        check("a prep over `auto` mints the concrete resolved spec",
+              proc.returncode == 0 and rec["target_spec"] == "working-tree",
+              "working-tree", str(rec.get("target_spec")))
+        check("'auto' appears nowhere in run.json",
+              "auto" not in rec_text, "absent", "present")
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -8679,6 +9780,9 @@ def main():
     test_probe()
     test_scaffold_config()
     test_persist_seat()
+    test_review_runs()
+    test_replay_spec()
+    test_run_scoped_reviews()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")

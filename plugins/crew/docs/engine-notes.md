@@ -93,8 +93,12 @@ inline. The RULE each names is still stated in the command docs; only the label
 gloss lives here.
 
 - **Decision-H** — persist EACH normalized Task seat through `crew persist-seat`
-  (engine-owned filename + six-field shape; a catalog seat's name is its own
-  slug), NOT a hand-rolled Write-tool `<seat>.json`.
+  with the prep JSON's `--run-id` (engine-owned filename + six-field core shape,
+  stamped with the run identity from the run dir's own `run.json`, under the
+  preserve-valid write rule; a catalog seat's name is its own slug), NOT a
+  hand-rolled Write-tool `<seat>.json`. Without `--run-id` while a session
+  pointer exists, `persist-seat` refuses (exit 2): completion-time attribution
+  by mutable pointer is the stale-fold bug the run scoping closes.
 - **Decision-I** — the WHOLE panel (subprocess AND Task seats) flows through ONE
   grouped `collect`, including the Claude-only branch (subprocess seats empty),
   which collects over the Task seats alone. There is NO "synthesize from raw Task
@@ -105,14 +109,17 @@ gloss lives here.
 ## T3a reference-spawn (why Task seats fetch their prompt by file)
 
 - **Reference-spawn (T3a).** The review-bearing commands spawn `crew:reviewer`
-  Task seats with a REFERENCE to the staged prompt file
-  (`Read .crew/reviews/<session-id>/prompt-<slug>.txt and follow it exactly`)
-  instead of pasting the staged prompt's contents inline — reference-not-payload
-  applied to Task seats (the reviewer has `Read`). build.md also passes the
-  executor summary as a PATH, not inline.
+  Task seats with a REFERENCE to the prep-staged prompt file in the run dir
+  (`Read <run_dir>/prompt-<seat>.txt and follow it exactly`, the path from the
+  prep JSON's `task_prompt_paths`; the prompt points the seat at the run's
+  frozen snapshot as the review authority) instead of pasting the staged
+  prompt's contents inline — reference-not-payload applied to Task seats (the
+  reviewer has `Read`). build.md also passes the executor summary as a PATH
+  (`<run_dir>/executor-summary.md`), not inline.
 - **Return side stays via the Task RESULT.** The seat returns its full review
   block as the Task RESULT (the only completion signal); the orchestrator Writes
-  that returned text to a temp file and `persist-seat -f`s it. The reviewer is
+  that returned text to a temp file and `persist-seat -f`s it with the prep
+  JSON's `--run-id` (run-scoped, stamped; see Decision-H). The reviewer is
   read-only (no `Write` grant) — symmetric with `panelist.md`. (A reviewer-writes-
   its-own-return-file variant was prototyped and reverted: an unvalidated
   model-returned path plus stale-file risk outweighed the token saving.)

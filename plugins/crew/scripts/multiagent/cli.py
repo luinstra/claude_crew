@@ -21,9 +21,12 @@ seat ad-hoc), ``render`` (build ONE seat's prompt, no execution), ``seats``
 ONE faithful ``render_panel`` markdown digest — reads EXACTLY the seats named in
 ``--seats``, never globs), and ``review-prep`` (the deterministic PREP for the
 review-bearing commands: resolve target + ``--panel``/``--seats`` → subprocess +
-task split, stage the ONE shared subprocess prompt, and PRINT
-``{prompt_path, subprocess_seats, task_seats, task_seat_models}`` — runs NOTHING;
-the per-seat ``run`` loop + the Task-seat dispatch stay in the command markdown).
+task split, mint the run-scoped review dir (``review_runs``: identity, run.json,
+snapshot), stage EVERY seat prompt against the snapshot, and PRINT the JSON
+contract (``prompt_path, subprocess_seats, task_seats, task_seat_models`` plus
+the run-scoped keys ``run_dir, run_id, target_sha256, task_prompt_paths,
+pending_subprocess_seats, pending_task_seats``): it runs NOTHING; the per-seat
+``run`` loop + the Task-seat dispatch stay in the command markdown).
 
 The engine EXECUTES only subprocess seats (codex-*/agy/cursor-*), but ``render`` BUILDS the
 prompt for ANY seat — including the Claude Task seats (opus/sonnet) the
@@ -47,6 +50,7 @@ if _PKG_PARENT not in sys.path:
 
 import argparse
 import concurrent.futures
+import dataclasses
 import datetime
 import json
 import os
@@ -54,7 +58,16 @@ import re
 import shutil
 import subprocess
 
-from multiagent import config, findings, prompts, render, rounds, seats, targets
+from multiagent import (
+    config,
+    findings,
+    prompts,
+    render,
+    review_runs,
+    rounds,
+    seats,
+    targets,
+)
 from multiagent.providers import (
     ProviderResult,
     available_seats,
@@ -107,6 +120,15 @@ def _task_seat_model(name: str) -> str:
     (every shipped Task seat pins its own name, which IS a Task-tool alias). An
     --task-seats override names a seat the catalog need not know, so it falls back
     rather than raising."""
+    spec = seats.seat_spec(name)
+    return (spec.model if spec and spec.model else name)
+
+
+def _subprocess_seat_model(name: str) -> str:
+    """The config-resolved model a subprocess seat's provider is bound to (the
+    catalog row, merged with the user's config layers): the value the run
+    identity's execution signature records, so a `[seats.<name>].model` flip
+    mints a new run instead of resuming the old model's results."""
     spec = seats.seat_spec(name)
     return (spec.model if spec and spec.model else name)
 
@@ -357,17 +379,51 @@ def _resolve_session_id(arg: str | None) -> str:
 
 def _reviews_subdir(session_id: str) -> Path:
     """Resolve ``.crew/reviews/<sanitized-session-id>`` — the SHARED traversal
-    containment guard used by BOTH ``_stage_path`` and ``cmd_collect``.
+    containment guard used by staging, collect, persist, and the run-dir layout.
 
-    The session segment is charset-guarded to ``[A-Za-z0-9_-]`` so it can never
-    escape ``.crew/reviews/``: a hostile ``--session-id ../../x`` does NOT raise —
-    it COLLAPSES (every ``/`` and ``.`` stripped) to a single child dir
+    The session-segment sanitization itself lives in ``review_runs`` (ONE
+    mechanism for every writer and the completion gate alike); this wrapper just
+    binds the module's base dir. A hostile ``--session-id ../../x`` does NOT
+    raise: it COLLAPSES (every ``/`` and ``.`` stripped) to a single child dir
     ``.crew/reviews/x``. Containment is by SANITIZATION, not by raising. With no
     session id the dir is flat (``.crew/reviews/``) — sequential same-project use
     still works; only cross-session isolation is lost.
     """
-    seg = re.sub(r"[^A-Za-z0-9_-]", "", session_id)
-    return Path(_REVIEWS_BASE) / seg if seg else Path(_REVIEWS_BASE)
+    return review_runs.reviews_dir(session_id, base=_REVIEWS_BASE)
+
+
+def _pointer_run_dir(session_id: str) -> Path | None:
+    """The run dir the session pointer names, when it names a real one.
+
+    The pointer (``current-run.json``) is a LAUNCH-TIME convenience only: it is
+    consulted once at process start, and only when no explicit ``--run-id`` was
+    given. A pointer that is missing, unreadable, or names a dir without a
+    ``run.json`` yields None (flat fallback); completion-time attribution never
+    flows through here.
+    """
+    base = _reviews_subdir(session_id)
+    rid = review_runs.read_pointer_run_id(base)
+    if rid and (base / rid / review_runs.RUN_JSON_NAME).is_file():
+        return base / rid
+    if rid:
+        _warn_once(
+            f"dangling-pointer:{session_id}",
+            f"warning: {base / review_runs.POINTER_NAME} names run {rid!r} but "
+            "no such run dir exists; falling back to the flat session dir",
+        )
+    return None
+
+
+def _results_dir(session_id: str, run_id: str | None = None) -> Path:
+    """THE seat-result routing chokepoint: explicit ``--run-id`` wins
+    (validated; raises ``review_runs.ReviewRunError`` on a bad id), else the
+    session pointer's run dir, else the flat session dir (ad-hoc unchanged).
+    Session-segment sanitization is delegated to ``review_runs`` so writers and
+    the gate resolve one dir by one mechanism.
+    """
+    if run_id:
+        return review_runs.run_dir(session_id, run_id, base=_REVIEWS_BASE)
+    return _pointer_run_dir(session_id) or _reviews_subdir(session_id)
 
 
 def _seat_role_slug(role: str) -> str:
@@ -395,8 +451,12 @@ def _stage_path(session_id: str, seat_role: str | None) -> str:
     session id the path is flat (``.crew/reviews/prompt-<role>.txt``) — sequential
     same-project use still works; only cross-session isolation is lost.
 
-    The session-segment containment is shared with ``cmd_collect`` via
-    ``_reviews_subdir`` so both resolve the dir identically.
+    Ad-hoc ``render`` staging ALWAYS lands in the FLAT session dir, pointer or
+    no pointer: a run dir's prompt files are frozen against that run's snapshot
+    and only ``review-prep`` may create or modify them. Routing render through
+    the pointer would let an ad-hoc re-render OVERWRITE an active run's frozen
+    prompts with live-target content, and a later run-scoped seat write would
+    then stamp its result as valid over content the snapshot never contained.
     """
     role = _seat_role_slug(seat_role or "")
     return str(_reviews_subdir(session_id) / f"prompt-{role}.txt")
@@ -719,16 +779,25 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         return 2
 
-    # Derive -f/-o from .crew/reviews/<session-id>/ when a TRUTHY, non-blank
-    # --session-id is given. The truthy + non-blank gate is load-bearing: an
-    # omitted (None), explicit-empty ("") or whitespace-only ("   ") arg must NOT
-    # derive — neither re-entering _resolve_session_id's env fallback nor
-    # deriving the flat .crew/reviews/ dir (Decision A). Runs AFTER the seat
-    # guards (so the seat is a registry-clean [A-Za-z0-9_-] name and the derived
-    # <seat>.json can never escape the dir — no path-char guard needed, Decision E)
-    # and BEFORE the prompt-source checks (so a positional prompt / explicit -f
-    # overrides input derivation without tripping the "both sources" error).
-    if args.session_id and args.session_id.strip():
+    # Derive -f/-o through the _results_dir chokepoint when a TRUTHY, non-blank
+    # --session-id (or an explicit --run-id) is given. The truthy + non-blank
+    # gate is load-bearing: an omitted (None), explicit-empty ("") or
+    # whitespace-only ("   ") arg must NOT derive: neither re-entering
+    # _resolve_session_id's env fallback nor deriving the flat .crew/reviews/
+    # dir (Decision A). Runs AFTER the seat guards (so the seat is a
+    # registry-clean [A-Za-z0-9_-] name and the derived <seat>.json can never
+    # escape the dir, so no path-char guard is needed, Decision E) and BEFORE the
+    # prompt-source checks (so a positional prompt / explicit -f overrides input
+    # derivation without tripping the "both sources" error).
+    #
+    # The destination resolves ONCE here, at process start, so a pointer flip
+    # by a later re-prep cannot re-route a running seat. `stamp_dir` marks a
+    # run-scoped destination: the result gets the run's identity stamps (read
+    # from the run dir's own run.json at write time) and the preserve-valid
+    # write rule.
+    stamp_dir: Path | None = None
+    sid = ""
+    if args.run_id or (args.session_id and args.session_id.strip()):
         sid = _resolve_session_id(args.session_id)
         if "<" in sid or ">" in sid:
             print(
@@ -738,10 +807,117 @@ def cmd_run(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+    results_dir: Path | None = None
+    if args.run_id:
+        if args.out is not None:
+            # An explicit -o could physically detach a stamped result from the
+            # run dir its stamp names; refuse the contradictory routing.
+            print(
+                "error: --run-id and an explicit -o/--out are contradictory "
+                "routing (the run dir owns the result location); drop -o or "
+                "drop --run-id",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            rd = _results_dir(sid, args.run_id)
+        except review_runs.ReviewRunError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if not (rd / review_runs.RUN_JSON_NAME).is_file():
+            print(
+                f"error: no run record at {rd / review_runs.RUN_JSON_NAME}; "
+                "--run-id must name a run that `review-prep` minted",
+                file=sys.stderr,
+            )
+            return 2
+        results_dir = rd
+    elif args.session_id and args.session_id.strip():
+        results_dir = _results_dir(sid)
+    run_record: dict | None = None
+    if results_dir is not None:
+        # Run-scoped = the derived <seat>.json lands in a run dir (explicit
+        # --run-id, or pointer-routed with no explicit -o). The run's identity
+        # promises "this panel, these kinds, these models, this frozen
+        # prompt", so a run-scoped write ENFORCES the manifest instead of
+        # stamping anything that shows up:
+        #   * the seat must be a manifest member with kind=subprocess;
+        #   * the frozen prompt-seat.txt is the ONLY sanctioned input (an
+        #     explicit -f or positional prompt would stamp a result over a
+        #     prompt the snapshot never produced);
+        #   * --json is REQUIRED (the plain path would write raw, unstamped
+        #     text into <seat>.json);
+        #   * a reserved control-file stem never writes (only review-prep
+        #     touches run.json / the pointer name).
+        # An explicit -o keeps today's ad-hoc, unstamped, unenforced behavior.
+        in_run_dir = (results_dir / review_runs.RUN_JSON_NAME).is_file()
+        if in_run_dir and args.out is None:
+            if seat in review_runs.RESERVED_STEMS:
+                print(
+                    f"error: seat name {seat!r} collides with a reserved "
+                    "run-dir filename stem and cannot write into a review run",
+                    file=sys.stderr,
+                )
+                return 2
+            if args.file is not None or args.prompt is not None:
+                print(
+                    "error: a run-scoped `run` takes no -f or positional "
+                    "prompt: the run dir's frozen prompt-seat.txt is the only "
+                    "sanctioned input (pass an explicit -o for ad-hoc output, "
+                    "or drop the prompt override)",
+                    file=sys.stderr,
+                )
+                return 2
+            if not args.json:
+                print(
+                    "error: a run-scoped `run` requires --json (the plain "
+                    "path would write raw, unstamped text into the run dir's "
+                    "<seat>.json)",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                run_record = review_runs.read_run_json(results_dir)
+            except review_runs.ReviewRunError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            sigs = run_record.get("seat_signatures")
+            sig = sigs.get(seat) if isinstance(sigs, dict) else None
+            if not (isinstance(sig, dict) and sig.get("kind") == "subprocess"):
+                members = sorted(sigs) if isinstance(sigs, dict) else []
+                print(
+                    f"error: seat {seat!r} is not a subprocess member of run "
+                    f"{run_record.get('run_id')!r} (manifest: "
+                    f"{', '.join(members) or 'none'}); a run-scoped write "
+                    "must come from the run's own panel",
+                    file=sys.stderr,
+                )
+                return 2
+            # The identity stamped onto the result promises the manifest's
+            # model and the catalog sandbox; a run-scoped seat may not execute
+            # under overrides the stamp does not describe.
+            if args.model is not None and args.model != sig.get("model"):
+                print(
+                    f"error: --model {args.model!r} does not match seat "
+                    f"{seat!r}'s manifest model {sig.get('model')!r} for run "
+                    f"{run_record.get('run_id')!r}; drop --model or pass the "
+                    "manifest model",
+                    file=sys.stderr,
+                )
+                return 2
+            if args.sandbox is not None:
+                print(
+                    "error: a run-scoped `run` takes no -s/--sandbox override; "
+                    "the catalog sandbox is the only sanctioned one for a "
+                    "stamped result (pass an explicit -o for ad-hoc use)",
+                    file=sys.stderr,
+                )
+                return 2
+            stamp_dir = results_dir
         if args.file is None and args.prompt is None:
-            args.file = str(_reviews_subdir(sid) / "prompt-seat.txt")
+            args.file = str(results_dir / "prompt-seat.txt")
         if args.out is None:
-            args.out = str(_reviews_subdir(sid) / f"{seat}.json")
+            args.out = str(results_dir / f"{seat}.json")
 
     # Exactly one prompt source: -f <file> XOR positional <prompt-string>.
     if args.file and args.prompt is not None:
@@ -788,10 +964,36 @@ def cmd_run(args: argparse.Namespace) -> int:
         # resolved model, which the registry already bound from its catalog row.
         timeout = _resolve_timeout(args.timeout)
         result = provider.run(
-            prompt, sandbox=args.sandbox, model=args.model, timeout=timeout,
+            prompt, sandbox=args.sandbox or "read-only", model=args.model,
+        timeout=timeout,
         )
 
     if args.json:
+        if stamp_dir is not None and run_record is not None:
+            # Run-scoped write: stamp the run identity from the run dir's OWN
+            # run.json (read once at process start alongside the membership
+            # check; never the pointer, so location and attribution cannot
+            # diverge) and apply the name-bound preserve-valid rule.
+            rid = run_record.get("run_id")
+            tsha = run_record.get("target_sha256")
+            result.run_id = None if rid is None else str(rid)
+            result.target_sha256 = None if tsha is None else str(tsha)
+            try:
+                _written, note = review_runs.preserve_valid_write(
+                    Path(args.out),
+                    json.dumps(result.to_dict(), ensure_ascii=False, indent=2)
+                    + "\n",
+                    incoming_ok=result.ok,
+                    run_id=result.run_id or "",
+                    target_sha256=result.target_sha256 or "",
+                    name=seat,
+                )
+            except review_runs.ReviewRunError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            if note:
+                print(note, file=sys.stderr)
+            return 0
         _emit(json.dumps(result.to_dict(), ensure_ascii=False), args.out)
         return 0
 
@@ -1546,8 +1748,9 @@ def cmd_collect(args: argparse.Namespace) -> int:
 
     EVERY block is labeled with the REQUESTED seat name ``s`` (valid, malformed,
     non-object, or missing alike) — never "unknown". The dir is resolved through
-    the SAME sanitizing containment guard ``_stage_path`` uses
-    (``_reviews_subdir``), so ``--session-id ../../x`` collapses to
+    the SAME sanitizing chokepoint the other seat-file commands use
+    (``_results_dir``: explicit ``--run-id``, else the session pointer, else
+    flat), so ``--session-id ../../x`` collapses to
     ``.crew/reviews/x`` (contained), reading nothing outside ``.crew/reviews/``.
     """
     # Fail LOUD on an unsubstituted template (same posture as cmd_render --stage):
@@ -1562,7 +1765,15 @@ def cmd_collect(args: argparse.Namespace) -> int:
         )
         return 2
 
-    results_dir = _reviews_subdir(session_id)
+    # Route through the run-scoped chokepoint: explicit --run-id > the session
+    # pointer > the flat session dir (byte-identical no-flag ad-hoc behavior).
+    # Run-dir isolation is what keeps a stale flat <seat>.json from an earlier
+    # panel out of this digest: a run-scoped read simply never sees it.
+    try:
+        results_dir = _results_dir(session_id, getattr(args, "run_id", None))
+    except review_runs.ReviewRunError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     seats = [s.strip() for s in (args.seats or "").split(",") if s.strip()]
 
@@ -1763,10 +1974,17 @@ def cmd_persist_seat(args: argparse.Namespace) -> int:
     Task seats ONLY. The slug is derived from ``_seat_role_slug`` — the ONE
     canonical role->filename source shared with staging/collect — so the filename
     and the ``name`` field can never diverge (they come from one call). The
-    session dir resolves via ``_reviews_subdir`` (the SAME sanitizing resolver
-    ``collect`` reads from), so a persisted seat always lands where the grouped
-    ``collect`` looks. Overwriting an existing ``<slug>.json`` IS the stale-file
-    clear the convention did with ``rm -f``."""
+    destination resolves via the SAME sanitizing chokepoint ``collect`` reads
+    from, so a persisted seat always lands where the grouped ``collect`` looks.
+
+    Run scoping: with ``--run-id`` the result lands in that run's dir, stamped
+    with the identity read from the dir's OWN ``run.json`` and written under the
+    preserve-valid rule. With NO ``--run-id`` while a session POINTER exists,
+    persist-seat REFUSES (exit 2): a late Task seat persisted against a mutable
+    pointer after a re-prep is exactly the misattribution this command must not
+    perform: loud refusal beats a silent stale fold, and a stale orchestrator
+    degrades to a visible error. With neither (ad-hoc flat layout), behavior is
+    unchanged."""
     # Resolve + placeholder-guard the session id up front (same posture as
     # cmd_render --stage / cmd_collect): resolve (arg -> CLAUDE_SESSION_ID env),
     # THEN reject an unsubstituted <...> template so a templating slip fails loud
@@ -1790,6 +2008,10 @@ def cmd_persist_seat(args: argparse.Namespace) -> int:
         except OSError as exc:
             print(f"error: cannot read {args.file!r}: {exc}", file=sys.stderr)
             return 2
+    elif args.failed:
+        # A failure record needs no body; reading stdin here would BLOCK an
+        # interactive terminal on a call that has nothing to read.
+        output = ""
     else:
         output = sys.stdin.read()
     error = None
@@ -1799,7 +2021,98 @@ def cmd_persist_seat(args: argparse.Namespace) -> int:
         name=slug, model=args.model, ok=not args.failed,
         output=output, error=error, elapsed=float(args.elapsed),
     )
+
+    if args.run_id:
+        # Run-scoped persist: land in the NAMED run's dir with its identity
+        # stamps (read from that dir's own run.json, never the pointer) and the
+        # preserve-valid write rule. A late seat persisted with round N's id
+        # lands in round N's dir no matter where the pointer points by now.
+        if slug in review_runs.RESERVED_STEMS:
+            # <slug>.json would overwrite a run-dir control file; only
+            # review-prep may create or modify those.
+            print(
+                f"error: seat slug {slug!r} collides with a reserved run-dir "
+                "filename stem and cannot be persisted into a review run",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            out_dir = _results_dir(session_id, args.run_id)
+        except review_runs.ReviewRunError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if not (out_dir / review_runs.RUN_JSON_NAME).is_file():
+            print(
+                f"error: no run record at {out_dir / review_runs.RUN_JSON_NAME}; "
+                "--run-id must name a run that `review-prep` minted",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            record = review_runs.read_run_json(out_dir)
+        except review_runs.ReviewRunError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        # The run's identity promises "this panel, these kinds, these
+        # models"; a run-scoped persist enforces the manifest instead of
+        # stamping anything: the slug must be a member with kind=task, and
+        # --model must equal the seat's signature model (a mismatched pin
+        # would resume-count one model's output as another's).
+        sigs = record.get("seat_signatures")
+        sig = sigs.get(slug) if isinstance(sigs, dict) else None
+        if not (isinstance(sig, dict) and sig.get("kind") == "task"):
+            members = sorted(sigs) if isinstance(sigs, dict) else []
+            print(
+                f"error: seat {slug!r} is not a task member of run "
+                f"{record.get('run_id')!r} (manifest: "
+                f"{', '.join(members) or 'none'}); a run-scoped persist must "
+                "come from the run's own panel",
+                file=sys.stderr,
+            )
+            return 2
+        if args.model != sig.get("model"):
+            print(
+                f"error: --model {args.model!r} does not match seat "
+                f"{slug!r}'s manifest model {sig.get('model')!r} for run "
+                f"{record.get('run_id')!r}; pass the manifest model",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            rid = record.get("run_id")
+            tsha = record.get("target_sha256")
+            result.run_id = None if rid is None else str(rid)
+            result.target_sha256 = None if tsha is None else str(tsha)
+            path = out_dir / f"{slug}.json"
+            _written, note = review_runs.preserve_valid_write(
+                path,
+                json.dumps(result.to_dict(), ensure_ascii=False, indent=2) + "\n",
+                incoming_ok=result.ok,
+                run_id=result.run_id or "",
+                target_sha256=result.target_sha256 or "",
+                name=slug,
+            )
+        except review_runs.ReviewRunError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if note:
+            print(note, file=sys.stderr)
+        print(str(path))
+        return 0
+
     out_dir = _reviews_subdir(session_id)
+    if review_runs.pointer_exists(out_dir):
+        # A live pointer means this session's reviews are run-scoped; persisting
+        # by pointer would attribute a completed seat by MUTABLE state. Refuse
+        # loudly instead of misattributing silently.
+        print(
+            "error: this session has a live review run "
+            f"({out_dir / review_runs.POINTER_NAME} exists) but no --run-id was "
+            "given; pass the prep JSON's run id: persist-seat <seat> "
+            "--session-id <id> --run-id <run_id> …",
+            file=sys.stderr,
+        )
+        return 2
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{slug}.json"
     path.write_text(
@@ -1820,19 +2133,23 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     SUBPROCESS seats (through the registry) AND the TASK seats (the Claude voices,
     via ``seats.merged_panels()`` + ``seats.task_seats()``); (c) build the
     ``task_seat_models`` map (the catalog's per-seat ``model`` is the SINGLE source of
-    every model pin); (d) stage the ONE shared subprocess prompt via the SAME
-    ``_build_render_text`` + ``_stage_path`` machinery ``render --mode review
-    --stage`` uses — so ``prompt_path``'s file is BYTE-IDENTICAL to ``render
-    --mode review --stage`` for the same target. Then it prints ONE JSON object
-    ``{prompt_path, subprocess_seats, task_seats, task_seat_models}`` (insertion
-    key order, ``ensure_ascii=False``) and exits.
+    every model pin); (d) mint the run-scoped review dir (identity from content
+    hash + review inputs; write-once ``run.json``; frozen snapshot) and stage
+    EVERY seat prompt (the shared subprocess prompt AND one per Task seat)
+    against the SNAPSHOT as the reviewed content. Then it prints ONE JSON
+    object (the original four keys ``prompt_path, subprocess_seats, task_seats,
+    task_seat_models`` in order, then ``run_dir, run_id, target_sha256,
+    task_prompt_paths, pending_subprocess_seats, pending_task_seats``;
+    ``ensure_ascii=False``) and exits.
 
     THIS function owns ``--panel``/``--seats`` → seat-split + model-pin
     resolution. The orchestrator only READS the JSON: it iterates
-    ``subprocess_seats`` for the per-seat ``crew run`` fan-out, joins
-    ``task_seats`` into ``render --stage-all`` to stage the Task prompts, and
-    spawns each Task seat with ``model = task_seat_models[seat]``. The
-    orchestrator NEVER classifies seat names or hardcodes a model pin.
+    ``pending_subprocess_seats`` for the per-seat ``crew run`` fan-out, spawns
+    each pending Task seat over its staged ``task_prompt_paths`` entry with
+    ``model = task_seat_models[seat]``, and passes ``run_id`` on every seat
+    write. The orchestrator NEVER classifies seat names, hardcodes a model pin,
+    or re-renders a prompt (a re-render would re-resolve the LIVE target and
+    reopen the drift window the snapshot closes).
 
     LOAD-BEARING — prep PREPARES; it does NOT run seats. This function MUST NOT
     call ``_fan_out``, ``_run_seat``, ``_run_cli``, or any provider ``.run()``.
@@ -1851,6 +2168,22 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     scripts/CLAUDE.md "Provider = executor"). What this function DOES own is the
     NAME-level split + model-pin resolution that feeds that dispatch.
     """
+    # 0. Review mode ONLY. A discuss prep over the same inputs would collide
+    #    with the review run's identity and overwrite its staged prompts, and no
+    #    shipped flow routes discuss through prep; reject at the gate instead of
+    #    folding a mode constant into the identity hash. --inline-diff is
+    #    likewise deliberately NOT in the identity: a flipped flag only
+    #    re-frames the staged prompts around the SAME frozen snapshot in the
+    #    same run, and no shipped command varies it across re-preps.
+    if args.mode != "review":
+        print(
+            f"error: review-prep only preps review runs (got --mode "
+            f"{args.mode!r}); build discuss material with `render --mode "
+            "discuss` instead",
+            file=sys.stderr,
+        )
+        return 2
+
     # 1. Target dispatch — the SAME call cmd_review/cmd_render make. --base
     #    defaults to "main" (parity with render/review); coerce before resolve.
     base = args.base if args.base is not None else "main"
@@ -1978,43 +2311,206 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     #     orchestrator reads `model` FROM here; it never hardcodes a pin.
     task_seat_models = {n: _task_seat_model(n) for n in task_seats}
 
-    # 4. Stage the shared SUBPROCESS prompt ONLY when subprocess seats exist —
-    #    via the SAME machinery cmd_render --stage uses, so prompt_path's file is
-    #    BYTE-IDENTICAL to `render <target> --mode review --stage`. When there are
-    #    no subprocess seats (Claude-only lite/solo), stage NOTHING and leave
-    #    prompt_path == "".
-    prompt_path = ""
-    if subprocess_seats:
-        # Resolve + placeholder-guard the session id the SAME way cmd_render
-        # --stage does (arg -> CLAUDE_SESSION_ID env, THEN reject an
-        # unsubstituted <...> placeholder so a templating slip fails loud).
-        session_id = _resolve_session_id(args.session_id)
-        if "<" in session_id or ">" in session_id:
-            print(
-                f"error: session id looks like an unsubstituted placeholder "
-                f"({session_id!r}); pass your actual session id (the "
-                "[Session ID: …] value), not the literal template",
-                file=sys.stderr,
-            )
-            return 2
-        # The shared subprocess prompt has NO per-seat label (seat_role=None),
-        # no prior round, and forwards --inline-diff — exactly the inputs
-        # `render <target> --mode review --stage` feeds the builder.
-        text = _build_render_text(
-            None, target, None, None, args.inline_diff, args.mode
+    # 3. Manifest hygiene + run identity. Resolve + placeholder-guard the
+    #    session id up front (prep writes run-scoped artifacts even for a
+    #    Claude-only panel, so the guard is no longer subprocess-gated).
+    session_id = _resolve_session_id(args.session_id)
+    if "<" in session_id or ">" in session_id:
+        print(
+            f"error: session id looks like an unsubstituted placeholder "
+            f"({session_id!r}); pass your actual session id (the "
+            "[Session ID: …] value), not the literal template",
+            file=sys.stderr,
         )
-        prompt_path = _stage_path(session_id, None)
-        _emit(text, prompt_path)
+        return 2
 
-    # 5. Print the JSON contract — the ONLY output. FIXED insertion key order
-    #    (prompt_path, subprocess_seats, task_seats, task_seat_models) IS the
-    #    contract, so do NOT sort_keys. ensure_ascii=False (Plan B's escaping
-    #    lesson — no \uXXXX).
+    # A duplicate seat name across the resolved panel (a config-declared seat
+    # or a --task-seats override colliding with a subprocess name) would let a
+    # quorum denominator double-count one seat; refuse before anything is
+    # written.
+    roster_all = subprocess_seats + task_seats
+    dupes = sorted({n for n in roster_all if roster_all.count(n) > 1})
+    if dupes:
+        print(
+            f"error: duplicate seat name(s) across the resolved panel: "
+            f"{', '.join(dupes)}; each seat may appear once (subprocess OR "
+            "task). Nothing was written.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Task-seat names double as run-dir FILENAMES (prompt-<seat>.txt,
+    # <seat>.json), so they get the same slug-vs-name discipline persist-seat
+    # applies: a name that is not its own slug is refused before mint (two
+    # names collapsing to one slug would silently share one file).
+    unsafe = [n for n in task_seats if _seat_role_slug(n) != n]
+    if unsafe:
+        print(
+            "error: task seat name(s) not filename-safe: "
+            f"{', '.join(repr(n) for n in unsafe)}; task seat names must match "
+            "[A-Za-z0-9_-] (they name files inside the run dir). Nothing was "
+            "written.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # A seat named after a run-dir control file (run.json /
+    # current-run.json) would let its ordinary <seat>.json write destroy the
+    # identity record, and a Task seat named "seat" would stage
+    # prompt-seat.txt ONTO the shared subprocess prompt; only prep may create
+    # or modify those files. Applies to BOTH kinds: a config-declared
+    # subprocess seat can carry any registry-legal name.
+    reserved = [n for n in roster_all if n in review_runs.RESERVED_STEMS]
+    if reserved:
+        print(
+            "error: seat name(s) collide with reserved run-dir filename stems: "
+            f"{', '.join(repr(n) for n in reserved)} "
+            f"(reserved stems: {', '.join(sorted(review_runs.RESERVED_STEMS))}). "
+            "Nothing was written.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # 4. Mint the run identity and ensure its immutable per-run record. The
+    #    identity covers the content hash AND every review input via a per-seat
+    #    EXECUTION SIGNATURE (name -> kind + resolved model, BOTH seat kinds):
+    #    same bytes reviewed by a different panel, a seat that flipped
+    #    execution kind, or a config-resolved model change on ANY seat is a
+    #    DIFFERENT run by construction, while a re-prep of an identical spec
+    #    RESUMES its dir with run.json byte-untouched. The ordered rosters
+    #    stay separate fields in the record; the signature map is the identity.
+    if not target.replay_spec:
+        print("error: resolved target carries no replayable spec",
+              file=sys.stderr)
+        return 2
+    target_sha = review_runs.sha256_text(target.content)
+    # Only the branch kind derives content from --base; for every other kind
+    # the flag is inert, so it is normalized out of the identity (identical
+    # plan bytes with a stray --base must not mint separate runs).
+    identity_base = base if target.replay_spec == "branch" else ""
+    seat_signatures = {
+        n: {"kind": "subprocess", "model": _subprocess_seat_model(n)}
+        for n in subprocess_seats
+    }
+    seat_signatures.update({
+        n: {"kind": "task", "model": task_seat_models[n]} for n in task_seats
+    })
+    run_id, identity_digest = review_runs.mint_identity(
+        target_sha256=target_sha,
+        target_spec=target.replay_spec,
+        target_base=identity_base,
+        seat_signatures=seat_signatures,
+    )
+    run_d = _reviews_subdir(session_id) / run_id
+    snapshot = review_runs.snapshot_name(target.kind)
+    created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    record = {
+        "run_id": run_id,
+        "identity_digest": identity_digest,
+        "target_sha256": target_sha,
+        "target_spec": target.replay_spec,
+        "target_base": identity_base,
+        "target_descriptor": target.descriptor,
+        "snapshot": snapshot,
+        "subprocess_seats": subprocess_seats,
+        "task_seats": task_seats,
+        "task_seat_models": task_seat_models,
+        "seat_signatures": seat_signatures,
+        "created_at": created_at,
+    }
+    try:
+        run_d.mkdir(parents=True, exist_ok=True)
+        review_runs.write_run_json_once(run_d, record)
+        heal_note = review_runs.ensure_snapshot(
+            run_d, snapshot, target.content, target_sha
+        )
+    except (review_runs.ReviewRunError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if heal_note:
+        print(f"review-prep: {heal_note}", file=sys.stderr)
+
+    # 5. Stage EVERY prompt into the run dir: the shared subprocess prompt
+    #    (only when subprocess seats exist; Claude-only panels leave
+    #    prompt_path == "") plus one labeled prompt per Task seat, from a
+    #    Target carrying the frozen snapshot as the reviewed content, so what
+    #    the seats read and what the record's hash certifies are the same
+    #    bytes by construction. The live path/diff command survives in the
+    #    prompt as supplementary context only (snapshot_path is its own field,
+    #    so ref_path/diff_cmd keep naming the live target).
+    staged_target = dataclasses.replace(
+        target, snapshot_path=str(run_d / snapshot)
+    )
+
+    def _stage_atomic(path: str, text: str) -> None:
+        # Run-dir prompts get the atomic write (a same-identity re-prep
+        # re-stages them while a seat may be mid-read; a torn prompt must be
+        # impossible), keeping _emit's trailing-newline normalization so the
+        # inline-mode bytes stay identical to `render --stage`.
+        review_runs.write_text_atomic(
+            Path(path), text if text.endswith("\n") else text + "\n"
+        )
+
+    prompt_path = ""
+    try:
+        if subprocess_seats:
+            text = _build_render_text(
+                None, staged_target, None, None, args.inline_diff, args.mode
+            )
+            prompt_path = str(run_d / "prompt-seat.txt")
+            _stage_atomic(prompt_path, text)
+        task_prompt_paths: dict[str, str] = {}
+        for task_name in task_seats:
+            text = _build_render_text(
+                None, staged_target, None, task_name, args.inline_diff, args.mode
+            )
+            p = str(run_d / f"prompt-{task_name}.txt")
+            _stage_atomic(p, text)
+            task_prompt_paths[task_name] = p
+    except review_runs.ReviewRunError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    # 6. The pointer: the prep-to-gate handoff and a launch-time default for
+    #    `run`, never the completion-time authority (seat writes carry
+    #    --run-id explicitly; persist-seat refuses to fall back to this file).
+    try:
+        review_runs.write_pointer(
+            _reviews_subdir(session_id),
+            run_id=run_id, target_sha256=target_sha, created_at=created_at,
+        )
+    except review_runs.ReviewRunError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    # 7. Pending lists: the roster minus seats already landed VALID in this
+    #    run (the SAME predicate the digest and the gate use), so an
+    #    unchanged-target re-prep resumes instead of relaunching, and an
+    #    overwrite of completed work is structurally off the fan-out path.
+    pending_sub = [
+        s for s in subprocess_seats
+        if not review_runs.seat_landed_valid(run_d, s, run_id, target_sha)
+    ]
+    pending_task = [
+        s for s in task_seats
+        if not review_runs.seat_landed_valid(run_d, s, run_id, target_sha)
+    ]
+
+    # 8. Print the JSON contract, the ONLY stdout output. FIXED insertion key
+    #    order IS the contract (the original four keys keep their order; the
+    #    run-scoped keys append), so do NOT sort_keys. ensure_ascii=False (no
+    #    \uXXXX).
     payload = {
         "prompt_path": prompt_path,
         "subprocess_seats": subprocess_seats,
         "task_seats": task_seats,
         "task_seat_models": task_seat_models,
+        "run_dir": str(run_d),
+        "run_id": run_id,
+        "target_sha256": target_sha,
+        "task_prompt_paths": task_prompt_paths,
+        "pending_subprocess_seats": pending_sub,
+        "pending_task_seats": pending_task,
     }
     print(json.dumps(payload, ensure_ascii=False))
     return 0
@@ -2994,7 +3490,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     coll.add_argument(
         "--session-id", dest="session_id", default=None,
-        help="session id for .crew/reviews/<session-id>/ (default: CLAUDE_SESSION_ID env)",
+        help="session id for .crew/reviews/<session-id>/ (default: "
+             "CLAUDE_SESSION_ID env). With no --run-id, a live current-run.json "
+             "pointer routes the read into that run's dir; the flat session "
+             "dir is read only when no pointer exists.",
     )
     coll.add_argument(
         "--seats", dest="seats", default="",
@@ -3025,6 +3524,12 @@ def build_parser() -> argparse.ArgumentParser:
              "findings (newline-separated) — the haiku-repair candidates. Writes no "
              "digest.",
     )
+    coll.add_argument(
+        "--run-id", dest="run_id", default=None,
+        help="read the seat files from this review run's dir (from the "
+             "review-prep JSON). Fallback: the session pointer; with neither, "
+             "the flat session dir (today's ad-hoc behavior).",
+    )
     coll.set_defaults(func=cmd_collect)
 
     rs = sub.add_parser(
@@ -3049,13 +3554,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     ps = sub.add_parser(
         "persist-seat",
-        help="Write ONE normalized Task-seat result to .crew/reviews/<id>/"
-             "<slug>.json (six-field ProviderResult, `name` = slug). The engine "
-             "owns slug derivation, the render-safe shape, stale-file replacement, "
-             "and the path echo — no LLM hand-assembly. Task seats only — "
-             "subprocess seats persist themselves via `run`. Prints ONLY the "
-             "written path (exit 0); exit 2 on usage errors (empty seat, unreadable "
-             "-f, placeholder/unresolvable session id).",
+        help="Write ONE normalized Task-seat result as <slug>.json (six-field "
+             "core ProviderResult, `name` = slug). With --run-id it lands in "
+             "that review run's dir, stamped with the run identity from its "
+             "run.json, under the preserve-valid rule; without --run-id while "
+             "a session pointer exists it REFUSES (exit 2); with neither, the "
+             "flat .crew/reviews/<id>/ dir. The engine owns slug derivation, "
+             "the render-safe shape, and the path echo — no LLM hand-assembly. "
+             "Task seats only — subprocess seats persist themselves via `run`. "
+             "Prints the seat path (exit 0); exit 2 on usage errors.",
     )
     ps.add_argument("seat", help="seat/role name; its slug (the name itself for "
                                  "catalog seats) is BOTH the filename and the "
@@ -3074,15 +3581,25 @@ def build_parser() -> argparse.ArgumentParser:
                          "generic 'Task seat failed' message)")
     ps.add_argument("--elapsed", dest="elapsed", type=float, default=0.0,
                     help="wall-clock seconds recorded in `elapsed` (default: 0.0)")
+    ps.add_argument(
+        "--run-id", dest="run_id", default=None,
+        help="land the result in this review run's dir (from the review-prep "
+             "JSON), stamped with the run identity from its run.json. REQUIRED "
+             "whenever the session has a live run pointer: persist-seat "
+             "refuses the pointer fallback (exit 2) so a late seat can never "
+             "be misattributed to a newer run.",
+    )
     ps.set_defaults(func=cmd_persist_seat)
 
     rp = sub.add_parser(
         "review-prep",
         help="Prepare a review/build/measure-twice fan-out: resolve target + "
-             "--panel/--seats into subprocess + task seats, stage the ONE shared "
-             "subprocess prompt, and PRINT {prompt_path, subprocess_seats, "
-             "task_seats, task_seat_models} as JSON. Runs NOTHING — the per-seat "
-             "`crew run` loop + the Task-seat dispatch stay in the command markdown.",
+             "--panel/--seats into subprocess + task seats, mint the run-scoped "
+             "review dir (run.json + frozen snapshot), stage every seat prompt "
+             "against the snapshot, and PRINT the JSON contract (prompt_path, "
+             "seat splits, run_dir/run_id/target_sha256, task_prompt_paths, "
+             "pending seat lists). Runs NOTHING; the per-seat `crew run` loop "
+             "+ the Task-seat dispatch stay in the command markdown.",
     )
     rp.add_argument(
         "target", nargs="?", default="auto",
@@ -3120,7 +3637,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rp.add_argument(
         "--mode", dest="mode", default="review", choices=["review", "discuss"],
-        help="prompt family for the staged subprocess prompt (default review)",
+        help="review ONLY: review-prep rejects discuss (exit 2, since a "
+             "discuss prep would collide with the review run's identity); "
+             "build discuss material with `render --mode discuss` instead",
     )
     rp.add_argument(
         "--inline-diff", action="store_true",
@@ -3154,9 +3673,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "-s", "--sandbox",
         choices=["read-only", "workspace-write"],
-        default="read-only",
+        default=None,
         help="sandbox mode for codex (default: read-only); agy maps any value "
-             "to its single confined --sandbox mode",
+             "to its single confined --sandbox mode. Rejected in run-scoped "
+             "mode (the catalog sandbox is the only sanctioned one for a "
+             "stamped result); the default None lets the engine tell an "
+             "explicit flag apart from the default.",
     )
     run.add_argument("--json", action="store_true", help="emit the six-field result as JSON")
     run.add_argument("--timeout", type=int, default=None, help="wall-clock timeout (s)")
@@ -3169,7 +3691,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--session-id", dest="session_id", default=None,
         help="derive -f and -o from .crew/reviews/<session-id>/ when omitted: "
              "-f defaults to prompt-seat.txt, -o defaults to <seat>.json. "
-             "Explicit -f/-o override independently.",
+             "When the session has a live review run (current-run.json "
+             "pointer), derivation lands in that run's dir and the run-scoped "
+             "rules apply: an explicit -f or positional prompt is REJECTED "
+             "(the frozen prompt is the only sanctioned input), while an "
+             "explicit -o keeps today's ad-hoc unstamped behavior. With no "
+             "run in play, explicit -f/-o override independently.",
+    )
+    run.add_argument(
+        "--run-id", dest="run_id", default=None,
+        help="pin the destination to this review run's dir (from the "
+             "review-prep JSON); the result is stamped with the run identity "
+             "read from the dir's run.json. Mutually exclusive with an "
+             "explicit -o.",
     )
     run.set_defaults(func=cmd_run)
 

@@ -174,9 +174,11 @@ pool). Use the bare-script path (its `sys.path` guard resolves package imports).
 
 **3a.0–3a.1 — prep the fan-out in ONE call.** `review-prep` resolves the plan-file
 target, resolves `--panel`/`--seats` into the SUBPROCESS seat list (group tokens like
-`cursor` expanded via the registry) AND the Task-seat split, stages the ONE shared
-subprocess prompt (`--stage`, byte-identical to `render "[plan_file]" --mode review
---stage`), and PRINTS `{prompt_path, subprocess_seats, task_seats, task_seat_models}`
+`cursor` expanded via the registry) AND the Task-seat split, mints the RUN-SCOPED
+review dir (`run.json` + a frozen snapshot of the plan body), stages the shared
+subprocess prompt AND one prompt per Task seat against that snapshot, and PRINTS
+`{prompt_path, subprocess_seats, task_seats, task_seat_models, run_dir, run_id,
+target_sha256, task_prompt_paths, pending_subprocess_seats, pending_task_seats}`
 as one-line JSON. It runs NOTHING. **Quote `"[plan_file from state]"`** (a plan path
 can contain spaces). Substitute your real id for `<session-id>` (the `[Session ID: …]`
 value; never the literal placeholder or a `${…}` expansion):
@@ -188,40 +190,42 @@ value; never the literal placeholder or a `${…}` expansion):
 **OMIT `--panel`/`--seats` when the user named no panel** (as shown) — so
 `review-prep` applies the configured `default_panel` or built-in **full**. Pass
 `--panel <preset>` / `--seats <subset>` ONLY when the user chose one explicitly.
-(No `--base` here: a plan-file target reviews the plan body and ignores the base ref,
-so omitting it keeps `prompt_path` byte-identical to the historical `render
-"[plan_file]" --stage` call.) Reference mode (the default) makes each seat read the
-plan file itself; `--inline-diff` embeds it instead (forwarded to the staged prompt).
+(No `--base` here: a plan-file target reviews the plan body and ignores the base
+ref.) Reference mode (the default) makes each seat read the run dir's frozen
+snapshot of the plan; `--inline-diff` embeds the content instead (forwarded to the
+staged prompt).
 
 `review-prep` resolves BOTH seat kinds: 3b reads `task_seats` + `task_seat_models`
-from this same JSON; the engine EXECUTES only the subprocess seats. **Parse the
-one-line JSON** it prints (read it directly from stdout — it is NOT a shell `$(…)`
-capture): use `subprocess_seats` to iterate the per-seat loop AND (JOINED
-comma-separated) as part of the `collect --seats` list in 3c.5. The per-seat `run`
-DERIVES its `-f` from `--session-id` (= `prompt_path`,
-`.crew/reviews/<session-id>/prompt-seat.txt`), so you do NOT pass `prompt_path` as
-`-f` yourself (see 3a.2). **If `subprocess_seats` is empty** (a Claude-only
-`--panel lite`/`solo` → `prompt_path` is `""`, nothing staged), **SKIP only the 3a.2
-per-seat loop** — go to 3b; you STILL persist the Task seats (3c) and run the SAME
-grouped `collect` (3c.5) with `--seats <task_seats only>`.
++ `task_prompt_paths` from this same JSON; the engine EXECUTES only the subprocess
+seats. **Parse the one-line JSON** it prints (read it directly from stdout — it is
+NOT a shell `$(…)` capture): use `pending_subprocess_seats` to iterate the
+per-seat loop, `run_id`/`run_dir` on every engine call below, and the FULL
+`subprocess_seats` (JOINED comma-separated) as part of the `collect --seats` list
+in 3c.5. The per-seat `run` DERIVES its `-f`/`-o` from `--session-id` + `--run-id`
+(the run dir's `prompt-seat.txt` / `<seat>.json`), so you do NOT pass
+`prompt_path` as `-f` yourself (see 3a.2). **If `subprocess_seats` is empty** (a
+Claude-only `--panel lite`/`solo` → `prompt_path` is `""`, no subprocess prompt
+staged), **SKIP only the 3a.2 per-seat loop** — go to 3b; you STILL persist the
+Task seats (3c) and run the SAME grouped `collect` (3c.5) with `--seats
+<task_seats only>`.
 
-**3a.2 — run EACH seat in its own parallel shell.** First, **clear any pre-existing
-`<seat>.json`** for the seats you are about to run — the session dir
-`.crew/reviews/<session-id>/` is REUSED across reviews, so a leftover file from an
-EARLIER panel (or a seat whose shell you later kill) would be read by `collect` as a
-FRESH result, folding stale data into this verdict. After clearing, a seat that
-doesn't write a fresh file renders as SKIPPED, not stale-OK:
+**3a.2 — run EACH seat in its own parallel shell.** Do NOT delete seat files:
+results are RUN-SCOPED. Each `review-prep` mints a run identity from the reviewed
+content + panel, so a re-review of a REVISED plan lands in a NEW `<run_dir>` (an
+earlier round's stale results are unreachable, so successive review rounds in one
+session can never fold together), while an UNCHANGED plan RESUMES its dir: seats already
+landed there stay landed, are excluded from
+`pending_subprocess_seats`/`pending_task_seats`, and a valid landed result is
+never overwritten by a fresh failure (preserve-valid).
+
+For every seat in `pending_subprocess_seats` (NOT the full roster, landed seats
+resume), launch a SEPARATE `crew run <seat>` Bash call, all concurrently (e.g.
+background calls). `--session-id` + `--run-id` let `run` DERIVE both paths from
+the run dir: `-f` = `prompt-seat.txt`, `-o` = `<seat>.json`, stamped with the run
+identity:
 
 ```bash
-rm -f .crew/reviews/<session-id>/<seat>.json
-```
-
-Then, for every seat in `subprocess_seats`, launch a SEPARATE `crew run <seat>` Bash
-call, all concurrently (e.g. background calls). `--session-id` lets `run` DERIVE both
-paths from `.crew/reviews/<session-id>/`: `-f` = `prompt-seat.txt`, `-o` = `<seat>.json`:
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" run <seat> --session-id <session-id> --json
+"${CLAUDE_PLUGIN_ROOT}/crew" run <seat> --session-id <session-id> --run-id <run_id from the prep JSON> --json
 ```
 
 - `run --json` ALWAYS exits 0 and writes the six-field result
@@ -238,53 +242,37 @@ barrier and the single collect.
 
 #### 3b — Fan out Task seats (parallel)
 
-Spawn a reviewer seat **in parallel for each entry in `task_seats`** (from the
-`review-prep` JSON — skip if empty). Do NOT hand-write each seat's prompt: **stage it
-from the engine** so every seat — subprocess AND Task — reviews ONE identical target.
-`render` is the single prompt source and resolves the plan file the SAME way Step 3a's
-engine `review` did, so the panel reviews a single identical plan. Stage ALL Task
-seats in ONE `--stage-all` call over the SAME `[plan_file from state]` target, fed the
-**comma-joined `task_seats`** from the prep JSON (NOT a hardcoded role list):
+Spawn a reviewer seat **in parallel for each entry in `pending_task_seats`** (from
+the `review-prep` JSON — skip if empty; a landed seat from an unchanged-plan
+resume is already in the run dir). Do NOT hand-write each seat's prompt, and do
+NOT run a separate `render` call: `review-prep` ALREADY STAGED one prompt per Task
+seat into the run dir (`task_prompt_paths` in the prep JSON,
+`<run_dir>/prompt-<seat>.txt`), each pointing the seat at the run's FROZEN
+snapshot of the plan (`<run_dir>/target.md`) as the content under review. A
+re-render here would re-resolve the LIVE plan file and reintroduce the drift the
+snapshot exists to close; every seat, subprocess AND Task, reviews the same
+frozen bytes.
 
-```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" render "[plan_file from state]" --mode review --stage-all <comma-joined task_seats from the review-prep JSON> --session-id <session-id>
-```
-
-**Skip this `--stage-all` call entirely if `task_seats` is empty** (a
-subprocess-only panel like `--panel cursor`). A registered seat name is already
-filename-safe (the `name == slug(name)` invariant means it can carry no `.`), so
-each seat stages to `prompt-<seat>.txt` verbatim and the spawn below reads that same file.
-
-`--stage-all` stages one LABELED prompt PER comma-listed role in a SINGLE call —
-`.crew/reviews/<session-id>/prompt-<role>.txt` for each, each carrying its own
-"acting as the **<role>** seat" label — and prints a JSON `{role: path}` map. It is
-session-scoped so concurrent sessions never clobber each other. **Substitute your
-actual session id for `<session-id>`** — the `[Session ID: …]` value (the same id
-`crew state` uses). Pass it as a literal `--session-id` value — NOT the placeholder
-text, and NOT a `${CLAUDE_SESSION_ID}` shell expansion (a `$…` expansion isn't
-allowlistable and isn't reliably exported; the engine resolves the id itself, arg →
-env). The engine **rejects an unsubstituted `<…>` placeholder** with a loud error, so
-a missed substitution fails fast instead of silently sharing one dir. `.crew/` is
-gitignored.
-
-Then dispatch each seat **by reference** — the SAME agent (`crew:reviewer`) with a
-per-spawn `model` override selecting the voice. **Iterate `task_seats` from the prep
-JSON**; for each `<seat>` read its model from `task_seat_models[<seat>]`. Do NOT
-hardcode seat names or model pins, and do NOT read + inline the staged prompt — point
-the seat at its staged file and let it `Read` it (reference, not payload; the reviewer
-has `Read`):
+Dispatch each seat **by reference** — the SAME agent (`crew:reviewer`) with a
+per-spawn `model` override selecting the voice. **Iterate `pending_task_seats`
+from the prep JSON**; for each `<seat>` read its model from
+`task_seat_models[<seat>]` and its prompt path from `task_prompt_paths[<seat>]`.
+Do NOT hardcode seat names or model pins, and do NOT read + inline the staged
+prompt — point the seat at its staged file and let it `Read` it (reference, not
+payload; the reviewer has `Read`):
 
 ```
-# for each <seat> in task_seats:
-Task(subagent_type="crew:reviewer", model="<task_seat_models[<seat>]>", prompt="You are the <seat> seat. Read .crew/reviews/<session-id>/prompt-<seat>.txt and follow it exactly.")
+# for each <seat> in pending_task_seats (path = task_prompt_paths[<seat>]):
+Task(subagent_type="crew:reviewer", model="<task_seat_models[<seat>]>", prompt="You are the <seat> seat. Read <run_dir>/prompt-<seat>.txt and follow it exactly.")
 ```
 
-The staged prompt already states this is a **plan review**, tells the seat to read
-the plan at `[plan_file from state]` itself (reference mode), lists the criteria
-(clarity, testability, completeness, context), and asks for per-criterion PASS/FAIL +
-`[BLOCKING]`/`[MINOR]` findings + a one-line verdict. `crew:reviewer` has `Read, Grep,
-Glob, Bash` for exactly this. Because every seat's prompt comes from the one `render`
-source over the same plan target, the panel reviews a single identical plan.
+The staged prompt already states this is a **plan review**, points the seat at the
+frozen snapshot as the review authority (the live plan path stays in the header as
+supplementary context), lists the criteria (clarity, testability, completeness,
+context), and asks for per-criterion PASS/FAIL + `[BLOCKING]`/`[MINOR]` findings +
+a one-line verdict. `crew:reviewer` has `Read, Grep, Glob, Bash` for exactly this.
+Because every seat's prompt comes from the one prep-staged source over one
+snapshot, the panel reviews a single identical plan. `.crew/` is gitignored.
 
 **Never choke on a Task-seat failure:** a `crew:reviewer` spawn that errors, times
 out, returns no usable block, or is reported missing/failed MUST NOT abort the review.
@@ -301,9 +289,9 @@ Task seat is treated identically to a failed subprocess seat.
 > flush and have falsely declared a finished seat "dead", discarding a good review. A
 > seat that has not returned is **still running, not failed** — wait for it.
 
-For each Task seat **in `task_seats`** (from the `review-prep` JSON — NOT a hardcoded
-`opus`/`sonnet` pair), normalize its return into the SAME six fields as the subprocess
-results:
+For each Task seat **you spawned in 3b** (`pending_task_seats` from the
+`review-prep` JSON — NOT a hardcoded `opus`/`sonnet` pair), normalize its return
+into the SAME six fields as the subprocess results:
 
 - `name` = the seat's name (a registered seat name is already `[A-Za-z0-9_-]`-only
   by the `name == slug(name)` invariant, so it doubles as its own filename stem).
@@ -320,19 +308,21 @@ results:
 A failed Task seat renders exactly like a failed subprocess seat. A skipped/unspawnable
 seat renders a clearly-marked skipped block and is excluded from the verdict math.
 
-**Persist each Task seat through the engine** (Decision-H). For EACH entry in
-`task_seats` (from the prep JSON — never a hardcoded list), write the seat's
-returned Task result to a temp file with the Write tool, then:
+**Persist each Task seat through the engine.** For EACH seat you spawned
+(`pending_task_seats` from the prep JSON — never a hardcoded list), write the
+seat's returned Task result to a temp file with the Write tool, then persist it
+with the SAME `--run-id` the prep printed (required: a late seat persisted
+without it exits 2 rather than risk landing in a newer run's dir):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" persist-seat <seat> --session-id <session-id> --model "<task_seat_models[<seat>]>" -f <temp-file>
+"${CLAUDE_PLUGIN_ROOT}/crew" persist-seat <seat> --session-id <session-id> --run-id <run_id from the prep JSON> --model "<task_seat_models[<seat>]>" -f <temp-file>
 ```
 
 For a seat whose Task errored / returned no usable block, persist the failure
 instead (never fabricate an ok result):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" persist-seat <seat> --session-id <session-id> --model "<task_seat_models[<seat>]>" --failed --error "<one-line diagnostic>"
+"${CLAUDE_PLUGIN_ROOT}/crew" persist-seat <seat> --session-id <session-id> --run-id <run_id from the prep JSON> --model "<task_seat_models[<seat>]>" --failed --error "<one-line diagnostic>"
 ```
 
 The engine derives the filename and the six-field shape itself — the
@@ -347,22 +337,24 @@ subprocess `crew run <seat>` shell to EXIT, AND (b) every Step 3b Task seat to r
 AND be persisted in 3c. A seat whose `<seat>.json` is not written yet is STILL
 RUNNING, not skipped — collecting early would silently drop it.
 
-Define `<ran_seats>` = the comma-join of `subprocess_seats` (resolved prep order)
-**then** `task_seats`. In the Claude-only branch (`subprocess_seats`
-empty) `<ran_seats>` is just `task_seats`.
+Define `<ran_seats>` = the comma-join of the FULL `subprocess_seats` (resolved
+prep order) **then** the FULL `task_seats`: the whole roster, not only the
+pending seats: a landed seat from a resumed run is part of this panel's verdict.
+In the Claude-only branch (`subprocess_seats` empty) `<ran_seats>` is just
+`task_seats`.
 
 **Repair non-compliant seats (per-seat haiku reformat).** A seat that ignored the
 structured `## FINDINGS` schema can't be grouped — give it ONE cheap repair pass. Ask
 the engine which seats did not parse:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" collect --session-id <session-id> --seats <ran_seats> --report-unparsed
+"${CLAUDE_PLUGIN_ROOT}/crew" collect --session-id <session-id> --run-id <run_id from the prep JSON> --seats <ran_seats> --report-unparsed
 ```
 
 This prints the seat names (one per line) whose output ran but did NOT parse into
 structured findings. For EACH such `<seat>`:
 
-1. **Read** its raw `output` field — `.crew/reviews/<session-id>/<seat>.json`.
+1. **Read** its raw `output` field — `<run_dir>/<seat>.json`.
 2. Spawn the cheap **formatter** agent to reformat that text into the schema (a
    FAITHFUL transform — do NOT invent, drop, or re-judge findings):
 
@@ -376,7 +368,7 @@ structured findings. For EACH such `<seat>`:
    to a SEPARATE `repaired_output` field, NEVER overwriting the original `output`):
 
    ```bash
-   "${CLAUDE_PLUGIN_ROOT}/crew" repair-seat --seat .crew/reviews/<session-id>/<seat>.json -f <temp-file-with-reformatted-text>
+   "${CLAUDE_PLUGIN_ROOT}/crew" repair-seat --seat <run_dir>/<seat>.json -f <temp-file-with-reformatted-text>
    ```
 
 `repair-seat` is **non-destructive**: it populates `repaired_output` ONLY IF the
@@ -392,7 +384,7 @@ seat — no `claude -p`, no API key.
 **Collect ONCE — grouped + faithful:**
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" collect --session-id <session-id> --seats <ran_seats> --group -o .crew/reviews/<session-id>/panel.md --full .crew/reviews/<session-id>/panel-full.md
+"${CLAUDE_PLUGIN_ROOT}/crew" collect --session-id <session-id> --run-id <run_id from the prep JSON> --seats <ran_seats> --group -o <run_dir>/panel.md --full <run_dir>/panel-full.md
 ```
 
 `--group` writes the deduped digest to `panel.md`; `--full` writes the faithful

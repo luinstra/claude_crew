@@ -223,12 +223,14 @@ already the same per-seat `crew run` shape as `/crew:review` Step 3. But most
 debates are discuss.)
 
 > **Why `-o` here (both A2 and A3), not `--stage`:** `/crew:review`,
-> `/crew:build`, and `/crew:measure-twice` stage prompts via `render --stage`
-> (session-scoped `.crew/reviews/<session-id>/`). Debate deliberately keeps `-o`
+> `/crew:build`, and `/crew:measure-twice` get their prompts staged by
+> `review-prep` into a run-scoped `.crew/reviews/<session-id>/<run_id>/` dir
+> (against that run's frozen snapshot). Debate deliberately keeps `-o`
 > into its own `.crew/debates/<dir>/` (single-round) or `<run-id>/` (multi-round)
 > dir instead — that dir is also where `question.md`/`round-NN.md` and the
-> per-seat `<seat>.json` results live, and the run-id is what threads prior rounds
-> through `render --run-id` (which `--stage` doesn't model). The two staging
+> per-seat `<seat>.json` results live, and debate's OWN run-id is what threads
+> prior rounds through `render --run-id` (a debate-round mechanism, unrelated to
+> the review engine's `run`/`persist-seat`/`collect --run-id`). The two staging
 > schemes are intentional, not an inconsistency to "fix".
 
 ## A4 — Normalize + synthesize + log

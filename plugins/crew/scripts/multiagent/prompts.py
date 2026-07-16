@@ -160,21 +160,42 @@ TARGET: {descriptor}{notes_block}
 """
 
 
-def plan_review_ref(ref_path: str, descriptor: str = "plan") -> str:
+def plan_review_ref(
+    ref_path: str, descriptor: str = "plan", snapshot_path: str | None = None
+) -> str:
     """Plan-review prompt that points the seat at the file to READ ITSELF.
 
     Reference mode (the default): the plan body is NOT inlined. The seat opens
     the file in the repository it is already running in. Keeps the prompt tiny
     (no payload transport, no ARG_MAX pressure, no synthesis-context bloat).
+
+    With ``snapshot_path`` the reviewed content is a FROZEN copy of the plan
+    instead: the seat reads that file as the review authority (its bytes are
+    what the panel's verdict certifies), and the live plan path is demoted to
+    supplementary context, so the plan changing under the seat mid-review
+    cannot change what was reviewed.
     """
+    if snapshot_path:
+        how = (
+            "The plan is NOT inlined below: it is FROZEN in a snapshot file. "
+            "Read that file yourself in the current repository; its bytes are "
+            "the exact content under review (the review authority):\n"
+            f"  read:  {snapshot_path}\n"
+            "Supplementary context ONLY (the live plan file, which may have "
+            f"drifted since the snapshot):\n  read:  {ref_path}"
+        )
+    else:
+        how = (
+            "The plan is NOT inlined below — open and read it yourself in the "
+            "current repository:\n"
+            f"  read:  {ref_path}"
+        )
     return f"""You are one reviewer on a multi-model review panel. Review a \
 PLAN as a single seat. Be specific and terse.
 
 TARGET: {descriptor}
 
-The plan is NOT inlined below — open and read it yourself in the current \
-repository:
-  read:  {ref_path}
+{how}
 
 {_PLAN_CRITERIA}
 
@@ -182,13 +203,24 @@ repository:
 """
 
 
-def code_review_ref(diff_cmd: str | None, descriptor: str = "code diff", notes: str = "") -> str:
+def code_review_ref(
+    diff_cmd: str | None,
+    descriptor: str = "code diff",
+    notes: str = "",
+    snapshot_path: str | None = None,
+) -> str:
     """Code-review prompt that points the seat at the diff to FETCH ITSELF.
 
     Reference mode (the default): the diff is NOT inlined. The seat runs the
     given git command in the repository it is already in, and reads the changed
     files for context. If there is no diff command (e.g. no commits yet), it is
     told to inspect the working tree directly.
+
+    With ``snapshot_path`` the reviewed content is a FROZEN diff file instead:
+    the seat reads that file as the review authority (its bytes are what the
+    panel's verdict certifies), and the live diff command is demoted to
+    supplementary context, so content changing under the seat mid-review cannot
+    change what was reviewed.
     """
     notes_block = f"\nCONTEXT NOTES:\n{notes}\n" if notes else ""
     scope_rule = (
@@ -200,7 +232,21 @@ def code_review_ref(diff_cmd: str | None, descriptor: str = "code diff", notes: 
         "unrelated subsystems the change doesn't touch — follow the change's blast "
         "radius, don't re-review the whole repository for its own sake."
     )
-    if diff_cmd:
+    if snapshot_path:
+        live = (
+            f"\nSupplementary context ONLY (the live diff, which may have "
+            f"drifted since the snapshot):\n  run:  {diff_cmd}"
+            if diff_cmd
+            else ""
+        )
+        how = (
+            "The diff is NOT inlined below: it is FROZEN in a snapshot file. "
+            "Read that file yourself in the current repository; its bytes are "
+            "the exact content under review (the review authority):\n"
+            f"  read:  {snapshot_path}{live}\n"
+            f"Review the changes the snapshot shows. {scope_rule}"
+        )
+    elif diff_cmd:
         how = (
             "The diff is NOT inlined below — reproduce it yourself in the "
             "current repository:\n"
@@ -361,19 +407,28 @@ def build_prompt(
             prior_round=prior_round,
         )
     notes = "\n".join(target.notes) if getattr(target, "notes", None) else ""
+    # snapshot_path is set by review-prep only: it flips the reference-mode
+    # wording to read-the-frozen-snapshot as the review authority, with the
+    # live ref_path/diff_cmd demoted to supplementary context.
+    snapshot = getattr(target, "snapshot_path", None)
     if target.kind == "plan":
         body = (
             plan_review(target.content, target.descriptor)
             if inline
             else plan_review_ref(
-                getattr(target, "ref_path", None) or target.scope, target.descriptor
+                getattr(target, "ref_path", None) or target.scope,
+                target.descriptor,
+                snapshot_path=snapshot,
             )
         )
     elif inline:
         body = code_review(target.content, target.descriptor, notes)
     else:
         body = code_review_ref(
-            getattr(target, "diff_cmd", None), target.descriptor, notes
+            getattr(target, "diff_cmd", None),
+            target.descriptor,
+            notes,
+            snapshot_path=snapshot,
         )
     # Prior round goes BEFORE the review body so a seat reads it as context to
     # weigh, not as a trailer after the "return your verdict" instruction. With

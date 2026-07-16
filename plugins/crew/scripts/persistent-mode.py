@@ -360,7 +360,7 @@ def main():
 Continue working. When complete, verify via the multi-model panel
 (/crew:build Step 2):
 1. "${{CLAUDE_PLUGIN_ROOT}}/crew" review-prep working-tree{session_flag}
-2. Fan out ALL resolved seats, wait for every seat, collect, synthesize
+2. Fan out the PENDING seats from the prep JSON (a resumed run relaunches only those), wait for every seat, collect the FULL roster, synthesize
 3. If APPROVED, deactivate the loop and summarize
 4. If REVISE with [BLOCKING] issues, fix and re-verify
 
@@ -395,7 +395,7 @@ Continue refining the plan. Verify via the multi-model panel
 (/crew:measure-twice Phase 3):
 1. If you just received panel feedback, revise the plan to address [BLOCKING] issues
 2. "${{CLAUDE_PLUGIN_ROOT}}/crew" review-prep {shlex.quote(measure_state.plan_file)}{session_flag}
-3. Fan out ALL resolved seats, wait for every seat, collect, synthesize
+3. Fan out the PENDING seats from the prep JSON (a resumed run relaunches only those), wait for every seat, collect the FULL roster, synthesize
 4. When APPROVED (or only [MINOR] issues), deactivate the loop and present the final plan
 
 If you are WAITING on seats that are still running, just wait. Do NOT re-run
