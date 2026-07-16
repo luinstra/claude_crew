@@ -8815,6 +8815,32 @@ def test_review_runs():
         (d / "run.json").write_bytes(before)
         check("a clean record still resumes after refusals",
               review_runs.write_run_json_once(d, record) is False, "resume", "?")
+        # verify_run_record: the reader-side three-axis integrity check.
+        src = d / "run.json"
+        try:
+            review_runs.verify_run_record(record, expected_run_id=a, source=src)
+            check("verify_run_record passes a clean record", True)
+        except review_runs.ReviewRunError as exc:
+            check("verify_run_record passes a clean record", False, "no raise", str(exc))
+        for label, rec_mut, expected_id in (
+            ("missing target_sha256",
+             {k: v for k, v in record.items() if k != "target_sha256"}, a),
+            ("missing identity_digest",
+             {k: v for k, v in record.items() if k != "identity_digest"}, a),
+            ("run_id mismatching the requested dir", record, "run-000000000000"),
+            ("tampered identity fields",
+             {**record, "target_spec": "elsewhere.md"}, a),
+            ("self-consistent fields whose DERIVED id is not the stored run_id",
+             {**record, "run_id": "run-000000000000"}, "run-000000000000"),
+        ):
+            try:
+                review_runs.verify_run_record(
+                    rec_mut, expected_run_id=expected_id, source=src)
+                check(f"verify_run_record refuses: {label}", False,
+                      "ReviewRunError", "accepted")
+            except review_runs.ReviewRunError as exc:
+                check(f"verify_run_record refuses: {label}",
+                      "Recovery" in str(exc), "raise naming recovery", str(exc))
         # Unparseable run.json: also a refusal, never a silent overwrite.
         (d / "run.json").write_text("{not json", encoding="utf-8")
         try:
@@ -9494,7 +9520,7 @@ def test_run_scoped_reviews():
 
     # 8d. Writer-side manifest enforcement: a run-scoped write must come from
     #     the run's own panel with the manifest's kind and model, over the
-    #     frozen prompt, in the catalog sandbox, as stamped JSON; anything
+    #     frozen prompt, read-only (no sandbox override), as stamped JSON; anything
     #     else exits 2 with nothing written and every existing run-dir file
     #     intact.
     with tempfile.TemporaryDirectory() as td:
@@ -9562,8 +9588,8 @@ def test_run_scoped_reviews():
               and not (run_d / "codex.json").exists() and _intact(),
               "exit 2 + manifest model named",
               f"rc={mm.returncode} err={mm.stderr[:200]!r}")
-        # run: an explicit --sandbox override is not the catalog sandbox the
-        # stamp promises.
+        # run: run-scoped review runs are hardcoded read-only, so an explicit
+        # --sandbox override is refused outright.
         sb = _run_dispatcher(["run", "codex", "--session-id", "S",
                               "--run-id", o1["run_id"], "-s", "workspace-write",
                               "--json"], cwd=td, env=env, timeout=30)
@@ -9725,6 +9751,303 @@ def test_run_scoped_reviews():
               "auto" not in rec_text, "absent", "present")
 
 
+# =============================================================================
+# Run-identity validation at collect: stamps + name + membership per seat file
+# =============================================================================
+
+_SCHEMA_REVIEW = (
+    "## VERDICT\nAPPROVED\n\n## CRITERIA\n- Clarity: PASS — clear\n\n"
+    "## FINDINGS\nnone\n\n## CONFIDENCE\nhigh\n"
+)
+
+
+def test_collect_run_scoped():
+    log_section("collect validates run-identity stamps (run-scoped reads)")
+
+    def _prep_json(args, cwd, env=None):
+        proc = _run_dispatcher(["review-prep", *args], cwd=cwd, env=env, timeout=30)
+        obj = json.loads(proc.stdout) if proc.returncode == 0 and proc.stdout.strip() else None
+        return proc, obj
+
+    ARGS = ["plan.md", "--seats", "codex", "--task-seats", "opus,sonnet",
+            "--session-id", "S"]
+
+    def _land_opus(td, o):
+        src = Path(td) / "r.txt"
+        src.write_text(_SCHEMA_REVIEW, encoding="utf-8")
+        _run_dispatcher(["persist-seat", "opus", "--session-id", "S",
+                         "--run-id", o["run_id"], "--model", "opus",
+                         "-f", str(src)], cwd=td, timeout=30)
+
+    def _collect(td, seats, extra=()):
+        return _run_dispatcher(["collect", "--session-id", "S",
+                                "--seats", seats, *extra], cwd=td, timeout=30)
+
+    # 1. Correct run_id + WRONG target_sha256 -> SKIPPED stale (AC-15 shape);
+    #    a fully unstamped hand-placed file -> SKIPPED stale (unstamped).
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, o1 = _prep_json(ARGS, td)
+        run_d = tdp / o1["run_dir"]
+        _land_opus(td, o1)
+        good = json.loads((run_d / "opus.json").read_text())
+        bad = dict(good)
+        bad["target_sha256"] = "0" * 64
+        (run_d / "opus.json").write_text(json.dumps(bad), encoding="utf-8")
+        cp = _collect(td, "opus", ("--run-id", o1["run_id"]))
+        check("correct run_id + wrong target_sha256 renders SKIPPED stale, review text never folded",
+              cp.returncode == 0 and "SKIPPED" in cp.stdout
+              and "stale result" in cp.stdout and "APPROVED" not in cp.stdout,
+              "SKIPPED stale, no fold", cp.stdout[:200])
+        (run_d / "codex.json").write_text(json.dumps(
+            {"name": "codex", "model": "m", "ok": True,
+             "output": "HANDPLACED APPROVED", "error": None, "elapsed": 1.0}),
+            encoding="utf-8")
+        ch = _collect(td, "codex", ("--run-id", o1["run_id"]))
+        check("an unstamped hand-placed file renders SKIPPED naming (run unstamped, current run X)",
+              ch.returncode == 0 and "stale result (run unstamped, "
+              f"current run {o1['run_id']})" in ch.stdout
+              and "HANDPLACED" not in ch.stdout,
+              "unstamped skip note", ch.stdout[:250])
+
+    # 2. Copied-seat quarantine + stamped FAILURE renders FAILED (not stale) +
+    #    non-member skip + repair-seat stamp round-trip + grouped e2e.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, o1 = _prep_json(ARGS, td)
+        run_d = tdp / o1["run_dir"]
+        _land_opus(td, o1)
+        shutil.copyfile(run_d / "opus.json", run_d / "sonnet.json")
+        cq = _collect(td, "opus,sonnet", ("--run-id", o1["run_id"]))
+        check("a valid result copied under another seat's filename renders SKIPPED foreign (opus still OK)",
+              cq.returncode == 0 and "foreign seat result" in cq.stdout
+              and "status: OK" in cq.stdout
+              and cq.stdout.count("APPROVED") == 1,
+              "opus OK once, sonnet quarantined", cq.stdout[:300])
+        # A stamped, named FAILURE is this run's result: FAILED, never stale.
+        bf = subprocess.run(
+            [str(CREW_DISPATCHER), "persist-seat", "sonnet", "--session-id", "S",
+             "--run-id", o1["run_id"], "--model", "sonnet",
+             "--failed", "--error", "seat timed out"],
+            input="", capture_output=True, text=True, cwd=td, timeout=30)
+        cf = _collect(td, "sonnet", ("--run-id", o1["run_id"]))
+        check("a stamped, named failure renders as FAILED (never skipped-stale)",
+              bf.returncode == 0 and cf.returncode == 0
+              and "seat timed out" in cf.stdout and "stale" not in cf.stdout,
+              "FAILED block with its diagnostic", cf.stdout[:200])
+        # Non-member with perfect stamps: membership is checked first.
+        (run_d / "fable.json").write_text(json.dumps(
+            {"name": "fable", "model": "fable", "ok": True,
+             "output": "NOT ON PANEL", "error": None, "elapsed": 1.0,
+             "run_id": o1["run_id"], "target_sha256": o1["target_sha256"]}),
+            encoding="utf-8")
+        cn = _collect(td, "fable", ("--run-id", o1["run_id"]))
+        check("a correctly-stamped NON-MEMBER renders SKIPPED (panel manifest)",
+              cn.returncode == 0 and "panel manifest" in cn.stdout
+              and "NOT ON PANEL" not in cn.stdout,
+              "membership skip note", cn.stdout[:200])
+        # repair-seat on a run-scoped file round-trips both stamps untouched.
+        rep_src = tdp / "rep.txt"
+        rep_src.write_text(_SCHEMA_REVIEW, encoding="utf-8")
+        rp = _run_dispatcher(["repair-seat", "--seat",
+                              str(run_d / "opus.json"), "-f", str(rep_src)],
+                             cwd=td, timeout=30)
+        odata = json.loads((run_d / "opus.json").read_text())
+        check("repair-seat round-trips run_id/target_sha256 untouched on a run-scoped seat file",
+              rp.returncode == 0 and odata.get("repaired_output")
+              and odata.get("run_id") == o1["run_id"]
+              and odata.get("target_sha256") == o1["target_sha256"],
+              "repaired + stamps intact", str({k: odata.get(k) for k in
+                                               ("run_id", "target_sha256")}))
+        cr = _collect(td, "opus", ("--run-id", o1["run_id"]))
+        check("a repaired run-scoped seat still collects as its OK block",
+              cr.returncode == 0 and "status: OK" in cr.stdout
+              and "stale" not in cr.stdout,
+              "OK after repair", cr.stdout[:150])
+        # Grouped e2e over the run dir: landed opus in the VERDICTS roster,
+        # stale-stamped codex visible as skipped, its text never folded.
+        (run_d / "codex.json").write_text(json.dumps(
+            {"name": "codex", "model": "m", "ok": True,
+             "output": "STALE BODY APPROVED", "error": None, "elapsed": 1.0,
+             "run_id": "run-000000000000", "target_sha256": "0" * 64}),
+            encoding="utf-8")
+        cg = _run_dispatcher(["collect", "--session-id", "S",
+                              "--seats", "codex,opus",
+                              "--run-id", o1["run_id"], "--group",
+                              "-o", str(run_d / "panel.md")], cwd=td, timeout=30)
+        digest = (run_d / "panel.md").read_text(encoding="utf-8") \
+            if (run_d / "panel.md").exists() else ""
+        check("grouped --run-id digest: landed seat in VERDICTS, stale seat skipped, stale text never folded",
+              cg.returncode == 0 and "- opus" in digest and "- codex" in digest
+              and "skipped" in digest.lower()
+              and "STALE BODY" not in digest,
+              "one landed + one skipped in digest", digest[:300])
+
+    # 3. Pointer-flip fold-count (AC-14's collect half): a late seat persisted
+    #    into run-N is invisible to run-N+1's collect, by --run-id AND by the
+    #    pointer.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, oA = _prep_json(ARGS, td)
+        (tdp / "plan.md").write_text("# Plan\nrevised body\n", encoding="utf-8")
+        _, oB = _prep_json(ARGS, td)   # pointer now names run-B
+        _land_opus(td, oA)             # late persist into run-A by explicit id
+        adata = json.loads((tdp / oA["run_dir"] / "opus.json").read_text())
+        check("the late seat landed in run-A with run-A's stamp",
+              oA["run_dir"] != oB["run_dir"]
+              and adata.get("run_id") == oA["run_id"], "run-A attribution",
+              str(adata.get("run_id")))
+        for label, extra in (("--run-id run-B", ("--run-id", oB["run_id"])),
+                             ("the live pointer", ())):
+            cb = _collect(td, "opus", extra)
+            check(f"run-B's collect via {label} counts 0 from the run-A seat (SKIPPED missing)",
+                  cb.returncode == 0 and "SKIPPED" in cb.stdout
+                  and "APPROVED" not in cb.stdout,
+                  "no cross-run fold", cb.stdout[:200])
+
+    # 4. Legacy unstamped flat file with NO pointer still collects verbatim.
+    with tempfile.TemporaryDirectory() as td:
+        flat = Path(td) / ".crew" / "reviews" / "S"
+        flat.mkdir(parents=True)
+        (flat / "codex.json").write_text(json.dumps(
+            {"name": "codex", "model": "m", "ok": True,
+             "output": "LEGACY FLAT APPROVED", "error": None, "elapsed": 1.0}),
+            encoding="utf-8")
+        cl = _collect(td, "codex")
+        check("an unstamped legacy file with no pointer still collects flat (no validation)",
+              cl.returncode == 0 and "LEGACY FLAT APPROVED" in cl.stdout
+              and "stale" not in cl.stdout,
+              "legacy OK block", cl.stdout[:150])
+
+    # 5. Fail CLOSED, never open: a REQUESTED run scope (explicit --run-id or
+    #    a pointer naming a run) whose run.json is missing or unreadable exits
+    #    2 with nothing folded and no output file written; validation is
+    #    governed by the requested scope, never by whether a manifest happens
+    #    to exist.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        rid = "run-abcdef123456"
+        run_d = tdp / ".crew" / "reviews" / "S" / rid
+        run_d.mkdir(parents=True)
+        (run_d / "codex.json").write_text(json.dumps(
+            {"name": "codex", "model": "m", "ok": True,
+             "output": "UNVALIDATED APPROVED", "error": None, "elapsed": 1.0}),
+            encoding="utf-8")
+        out = run_d / "panel.md"
+        ce = _collect(td, "codex", ("--run-id", rid, "-o", str(out)))
+        check("explicit --run-id with a MISSING run.json exits 2, nothing folded, no output file",
+              ce.returncode == 2 and "error:" in ce.stderr
+              and "Traceback" not in ce.stderr and not out.exists()
+              and "UNVALIDATED" not in ce.stdout,
+              "exit 2 + no panel.md", f"rc={ce.returncode} err={ce.stderr[:200]!r}")
+        (run_d / "run.json").write_text("{broken", encoding="utf-8")
+        cb = _collect(td, "codex", ("--run-id", rid, "-o", str(out)))
+        check("explicit --run-id with an UNREADABLE run.json exits 2, no output file",
+              cb.returncode == 2 and "error:" in cb.stderr
+              and not out.exists(),
+              "exit 2 + no panel.md", f"rc={cb.returncode} err={cb.stderr[:200]!r}")
+        (run_d / "run.json").unlink()
+        # Pointer-resolved scope: the pointer names the run, the manifest is
+        # gone; collect must refuse rather than fall back to an unvalidated
+        # read (run's dangling-pointer flat fallback is a LAUNCH convenience
+        # that collect deliberately does not share).
+        (tdp / ".crew" / "reviews" / "S" / "current-run.json").write_text(
+            json.dumps({"run_id": rid, "target_sha256": "0" * 64,
+                        "created_at": "2026-01-01T00:00:00+00:00"}),
+            encoding="utf-8")
+        cptr = _collect(td, "codex", ("-o", str(out)))
+        check("pointer-resolved scope with a missing run.json exits 2, nothing folded, no output file",
+              cptr.returncode == 2 and "error:" in cptr.stderr
+              and "Traceback" not in cptr.stderr and not out.exists()
+              and "UNVALIDATED" not in cptr.stdout,
+              "exit 2 + no panel.md", f"rc={cptr.returncode} err={cptr.stderr[:200]!r}")
+
+    # 6. Manifest integrity + pointer validity, fail-closed: a valid-JSON
+    #    run.json with stripped identity fields or a run_id that lies about
+    #    its dir refuses; a PRESENT-but-corrupt pointer refuses while an
+    #    ABSENT pointer still collects flat.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, o1 = _prep_json(ARGS, td)
+        _land_opus(td, o1)
+        run_json = tdp / o1["run_dir"] / "run.json"
+        good = run_json.read_text(encoding="utf-8")
+        rec = json.loads(good)
+        del rec["target_sha256"]
+        run_json.write_text(json.dumps(rec), encoding="utf-8")
+        cs = _collect(td, "opus", ("--run-id", o1["run_id"]))
+        check("a field-stripped manifest (no target_sha256) exits 2, nothing folded",
+              cs.returncode == 2 and "identity" in cs.stderr
+              and "APPROVED" not in cs.stdout,
+              "exit 2 identity check", f"rc={cs.returncode} err={cs.stderr[:200]!r}")
+        rec = json.loads(good)
+        rec["run_id"] = "run-000000000000"
+        run_json.write_text(json.dumps(rec), encoding="utf-8")
+        cm = _collect(td, "opus", ("--run-id", o1["run_id"]))
+        check("a manifest whose run_id mismatches the requested dir exits 2, nothing folded",
+              cm.returncode == 2 and "does not match the requested run" in cm.stderr
+              and "APPROVED" not in cm.stdout,
+              "exit 2 run_id mismatch", f"rc={cm.returncode} err={cm.stderr[:200]!r}")
+        run_json.write_text(good, encoding="utf-8")
+        # Present-but-corrupt pointer: a run WAS in play; refuse rather than
+        # fall to the unvalidated flat dir. Removing the pointer restores the
+        # ad-hoc flat read.
+        pointer = tdp / ".crew" / "reviews" / "S" / "current-run.json"
+        pointer.write_text("{broken", encoding="utf-8")
+        (tdp / ".crew" / "reviews" / "S" / "codex.json").write_text(json.dumps(
+            {"name": "codex", "model": "m", "ok": True,
+             "output": "FLAT UNDER BROKEN POINTER", "error": None,
+             "elapsed": 1.0}), encoding="utf-8")
+        cbp = _collect(td, "codex")
+        check("a PRESENT-but-corrupt pointer exits 2 naming the pointer (never a flat fold)",
+              cbp.returncode == 2 and "current-run.json" in cbp.stderr
+              and "FLAT UNDER BROKEN POINTER" not in cbp.stdout,
+              "exit 2 naming pointer", f"rc={cbp.returncode} err={cbp.stderr[:200]!r}")
+        pointer.unlink()
+        cok = _collect(td, "codex")
+        check("removing the pointer restores the flat, validation-free read",
+              cok.returncode == 0 and "FLAT UNDER BROKEN POINTER" in cok.stdout,
+              "flat OK after pointer removal", cok.stdout[:150])
+        # An explicitly EMPTY --run-id is SUPPLIED run-scoped input, never a
+        # silent flat/pointer fallback: it fails run-id validation at all
+        # three intakes.
+        ce2 = _collect(td, "codex", ("--run-id", ""))
+        check("collect with an explicitly empty --run-id exits 2 (never a flat fallback)",
+              ce2.returncode == 2 and "invalid run-id" in ce2.stderr
+              and "FLAT UNDER BROKEN POINTER" not in ce2.stdout,
+              "exit 2 invalid run-id", f"rc={ce2.returncode} err={ce2.stderr[:150]!r}")
+        re2 = _run_dispatcher(["run", "codex", "--session-id", "S",
+                               "--run-id", "", "--json"], cwd=td, timeout=30)
+        check("run with an explicitly empty --run-id exits 2 (never pointer-rerouted)",
+              re2.returncode == 2 and "invalid run-id" in re2.stderr,
+              "exit 2 invalid run-id", f"rc={re2.returncode} err={re2.stderr[:150]!r}")
+        pe2 = _run_dispatcher(["persist-seat", "opus", "--session-id", "S",
+                               "--run-id", "", "--model", "opus",
+                               "-f", "plan.md"], cwd=td, timeout=30)
+        check("persist-seat with an explicitly empty --run-id exits 2",
+              pe2.returncode == 2 and "invalid run-id" in pe2.stderr,
+              "exit 2 invalid run-id", f"rc={pe2.returncode} err={pe2.stderr[:150]!r}")
+        # Derived-id axis: a run dir copied under a foreign name, its stored
+        # run_id edited to match the new dir; the record is self-consistent
+        # (fields + digest) but the id its fields DERIVE belongs to the
+        # original run.
+        fake_rid = "run-000000000000"
+        fake_dir = tdp / ".crew" / "reviews" / "S" / fake_rid
+        shutil.copytree(tdp / o1["run_dir"], fake_dir)
+        rec = json.loads((fake_dir / "run.json").read_text())
+        rec["run_id"] = fake_rid
+        (fake_dir / "run.json").write_text(json.dumps(rec), encoding="utf-8")
+        cdi = _collect(td, "opus", ("--run-id", fake_rid))
+        check("a self-consistent manifest whose fields DERIVE a different run id exits 2, nothing folded",
+              cdi.returncode == 2 and "derive run id" in cdi.stderr
+              and "APPROVED" not in cdi.stdout,
+              "exit 2 derived-id axis", f"rc={cdi.returncode} err={cdi.stderr[:200]!r}")
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -9783,6 +10106,7 @@ def main():
     test_review_runs()
     test_replay_spec()
     test_run_scoped_reviews()
+    test_collect_run_scoped()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")

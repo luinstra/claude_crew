@@ -265,7 +265,12 @@ Key contracts (do NOT regress):
   the reused session dir is never folded in), labels every block by its requested seat name (a missing,
   unreadable, non-JSON, or non-object file → a labeled SKIPPED block; a well-formed JSON object renders
   per its fields via `from_dict`'s render-safe coercion), and rejects a seat name with path chars
-  (nonzero). `collect` is **no longer faithful-only** — it has THREE additive modes over the same
+  (nonzero). A RUN-SCOPED read (explicit `--run-id` or the session pointer) additionally validates
+  every well-formed object against the run dir's own `run.json` (both identity stamps, the stored
+  `name` vs the filename's seat, and panel membership), rendering anything else as a labeled SKIPPED
+  block (`skipped: stale result (run X, current run Y)` style), so a stale, copied, or hand-placed file
+  never folds into the digest; a stamped, named FAILURE still renders as its failed block. Flat reads
+  validate nothing (legacy unstamped files render as before). `collect` is **no longer faithful-only** — it has THREE additive modes over the same
   named-seats read (`multiagent/findings.py` is the pure parser+grouping module; `collect`/`findings`
   spawn NO agents):
   - **no flag** — the original FAITHFUL `render_panel` projection (never summarizes/votes/reorders);

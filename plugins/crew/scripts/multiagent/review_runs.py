@@ -267,6 +267,49 @@ def read_run_json(d: Path) -> dict:
     return data
 
 
+def verify_run_record(record: dict, *, expected_run_id: str, source: Path) -> None:
+    """Integrity-check a loaded ``run.json`` before anything TRUSTS it.
+
+    The same three axes ``write_run_json_once`` checks on resume, aimed at a
+    reader: the identity fields must be present, the stored ``run_id`` must
+    equal the id whose dir was requested, and the field-level recomputed
+    identity must match the stored full digest. A record failing any axis
+    would validate seat stamps against values that are missing or lie about
+    the dir they sit in (e.g. ``result_current`` against ``None`` stamps would
+    pass unstamped files), so the caller must refuse rather than fold.
+    Raises ``ReviewRunError`` naming the failing axis and the recovery.
+    """
+    rid = record.get("run_id")
+    tsha = record.get("target_sha256")
+    digest = record.get("identity_digest")
+    problem = None
+    if not rid or not tsha or not digest:
+        problem = "identity fields missing (run_id/target_sha256/identity_digest)"
+    elif rid != expected_run_id:
+        problem = f"stored run_id {rid!r} does not match the requested run {expected_run_id!r}"
+    else:
+        rec_id, recomputed = recompute_identity(record)
+        if recomputed != digest:
+            problem = (
+                f"identity fields recompute to {recomputed[:12]}… but the stored "
+                f"digest is {str(digest)[:12]}…"
+            )
+        elif rec_id != rid:
+            # A hand-crafted record can carry SELF-CONSISTENT identity fields
+            # and digest while its stored run_id (the dir name) belongs to a
+            # different run; the id DERIVED from the recomputed digest is the
+            # axis that catches it.
+            problem = (
+                f"identity fields derive run id {rec_id!r}, not the stored "
+                f"{rid!r}"
+            )
+    if problem:
+        raise ReviewRunError(
+            f"run record {source} fails its identity check: {problem}. "
+            "Recovery: remove the run dir and re-prep"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Snapshot: the frozen bytes every seat reviews
 # ---------------------------------------------------------------------------
@@ -298,30 +341,45 @@ def ensure_snapshot(d: Path, name: str, content: str, target_sha256: str) -> str
         return (
             f"snapshot {p} did not match the run's target_sha256; rewrote the "
             "correct bytes. Seat results landed BEFORE this heal reviewed the "
-            "pre-heal bytes; relaunch those seats (per-seat, same --run-id) "
-            "if that matters"
+            "pre-heal bytes: relaunch each LANDED seat with the same --run-id; "
+            "pending seats are unaffected"
         )
     _atomic_write_text(p, content)
     return None
 
 
 # ---------------------------------------------------------------------------
-# Landed-and-valid predicate: shared by prep's pending lists, the digest, and
-# the completion gate, so no two consumers can disagree on the definition.
+# Belonging predicates, two tiers with one shared core. `result_current` is
+# what the DIGEST validates (a stamped, named failure still belongs and must
+# render as a failed block); `result_valid` layers `ok is True` on top for the
+# consumers that only ever count successes (prep's pending lists, the
+# preserve-valid write, the completion gate). Both resolve stamps + name the
+# same way, so the digest and the gates can never disagree on whose result a
+# file is; they differ only in whether a failure counts.
 # ---------------------------------------------------------------------------
 
-def result_valid(data, run_id: str, target_sha256: str, *, name: str | None = None) -> bool:
-    """A decoded seat result counts ONLY when it is a JSON object with a literal
-    ``ok: true`` AND both identity stamps match the run's own record AND, when
-    ``name`` is given, the stored ``name`` equals the expected seat slug (a
-    same-run result copied to another seat's filename must never satisfy that
-    seat's pending or quorum check)."""
+def result_current(data, run_id: str, target_sha256: str, *, name: str | None = None) -> bool:
+    """A decoded seat result BELONGS to this run (and, when ``name`` is given,
+    to this seat): a JSON object whose two identity stamps match the run's own
+    record and whose stored ``name`` equals the expected seat slug. Says
+    nothing about ``ok``: a stamped, named FAILURE is still this run's result
+    (it renders as a failed block, never as stale)."""
     return (
         isinstance(data, dict)
-        and data.get("ok") is True
         and data.get("run_id") == run_id
         and data.get("target_sha256") == target_sha256
         and (name is None or data.get("name") == name)
+    )
+
+
+def result_valid(data, run_id: str, target_sha256: str, *, name: str | None = None) -> bool:
+    """A decoded seat result COUNTS only when it belongs to this run/seat
+    (``result_current``) AND carries a literal ``ok: true`` (a same-run result
+    copied to another seat's filename must never satisfy that seat's pending
+    or quorum check)."""
+    return (
+        result_current(data, run_id, target_sha256, name=name)
+        and data.get("ok") is True
     )
 
 

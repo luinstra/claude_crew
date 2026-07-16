@@ -418,10 +418,13 @@ def _results_dir(session_id: str, run_id: str | None = None) -> Path:
     """THE seat-result routing chokepoint: explicit ``--run-id`` wins
     (validated; raises ``review_runs.ReviewRunError`` on a bad id), else the
     session pointer's run dir, else the flat session dir (ad-hoc unchanged).
-    Session-segment sanitization is delegated to ``review_runs`` so writers and
-    the gate resolve one dir by one mechanism.
+    ANY supplied ``run_id`` (an explicit empty string included) goes through
+    validation rather than silently re-routing to the pointer; only ``None``
+    (the flag omitted) falls through. Session-segment sanitization is delegated
+    to ``review_runs`` so writers and the gate resolve one dir by one
+    mechanism.
     """
-    if run_id:
+    if run_id is not None:
         return review_runs.run_dir(session_id, run_id, base=_REVIEWS_BASE)
     return _pointer_run_dir(session_id) or _reviews_subdir(session_id)
 
@@ -797,7 +800,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     # write rule.
     stamp_dir: Path | None = None
     sid = ""
-    if args.run_id or (args.session_id and args.session_id.strip()):
+    if args.run_id is not None or (args.session_id and args.session_id.strip()):
         sid = _resolve_session_id(args.session_id)
         if "<" in sid or ">" in sid:
             print(
@@ -808,7 +811,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
             return 2
     results_dir: Path | None = None
-    if args.run_id:
+    if args.run_id is not None:
         if args.out is not None:
             # An explicit -o could physically detach a stamped result from the
             # run dir its stamp names; refuse the contradictory routing.
@@ -894,8 +897,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                 )
                 return 2
             # The identity stamped onto the result promises the manifest's
-            # model and the catalog sandbox; a run-scoped seat may not execute
-            # under overrides the stamp does not describe.
+            # model, and run-scoped review runs are hardcoded read-only; a
+            # run-scoped seat may not execute under overrides the stamp does
+            # not describe.
             if args.model is not None and args.model != sig.get("model"):
                 print(
                     f"error: --model {args.model!r} does not match seat "
@@ -908,8 +912,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             if args.sandbox is not None:
                 print(
                     "error: a run-scoped `run` takes no -s/--sandbox override; "
-                    "the catalog sandbox is the only sanctioned one for a "
-                    "stamped result (pass an explicit -o for ad-hoc use)",
+                    "review runs are hardcoded read-only (pass an explicit -o "
+                    "for ad-hoc use)",
                     file=sys.stderr,
                 )
                 return 2
@@ -1716,6 +1720,33 @@ def cmd_seats(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_scope_skip(data: dict, seat: str, record: dict) -> str | None:
+    """The skip note for a run-scoped seat file that does not belong, or None.
+
+    The DECISION is the shared ``review_runs.result_current`` predicate (the
+    same stamps + name definition the writers enforce and the pending lists
+    use), preceded by a panel-membership check; the branches below only pick
+    the diagnostic wording. A stamped, named FAILURE passes: it is this run's
+    result and renders as a failed block, never as stale.
+    """
+    rid = record.get("run_id")
+    tsha = record.get("target_sha256")
+    sigs = record.get("seat_signatures")
+    if not (isinstance(sigs, dict) and seat in sigs):
+        return f"skipped: seat not in run {rid}'s panel manifest"
+    if review_runs.result_current(data, rid, tsha, name=seat):
+        return None
+    if data.get("run_id") != rid or data.get("target_sha256") != tsha:
+        return (
+            f"skipped: stale result (run {data.get('run_id') or 'unstamped'}, "
+            f"current run {rid})"
+        )
+    return (
+        f"skipped: foreign seat result (stamped for this run but named "
+        f"{data.get('name')!r}) under {seat!r}'s filename"
+    )
+
+
 def cmd_collect(args: argparse.Namespace) -> int:
     """Collapse the named per-seat ``<seat>.json`` result files into ONE markdown
     digest.
@@ -1734,9 +1765,10 @@ def cmd_collect(args: argparse.Namespace) -> int:
     is the deterministic fix for the stale-seat bug: the reviews dir is reused
     across reviews within a session and seat filenames are STABLE, so a blind
     ``*.json`` glob would fold a STALE ``<seat>.json`` from an earlier panel into
-    a later verdict. By reading only the named seats, a stale/foreign file is
-    never read, and a named-but-missing seat renders as a SKIPPED block labeled
-    with its name (never silently dropped).
+    a later verdict. A file that is not named is never read at all; a NAMED
+    stale/foreign file is read but never FOLDED (run-scoped validation
+    quarantines it as a labeled SKIPPED block), and a named-but-missing seat
+    renders as a SKIPPED block labeled with its name (never silently dropped).
 
     Per-file outcome (precise): a MISSING, UNREADABLE, or non-JSON file → a
     labeled SKIPPED block; a valid-JSON-but-NON-OBJECT file (``[]``/``null``/etc.)
@@ -1744,13 +1776,23 @@ def cmd_collect(args: argparse.Namespace) -> int:
     WELL-FORMED JSON OBJECT renders per its fields (missing fields coerced via
     ``from_dict``'s render-safe defaults — e.g. ``{}`` renders as a FAILED block,
     ``{"ok": true}`` as an OK block). This faithfully reflects whatever ``run
-    --json`` wrote; collect does not validate the schema.
+    --json`` wrote; collect does not validate the review schema. What a
+    RUN-SCOPED read DOES validate is run identity: every well-formed object
+    must carry both stamps matching the run dir's own ``run.json``, a stored
+    ``name`` matching its filename's seat, and panel membership; anything
+    else renders as a labeled SKIPPED block (``_run_scope_skip``), so a stale,
+    copied, or hand-placed file can never fold into this run's digest. Flat
+    reads (no run in play) have no manifest and validate nothing.
 
     EVERY block is labeled with the REQUESTED seat name ``s`` (valid, malformed,
-    non-object, or missing alike) — never "unknown". The dir is resolved through
-    the SAME sanitizing chokepoint the other seat-file commands use
-    (``_results_dir``: explicit ``--run-id``, else the session pointer, else
-    flat), so ``--session-id ../../x`` collapses to
+    non-object, or missing alike) — never "unknown". Scope resolution is
+    collect's OWN (``review_runs.run_dir`` / ``read_pointer_run_id`` /
+    ``_reviews_subdir``), deliberately NOT ``_results_dir``: that chokepoint's
+    dangling-pointer flat fallback is a launch-time convenience for ``run``,
+    and a fold that silently dropped to the flat dir after a run was requested
+    would collect unvalidated files. Containment is identical (session and
+    run-id segments both resolve through review_runs' one sanitizing
+    mechanism), so ``--session-id ../../x`` collapses to
     ``.crew/reviews/x`` (contained), reading nothing outside ``.crew/reviews/``.
     """
     # Fail LOUD on an unsubstituted template (same posture as cmd_render --stage):
@@ -1765,15 +1807,74 @@ def cmd_collect(args: argparse.Namespace) -> int:
         )
         return 2
 
-    # Route through the run-scoped chokepoint: explicit --run-id > the session
-    # pointer > the flat session dir (byte-identical no-flag ad-hoc behavior).
-    # Run-dir isolation is what keeps a stale flat <seat>.json from an earlier
-    # panel out of this digest: a run-scoped read simply never sees it.
+    # Resolve the read scope by what was REQUESTED: explicit --run-id > a
+    # pointer that names a run > the flat session dir (byte-identical no-flag
+    # ad-hoc behavior). Run-dir isolation is what keeps a stale flat
+    # <seat>.json from an earlier panel out of this digest: a run-scoped read
+    # simply never sees it. Collect deliberately does NOT share `run`'s
+    # dangling-pointer flat fallback (`_pointer_run_dir`): that fallback is a
+    # LAUNCH-time convenience, while a fold that silently dropped to the flat
+    # dir after a run was requested would collect unvalidated files under a
+    # run-scoped invocation. Session/run-id containment still resolves through
+    # the one review_runs mechanism.
+    explicit_rid = getattr(args, "run_id", None)
+    scope_rid: str | None = None
     try:
-        results_dir = _results_dir(session_id, getattr(args, "run_id", None))
+        # ANY supplied --run-id (an explicit empty string included) is
+        # run-scoped input and goes through run-id validation; only an OMITTED
+        # flag falls through to the pointer/flat resolution.
+        if explicit_rid is not None:
+            results_dir = review_runs.run_dir(
+                session_id, explicit_rid, base=_REVIEWS_BASE
+            )
+            scope_rid = explicit_rid
+        else:
+            base_dir = _reviews_subdir(session_id)
+            pointer_rid = review_runs.read_pointer_run_id(base_dir)
+            if pointer_rid:
+                results_dir = base_dir / pointer_rid
+                scope_rid = pointer_rid
+            elif review_runs.pointer_exists(base_dir):
+                # Present-but-invalid pointer: a run WAS in play here, so
+                # dropping to the unvalidated flat dir would fail open (same
+                # posture as persist-seat's pointer-existence refusal). Only a
+                # truly ABSENT pointer means the flat, validation-free layout.
+                print(
+                    f"error: the session pointer "
+                    f"{base_dir / review_runs.POINTER_NAME} exists but is "
+                    "corrupt or names no valid run; pass the prep JSON's "
+                    "--run-id, or remove the pointer for an ad-hoc flat read",
+                    file=sys.stderr,
+                )
+                return 2
+            else:
+                results_dir = base_dir
     except review_runs.ReviewRunError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+
+    # Run-scoped read: load the manifest ONCE, integrity-check it, and
+    # validate every seat file against it before rendering. Belt-and-suspenders
+    # on top of the dir isolation: it exists for the resume case and for
+    # anything that hand-places files in a run dir. Without a TRUSTWORTHY
+    # run.json NOTHING can be validated (missing identity fields would let
+    # unstamped files pass a comparison against None), so a REQUESTED run
+    # scope whose manifest is missing, unreadable, or failing its identity
+    # check refuses (exit 2, nothing folded) rather than failing open into a
+    # verbatim fold. Flat mode (no pointer, no --run-id) stays validation-free
+    # as designed: there is no manifest, and legacy unstamped files render
+    # exactly as before.
+    run_record: dict | None = None
+    if scope_rid:
+        try:
+            run_record = review_runs.read_run_json(results_dir)
+            review_runs.verify_run_record(
+                run_record, expected_run_id=scope_rid,
+                source=results_dir / review_runs.RUN_JSON_NAME,
+            )
+        except review_runs.ReviewRunError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     seats = [s.strip() for s in (args.seats or "").split(",") if s.strip()]
 
@@ -1803,18 +1904,31 @@ def cmd_collect(args: argparse.Namespace) -> int:
             ))
             continue
         try:
-            result = ProviderResult.from_dict(json.loads(p.read_text(encoding="utf-8")))
-            # ALWAYS label by the requested seat — never "unknown". from_dict's
-            # "unknown" fallback (non-object/missing-name files) can never reach
-            # the digest: cmd_collect knows s, from_dict does not.
-            result.name = s
+            data = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             # "not valid JSON at all" (JSONDecodeError is a ValueError subclass)
             # or unreadable file -> SKIPPED block labeled with the requested seat.
-            result = ProviderResult(
+            results.append(ProviderResult(
                 name=s, model=None, ok=False, output="",
                 error=f"skipped: unreadable result file ({exc})", elapsed=0.0,
-            )
+            ))
+            continue
+        if run_record is not None and isinstance(data, dict):
+            skip = _run_scope_skip(data, s, run_record)
+            if skip:
+                # A stale, foreign, or non-member file counts exactly like a
+                # failed seat: skip-with-note, never a hard error (one stray
+                # file must not sink an otherwise healthy panel).
+                results.append(ProviderResult(
+                    name=s, model=None, ok=False, output="",
+                    error=skip, elapsed=0.0,
+                ))
+                continue
+        result = ProviderResult.from_dict(data)
+        # ALWAYS label by the requested seat — never "unknown". from_dict's
+        # "unknown" fallback (non-object/missing-name files) can never reach
+        # the digest: cmd_collect knows s, from_dict does not.
+        result.name = s
         results.append(result)
 
     # --report-unparsed: QUERY mode for the orchestrator-side haiku repair (Part
@@ -2022,7 +2136,7 @@ def cmd_persist_seat(args: argparse.Namespace) -> int:
         output=output, error=error, elapsed=float(args.elapsed),
     )
 
-    if args.run_id:
+    if args.run_id is not None:
         # Run-scoped persist: land in the NAMED run's dir with its identity
         # stamps (read from that dir's own run.json, never the pointer) and the
         # preserve-valid write rule. A late seat persisted with round N's id
@@ -2484,7 +2598,10 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
         return 2
 
     # 7. Pending lists: the roster minus seats already landed VALID in this
-    #    run (the SAME predicate the digest and the gate use), so an
+    #    run. Two predicate tiers share one stamps+name core: the digest
+    #    validates belonging via result_current (a stamped failure still
+    #    renders), while pending lists and the completion gate count SUCCESSES
+    #    only via result_valid (used here). So an
     #    unchanged-target re-prep resumes instead of relaunching, and an
     #    overwrite of completed work is structurally off the fan-out path.
     pending_sub = [
@@ -3501,7 +3618,9 @@ def build_parser() -> argparse.ArgumentParser:
              "AND the Task seats (opus/sonnet/fable plus any config-declared "
              "claude-code seat). collect reads "
              "EXACTLY <seat>.json for each; a missing seat renders as a SKIPPED "
-             "block; stale/foreign files are never read. (collect never globs.)",
+             "block; stale/foreign files are read but never FOLDED (run-scoped "
+             "validation quarantines them as labeled SKIPPED blocks). "
+             "(collect never globs.)",
     )
     coll.add_argument(
         "-o", "--out", default=None,
@@ -3676,9 +3795,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="sandbox mode for codex (default: read-only); agy maps any value "
              "to its single confined --sandbox mode. Rejected in run-scoped "
-             "mode (the catalog sandbox is the only sanctioned one for a "
-             "stamped result); the default None lets the engine tell an "
-             "explicit flag apart from the default.",
+             "mode (review runs are hardcoded read-only); the default None "
+             "lets the engine tell an explicit flag apart from the default.",
     )
     run.add_argument("--json", action="store_true", help="emit the six-field result as JSON")
     run.add_argument("--timeout", type=int, default=None, help="wall-clock timeout (s)")
