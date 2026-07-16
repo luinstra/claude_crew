@@ -10,10 +10,12 @@ seat results:
         <seat>.json        per-seat results, stamped with the run identity
 
 ``run_id = "run-" + sha256(canonical review spec)[:12]``. The spec covers the
-FULL content hash AND the review inputs (replayable target spec, base, roster,
-Task-seat model pins), so the same bytes reviewed with a different plan path,
-base, panel, or model pin is a DIFFERENT run by construction, while a re-prep
-of an identical spec lands on the same dir and resumes. The truncated id is
+FULL content hash AND the review inputs (replayable target spec, base, and a
+per-seat execution signature: ``{name: {kind, provider, model}}`` for
+subprocess seats, ``{name: {kind, model}}`` for Task seats), so the same bytes
+reviewed with a different plan path, base, panel, provider, or model pin is a
+DIFFERENT run by construction, while a re-prep of an identical spec lands on
+the same dir and resumes. The truncated id is
 only a directory name: everything that COUNTS a result validates the full
 ``target_sha256`` stamp, never the id alone.
 
@@ -47,9 +49,18 @@ RUN_JSON_NAME = "run.json"
 # so a seat named after a control file would let an ordinary seat write DESTROY
 # the identity record or shadow the pointer, and a Task seat named "seat" would
 # stage prompt-seat.txt ONTO the shared subprocess prompt. Only review-prep may
-# create or modify a run dir's control files; every seat-name intake and
-# run-scoped seat write checks this set.
+# create or modify a run dir's control files; every seat-name intake and every
+# DERIVED seat write checks this set through is_reserved_stem, which
+# case-folds: on a case-insensitive filesystem (macOS APFS, Windows) `Run.json`
+# IS `run.json`, so a mixed-case stem would alias a control file.
 RESERVED_STEMS = frozenset({"run", "current-run", "seat"})
+
+
+def is_reserved_stem(name: str) -> bool:
+    """Case-folded reserved-stem membership: the ONE comparison every intake
+    uses, so a mixed-case name can never alias a control file on a
+    case-insensitive filesystem."""
+    return (name or "").lower() in RESERVED_STEMS
 
 
 class ReviewRunError(Exception):
@@ -114,11 +125,14 @@ def mint_identity(
 ) -> tuple[str, str]:
     """Mint the content-addressed identity: ``(run_id, identity_digest)``.
 
-    ``seat_signatures`` is ``{name: {"kind": "subprocess"|"task", "model":
-    <resolved model>}}`` for EVERY seat: any flip in what actually reviews the
+    ``seat_signatures`` carries EVERY seat: ``{name: {"kind": "subprocess",
+    "provider": <executor kind>, "model": <resolved model>}}`` for subprocess
+    seats and ``{name: {"kind": "task", "model": <pin>}}`` for Task seats
+    (which have no subprocess provider). Any flip in what actually reviews the
     content (a seat added or dropped, a seat changing execution kind, a
-    config-resolved model change on EITHER kind) mints a new run instead of
-    resume-counting output from a different reviewer under the old identity.
+    config-resolved PROVIDER flip, a model change on EITHER kind) mints a new
+    run instead of resume-counting output from a different reviewer under the
+    old identity.
     The map is keyed by name and the encoding sorts keys, so seat ORDER never
     splits an identity. ``identity_digest`` is the FULL sha256 of the canonical
     spec; ``run_id`` truncates it for the dir name only, and the resume check

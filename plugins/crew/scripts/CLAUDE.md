@@ -61,8 +61,10 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
 - `debate` — scaffold-only (see below); the round loop lives in debate.md.
 - `run <seat>` — run ONE subprocess seat; `--json` always exits 0 with the six-field core result
   for every result it WRITES (run-scoped results also carry the two optional identity stamps).
-  Run-scoped MISUSE (non-member seat, prompt/model/sandbox override, reserved stem) exits 2 before
-  any result is written.
+  Run-scoped MISUSE (non-member seat, prompt/model/sandbox override) exits 2 before any result is
+  written, and a seat name matching a reserved control filename stem (run/current-run/seat,
+  case-folded) is rejected on EVERY derived destination, flat and run-scoped alike (an explicit
+  `-o` keeps ad-hoc freedom).
 - `dispatch` — write-mode single-seat WORK delegation (see below).
 - `render` — build/stage a seat prompt; `--stage-all` collapses N stages into one call.
 - `seats` — resolve/print a panel; `--debate` prints the config-aware full debate panel.
@@ -74,10 +76,12 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   against the snapshot, and print the JSON contract with the pending seat lists;
   runs NOTHING.
 - `persist-seat` — write ONE normalized Task-seat result (engine-owned slug +
-  six-field core shape). With `--run-id` it lands stamped in that run's dir under
-  the preserve-valid rule; with NO `--run-id` while a session pointer exists it
+  six-field core shape; an empty/whitespace-only output persists as ok=false with
+  error "empty seat output", never a fabricated success). With `--run-id` it lands
+  stamped in that run's dir under the preserve-valid rule; with NO `--run-id` while a session pointer exists it
   REFUSES (exit 2) rather than attribute a completed seat by mutable pointer;
-  with neither, the flat session dir, unchanged.
+  with neither, the flat session dir, which skips only the run-identity half
+  (the reserved-stem guard and the empty-output refusal apply everywhere).
 - `doctor` — `/crew:init` provider probe (NON-billable: installed-CLI detection).
 - `probe` — opt-in BILLABLE live seat smoke test (doctor proves the CLI is installed; probe proves it returns usable output).
 - `scaffold-config` — `/crew:init` commented-config generator.
@@ -218,8 +222,10 @@ Key contracts (do NOT regress):
   discuss`, a duplicate name across the two kinds, a non-filename-safe task-seat name, and any seat
   named after a reserved run-dir filename stem (`run`/`current-run`/`seat`)), mints the run-scoped review dir
   `.crew/reviews/<id>/<run_id>/` (identity = content hash + replayable target spec + base + a per-seat
-  EXECUTION SIGNATURE for every seat, kind + config-resolved model, so a panel change, a kind flip, or
-  a `[seats.<name>].model` change on EITHER seat kind mints a new run; write-once `run.json` carrying
+  EXECUTION SIGNATURE for every seat: kind + resolved provider + model for subprocess seats, kind +
+  model for Task seats (no subprocess provider). A panel change, a kind flip, a
+  `[seats.<name>].provider` flip, or a `[seats.<name>].model` change on EITHER seat kind mints a new
+  run; write-once `run.json` carrying
   the full `identity_digest`; frozen snapshot `target.md`/`target.diff`; the
   `current-run.json` pointer as a launch-time handoff), stages the shared subprocess prompt AND one
   prompt per Task seat against the SNAPSHOT, and PRINTS `{prompt_path, subprocess_seats, task_seats,

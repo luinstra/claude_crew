@@ -128,9 +128,20 @@ def _subprocess_seat_model(name: str) -> str:
     """The config-resolved model a subprocess seat's provider is bound to (the
     catalog row, merged with the user's config layers): the value the run
     identity's execution signature records, so a `[seats.<name>].model` flip
-    mints a new run instead of resuming the old model's results."""
+    mints a new run instead of resuming the old model's results. ALWAYS truthy
+    (falls back to the seat name), so every subprocess signature carries a
+    model the run-scoped writers can pin and compare against."""
     spec = seats.seat_spec(name)
     return (spec.model if spec and spec.model else name)
+
+
+def _subprocess_seat_provider(name: str) -> str:
+    """The config-resolved provider KIND executing a subprocess seat (codex /
+    cursor / agy): the executor half of the run identity's execution
+    signature, so a `[seats.<name>].provider` flip (same model, different
+    executor) mints a new run instead of resuming the old executor's results."""
+    spec = seats.seat_spec(name)
+    return (spec.provider if spec and spec.provider else "")
 
 
 def _drop_unavailable(names: list[str], explicit: set[str]) -> list[str]:
@@ -854,14 +865,19 @@ def cmd_run(args: argparse.Namespace) -> int:
         #     touches run.json / the pointer name).
         # An explicit -o keeps today's ad-hoc, unstamped, unenforced behavior.
         in_run_dir = (results_dir / review_runs.RUN_JSON_NAME).is_file()
+        if args.out is None and review_runs.is_reserved_stem(seat):
+            # EVERY derived destination is guarded, flat included: a seat
+            # named current-run would overwrite the SESSION pointer in the
+            # flat dir, and run/seat would shadow control filenames. Only an
+            # explicit -o keeps ad-hoc freedom.
+            print(
+                f"error: seat name {seat!r} collides with a reserved crew "
+                "control filename stem; its derived <seat>.json is refused "
+                "(pass an explicit -o for ad-hoc output)",
+                file=sys.stderr,
+            )
+            return 2
         if in_run_dir and args.out is None:
-            if seat in review_runs.RESERVED_STEMS:
-                print(
-                    f"error: seat name {seat!r} collides with a reserved "
-                    "run-dir filename stem and cannot write into a review run",
-                    file=sys.stderr,
-                )
-                return 2
             if args.file is not None or args.prompt is not None:
                 print(
                     "error: a run-scoped `run` takes no -f or positional "
@@ -897,9 +913,33 @@ def cmd_run(args: argparse.Namespace) -> int:
                 )
                 return 2
             # The identity stamped onto the result promises the manifest's
-            # model, and run-scoped review runs are hardcoded read-only; a
-            # run-scoped seat may not execute under overrides the stamp does
-            # not describe.
+            # provider, its model, and read-only execution; a run-scoped seat
+            # may not execute under anything the stamp does not describe. A
+            # signature with NO provider (a record minted before providers
+            # joined the identity, or a hand-crafted one) fails CLOSED: it
+            # cannot prove its executor, so it cannot certify a result, and
+            # skipping the check would let a provider flip stamp the new
+            # executor's output into the old run. The run dir is a stale
+            # ephemeral artifact; re-prep is the whole recovery.
+            if not sig.get("provider"):
+                print(
+                    f"error: run {run_record.get('run_id')!r}'s signature for "
+                    f"seat {seat!r} records no provider, so its executor "
+                    "cannot be verified; re-prep to mint a provider-bearing "
+                    "identity",
+                    file=sys.stderr,
+                )
+                return 2
+            if _subprocess_seat_provider(seat) != sig.get("provider"):
+                print(
+                    f"error: seat {seat!r} now resolves to provider "
+                    f"{_subprocess_seat_provider(seat)!r} but run "
+                    f"{run_record.get('run_id')!r}'s manifest recorded "
+                    f"{sig.get('provider')!r}; a provider flip is a different "
+                    "executor, so re-prep (it mints a new run) instead",
+                    file=sys.stderr,
+                )
+                return 2
             if args.model is not None and args.model != sig.get("model"):
                 print(
                     f"error: --model {args.model!r} does not match seat "
@@ -922,7 +962,10 @@ def cmd_run(args: argparse.Namespace) -> int:
                 # config inside the provider, so a [seats.<name>].model edit
                 # after prep would stamp a different model's output into this
                 # run. The manifest signature is the model the identity
-                # promises; pin it.
+                # promises; pin it. The truthiness guard cannot reopen the
+                # drift for a real seat: _subprocess_seat_model always records
+                # a truthy model (it falls back to the seat name), so only a
+                # hand-crafted manifest can carry an empty one.
                 args.model = sig.get("model")
             stamp_dir = results_dir
         if args.file is None and args.prompt is None:
@@ -2143,8 +2186,10 @@ def cmd_persist_seat(args: argparse.Namespace) -> int:
     persist-seat REFUSES (exit 2): a late Task seat persisted against a mutable
     pointer after a re-prep is exactly the misattribution this command must not
     perform: loud refusal beats a silent stale fold, and a stale orchestrator
-    degrades to a visible error. With neither (ad-hoc flat layout), behavior is
-    unchanged."""
+    degrades to a visible error. With neither (ad-hoc flat layout), the write
+    skips ONLY the run-identity half (no stamps, no preserve-valid, no
+    membership); the reserved-stem guard and the empty-output refusal apply to
+    every destination."""
     # Resolve + placeholder-guard the session id up front (same posture as
     # cmd_render --stage / cmd_collect): resolve (arg -> CLAUDE_SESSION_ID env),
     # THEN reject an unsubstituted <...> template so a templating slip fails loud
@@ -2162,6 +2207,16 @@ def cmd_persist_seat(args: argparse.Namespace) -> int:
         print("error: empty seat name", file=sys.stderr)
         return 2
     slug = _seat_role_slug(args.seat)
+    if review_runs.is_reserved_stem(slug):
+        # persist-seat ALWAYS derives its destination, so the guard covers the
+        # flat layout too: a seat slugged `current-run` would overwrite the
+        # SESSION pointer, and `run`/`seat` shadow control filenames.
+        print(
+            f"error: seat slug {slug!r} collides with a reserved crew control "
+            "filename stem and cannot be persisted",
+            file=sys.stderr,
+        )
+        return 2
     if args.file:
         try:
             output = Path(args.file).read_text(encoding="utf-8")
@@ -2175,10 +2230,17 @@ def cmd_persist_seat(args: argparse.Namespace) -> int:
     else:
         output = sys.stdin.read()
     error = None
+    failed = args.failed
     if args.failed:
         error = (args.error or "").strip() or "Task seat failed (no diagnostic provided)"
+    elif not output.strip():
+        # Never fabricate success: an empty or whitespace-only return is not a
+        # review, and an ok=true empty result would count toward quorum. Land
+        # it as a failure (exit 0 stays the never-choke contract).
+        failed = True
+        error = "empty seat output"
     result = ProviderResult(
-        name=slug, model=args.model, ok=not args.failed,
+        name=slug, model=args.model, ok=not failed,
         output=output, error=error, elapsed=float(args.elapsed),
     )
 
@@ -2187,15 +2249,6 @@ def cmd_persist_seat(args: argparse.Namespace) -> int:
         # stamps (read from that dir's own run.json, never the pointer) and the
         # preserve-valid write rule. A late seat persisted with round N's id
         # lands in round N's dir no matter where the pointer points by now.
-        if slug in review_runs.RESERVED_STEMS:
-            # <slug>.json would overwrite a run-dir control file; only
-            # review-prep may create or modify those.
-            print(
-                f"error: seat slug {slug!r} collides with a reserved run-dir "
-                "filename stem and cannot be persisted into a review run",
-                file=sys.stderr,
-            )
-            return 2
         try:
             out_dir = _results_dir(session_id, args.run_id)
         except review_runs.ReviewRunError as exc:
@@ -2500,9 +2553,24 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
         return 2
 
     # Task-seat names double as run-dir FILENAMES (prompt-<seat>.txt,
-    # <seat>.json), so they get the same slug-vs-name discipline persist-seat
-    # applies: a name that is not its own slug is refused before mint (two
-    # names collapsing to one slug would silently share one file).
+    # <seat>.json), so they get the registry's lowercase rule too: result file
+    # names are not case-sensitive on every filesystem (macOS APFS, Windows),
+    # so a case-variant would collide with the lowercase file, reserved stems
+    # included.
+    cased = [n for n in task_seats if n != n.lower()]
+    if cased:
+        print(
+            "error: task seat name(s) must be lowercase: "
+            f"{', '.join(repr(n) for n in cased)} (result file names are not "
+            "case-sensitive on every filesystem, so a case-variant would "
+            "collide with the lowercase file). Nothing was written.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # And the same slug-vs-name discipline persist-seat applies: a name that
+    # is not its own slug is refused before mint (two names collapsing to one
+    # slug would silently share one file).
     unsafe = [n for n in task_seats if _seat_role_slug(n) != n]
     if unsafe:
         print(
@@ -2520,7 +2588,7 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     # prompt-seat.txt ONTO the shared subprocess prompt; only prep may create
     # or modify those files. Applies to BOTH kinds: a config-declared
     # subprocess seat can carry any registry-legal name.
-    reserved = [n for n in roster_all if n in review_runs.RESERVED_STEMS]
+    reserved = [n for n in roster_all if review_runs.is_reserved_stem(n)]
     if reserved:
         print(
             "error: seat name(s) collide with reserved run-dir filename stems: "
@@ -2533,12 +2601,14 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
 
     # 4. Mint the run identity and ensure its immutable per-run record. The
     #    identity covers the content hash AND every review input via a per-seat
-    #    EXECUTION SIGNATURE (name -> kind + resolved model, BOTH seat kinds):
-    #    same bytes reviewed by a different panel, a seat that flipped
-    #    execution kind, or a config-resolved model change on ANY seat is a
-    #    DIFFERENT run by construction, while a re-prep of an identical spec
-    #    RESUMES its dir with run.json byte-untouched. The ordered rosters
-    #    stay separate fields in the record; the signature map is the identity.
+    #    EXECUTION SIGNATURE (name -> kind + resolved provider + model for
+    #    subprocess seats; kind + model for Task seats, which have no
+    #    subprocess provider): same bytes reviewed by a different panel, a
+    #    seat that flipped execution kind or provider, or a config-resolved
+    #    model change on ANY seat is a DIFFERENT run by construction, while a
+    #    re-prep of an identical spec RESUMES its dir with run.json
+    #    byte-untouched. The ordered rosters stay separate fields in the
+    #    record; the signature map is the identity.
     if not target.replay_spec:
         print("error: resolved target carries no replayable spec",
               file=sys.stderr)
@@ -2549,7 +2619,11 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     # plan bytes with a stray --base must not mint separate runs).
     identity_base = base if target.replay_spec == "branch" else ""
     seat_signatures = {
-        n: {"kind": "subprocess", "model": _subprocess_seat_model(n)}
+        n: {
+            "kind": "subprocess",
+            "provider": _subprocess_seat_provider(n),
+            "model": _subprocess_seat_model(n),
+        }
         for n in subprocess_seats
     }
     seat_signatures.update({
@@ -3724,7 +3798,12 @@ def build_parser() -> argparse.ArgumentParser:
              "that review run's dir, stamped with the run identity from its "
              "run.json, under the preserve-valid rule; without --run-id while "
              "a session pointer exists it REFUSES (exit 2); with neither, the "
-             "flat .crew/reviews/<id>/ dir. The engine owns slug derivation, "
+             "flat .crew/reviews/<id>/ dir. An empty/whitespace-only output "
+             "lands as ok=false with error 'empty seat output' (never a "
+             "fabricated success), and a slug matching a reserved crew "
+             "control filename stem (run/current-run/seat, case-folded) is "
+             "rejected (exit 2) since the destination is always derived. "
+             "The engine owns slug derivation, "
              "the render-safe shape, and the path echo — no LLM hand-assembly. "
              "Task seats only — subprocess seats persist themselves via `run`. "
              "Prints the seat path (exit 0); exit 2 on usage errors.",
@@ -3820,7 +3899,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser(
         "run",
-        help="Run ONE subprocess seat (codex|agy|cursor-*) ad-hoc through the engine.",
+        help="Run ONE subprocess seat (codex|agy|cursor-*) ad-hoc through the "
+             "engine. A seat name matching a reserved crew control filename "
+             "stem (run/current-run/seat, case-folded) is rejected (exit 2) "
+             "whenever the output path is DERIVED, flat and run-scoped alike; "
+             "an explicit -o keeps ad-hoc freedom.",
     )
     run.add_argument("seat", help="subprocess seat name (codex, agy, or a cursor-* seat)")
     run.add_argument(

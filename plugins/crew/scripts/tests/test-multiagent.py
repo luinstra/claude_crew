@@ -8696,7 +8696,7 @@ def test_review_runs():
 
     TSHA = _hl.sha256(b"content").hexdigest()
     SIGS = {
-        "codex": {"kind": "subprocess", "model": "gpt-5.6-sol"},
+        "codex": {"kind": "subprocess", "provider": "codex", "model": "gpt-5.6-sol"},
         "opus": {"kind": "task", "model": "opus"},
         "sonnet": {"kind": "task", "model": "sonnet"},
     }
@@ -8718,7 +8718,12 @@ def test_review_runs():
         "panel (seat added)": {**BASE_KW, "seat_signatures": {
             **SIGS, "codex-luna": {"kind": "subprocess", "model": "gpt-5.6-luna"}}},
         "SUBPROCESS seat's resolved model": {**BASE_KW, "seat_signatures": {
-            **SIGS, "codex": {"kind": "subprocess", "model": "gpt-other"}}},
+            **SIGS, "codex": {"kind": "subprocess", "provider": "codex",
+                              "model": "gpt-other"}}},
+        "SUBPROCESS seat's resolved PROVIDER (same model)": {**BASE_KW,
+            "seat_signatures": {
+                **SIGS, "codex": {"kind": "subprocess", "provider": "cursor",
+                                  "model": "gpt-5.6-sol"}}},
         "task seat's model pin": {**BASE_KW, "seat_signatures": {
             **SIGS, "opus": {"kind": "task", "model": "fable"}}},
         "seat's execution KIND (same name, same model)": {**BASE_KW,
@@ -9431,6 +9436,18 @@ def test_run_scoped_reviews():
                   and not (tdp / ".crew").exists(),
                   "exit 2 + nothing written",
                   f"rc={res.returncode} err={res.stderr[:150]!r}")
+        # Case variants never slip past: task-seat names get the registry's
+        # lowercase rule (on a case-insensitive filesystem `Run.json` IS
+        # `run.json`, so a mixed-case stem would alias the control file).
+        for cased in ("Run", "Current-Run", "SEAT", "Opus"):
+            res = _run_dispatcher(
+                ["review-prep", "plan.md", "--seats", "codex",
+                 "--task-seats", cased, "--session-id", "S"], cwd=td, timeout=30)
+            check(f"non-lowercase task seat {cased!r} exits 2 with nothing written",
+                  res.returncode == 2 and "lowercase" in res.stderr
+                  and not (tdp / ".crew").exists(),
+                  "exit 2 lowercase + nothing written",
+                  f"rc={res.returncode} err={res.stderr[:150]!r}")
         # Discuss never preps: a discuss prep would collide with the review
         # run's identity and overwrite its staged prompts.
         disc = _run_dispatcher(
@@ -9749,6 +9766,134 @@ def test_run_scoped_reviews():
                   "exit 2 + clean error", f"rc={rw.returncode} err={rw.stderr[:200]!r}")
         finally:
             os.chmod(run_d, 0o700)
+
+    # 8g. Provider in the execution signature: a [seats.<name>].provider flip
+    #     (same model) mints a NEW run, and the run-scoped writer refuses to
+    #     execute the old run under the new executor.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        env = _neutral_env()
+        env["CLAUDE_PROJECT_DIR"] = td
+        crew_cfg = tdp / ".crew"
+        crew_cfg.mkdir(exist_ok=True)
+        (crew_cfg / "config.toml").write_text(
+            '[seats.myseat]\nprovider = "codex"\nmodel = "m1"\n',
+            encoding="utf-8")
+        _, oa = _prep_json(["plan.md", "--seats", "myseat",
+                            "--task-seats", "opus", "--session-id", "S"], td, env)
+        rec = json.loads((tdp / oa["run_dir"] / "run.json").read_text())
+        check("the signature records the resolved provider (subprocess) and omits it for task seats",
+              rec["seat_signatures"]["myseat"] == {
+                  "kind": "subprocess", "provider": "codex", "model": "m1"}
+              and "provider" not in rec["seat_signatures"]["opus"],
+              "codex provider recorded, none on opus",
+              str(rec["seat_signatures"]))
+        (crew_cfg / "config.toml").write_text(
+            '[seats.myseat]\nprovider = "cursor"\nmodel = "m1"\n',
+            encoding="utf-8")
+        _, ob = _prep_json(["plan.md", "--seats", "myseat",
+                            "--task-seats", "opus", "--session-id", "S"], td, env)
+        check("a provider flip (same model) mints a DIFFERENT run_dir",
+              ob is not None and ob["run_dir"] != oa["run_dir"],
+              "different dirs", f"{oa['run_dir']} vs {ob and ob['run_dir']}")
+        pf = _run_dispatcher(["run", "myseat", "--session-id", "S",
+                              "--run-id", oa["run_id"], "--json"],
+                             cwd=td, env=env, timeout=30)
+        check("run-scoped run under a flipped provider exits 2 naming both providers",
+              pf.returncode == 2 and "'cursor'" in pf.stderr
+              and "'codex'" in pf.stderr
+              and not (tdp / oa["run_dir"] / "myseat.json").exists(),
+              "exit 2 + both providers named",
+              f"rc={pf.returncode} err={pf.stderr[:200]!r}")
+        # A provider-LESS signature (a record minted before providers joined
+        # the identity, or hand-crafted) fails CLOSED: it cannot prove its
+        # executor, so the writer refuses rather than stamping under whatever
+        # the config resolves to today.
+        (crew_cfg / "config.toml").write_text(
+            '[seats.myseat]\nprovider = "codex"\nmodel = "m1"\n',
+            encoding="utf-8")
+        run_json = tdp / oa["run_dir"] / "run.json"
+        good = run_json.read_text(encoding="utf-8")
+        for label, mutate in (
+            ("no provider key", lambda s: s.pop("provider")),
+            ("empty-string provider", lambda s: s.update(provider="")),
+        ):
+            rec = json.loads(good)
+            mutate(rec["seat_signatures"]["myseat"])
+            run_json.write_text(json.dumps(rec), encoding="utf-8")
+            record_bytes = run_json.read_bytes()
+            pl = _run_dispatcher(["run", "myseat", "--session-id", "S",
+                                  "--run-id", oa["run_id"], "--json"],
+                                 cwd=td, env=env, timeout=30)
+            check(f"run-scoped run with {label} in the signature exits 2 (fail closed), record intact",
+                  pl.returncode == 2 and "re-prep" in pl.stderr
+                  and run_json.read_bytes() == record_bytes
+                  and not (tdp / oa["run_dir"] / "myseat.json").exists(),
+                  "exit 2 + re-prep recovery + nothing written",
+                  f"rc={pl.returncode} err={pl.stderr[:200]!r}")
+        run_json.write_text(good, encoding="utf-8")
+
+    # 8h. Reserved stems guard FLAT derived destinations too: persist-seat
+    #     always derives its path, so a control-file slug is refused in the
+    #     flat layout as well (a seat slugged current-run would overwrite the
+    #     SESSION pointer).
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        flat = tdp / ".crew" / "reviews" / "S"
+        flat.mkdir(parents=True)
+        src = tdp / "r.txt"
+        src.write_text("review body", encoding="utf-8")
+        for stem in ("run", "seat"):
+            rs = _run_dispatcher(["persist-seat", stem, "--session-id", "S",
+                                  "--model", "opus", "-f", str(src)],
+                                 cwd=td, timeout=30)
+            check(f"flat persist-seat {stem!r} exits 2 (reserved), nothing written",
+                  rs.returncode == 2 and "reserved" in rs.stderr
+                  and not (flat / f"{stem}.json").exists(),
+                  "exit 2 + no file", f"rc={rs.returncode} err={rs.stderr[:150]!r}")
+        pointer = flat / "current-run.json"
+        pointer_bytes = b'{"run_id": "run-abcdef123456"}'
+        pointer.write_bytes(pointer_bytes)
+        # Case-folded: on a case-insensitive filesystem a mixed-case stem
+        # ALIASES the control file, so the guard must catch it too.
+        for stem in ("current-run", "Current-Run", "SEAT"):
+            rc = _run_dispatcher(["persist-seat", stem, "--session-id", "S",
+                                  "--model", "opus", "-f", str(src)],
+                                 cwd=td, timeout=30)
+            check(f"flat persist-seat {stem!r} exits 2 (reserved, case-folded) with the pointer byte-intact",
+                  rc.returncode == 2 and "reserved" in rc.stderr
+                  and pointer.read_bytes() == pointer_bytes,
+                  "exit 2 + pointer intact", f"rc={rc.returncode} err={rc.stderr[:150]!r}")
+
+    # 8i. Mixed-case stems against a LIVE run dir: the run.json record stays
+    #     byte-intact through both writers' refusals.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, o1 = _prep_json(ARGS, td)
+        run_json = tdp / o1["run_dir"] / "run.json"
+        record_bytes = run_json.read_bytes()
+        src = tdp / "r.txt"
+        src.write_text("review body", encoding="utf-8")
+        pcase = _run_dispatcher(["persist-seat", "Run", "--session-id", "S",
+                                 "--run-id", o1["run_id"], "--model", "opus",
+                                 "-f", str(src)], cwd=td, timeout=30)
+        # NB: Path("Run.json").exists() would ALIAS run.json on APFS (the very
+        # collision under test), so assert via a case-sensitive dir listing.
+        check("run-scoped persist-seat 'Run' exits 2 (reserved, case-folded), run.json byte-intact",
+              pcase.returncode == 2 and "reserved" in pcase.stderr
+              and run_json.read_bytes() == record_bytes
+              and "Run.json" not in os.listdir(tdp / o1["run_dir"]),
+              "exit 2 + record intact",
+              f"rc={pcase.returncode} err={pcase.stderr[:150]!r}")
+        rcase = _run_dispatcher(["run", "Run", "--session-id", "S",
+                                 "--run-id", o1["run_id"], "--json"],
+                                cwd=td, timeout=30)
+        check("run 'Run' exits 2 (registry names are lowercase), run.json byte-intact",
+              rcase.returncode == 2 and run_json.read_bytes() == record_bytes,
+              "exit 2 + record intact",
+              f"rc={rcase.returncode} err={rcase.stderr[:120]!r}")
 
     # 9. Mint-conflict refusal at the CLI: a run.json whose identity fields were
     #    corrupted refuses the re-prep (exit 2), dir untouched.
@@ -10221,6 +10366,31 @@ def test_quorum_header():
                   and "Traceback" not in c2c.stderr,
                   "2 launched, clean", f"rc={c2c.returncode} out={c2c.stdout[:100]!r}")
         run_json.write_text(good, encoding="utf-8")
+
+    # 3b. An empty/whitespace-only Task return never fabricates success: it
+    #     persists as ok=false ("empty seat output") and does not count toward
+    #     quorum (a 1-seat manifest renders 0 usable, NOT MET).
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, oe = _prep_json(["plan.md", "--seats", "", "--task-seats", "opus",
+                            "--session-id", "S"], td)
+        blank = tdp / "blank.txt"
+        blank.write_text("   \n\t\n", encoding="utf-8")
+        pe = _run_dispatcher(["persist-seat", "opus", "--session-id", "S",
+                              "--run-id", oe["run_id"], "--model", "opus",
+                              "-f", str(blank)], cwd=td, timeout=30)
+        odata = json.loads((tdp / oe["run_dir"] / "opus.json").read_text())
+        check("a whitespace-only persist lands ok=false with 'empty seat output' (exit 0)",
+              pe.returncode == 0 and odata.get("ok") is False
+              and odata.get("error") == "empty seat output",
+              "ok=false, empty-output error, exit 0",
+              f"rc={pe.returncode} data={str(odata)[:150]}")
+        ce = _grouped(td, oe, "opus")
+        check("the empty result does not count toward quorum (0 usable, NOT MET)",
+              ce.returncode == 0
+              and "PANEL: 1 launched · 0 usable · quorum 1: NOT MET" in ce.stdout,
+              "0 usable NOT MET", ce.stdout[:150])
 
     # 4. Flat mode: no resolvable run identity -> no header, one stderr note.
     with tempfile.TemporaryDirectory() as td:
