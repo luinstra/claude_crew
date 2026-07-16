@@ -190,7 +190,10 @@ and `model: sonnet`. It dispatches plan-vs-code from natural language and report
 `APPROVED`/`REVISE` with `[BLOCKING]`/`[MINOR]` findings. A skipped or failed
 seat (any kind) is reported but never sinks the panel: the verdict is synthesized
 from whichever seats succeed, and only an all-seats-failed panel skips the
-verdict.
+verdict. Certification is quorum-gated, though: the grouped digest opens with a
+`PANEL: … quorum <n>: MET|NOT MET` header (a strict majority of the launched
+panel), and a `NOT MET` panel cannot certify an `APPROVED`; the orchestrator
+relaunches the pending seats or surfaces the shortfall instead.
 
 **Why some seats are opt-in.** `codex` already covers the GPT lineage and `agy`
 covers the Gemini lineage flat-rate, so the premium cursor seats stay off the

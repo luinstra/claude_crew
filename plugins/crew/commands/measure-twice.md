@@ -45,7 +45,7 @@ handle any count down to one.
 2. **Generate Plan** - Advisor creates the plan
 3. **Review** - The resolved multi-model panel evaluates (with BLOCKING/MINOR classification)
 4. **Iterate** - If BLOCKING issues: revise and re-review. If REJECT: rethink approach.
-5. **Complete** - When the panel's verdict is APPROVED (or only MINOR issues)
+5. **Complete** - When the panel's verdict is APPROVED (or only MINOR issues) and the digest's quorum is met
 
 ---
 
@@ -232,6 +232,9 @@ identity:
   (`name, model, ok, output, error, elapsed`) — a failed/skipped seat lands as
   `ok=False` with a diagnostic. **Per-seat never-choke is automatic**: one seat
   failing can't sink the others, and there's no all-failed abort to handle.
+  (Run-scoped results also carry the `run_id`/`target_sha256` stamps; a run-scoped
+  MISUSE, like a prompt/model/sandbox override or a non-member seat, exits 2
+  before any result is written. The templated call above never hits those paths.)
 - Same model / sandbox / auth-banner / ARG_MAX handling as the old single-call path
   — `run` uses the identical provider machinery.
 
@@ -407,7 +410,9 @@ MATRIX** (per-criterion PASS/FAIL/`?`), **GROUPED FINDINGS** (each finding once 
 `M/N` agreement count where N = findings-parsed seats; a **`⚠ SINGLETON`** lone dissent
 is weighed ON ITS MERITS, never dismissed for being one seat), and **RAW / UNPARSED
 SEATS** (any seat that didn't parse even after repair, verbatim — **still read
-these**). You MUST use one of these verdicts:
+these**). You MUST use one of these verdicts (emitting APPROVED additionally
+requires the digest's quorum header to read MET, or to be absent; a NOT MET
+digest renders the could-not-verify-quorum outcome below instead):
 
 **APPROVED** - Plan is ready for execution. No blocking issues.
 
@@ -424,6 +429,18 @@ Example:
 
 **REJECT** - Fundamental problems requiring complete replanning.
 
+**The quorum header gates certification.** A run-scoped grouped digest opens
+with a `PANEL:` header. When it reads `NOT MET`, you MUST NOT emit APPROVED and
+MUST NOT complete on REVISE-with-only-[MINOR]: too few usable seats reviewed
+this content for the panel to certify it. Report the outcome as `could not
+verify quorum: <usable>/<N> usable (threshold from the header)`, name the seats
+that are pending or failed, and either relaunch the pending seats (same
+`--run-id`; a landed valid seat is never overwritten) or surface the shortfall
+to the user. This gates only how much SUCCESS certification requires: a failed
+seat still never aborts the review (never-choke below is unchanged), and the
+digest header is the authority on the count. Zero usable seats stays the
+all-failed branch below.
+
 **Never choke — synthesize from whatever succeeded.** A failed/skipped seat
 (subprocess OR Task) NEVER aborts the review and is NEVER silently dropped: synthesize
 the verdict from the seats that produced usable output, and render each failed/skipped
@@ -435,10 +452,14 @@ review — all seats failed: <per-seat diagnostics>`.
 
 | Verdict | Action |
 |---------|--------|
-| **APPROVED** | Complete the loop (see below) |
+| **APPROVED** (quorum MET) | Complete the loop (see below) |
 | **REVISE with any [BLOCKING]** | Update the plan to address blocking issues, then re-review |
-| **REVISE with only [MINOR]** | Complete the loop — minor issues are acceptable |
+| **REVISE with only [MINOR]** (quorum MET) | Complete the loop — minor issues are acceptable |
 | **REJECT** | Fundamentally rethink approach, create new plan, re-review |
+| **Quorum NOT MET** (the digest's `PANEL:` header) | Non-completing: relaunch the pending seats (same `--run-id`) or surface the shortfall to the user, then re-collect |
+
+The completing rows require the digest's quorum header to read MET (or to be
+absent: a flat/legacy digest with no `PANEL:` header carries no quorum gate).
 
 **On REVISE, diagnose the CLASS before revising.** When several findings share
 one structural cause (the same property violated at different sites, a value
@@ -459,7 +480,9 @@ before it forces a revision.
 
 ## Completing the Loop
 
-When the panel's verdict is **APPROVED** (or REVISE with only [MINOR] issues):
+When the panel's verdict is **APPROVED** (or REVISE with only [MINOR] issues)
+AND the digest's quorum header read MET or was absent (a NOT MET panel cannot
+certify completion; see 3d):
 
 1. **Deactivate the loop** — pass the SAME `--session-id` the init used (the
    `[Session ID: …]` value, as a literal, NOT a `${CLAUDE_SESSION_ID}` shell
@@ -479,8 +502,10 @@ When the panel's verdict is **APPROVED** (or REVISE with only [MINOR] issues):
 
 ## Exit Conditions
 
-- Panel verdict is **APPROVED**
-- Panel verdict is **REVISE** but ALL issues are marked [MINOR]
+- Panel verdict is **APPROVED**, with the digest's quorum header MET or absent
+- Panel verdict is **REVISE** but ALL issues are marked [MINOR], with the
+  digest's quorum header MET or absent (a NOT MET panel never completes the
+  loop; relaunch pending seats or surface the shortfall instead)
 - A hook-owned safety limit trips: the stop-fire cap or the wall-clock deadline
   (both force-exit the loop; see `scripts/CLAUDE.md`)
 - User runs `/crew:cancel-measure-twice`

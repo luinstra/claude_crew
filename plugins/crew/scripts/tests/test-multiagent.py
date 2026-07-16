@@ -9646,6 +9646,56 @@ def test_run_scoped_reviews():
               and sdata.get("error") == "seat errored",
               "sonnet failure written over the copy", str(sdata)[:200])
 
+    # 8d2. Run-scoped model pin: with --model omitted, the seat runs the
+    #      MANIFEST signature's model, not whatever the config says NOW. A
+    #      config flip after prep must not stamp another model's output into
+    #      the old run.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        bins = tdp / "bin"
+        bins.mkdir()
+        argv_file = tdp / "codex_argv.json"
+        make_fake_bin(bins, "codex", f"""
+        import sys, json
+        out = None
+        a = sys.argv[1:]
+        for i, x in enumerate(a):
+            if x == "-o":
+                out = a[i+1]
+        open({str(argv_file)!r}, "w").write(json.dumps(sys.argv))
+        sys.stdin.read()
+        with open(out, "w") as f:
+            f.write("PINNED APPROVED")
+        sys.exit(0)
+        """)
+        env = path_with(bins)
+        env["CLAUDE_PROJECT_DIR"] = td
+        crew_cfg = tdp / ".crew"
+        crew_cfg.mkdir(exist_ok=True)
+        (crew_cfg / "config.toml").write_text(
+            '[seats.codex]\nmodel = "model-a"\n', encoding="utf-8")
+        _, o1 = _prep_json(ARGS, td, env)
+        rec = json.loads((tdp / o1["run_dir"] / "run.json").read_text())
+        check("prep recorded the config-resolved subprocess model in the signature",
+              rec["seat_signatures"]["codex"]["model"] == "model-a",
+              "model-a", str(rec["seat_signatures"]["codex"]))
+        (crew_cfg / "config.toml").write_text(
+            '[seats.codex]\nmodel = "model-b"\n', encoding="utf-8")
+        rr = _run_dispatcher(["run", "codex", "--session-id", "S",
+                              "--run-id", o1["run_id"], "--json"],
+                             cwd=td, env=env, timeout=30)
+        argv = json.loads(argv_file.read_text()) if argv_file.exists() else []
+        data = json.loads((tdp / o1["run_dir"] / "codex.json").read_text()) \
+            if (tdp / o1["run_dir"] / "codex.json").exists() else {}
+        check("omitted --model runs the manifest model after a config flip (provider argv)",
+              rr.returncode == 0 and "model-a" in argv and "model-b" not in argv,
+              "argv carries model-a, never model-b", str(argv)[:200])
+        check("the stamped result records the manifest model",
+              data.get("model") == "model-a" and data.get("ok") is True
+              and data.get("run_id") == o1["run_id"],
+              "model-a stamped ok", str({k: data.get(k) for k in ("model", "ok")}))
+
     # 8e. Base normalization + malformed-signature refusal at the CLI.
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)

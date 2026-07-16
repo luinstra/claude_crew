@@ -59,7 +59,10 @@ multiagent/
 Per-subcommand one-liners (do NOT regress the behavior each names):
 - `review` / `council` — ad-hoc one-shot fan-out across subprocess seats (`_fan_out`).
 - `debate` — scaffold-only (see below); the round loop lives in debate.md.
-- `run <seat>` — run ONE subprocess seat; `--json` always exits 0 with the six-field result.
+- `run <seat>` — run ONE subprocess seat; `--json` always exits 0 with the six-field core result
+  for every result it WRITES (run-scoped results also carry the two optional identity stamps).
+  Run-scoped MISUSE (non-member seat, prompt/model/sandbox override, reserved stem) exits 2 before
+  any result is written.
 - `dispatch` — write-mode single-seat WORK delegation (see below).
 - `render` — build/stage a seat prompt; `--stage-all` collapses N stages into one call.
 - `seats` — resolve/print a panel; `--debate` prints the config-aware full debate panel.
@@ -213,7 +216,7 @@ Key contracts (do NOT regress):
   <spec>`) `--session-id <id>` call, which resolves the target, splits `--panel`/`--seats` into the
   subprocess seat list AND the Task-seat split (rejecting, exit 2 with nothing written: `--mode
   discuss`, a duplicate name across the two kinds, a non-filename-safe task-seat name, and any seat
-  named after a run-dir control file (`run`/`current-run`)), mints the run-scoped review dir
+  named after a reserved run-dir filename stem (`run`/`current-run`/`seat`)), mints the run-scoped review dir
   `.crew/reviews/<id>/<run_id>/` (identity = content hash + replayable target spec + base + a per-seat
   EXECUTION SIGNATURE for every seat, kind + config-resolved model, so a panel change, a kind flip, or
   a `[seats.<name>].model` change on EITHER seat kind mints a new run; write-once `run.json` carrying
@@ -238,8 +241,10 @@ Key contracts (do NOT regress):
   failure never replaces a landed valid success; a fresh `ok=true` replaces anything). `--run-id` with
   an explicit `-o` is rejected (contradictory routing); explicit `-f`/`-o` alone still override
   independently (debate's own `.crew/debates/` layout keeps passing explicit paths, unstamped).
-- `run --json` always exits 0 with the six-field result, so per-seat never-choke is automatic (no
-  all-failed abort to handle).
+- `run --json` always exits 0 with the six-field core result for every result it writes (run-scoped
+  results also carry the identity stamps), so per-seat never-choke is automatic (no
+  all-failed abort to handle). Run-scoped misuse exits 2 with nothing written; the markdown-templated
+  calls never hit those paths.
 
 ### Task-seat dispatch & persist
 
@@ -281,8 +286,10 @@ Key contracts (do NOT regress):
     seat verbatim (a finding is NEVER dropped). A RUN-SCOPED grouped digest opens with one quorum
     header, `PANEL: <N> launched · <usable> usable · quorum <N//2+1>: MET|NOT MET` (N = distinct
     manifest names from `run.json`; usable = the success-only `result_valid` tier; NOT MET adds
-    "an APPROVED verdict cannot be recorded from this panel"); the completion gate recounts against
-    the identity frozen in loop state and WINS on divergence, so the header is advisory. Flat-mode
+    "an APPROVED verdict cannot be recorded from this panel"). The command markdowns HONOR this
+    header at synthesis time: a NOT MET digest must not certify an APPROVED (nor a
+    REVISE-minor-only completion); loop state persists no run identity, so the header is the quorum
+    authority the synthesis reads. Flat-mode
     `--group` renders NO header plus a one-line stderr note (quorum facts need a run manifest).
     Merge predicate: severity is the only hard partition;
     within it, COMPLETE-LINKAGE clustering on `path_compatible AND line_compatible AND jaccard>=0.5`.

@@ -159,6 +159,9 @@ identity:
   seat failing can't sink the others, there's no all-failed abort, and the Step
   5.5 collect reads EXACTLY the named seats, rendering a missing one as a labeled
   SKIPPED block.
+  (Run-scoped results also carry the `run_id`/`target_sha256` stamps; a run-scoped
+  MISUSE, like a prompt/model/sandbox override or a non-member seat, exits 2
+  before any result is written. The templated call above never hits those paths.)
 - Same model / sandbox / auth-banner / ARG_MAX handling as the old single-call
   path — `run` dispatches through the identical provider machinery.
 
@@ -340,6 +343,10 @@ the existing verdict format:
 - **Plan target** → `APPROVED` / `REVISE` (with `[BLOCKING]`/`[MINOR]` items).
 - **Code target** → findings tagged `[BLOCKING]`/`[MINOR]` + a summary verdict.
 
+An `APPROVED` verdict additionally requires the digest's quorum header to read
+MET, or to be absent (a flat/legacy digest with no `PANEL:` header carries no
+quorum gate); see the quorum rule below.
+
 `panel.md` has four sections, read them all:
 
 - **VERDICTS** — the roster of every seat that RAN, each with its verdict (or
@@ -353,6 +360,18 @@ the existing verdict format:
 - **RAW / UNPARSED SEATS** — any seat whose findings could not be parsed even after
   repair, rendered verbatim. **Still read these** — a partial seat's prose findings
   live here and must not be ignored.
+
+**The quorum header gates certification.** A run-scoped grouped digest opens
+with a `PANEL:` header. When it reads `NOT MET`, you MUST NOT emit APPROVED and
+MUST NOT complete on REVISE-with-only-[MINOR]: too few usable seats reviewed
+this content for the panel to certify it. Report the outcome as `could not
+verify quorum: <usable>/<N> usable (threshold from the header)`, name the seats
+that are pending or failed, and either relaunch the pending seats (same
+`--run-id`; a landed valid seat is never overwritten) or surface the shortfall
+to the user. This gates only how much SUCCESS certification requires: a failed
+seat still never aborts the review (never-choke below is unchanged), and the
+digest header is the authority on the count. Zero usable seats stays the
+all-failed branch below.
 
 **Never choke — synthesize from whatever succeeded.** A failed/skipped seat
 (subprocess OR Task) NEVER aborts the review and is NEVER silently dropped (it shows

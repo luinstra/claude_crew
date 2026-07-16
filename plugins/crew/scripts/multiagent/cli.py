@@ -917,6 +917,13 @@ def cmd_run(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 2
+            if args.model is None and sig.get("model"):
+                # An omitted --model would otherwise resolve from CURRENT
+                # config inside the provider, so a [seats.<name>].model edit
+                # after prep would stamp a different model's output into this
+                # run. The manifest signature is the model the identity
+                # promises; pin it.
+                args.model = sig.get("model")
             stamp_dir = results_dir
         if args.file is None and args.prompt is None:
             args.file = str(results_dir / "prompt-seat.txt")
@@ -966,10 +973,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     else:
         # Same model resolution as the review path: --model overrides the seat's
         # resolved model, which the registry already bound from its catalog row.
+        # The `or` is safe for the sandbox default: argparse's choices exclude
+        # every falsy string, so None (flag omitted) is the only falsy value.
         timeout = _resolve_timeout(args.timeout)
         result = provider.run(
             prompt, sandbox=args.sandbox or "read-only", model=args.model,
-        timeout=timeout,
+            timeout=timeout,
         )
 
     if args.json:
@@ -1986,9 +1995,9 @@ def cmd_collect(args: argparse.Namespace) -> int:
             # validated field-level (recorded at mint precisely so the digest
             # never needs a mutable read). The roster LISTS are outside the
             # identity and untyped, so they are never trusted for counting.
-            # The completion gate recounts against the run identity frozen in
-            # loop state, so after a panel-changing re-prep the two can
-            # diverge: the gate wins, this header is advisory.
+            # This header is what the command markdowns honor at synthesis
+            # time (a NOT MET digest must not certify an APPROVED); loop state
+            # persists no run identity, so nothing downstream recounts it.
             launched = len(dict(run_record.get("seat_signatures") or {}))
             quorum = (launched, len(usable_names))
         else:
@@ -2097,10 +2106,17 @@ def cmd_repair_seat(args: argparse.Namespace) -> int:
     # Record the repaired text in the SEPARATE grouping-only field. The original
     # ``output`` is NEVER overwritten: --full/RAW always render the seat's genuine
     # review, so a repair that dropped a finding cannot make it unrecoverable.
+    # Atomic write: a collect racing this rewrite must never read a torn seat
+    # file (it would quarantine the seat as unreadable).
     result.repaired_output = replacement
-    seat_path.write_text(
-        json.dumps(result.to_dict(), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8")
+    try:
+        review_runs.write_text_atomic(
+            seat_path,
+            json.dumps(result.to_dict(), ensure_ascii=False, indent=2) + "\n",
+        )
+    except review_runs.ReviewRunError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     print(str(seat_path))
     return 0
 
