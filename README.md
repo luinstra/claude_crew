@@ -14,6 +14,21 @@ A Claude Code plugin for persistence, specialized agents, and tech-stack guidanc
 - **Tech-Stack Skills** — Auto-injected guidance for Kotlin, Exposed, Gradle, Trino (via `sk` plugin)
 - **Session Restoration** — Resume where you left off after restarts
 
+## The Workflow
+
+The intended path for real work, in order:
+
+1. **Frame and discuss the problem** in plain conversation. No commands yet, just get the shape of it right.
+2. **`/crew:debate "question"`** at a decision point you're unsure about. A multi-model council argues it out and hands back where the seats agree, where they don't, and a recommendation.
+3. **`/crew:measure-twice "task"`** to loop on the *plan document*, revising until a review panel approves it.
+4. **`/crew:build "task"`** to loop on *executing* that plan, persisting until a panel approves the result.
+
+Steps 2 and 3 are cheap next to step 4. A decision settled in a debate costs one round; the same decision re-litigated mid-build costs a rewrite.
+
+Steps 3 and 4 also protect your context. Work done directly puts every file read, grep result, and edit diff into your context window, which drives frequent compaction and lost continuity. Delegating to an agent keeps that noise in its context, and you get back the summary.
+
+Not every task earns all four. A one-line fix earns none of them: just make the change.
+
 ## Installation
 
 ### From GitHub (Recommended)
@@ -74,47 +89,6 @@ repo-relative path.
 ### Requirements
 
 - **Python 3.11+**: the engine parses its TOML config with stdlib `tomllib`, which lands in 3.11. macOS 13+ and most modern Linux distributions include it. Check with `python3 --version`; below 3.11 the `crew` engine exits with a one-line diagnostic.
-
-## Usage
-
-### The Plan → Execute Workflow
-
-For non-trivial work, use the **plan → execute** workflow to keep your main context clean:
-
-```
-/crew:plan "add user authentication to the API"
-  ↓ (advisor gathers requirements, creates plan in .crew/plans/)
-/crew:execute the plan
-  ↓ (executor implements, verbose output stays in its context)
-[summary returned to main session]
-```
-
-**Why this matters:** When you do work directly, every file read, grep result, and edit diff goes into your context window. This causes frequent compaction and lost continuity. Delegating to the executor keeps that noise isolated — you just get the summary.
-
-### When to Use What
-
-| Situation | Approach |
-|-----------|----------|
-| Quick question about code | Ask directly (maybe `/crew:analyze`) |
-| Single small change | Do it directly |
-| Multi-file feature | `/crew:plan` → `/crew:execute` |
-| Debugging complex issue | `/crew:analyze` or `/crew:build` |
-| Need to persist until done | `/crew:build` |
-| Want a bulletproof plan | `/crew:measure-twice` (auto plan-review-revise loop) |
-
-### Typical Session Flow
-
-1. **Explore** — Ask questions, `/crew:analyze` to understand the codebase
-2. **Plan** — `/crew:plan "the feature"` to design the approach
-3. **Review** — `/crew:review` for a multi-model sanity-check of the plan or diff (optional)
-4. **Execute** — `/crew:execute` to implement via executor agent
-5. **Verify** — Check results, iterate if needed
-
-For work requiring verification before declaring "done," use `/crew:build` instead: it won't let you stop until the multi-model review panel approves completion. Three other things can end a turn:
-
-- **Cancelling** (`/crew:cancel-build`).
-- **A hook-owned safety limit** (a stop-fire cap or the wall-clock deadline), which force-exits the loop and asks for a status report instead of an approval.
-- **A parked turn.** While the session still has background work in flight (its own panel seats, but also any unrelated background shell: a dev server, a `tail -f`), the Stop is ALLOWED and the turn ends: waiting is not quitting, and the session resumes when that work completes. The loop stays active. Consecutive parked turns are capped (20), after which a parked stop is nudged like any other, so a background process that never exits cannot switch the loop off.
 
 ## Commands
 
@@ -419,6 +393,12 @@ Generic todo continuation is not enforced by the Stop hook — Claude Code handl
 that natively.
 
 To exit early: `/crew:cancel-build` or `/crew:cancel-measure-twice`
+
+A build loop normally ends when the multi-model review panel approves completion. Three other things can end a turn:
+
+- **Cancelling** (`/crew:cancel-build`).
+- **A hook-owned safety limit** (a stop-fire cap or the wall-clock deadline), which force-exits the loop and asks for a status report instead of an approval.
+- **A parked turn.** While the session still has background work in flight (its own panel seats, but also any unrelated background shell: a dev server, a `tail -f`), the Stop is ALLOWED and the turn ends: waiting is not quitting, and the session resumes when that work completes. The loop stays active. Consecutive parked turns are capped (20), after which a parked stop is nudged like any other, so a background process that never exits cannot switch the loop off.
 
 ### SessionStart Plugin Guidance
 
