@@ -39,7 +39,7 @@ their results into the same six-field shape the engine returns.
 
 ```
 multiagent/
-├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher) — subcommands: review | council | debate | run | dispatch | render (incl. --stage-all) | seats (incl. --debate) | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | doctor | probe | scaffold-config
+├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher) — subcommands: review | council | debate | run | dispatch | render (incl. --stage-all) | seats (incl. --debate) | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | wait | doctor | probe | scaffold-config
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
@@ -69,6 +69,12 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
 - `render` — build/stage a seat prompt; `--stage-all` collapses N stages into one call.
 - `seats` — resolve/print a panel; `--debate` prints the config-aware full debate panel.
 - `collect` — fold per-seat `<seat>.json` into a digest; `--group`/`--full`/`--report-unparsed`.
+- `wait` — the review flows' barrier primitive: block until every named SUBPROCESS seat's
+  `<seat>.json` exists (a failed seat counts as landed, it has FINISHED; certification is collect's
+  job). Default seat list = the manifest's kind=subprocess names; a task-kind name is REFUSED (the
+  orchestrator persists Task seats itself, so waiting on one would deadlock); flat mode requires
+  --seats. Exit 0 all landed; exit 1 on timeout naming the missing seats (default 900s). Scope
+  resolves through the same requested-scope fail-closed helpers `collect` uses.
 - `repair-seat` — write the haiku repair to a seat's SEPARATE `repaired_output` field, never overwriting `output`.
 - `review-prep` — resolve target + split panel, mint the run-scoped review dir
   (`review_runs.py`: identity from content hash + review inputs, write-once
@@ -233,6 +239,9 @@ Key contracts (do NOT regress):
   pending_task_seats}` as JSON — it runs NOTHING. A re-prep of an identical spec RESUMES the same dir
   (`run.json` byte-untouched, landed-valid seats excluded from the pending lists); changed content or
   review inputs mint a DIFFERENT dir, so stale results are unreachable rather than merely inadvisable.
+  Before printing, prep CLEARS every pending seat's stale non-valid `<seat>.json` (a prior launch's
+  failure): this is the clear that keeps `wait`'s existence barrier honest, because at prep time no
+  launch exists to race it.
 
 ### Subprocess fan-out
 
@@ -244,7 +253,12 @@ Key contracts (do NOT regress):
   the run dir (explicit `--run-id` > the session pointer > the flat session dir; resolved ONCE at
   process start so a pointer flip cannot re-route a running seat), stamps the result with the run
   identity read from the run dir's own `run.json`, and applies the preserve-valid rule (an incoming
-  failure never replaces a landed valid success; a fresh `ok=true` replaces anything). `--run-id` with
+  failure never replaces a landed valid success; a fresh `ok=true` replaces anything). A run-scoped
+  launch also CLEARS its one derived `<seat>.json` first when the existing file is not a landed valid
+  success, but only as the BACKSTOP for a direct relaunch with no re-prep: the clear that carries
+  `wait`'s barrier guarantee is prep's (race-free, since no launch exists at prep time, while a
+  launch-time clear sits behind process start and every gate, a window a concurrent `wait` polls
+  into); a landed valid file is never cleared. `--run-id` with
   an explicit `-o` is rejected (contradictory routing); explicit `-f`/`-o` alone still override
   independently (debate's own `.crew/debates/` layout keeps passing explicit paths, unstamped).
 - `run --json` always exits 0 with the six-field core result for every result it writes (run-scoped
@@ -319,9 +333,13 @@ Key contracts (do NOT regress):
   render the original `output` — so a degraded haiku rewrite can never overwrite the seat's genuine
   review, and a seat still non-compliant after repair renders its ORIGINAL text raw (graceful
   degradation, never worse than the original).
-- Seat results are RUN-SCOPED, so there is no pre-launch `rm -f` clear anymore: a changed target mints a
-  new run dir (an old panel's files are unreachable), and an unchanged target resumes with landed seats
-  excluded from the pending lists. `collect` gains `--run-id` (fallback: the session pointer; with
+- The wait-for-both barrier's subprocess half is `crew wait --session-id <id> --run-id <rid>` (the
+  orchestrator still awaits its own Task returns and persists them before collecting).
+- Seat results are RUN-SCOPED, so the orchestrator does no pre-launch `rm -f` clear anymore: a changed
+  target mints a new run dir (an old panel's files are unreachable), and an unchanged target resumes
+  with landed seats excluded from the pending lists (`review-prep` clears each pending seat's stale
+  non-valid file before printing its JSON, and `run` repeats the clear at launch as the backstop for
+  a re-prep-free relaunch; one derived file per seat, no globs). `collect` gains `--run-id` (fallback: the session pointer; with
   neither, the flat dir, byte-identical no-flag behavior). The orchestrator WAITS
   for BOTH every subprocess run shell AND every Task-seat persist before collecting. The `review`
   subcommand still exists for ad-hoc one-shot fan-out; the commands just don't use it. (`/crew:debate`

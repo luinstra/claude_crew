@@ -10244,6 +10244,361 @@ def test_collect_run_scoped():
 
 
 # =============================================================================
+# crew wait: the review flows' subprocess barrier primitive
+# =============================================================================
+
+def test_wait():
+    log_section("crew wait (subprocess barrier: landed = file exists)")
+
+    def _prep_json(args, cwd):
+        proc = _run_dispatcher(["review-prep", *args], cwd=cwd, timeout=30)
+        obj = json.loads(proc.stdout) if proc.returncode == 0 and proc.stdout.strip() else None
+        return proc, obj
+
+    def _land_file(run_d, seat, ok=True):
+        (run_d / f"{seat}.json").write_text(json.dumps(
+            {"name": seat, "model": "m", "ok": ok,
+             "output": "done" if ok else "",
+             "error": None if ok else "seat blew up", "elapsed": 1.0}),
+            encoding="utf-8")
+
+    ARGS = ["plan.md", "--seats", "codex,codex-luna", "--task-seats", "opus",
+            "--session-id", "S"]
+
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, o1 = _prep_json(ARGS, td)
+        run_d = tdp / o1["run_dir"]
+
+        # 1. Timeout: one landed, one missing -> exit 1 naming ONLY the
+        #    missing seat; the default seat list is the manifest's subprocess
+        #    names (opus, the task seat, is never waited on).
+        _land_file(run_d, "codex")
+        w1 = _run_dispatcher(["wait", "--session-id", "S",
+                              "--run-id", o1["run_id"], "--timeout", "2",
+                              "--json"], cwd=td, timeout=30)
+        try:
+            j1 = json.loads(w1.stdout)
+        except (json.JSONDecodeError, ValueError):
+            j1 = {}
+        check("timeout: exit 1, --json names the missing seat only (task seat never waited on)",
+              w1.returncode == 1 and j1.get("landed") == ["codex"]
+              and j1.get("missing") == ["codex-luna"]
+              and "codex-luna" in w1.stderr and "opus" not in w1.stderr,
+              "landed=[codex] missing=[codex-luna]",
+              f"rc={w1.returncode} out={w1.stdout[:120]!r} err={w1.stderr[:120]!r}")
+
+        # 2. A FAILED seat counts as landed (it has finished; result_valid is
+        #    the certification tier, not the barrier's).
+        _land_file(run_d, "codex-luna", ok=False)
+        start = _time_now()
+        w2 = _run_dispatcher(["wait", "--session-id", "S",
+                              "--run-id", o1["run_id"], "--timeout", "10"],
+                             cwd=td, timeout=30)
+        quick = (_time_now() - start) < 8
+        check("all landed (one ok, one FAILED): immediate exit 0 with the summary line",
+              w2.returncode == 0 and "landed 2/2" in w2.stdout and quick,
+              "exit 0, landed 2/2, no full-timeout stall",
+              f"rc={w2.returncode} out={w2.stdout[:100]!r} quick={quick}")
+
+        # 3. Explicit --seats: a task-kind name is a DEADLOCK, refused loudly;
+        #    a non-member is refused; a hostile name never touches a path.
+        wt = _run_dispatcher(["wait", "--session-id", "S",
+                              "--run-id", o1["run_id"], "--seats", "opus",
+                              "--timeout", "2"], cwd=td, timeout=30)
+        check("--seats naming a task seat exits 2 naming the deadlock",
+              wt.returncode == 2 and "DEADLOCK" in wt.stderr,
+              "exit 2 + deadlock named", f"rc={wt.returncode} err={wt.stderr[:200]!r}")
+        wn = _run_dispatcher(["wait", "--session-id", "S",
+                              "--run-id", o1["run_id"], "--seats", "bogus",
+                              "--timeout", "2"], cwd=td, timeout=30)
+        check("--seats naming a non-member exits 2",
+              wn.returncode == 2 and "not a member" in wn.stderr,
+              "exit 2 non-member", f"rc={wn.returncode} err={wn.stderr[:150]!r}")
+        wh = _run_dispatcher(["wait", "--session-id", "S",
+                              "--run-id", o1["run_id"], "--seats", "../x",
+                              "--timeout", "2"], cwd=td, timeout=30)
+        check("a hostile --seats name exits 2 (charset guard)",
+              wh.returncode == 2 and "invalid seat name" in wh.stderr,
+              "exit 2 charset", f"rc={wh.returncode} err={wh.stderr[:150]!r}")
+
+    # 4. A seat that lands MID-WAIT is picked up.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, o1 = _prep_json(["plan.md", "--seats", "codex",
+                            "--task-seats", "opus", "--session-id", "S"], td)
+        run_d = tdp / o1["run_dir"]
+        try:
+            os.chmod(CREW_DISPATCHER, 0o755)
+        except OSError:
+            pass
+        proc = subprocess.Popen(
+            [str(CREW_DISPATCHER), "wait", "--session-id", "S",
+             "--run-id", o1["run_id"], "--timeout", "15"],
+            cwd=td, env=_neutral_env(),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        import time as _t
+        _t.sleep(2)
+        _land_file(run_d, "codex")
+        out, err = proc.communicate(timeout=30)
+        check("a seat landing mid-wait releases the barrier (exit 0)",
+              proc.returncode == 0 and "landed 1/1" in out,
+              "exit 0 after the mid-wait landing",
+              f"rc={proc.returncode} out={out[:100]!r} err={err[:100]!r}")
+
+    # 5. Flat mode: --seats is REQUIRED (no manifest to enumerate); with it,
+    #    an existing flat file releases immediately. Run-scoped fail-closed
+    #    inherits: a requested run with no run.json exits 2.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        flat = tdp / ".crew" / "reviews" / "S"
+        flat.mkdir(parents=True)
+        wf = _run_dispatcher(["wait", "--session-id", "S", "--timeout", "2"],
+                             cwd=td, timeout=30)
+        check("flat mode without --seats exits 2",
+              wf.returncode == 2 and "--seats" in wf.stderr,
+              "exit 2 requiring --seats", f"rc={wf.returncode} err={wf.stderr[:150]!r}")
+        _land_file(flat, "codex")
+        wl = _run_dispatcher(["wait", "--session-id", "S", "--seats", "codex",
+                              "--timeout", "5"], cwd=td, timeout=30)
+        check("flat mode with --seats and a landed file exits 0",
+              wl.returncode == 0 and "landed 1/1" in wl.stdout,
+              "exit 0", f"rc={wl.returncode} out={wl.stdout[:100]!r}")
+        # No manifest in flat mode, but the REGISTRY knows opus is a Task
+        # seat: the deadlock refusal must fire promptly, not stall out the
+        # whole timeout.
+        start = _time_now()
+        wtf = _run_dispatcher(["wait", "--session-id", "S", "--seats", "opus",
+                               "--timeout", "30"], cwd=td, timeout=45)
+        quick = (_time_now() - start) < 10
+        check("flat --seats naming a registry Task seat exits 2 promptly with the deadlock named",
+              wtf.returncode == 2 and "DEADLOCK" in wtf.stderr and quick,
+              "exit 2 + DEADLOCK, no timeout stall",
+              f"rc={wtf.returncode} quick={quick} err={wtf.stderr[:150]!r}")
+        rid = "run-abcdef123456"
+        (tdp / ".crew" / "reviews" / "S" / rid).mkdir()
+        wm = _run_dispatcher(["wait", "--session-id", "S", "--run-id", rid,
+                              "--timeout", "2"], cwd=td, timeout=30)
+        check("a requested run scope with no run.json exits 2 (fail-closed inherited)",
+              wm.returncode == 2 and "error:" in wm.stderr,
+              "exit 2", f"rc={wm.returncode} err={wm.stderr[:150]!r}")
+
+    # 6. Stale-clear on the resume path. The clear that carries the barrier
+    #    guarantee is PREP's: pending seats lose their stale non-valid files
+    #    before the prep JSON returns, so every launch the orchestrator makes
+    #    afterward happens in a world where no pending seat has a file and
+    #    `wait` cannot observe one however the timing falls. `run`'s
+    #    launch-time clear is only the backstop for a re-prep-free relaunch.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        bins = tdp / "bin"
+        bins.mkdir()
+        env = path_with(bins)
+        env["CLAUDE_PROJECT_DIR"] = td
+        PREP = ["review-prep", "plan.md", "--seats", "codex",
+                "--task-seats", "opus,sonnet", "--session-id", "S"]
+        pp = _run_dispatcher(PREP, cwd=td, env=env, timeout=30)
+        o1 = json.loads(pp.stdout)
+        run_d = tdp / o1["run_dir"]
+        codex_f = run_d / "codex.json"
+
+        def _stale_failed(seat):
+            (run_d / f"{seat}.json").write_text(json.dumps(
+                {"name": seat, "model": "m", "ok": False, "output": "",
+                 "error": "seat blew up", "elapsed": 1.0,
+                 "run_id": o1["run_id"],
+                 "target_sha256": o1["target_sha256"]}), encoding="utf-8")
+
+        # 6a. The files are gone the moment prep RETURNS, before any launch
+        #     exists: a stale subprocess failure and a stale Task-seat
+        #     failure both go; a landed VALID seat is kept and excluded.
+        src = tdp / "r.txt"
+        src.write_text("## VERDICT\nAPPROVED\n", encoding="utf-8")
+        _run_dispatcher(["persist-seat", "opus", "--session-id", "S",
+                         "--run-id", o1["run_id"], "--model", "opus",
+                         "-f", str(src)], cwd=td, env=env, timeout=30)
+        _stale_failed("codex")
+        _stale_failed("sonnet")
+        p2 = _run_dispatcher(PREP, cwd=td, env=env, timeout=30)
+        o2 = json.loads(p2.stdout)
+        check("re-prep clears BOTH pending kinds' stale failures before its JSON returns",
+              p2.returncode == 0 and not codex_f.exists()
+              and not (run_d / "sonnet.json").exists()
+              and o2["pending_subprocess_seats"] == ["codex"]
+              and o2["pending_task_seats"] == ["sonnet"],
+              "codex.json + sonnet.json gone, both still pending",
+              f"rc={p2.returncode} codex={codex_f.exists()} "
+              f"sonnet={(run_d / 'sonnet.json').exists()} "
+              f"pend={o2.get('pending_subprocess_seats')}/"
+              f"{o2.get('pending_task_seats')}")
+        odata = (json.loads((run_d / "opus.json").read_text())
+                 if (run_d / "opus.json").exists() else {})
+        check("prep never touches the landed VALID seat (kept, ok=true)",
+              odata.get("ok") is True, "opus.json intact", str(odata)[:120])
+
+        # 6b. The end-to-end ordering with NO deletion-polling crutch: stale
+        #     failure -> re-prep -> launch the slow retry -> start wait
+        #     IMMEDIATELY. The only correct behavior is blocked until the
+        #     retry writes; an early release means the barrier saw a stale
+        #     file.
+        _stale_failed("codex")
+        _run_dispatcher(PREP, cwd=td, env=env, timeout=30)
+        make_fake_bin(bins, "codex", """
+        import sys, time
+        out = None
+        a = sys.argv[1:]
+        for i, x in enumerate(a):
+            if x == "-o":
+                out = a[i+1]
+        sys.stdin.read()
+        time.sleep(8)
+        with open(out, "w") as f:
+            f.write("RETRY GOOD APPROVED")
+        sys.exit(0)
+        """)
+        import time as _t
+        run_p = subprocess.Popen(
+            [str(CREW_DISPATCHER), "run", "codex", "--session-id", "S",
+             "--run-id", o1["run_id"], "--json"],
+            cwd=td, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        wait_p = subprocess.Popen(
+            [str(CREW_DISPATCHER), "wait", "--session-id", "S",
+             "--run-id", o1["run_id"], "--timeout", "25"],
+            cwd=td, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        _t.sleep(3)
+        check("a wait started IMMEDIATELY after the launch stays BLOCKED (no stale release)",
+              wait_p.poll() is None, "wait still running",
+              f"wait exited rc={wait_p.poll()}")
+        run_p.communicate(timeout=30)
+        wout, werr = wait_p.communicate(timeout=30)
+        data = json.loads(codex_f.read_text()) if codex_f.exists() else {}
+        check("the wait releases only when the retry writes (exit 0, fresh ok=true result)",
+              run_p.returncode == 0 and wait_p.returncode == 0
+              and "landed 1/1" in wout and data.get("ok") is True
+              and data.get("output") == "RETRY GOOD APPROVED",
+              "exit 0 + retry result landed",
+              f"run rc={run_p.returncode} wait rc={wait_p.returncode} "
+              f"out={wout[:80]!r} data={str(data)[:120]}")
+
+        # 6c. `run`'s backstop: a direct relaunch with NO re-prep still
+        #     clears its own stale failure at launch. This deletion-poll
+        #     tests the clear MECHANISM only; the barrier ordering guarantee
+        #     is prep's (6a/6b).
+        _stale_failed("codex")
+        run_p2 = subprocess.Popen(
+            [str(CREW_DISPATCHER), "run", "codex", "--session-id", "S",
+             "--run-id", o1["run_id"], "--json"],
+            cwd=td, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        cleared = False
+        deadline = _t.monotonic() + 6
+        while _t.monotonic() < deadline:
+            if not codex_f.exists():
+                cleared = True
+                break
+            _t.sleep(0.1)
+        run_p2.communicate(timeout=30)
+        data = json.loads(codex_f.read_text())
+        check("a re-prep-free relaunch clears its stale failure at launch (backstop)",
+              cleared and run_p2.returncode == 0
+              and data.get("output") == "RETRY GOOD APPROVED",
+              "cleared mid-launch, fresh result landed",
+              f"cleared={cleared} rc={run_p2.returncode}")
+
+        # A landed VALID result is NEVER cleared by a relaunch: the failing
+        # retry finds it in place and preserve-valid keeps it (if the launch
+        # had wrongly cleared it, the failure would land with no kept note).
+        _fake_codex_writer(bins, "", 1)
+        r2 = _run_dispatcher(["run", "codex", "--session-id", "S",
+                              "--run-id", o1["run_id"], "--json"],
+                             cwd=td, env=env, timeout=30)
+        data = json.loads(codex_f.read_text())
+        check("a landed VALID result survives a failing relaunch un-cleared (preserve-valid note intact)",
+              r2.returncode == 0 and "kept existing valid result" in r2.stderr
+              and data.get("ok") is True
+              and data.get("output") == "RETRY GOOD APPROVED",
+              "kept note + ok=true unchanged",
+              f"rc={r2.returncode} err={r2.stderr[:120]!r} ok={data.get('ok')}")
+
+        # An explicit -o keeps ad-hoc freedom: nothing is cleared, neither
+        # the run dir's stale file nor the -o destination itself.
+        stale = json.dumps({"name": "codex", "model": "m", "ok": False,
+                            "output": "", "error": "old", "elapsed": 1.0,
+                            "run_id": o1["run_id"],
+                            "target_sha256": o1["target_sha256"]})
+        codex_f.write_text(stale, encoding="utf-8")
+        out_f = tdp / "adhoc.json"
+        out_f.write_text("SENTINEL", encoding="utf-8")
+        ro = _run_dispatcher(["run", "codex", "--session-id", "S",
+                              "-o", str(out_f)], cwd=td, env=env, timeout=30)
+        check("an explicit -o launch clears nothing (run-dir stale file and -o sentinel both intact)",
+              ro.returncode == 1
+              and codex_f.read_text(encoding="utf-8") == stale
+              and out_f.read_text(encoding="utf-8") == "SENTINEL",
+              "both files untouched",
+              f"rc={ro.returncode} rundir={codex_f.exists()} "
+              f"out={out_f.read_text(encoding='utf-8')[:40]!r}")
+
+    # 7. --timeout parse guard: nan makes `elapsed >= timeout` always false
+    #    (an endless poll); inf and non-positive values are equally
+    #    meaningless; all are rejected at parse.
+    with tempfile.TemporaryDirectory() as td:
+        for bad in ("nan", "inf", "0", "-3"):
+            wb = _run_dispatcher(["wait", "--session-id", "S",
+                                  "--seats", "codex", "--timeout", bad],
+                                 cwd=td, timeout=30)
+            check(f"--timeout {bad} is rejected at parse (exit 2)",
+                  wb.returncode == 2 and "positive finite" in wb.stderr,
+                  "argparse rejection", f"rc={wb.returncode} err={wb.stderr[-150:]!r}")
+
+    # 8. Duplicate --seats names collapse to one seat; a scope with zero
+    #    subprocess seats says so instead of printing a bare `landed 0/0`.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        flat = tdp / ".crew" / "reviews" / "S"
+        flat.mkdir(parents=True)
+        _land_file(flat, "codex")
+        wd = _run_dispatcher(["wait", "--session-id", "S",
+                              "--seats", "codex,codex", "--timeout", "5"],
+                             cwd=td, timeout=30)
+        check("--seats codex,codex dedupes to landed 1/1 (one file is one seat)",
+              wd.returncode == 0 and "landed 1/1" in wd.stdout,
+              "landed 1/1", f"rc={wd.returncode} out={wd.stdout[:100]!r}")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, oz = _prep_json(["plan.md", "--seats", "", "--task-seats", "opus",
+                            "--session-id", "S"], td)
+        wz = _run_dispatcher(["wait", "--session-id", "S",
+                              "--run-id", oz["run_id"], "--timeout", "5"],
+                             cwd=td, timeout=30)
+        check("a Task-only run exits 0 with the no-subprocess-seats note (not a bare landed 0/0)",
+              wz.returncode == 0 and "landed 0/0" in wz.stdout
+              and "no subprocess seats" in wz.stdout,
+              "exit 0 + note", f"rc={wz.returncode} out={wz.stdout[:150]!r}")
+        wzj = _run_dispatcher(["wait", "--session-id", "S",
+                               "--run-id", oz["run_id"], "--timeout", "5",
+                               "--json"], cwd=td, timeout=30)
+        try:
+            jz = json.loads(wzj.stdout)
+        except (json.JSONDecodeError, ValueError):
+            jz = {}
+        check("--json carries the same note for a zero-seat scope",
+              wzj.returncode == 0 and "no subprocess seats" in jz.get("note", ""),
+              "note key present", f"rc={wzj.returncode} out={wzj.stdout[:150]!r}")
+
+
+def _time_now():
+    import time as _t
+    return _t.monotonic()
+
+
+# =============================================================================
 # Quorum facts in the grouped digest header
 # =============================================================================
 
@@ -10468,6 +10823,7 @@ def main():
     test_replay_spec()
     test_run_scoped_reviews()
     test_collect_run_scoped()
+    test_wait()
     test_quorum_header()
 
     print()

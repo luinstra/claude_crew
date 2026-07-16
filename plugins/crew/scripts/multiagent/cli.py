@@ -19,7 +19,9 @@ seat ad-hoc), ``render`` (build ONE seat's prompt, no execution), ``seats``
 (print the resolved subprocess seat list, one per line, for per-seat fan-out),
 ``collect`` (collapse the named per-seat ``<seat>.json`` result files into
 ONE faithful ``render_panel`` markdown digest — reads EXACTLY the seats named in
-``--seats``, never globs), and ``review-prep`` (the deterministic PREP for the
+``--seats``, never globs), ``wait`` (block until every named subprocess seat's
+result file exists, the review flows' barrier primitive; Task seats refused,
+the orchestrator persists those itself), and ``review-prep`` (the deterministic PREP for the
 review-bearing commands: resolve target + ``--panel``/``--seats`` → subprocess +
 task split, mint the run-scoped review dir (``review_runs``: identity, run.json,
 snapshot), stage EVERY seat prompt against the snapshot, and PRINT the JSON
@@ -53,10 +55,12 @@ import concurrent.futures
 import dataclasses
 import datetime
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
+import time
 
 from multiagent import (
     config,
@@ -967,6 +971,25 @@ def cmd_run(args: argparse.Namespace) -> int:
                 # a truthy model (it falls back to the seat name), so only a
                 # hand-crafted manifest can carry an empty one.
                 args.model = sig.get("model")
+            # A prior FAILED result for this seat must be gone before the
+            # provider starts: `wait` treats file existence as landed, so a
+            # stale failure left in place would release the barrier while
+            # this retry is still running. The clear that CARRIES that
+            # guarantee is review-prep's (race-free: at prep no launch
+            # exists, while this one runs behind process start and every
+            # manifest gate, a window a concurrent `wait` polls into); this
+            # launch-time clear is only the backstop for a direct relaunch
+            # with no re-prep. Engine-owned, this one derived file only; a
+            # landed VALID result is never cleared.
+            try:
+                review_runs.clear_stale_result(
+                    results_dir, seat,
+                    str(run_record.get("run_id") or ""),
+                    str(run_record.get("target_sha256") or ""),
+                )
+            except review_runs.ReviewRunError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
             stamp_dir = results_dir
         if args.file is None and args.prompt is None:
             args.file = str(results_dir / "prompt-seat.txt")
@@ -1772,6 +1795,54 @@ def cmd_seats(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_read_scope(session_id: str, explicit_rid):
+    """``(results_dir, scope_rid)`` for a REQUESTED-scope reader (collect and
+    wait share this so their fail-closed rules can never drift).
+
+    ANY supplied ``--run-id`` (an explicit empty string included) is run-scoped
+    input and goes through run-id validation; only an OMITTED flag falls
+    through to the pointer/flat resolution. A PRESENT-but-invalid pointer
+    refuses rather than falling to the unvalidated flat dir (a run WAS in play
+    here; same posture as persist-seat's pointer-existence refusal); only a
+    truly ABSENT pointer means the flat layout (``scope_rid`` None). Raises
+    ``ReviewRunError`` on every refusal.
+    """
+    if explicit_rid is not None:
+        return (
+            review_runs.run_dir(session_id, explicit_rid, base=_REVIEWS_BASE),
+            explicit_rid,
+        )
+    base_dir = _reviews_subdir(session_id)
+    pointer_rid = review_runs.read_pointer_run_id(base_dir)
+    if pointer_rid:
+        return base_dir / pointer_rid, pointer_rid
+    if review_runs.pointer_exists(base_dir):
+        raise review_runs.ReviewRunError(
+            f"the session pointer {base_dir / review_runs.POINTER_NAME} "
+            "exists but is corrupt or names no valid run; pass the prep "
+            "JSON's --run-id, or remove the pointer for an ad-hoc flat read"
+        )
+    return base_dir, None
+
+
+def _load_scope_manifest(results_dir: Path, scope_rid: str | None):
+    """The VERIFIED run manifest for a requested scope, or None in flat mode.
+
+    Without a trustworthy ``run.json`` nothing downstream can be validated or
+    enumerated, so a REQUESTED scope whose manifest is missing, unreadable, or
+    failing its identity check raises ``ReviewRunError`` (fail closed) instead
+    of degrading to an unvalidated read.
+    """
+    if not scope_rid:
+        return None
+    record = review_runs.read_run_json(results_dir)
+    review_runs.verify_run_record(
+        record, expected_run_id=scope_rid,
+        source=results_dir / review_runs.RUN_JSON_NAME,
+    )
+    return record
+
+
 def _run_scope_skip(data: dict, seat: str, record: dict) -> str | None:
     """The skip note for a run-scoped seat file that does not belong, or None.
 
@@ -1869,64 +1940,19 @@ def cmd_collect(args: argparse.Namespace) -> int:
     # dir after a run was requested would collect unvalidated files under a
     # run-scoped invocation. Session/run-id containment still resolves through
     # the one review_runs mechanism.
-    explicit_rid = getattr(args, "run_id", None)
-    scope_rid: str | None = None
+    # Requested-scope resolution + the verified manifest, through the SAME
+    # helpers `wait` uses (one mechanism, one set of fail-closed rules): a
+    # requested run scope with a missing/unreadable/lying manifest refuses
+    # (exit 2, nothing folded), a present-but-invalid pointer refuses, and
+    # only flat mode (no pointer, no --run-id) reads validation-free (legacy
+    # unstamped files render exactly as before).
     try:
-        # ANY supplied --run-id (an explicit empty string included) is
-        # run-scoped input and goes through run-id validation; only an OMITTED
-        # flag falls through to the pointer/flat resolution.
-        if explicit_rid is not None:
-            results_dir = review_runs.run_dir(
-                session_id, explicit_rid, base=_REVIEWS_BASE
-            )
-            scope_rid = explicit_rid
-        else:
-            base_dir = _reviews_subdir(session_id)
-            pointer_rid = review_runs.read_pointer_run_id(base_dir)
-            if pointer_rid:
-                results_dir = base_dir / pointer_rid
-                scope_rid = pointer_rid
-            elif review_runs.pointer_exists(base_dir):
-                # Present-but-invalid pointer: a run WAS in play here, so
-                # dropping to the unvalidated flat dir would fail open (same
-                # posture as persist-seat's pointer-existence refusal). Only a
-                # truly ABSENT pointer means the flat, validation-free layout.
-                print(
-                    f"error: the session pointer "
-                    f"{base_dir / review_runs.POINTER_NAME} exists but is "
-                    "corrupt or names no valid run; pass the prep JSON's "
-                    "--run-id, or remove the pointer for an ad-hoc flat read",
-                    file=sys.stderr,
-                )
-                return 2
-            else:
-                results_dir = base_dir
+        results_dir, scope_rid = _resolve_read_scope(
+            session_id, getattr(args, "run_id", None))
+        run_record = _load_scope_manifest(results_dir, scope_rid)
     except review_runs.ReviewRunError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-
-    # Run-scoped read: load the manifest ONCE, integrity-check it, and
-    # validate every seat file against it before rendering. Belt-and-suspenders
-    # on top of the dir isolation: it exists for the resume case and for
-    # anything that hand-places files in a run dir. Without a TRUSTWORTHY
-    # run.json NOTHING can be validated (missing identity fields would let
-    # unstamped files pass a comparison against None), so a REQUESTED run
-    # scope whose manifest is missing, unreadable, or failing its identity
-    # check refuses (exit 2, nothing folded) rather than failing open into a
-    # verbatim fold. Flat mode (no pointer, no --run-id) stays validation-free
-    # as designed: there is no manifest, and legacy unstamped files render
-    # exactly as before.
-    run_record: dict | None = None
-    if scope_rid:
-        try:
-            run_record = review_runs.read_run_json(results_dir)
-            review_runs.verify_run_record(
-                run_record, expected_run_id=scope_rid,
-                source=results_dir / review_runs.RUN_JSON_NAME,
-            )
-        except review_runs.ReviewRunError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
 
     seats = [s.strip() for s in (args.seats or "").split(",") if s.strip()]
 
@@ -2068,6 +2094,147 @@ def cmd_collect(args: argparse.Namespace) -> int:
     # passed is the path to echo.
     if args.out:
         print(args.out)
+    return 0
+
+
+def cmd_wait(args: argparse.Namespace) -> int:
+    """Block until every named SUBPROCESS seat's ``<seat>.json`` exists: the
+    engine half of the review flows' wait-for-both barrier.
+
+    A seat is LANDED whether its result is ok or failed: a failed seat has
+    FINISHED, which is what a barrier cares about (the certification tier,
+    ``result_valid``, is collect's and the quorum's job; using it here would
+    hang the barrier forever on any failed seat). Landing is file EXISTENCE,
+    so the barrier also releases on results a concurrent process just wrote.
+
+    SUBPROCESS seats only, enforced: Task seats are persisted by the
+    ORCHESTRATOR after their Task returns, so blocking on a task-kind seat
+    from the orchestrator would deadlock the only process that can write it.
+    Naming one in ``--seats`` exits 2 rather than silently skipping it. The
+    default seat list is the manifest's kind=subprocess names; flat mode has
+    no manifest, so ``--seats`` is required there.
+
+    Exit 0 when every named seat has landed; exit 1 on timeout, naming exactly
+    the seats still missing so the orchestrator can report or relaunch. Scope
+    resolves through the same requested-scope helpers ``collect`` uses,
+    inheriting every fail-closed rule.
+    """
+    session_id = _resolve_session_id(args.session_id)
+    if "<" in session_id or ">" in session_id:
+        print(
+            f"error: session id looks like an unsubstituted placeholder "
+            f"({session_id!r}); pass your actual session id (the "
+            "[Session ID: …] value), not the literal template",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        results_dir, scope_rid = _resolve_read_scope(
+            session_id, getattr(args, "run_id", None))
+        run_record = _load_scope_manifest(results_dir, scope_rid)
+    except review_runs.ReviewRunError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    # Deduped: `--seats codex,codex` names one file and must count as one
+    # seat, not report an inflated landed 2/2.
+    requested = list(dict.fromkeys(
+        s.strip() for s in (args.seats or "").split(",") if s.strip()
+    ))
+    for s in requested:
+        # Seat names supply the polled FILENAME; reject path chars like
+        # collect does rather than probing outside the results dir.
+        if re.sub(r"[^A-Za-z0-9_-]", "", s) != s:
+            print(
+                f"error: invalid seat name {s!r} in --seats; seat names must "
+                "match [A-Za-z0-9_-] (no path separators or dots)",
+                file=sys.stderr,
+            )
+            return 2
+
+    def _task_seat_deadlock(s: str) -> str:
+        return (
+            f"error: seat {s!r} is a Task seat; Task seats are persisted by "
+            "the ORCHESTRATOR after their Task returns, so waiting on one "
+            "from the orchestrator would DEADLOCK the only process that can "
+            "write it. `wait` covers subprocess shells only."
+        )
+
+    if run_record is not None:
+        sigs = run_record.get("seat_signatures") or {}
+        if requested:
+            for s in requested:
+                sig = sigs.get(s) if isinstance(sigs, dict) else None
+                if not isinstance(sig, dict):
+                    print(
+                        f"error: seat {s!r} is not a member of run "
+                        f"{run_record.get('run_id')!r}'s panel manifest",
+                        file=sys.stderr,
+                    )
+                    return 2
+                if sig.get("kind") != "subprocess":
+                    print(_task_seat_deadlock(s), file=sys.stderr)
+                    return 2
+            seats_to_wait = requested
+        else:
+            seats_to_wait = [
+                n for n, sg in sigs.items()
+                if isinstance(sg, dict) and sg.get("kind") == "subprocess"
+            ]
+    else:
+        if not requested:
+            print(
+                "error: flat mode has no manifest to enumerate; pass --seats "
+                "with the subprocess seats to wait on",
+                file=sys.stderr,
+            )
+            return 2
+        # No manifest here, but the REGISTRY knows the Task seat names;
+        # without this check a flat `--seats opus` would stall for the full
+        # timeout instead of refusing the deadlock.
+        for s in requested:
+            if s in seats.task_seats():
+                print(_task_seat_deadlock(s), file=sys.stderr)
+                return 2
+        seats_to_wait = requested
+
+    start = time.monotonic()
+    while True:
+        missing = [
+            s for s in seats_to_wait
+            if not (results_dir / f"{s}.json").is_file()
+        ]
+        elapsed = time.monotonic() - start
+        if not missing or elapsed >= args.timeout:
+            break
+        # ~1s poll; stdout stays quiet while polling (no spinner spam).
+        time.sleep(min(1.0, max(0.05, args.timeout - elapsed)))
+
+    landed = [s for s in seats_to_wait if s not in missing]
+    # A Task-only panel has zero subprocess seats, so the barrier is
+    # trivially satisfied; say so out loud, or a `landed 0/0` exit 0 reads
+    # like confirmation that seats ran.
+    empty_note = "no subprocess seats in this scope; nothing was waited on"
+    if args.json:
+        payload = {"landed": landed, "missing": missing,
+                   "elapsed": round(elapsed, 1)}
+        if not seats_to_wait:
+            payload["note"] = empty_note
+        print(json.dumps(payload, ensure_ascii=False))
+    else:
+        note = f" (missing: {', '.join(missing)})" if missing else ""
+        if not seats_to_wait:
+            note = f" ({empty_note})"
+        print(f"wait: landed {len(landed)}/{len(seats_to_wait)}{note} "
+              f"· elapsed {elapsed:.0f}s")
+    if missing:
+        print(
+            f"error: timed out after {args.timeout:g}s waiting for seat(s): "
+            f"{', '.join(missing)}",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
@@ -2732,6 +2899,23 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
         s for s in task_seats
         if not review_runs.seat_landed_valid(run_d, s, run_id, target_sha)
     ]
+
+    # A pending seat with a stale non-valid file (a prior launch's failure)
+    # loses that file HERE, before the JSON reaches the orchestrator. This
+    # clear is what makes `wait`'s existence barrier correct: the orchestrator
+    # launches seats and calls `wait` immediately, and `run`'s own launch-time
+    # clear sits behind process start and every manifest gate, a window `wait`
+    # polls straight into. At prep no launch exists yet, so clearing here is
+    # race-free by construction; run's clear remains only as the backstop for
+    # a direct relaunch with no re-prep. Scoped to exactly the seats prep
+    # itself declares pending, inside the run dir, no globs. A landed VALID
+    # seat is not in these lists and is never touched.
+    try:
+        for s in pending_sub + pending_task:
+            review_runs.clear_stale_result(run_d, s, run_id, target_sha)
+    except review_runs.ReviewRunError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     # 8. Print the JSON contract, the ONLY stdout output. FIXED insertion key
     #    order IS the contract (the original four keys keep their order; the
@@ -3582,6 +3766,21 @@ def cmd_scaffold_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def _finite_positive_seconds(text: str) -> float:
+    """argparse type for wait's ``--timeout``: a bare ``type=float`` accepts
+    ``nan`` (every ``elapsed >= timeout`` comparison is false, so the poll
+    never ends), ``inf``, and non-positive values; reject them at parse."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid float value: {text!r}")
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(
+            f"timeout must be a positive finite number of seconds, got {text!r}"
+        )
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multiagent",
@@ -3770,6 +3969,46 @@ def build_parser() -> argparse.ArgumentParser:
              "the flat session dir (today's ad-hoc behavior).",
     )
     coll.set_defaults(func=cmd_collect)
+
+    wt = sub.add_parser(
+        "wait",
+        help="Block until every named SUBPROCESS seat's <seat>.json exists "
+             "(the review flows' barrier primitive). A failed seat counts as "
+             "landed (it has finished). Exit 0 all landed; exit 1 on timeout "
+             "naming the missing seats; exit 2 on misuse. Task seats are "
+             "REFUSED: the orchestrator persists them itself, so waiting on "
+             "one would deadlock.",
+    )
+    wt.add_argument(
+        "--session-id", dest="session_id", default=None,
+        help="session id for .crew/reviews/<session-id>/ (default: "
+             "CLAUDE_SESSION_ID env)",
+    )
+    wt.add_argument(
+        "--run-id", dest="run_id", default=None,
+        help="wait inside this review run's dir (from the review-prep JSON). "
+             "Fallback: the session pointer; with neither, the flat session "
+             "dir, where --seats is required (no manifest to enumerate).",
+    )
+    wt.add_argument(
+        "--seats", dest="seats", default="",
+        help="comma-separated subprocess seats to wait on (default: every "
+             "kind=subprocess name in the run manifest). A task-kind or "
+             "non-member name exits 2.",
+    )
+    wt.add_argument(
+        "--timeout", dest="timeout", type=_finite_positive_seconds,
+        default=900.0,
+        help="seconds before giving up (default 900: generous headroom over "
+             "the longest observed seat, ~350s; must be positive and finite). "
+             "On timeout exit 1 names the still-missing seats.",
+    )
+    wt.add_argument(
+        "--json", action="store_true",
+        help="print {landed, missing, elapsed} as JSON instead of the "
+             "one-line summary",
+    )
+    wt.set_defaults(func=cmd_wait)
 
     rs = sub.add_parser(
         "repair-seat",

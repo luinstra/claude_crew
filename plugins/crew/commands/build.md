@@ -308,6 +308,27 @@ subprocess `crew run <seat>` shell to EXIT, AND (b) every Step 2b Task seat to r
 AND be persisted in Step 2c. A seat whose `<seat>.json` is not written yet is STILL
 RUNNING, not skipped — collecting early would silently drop it.
 
+For the subprocess half, use the engine's barrier primitive instead of
+improvised polling (it exits 0 once every subprocess seat file has landed, ok
+and failed alike, since a failed seat has FINISHED; on timeout it exits 1
+naming exactly the seats still missing, so you can report or relaunch them):
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/crew" wait --session-id <session-id> --run-id <run_id from the prep JSON> --timeout 550
+```
+
+The snippet passes `--timeout 550` because `wait`'s 900s default exceeds the
+Bash tool's own timeout (120s default, 600s max): a foreground call left at
+the default gets killed by the harness before `wait` can name the missing
+seats. Keep the explicit `--timeout` under your Bash call's budget (550 fits
+a call with its timeout raised to 600000ms), or run the call in the
+background and check its result.
+
+`wait` covers ONLY the subprocess shells, and refuses a Task seat by name: the
+Task seats are persisted by YOU after their Task returns, so waiting on one
+would deadlock the only process that can write it. Wait for your own Task
+returns, persist them, THEN collect.
+
 Define `<ran_seats>` = the comma-join of the FULL `subprocess_seats` (resolved
 prep order) **then** the FULL `task_seats`: the whole roster, not only the
 pending seats: a landed seat from a resumed run is part of this panel's verdict.
