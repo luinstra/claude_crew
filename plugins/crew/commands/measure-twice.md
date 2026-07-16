@@ -310,7 +310,10 @@ seat renders a clearly-marked skipped block and is excluded from the verdict mat
 
 **Persist each Task seat through the engine.** For EACH seat you spawned
 (`pending_task_seats` from the prep JSON — never a hardcoded list), write the
-seat's returned Task result to a temp file with the Write tool, then persist it
+seat's returned Task result to a temp file with the Write tool (a file
+under `.crew/reviews/<session-id>/`, e.g. `tmp-seat-<seat>.md`; NEVER a
+system temp or scratchpad dir, which sits outside the approved working dirs
+and fires a permission prompt on every write), then persist it
 with the SAME `--run-id` the prep printed (required: a late seat persisted
 without it exits 2 rather than risk landing in a newer run's dir):
 
@@ -365,7 +368,10 @@ structured findings. For EACH such `<seat>`:
    ```
 
 3. Write the formatter's returned text into the seat file with the engine (it writes
-   to a SEPARATE `repaired_output` field, NEVER overwriting the original `output`):
+   to a SEPARATE `repaired_output` field, NEVER overwriting the original
+   `output`), via a temp file with `-f` (also under
+   `.crew/reviews/<session-id>/`, e.g. `tmp-repair-<seat>.md`; never a system
+   temp or scratchpad dir):
 
    ```bash
    "${CLAUDE_PLUGIN_ROOT}/crew" repair-seat --seat <run_dir>/<seat>.json -f <temp-file-with-reformatted-text>

@@ -1894,6 +1894,10 @@ def cmd_collect(args: argparse.Namespace) -> int:
             return 2
 
     results: list[ProviderResult] = []
+    # Usable is a set of DISTINCT names, not a counter: a duplicated --seats
+    # entry re-renders its block harmlessly but must not count one result
+    # twice toward the quorum.
+    usable_names: set[str] = set()
     for s in seats:
         p = results_dir / f"{s}.json"
         if not p.exists():
@@ -1924,6 +1928,14 @@ def cmd_collect(args: argparse.Namespace) -> int:
                     error=skip, elapsed=0.0,
                 ))
                 continue
+            # Quorum's usable count: the success-only result_valid tier (the
+            # membership half already held, or the file would be quarantined
+            # above).
+            if review_runs.result_valid(
+                data, run_record.get("run_id"),
+                run_record.get("target_sha256"), name=s,
+            ):
+                usable_names.add(s)
         result = ProviderResult.from_dict(data)
         # ALWAYS label by the requested seat — never "unknown". from_dict's
         # "unknown" fallback (non-object/missing-name files) can never reach
@@ -1967,7 +1979,25 @@ def cmd_collect(args: argparse.Namespace) -> int:
         # GROUPED digest: the deduped "N/N seats flagged X" panel.
         # --full ALSO writes the byte-faithful render_panel sibling (the recovery
         # artifact + the advisory size denominator).
-        text = findings.render_digest(results)
+        quorum = None
+        if run_record is not None:
+            # Launched = DISTINCT names in seat_signatures: the manifest field
+            # INSIDE the hashed identity, which verify_run_record already
+            # validated field-level (recorded at mint precisely so the digest
+            # never needs a mutable read). The roster LISTS are outside the
+            # identity and untyped, so they are never trusted for counting.
+            # The completion gate recounts against the run identity frozen in
+            # loop state, so after a panel-changing re-prep the two can
+            # diverge: the gate wins, this header is advisory.
+            launched = len(dict(run_record.get("seat_signatures") or {}))
+            quorum = (launched, len(usable_names))
+        else:
+            print(
+                "collect: no run identity resolved; quorum facts omitted from "
+                "the grouped digest (they need a run manifest)",
+                file=sys.stderr,
+            )
+        text = findings.render_digest(results, quorum=quorum)
         if getattr(args, "full", None):
             full_text = render.render_panel(results)
             _emit(full_text, args.full)

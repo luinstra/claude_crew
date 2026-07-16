@@ -10048,6 +10048,147 @@ def test_collect_run_scoped():
               "exit 2 derived-id axis", f"rc={cdi.returncode} err={cdi.stderr[:200]!r}")
 
 
+# =============================================================================
+# Quorum facts in the grouped digest header
+# =============================================================================
+
+def test_quorum_header():
+    log_section("collect --group quorum header (run-scoped manifest facts)")
+
+    def _prep_json(args, cwd):
+        proc = _run_dispatcher(["review-prep", *args], cwd=cwd, timeout=30)
+        obj = json.loads(proc.stdout) if proc.returncode == 0 and proc.stdout.strip() else None
+        return proc, obj
+
+    def _land(td, o, seat):
+        src = Path(td) / f"{seat}.txt"
+        src.write_text(_SCHEMA_REVIEW, encoding="utf-8")
+        _run_dispatcher(["persist-seat", seat, "--session-id", "S",
+                         "--run-id", o["run_id"], "--model", seat,
+                         "-f", str(src)], cwd=td, timeout=30)
+
+    def _grouped(td, o, seats):
+        return _run_dispatcher(
+            ["collect", "--session-id", "S", "--run-id", o["run_id"],
+             "--seats", seats, "--group"], cwd=td, timeout=30)
+
+    # 1. The quorum-gap regression at digest level: a manifest of 7 with ONE
+    #    usable seat renders NOT MET plus the cannot-record line.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, o1 = _prep_json(
+            ["plan.md", "--seats", "codex,codex-luna,agy,cursor-auto,cursor-composer",
+             "--task-seats", "opus,sonnet", "--session-id", "S"], td)
+        roster = ",".join(o1["subprocess_seats"] + o1["task_seats"])
+        check("the 7-seat manifest resolved intact (explicit names survive availability)",
+              o1 is not None and len(o1["subprocess_seats"]) == 5
+              and len(o1["task_seats"]) == 2, "5 + 2", str(o1 and roster))
+        _land(td, o1, "opus")
+        cq = _grouped(td, o1, roster)
+        check("1-of-7 usable renders `PANEL: 7 launched · 1 usable · quorum 4: NOT MET`",
+              cq.returncode == 0
+              and "PANEL: 7 launched · 1 usable · quorum 4: NOT MET" in cq.stdout,
+              "the exact header line", cq.stdout[:200])
+        check("NOT MET adds the cannot-record line",
+              "an APPROVED verdict cannot be recorded from this panel" in cq.stdout,
+              "cannot-record line present", cq.stdout[:200])
+        # Faithful mode (no --group) and the --full sibling never carry the header.
+        cf = _run_dispatcher(
+            ["collect", "--session-id", "S", "--run-id", o1["run_id"],
+             "--seats", roster], cwd=td, timeout=30)
+        check("faithful (no --group) run-scoped output carries NO quorum header",
+              cf.returncode == 0 and "PANEL:" not in cf.stdout,
+              "no header", cf.stdout[:150])
+        run_d = tdp / o1["run_dir"]
+        cfull = _run_dispatcher(
+            ["collect", "--session-id", "S", "--run-id", o1["run_id"],
+             "--seats", roster, "--group", "-o", str(run_d / "panel.md"),
+             "--full", str(run_d / "panel-full.md")], cwd=td, timeout=30)
+        digest = (run_d / "panel.md").read_text(encoding="utf-8")
+        full = (run_d / "panel-full.md").read_text(encoding="utf-8")
+        check("--full's faithful sibling stays header-free while the digest carries it",
+              cfull.returncode == 0 and "PANEL: 7 launched" in digest
+              and "PANEL:" not in full,
+              "header in digest only", f"digest={digest[:80]!r} full={full[:80]!r}")
+
+    # 2. Threshold arithmetic: N=1 -> quorum 1; N=2 -> quorum 2 (strict
+    #    majority, N//2+1), MET exactly when usable reaches it.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, o1 = _prep_json(["plan.md", "--seats", "", "--task-seats", "opus",
+                            "--session-id", "S"], td)
+        _land(td, o1, "opus")
+        c1 = _grouped(td, o1, "opus")
+        check("N=1: `PANEL: 1 launched · 1 usable · quorum 1: MET` and no cannot-record line",
+              c1.returncode == 0
+              and "PANEL: 1 launched · 1 usable · quorum 1: MET" in c1.stdout
+              and "cannot be recorded" not in c1.stdout,
+              "quorum 1 MET", c1.stdout[:150])
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, o2 = _prep_json(["plan.md", "--seats", "", "--task-seats", "opus,sonnet",
+                            "--session-id", "S"], td)
+        _land(td, o2, "opus")
+        c2 = _grouped(td, o2, "opus,sonnet")
+        check("N=2 with 1 usable: `quorum 2: NOT MET` (strict majority of 2 is 2)",
+              c2.returncode == 0
+              and "PANEL: 2 launched · 1 usable · quorum 2: NOT MET" in c2.stdout,
+              "quorum 2 NOT MET", c2.stdout[:150])
+        # A duplicated --seats entry re-renders one result but counts it ONCE:
+        # `opus,opus` over one landed seat must not fake a met 2-seat quorum.
+        cdup = _grouped(td, o2, "opus,opus")
+        check("--seats opus,opus over one landed seat renders `1 usable` and NOT MET (distinct usable names)",
+              cdup.returncode == 0
+              and "PANEL: 2 launched · 1 usable · quorum 2: NOT MET" in cdup.stdout,
+              "1 usable despite the duplicate", cdup.stdout[:150])
+        _land(td, o2, "sonnet")
+        c2b = _grouped(td, o2, "opus,sonnet")
+        check("N=2 with 2 usable: `quorum 2: MET`",
+              c2b.returncode == 0
+              and "PANEL: 2 launched · 2 usable · quorum 2: MET" in c2b.stdout,
+              "quorum 2 MET", c2b.stdout[:150])
+        # 3. Distinct-name counting comes from seat_signatures (inside the
+        #    hashed identity, verified), so the untyped roster LISTS are inert:
+        #    a duplicated name, an injected bogus name, or a list replaced by a
+        #    string (which the record still verifies, since the lists are
+        #    outside the identity) neither changes N nor crashes.
+        run_json = tdp / o2["run_dir"] / "run.json"
+        good = run_json.read_text(encoding="utf-8")
+        for label, tamper in (
+            ("a duplicated roster name", ["opus", "sonnet", "opus"]),
+            ("an injected bogus roster name", ["opus", "sonnet", "bogus"]),
+            ("a roster list replaced by a string", "corrupted"),
+        ):
+            rec = json.loads(good)
+            rec["task_seats"] = tamper
+            run_json.write_text(json.dumps(rec), encoding="utf-8")
+            c2c = _grouped(td, o2, "opus,sonnet")
+            check(f"{label} still renders `2 launched` (signature-derived N, no crash)",
+                  c2c.returncode == 0 and "PANEL: 2 launched" in c2c.stdout
+                  and "Traceback" not in c2c.stderr,
+                  "2 launched, clean", f"rc={c2c.returncode} out={c2c.stdout[:100]!r}")
+        run_json.write_text(good, encoding="utf-8")
+
+    # 4. Flat mode: no resolvable run identity -> no header, one stderr note.
+    with tempfile.TemporaryDirectory() as td:
+        flat = Path(td) / ".crew" / "reviews" / "S"
+        flat.mkdir(parents=True)
+        (flat / "opus.json").write_text(json.dumps(
+            {"name": "opus", "model": "opus", "ok": True,
+             "output": _SCHEMA_REVIEW, "error": None, "elapsed": 1.0}),
+            encoding="utf-8")
+        cn = _run_dispatcher(["collect", "--session-id", "S", "--seats", "opus",
+                              "--group"], cwd=td, timeout=30)
+        check("flat --group renders NO quorum header and one stderr note",
+              cn.returncode == 0 and "PANEL:" not in cn.stdout
+              and "quorum" in cn.stderr,
+              "no header + stderr note",
+              f"out={cn.stdout[:80]!r} err={cn.stderr[:120]!r}")
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -10107,6 +10248,7 @@ def main():
     test_replay_spec()
     test_run_scoped_reviews()
     test_collect_run_scoped()
+    test_quorum_header()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")

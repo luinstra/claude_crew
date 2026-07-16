@@ -278,10 +278,18 @@ Key contracts (do NOT regress):
   - **`--group`** — the deduped digest (`findings.render_digest`): a VERDICTS roster (every ran
     seat) + CRITERIA MATRIX + GROUPED FINDINGS (`M/N` agreement, N = findings-parsed seats only, `⚠
     SINGLETON` for lone dissents) + a RAW / UNPARSED SEATS section that renders any non-parseable
-    seat verbatim (a finding is NEVER dropped). Merge predicate: severity is the only hard partition;
+    seat verbatim (a finding is NEVER dropped). A RUN-SCOPED grouped digest opens with one quorum
+    header, `PANEL: <N> launched · <usable> usable · quorum <N//2+1>: MET|NOT MET` (N = distinct
+    manifest names from `run.json`; usable = the success-only `result_valid` tier; NOT MET adds
+    "an APPROVED verdict cannot be recorded from this panel"); the completion gate recounts against
+    the identity frozen in loop state and WINS on divergence, so the header is advisory. Flat-mode
+    `--group` renders NO header plus a one-line stderr note (quorum facts need a run manifest).
+    Merge predicate: severity is the only hard partition;
     within it, COMPLETE-LINKAGE clustering on `path_compatible AND line_compatible AND jaccard>=0.5`.
-    Falls back to exactly `render_panel` when NO seat is findings-parsed. `--full <path>` ALSO writes
-    the faithful sibling (the recovery artifact / advisory size denominator).
+    Falls back to exactly `render_panel` when NO seat is findings-parsed (behind the quorum header
+    when one applies). `--full <path>` ALSO writes
+    the faithful sibling (the recovery artifact / advisory size denominator; never carries the
+    quorum header).
   - **`--report-unparsed`** — prints ONLY the ran-but-non-findings-parsed seat names (the
     haiku-repair candidates); writes no digest.
 - **Per-seat haiku repair (orchestrator-side).** Between the seat fan-out and the grouped collect, the

@@ -456,15 +456,42 @@ def _criterion_for(parse: SeatParse, row: str) -> str:
     return "?"
 
 
-def render_digest(results: list[ProviderResult], repo_root: str | None = None) -> str:
+def render_digest(
+    results: list[ProviderResult],
+    repo_root: str | None = None,
+    quorum: tuple[int, int] | None = None,
+) -> str:
     """Render the grouped panel digest. Falls back to the byte-faithful
-    ``render.render_panel`` when NO seat is findings-parsed."""
+    ``render.render_panel`` when NO seat is findings-parsed.
+
+    ``quorum`` is an optional ``(launched, usable)`` pair of quorum facts the
+    CALLER computed from the run manifest (this module stays pure: no I/O, no
+    manifest read). When given, the digest opens with one PANEL header line
+    stating the strict-majority threshold (``launched // 2 + 1``) and whether
+    the usable count meets it; a NOT MET header adds the line that an APPROVED
+    verdict cannot be recorded. The header prepends in the no-parse fallback
+    too (the quorum facts hold regardless of parseability); with ``quorum``
+    omitted, output is byte-identical to before the header existed.
+    """
+    prefix = ""
+    if quorum is not None:
+        launched, usable = quorum
+        threshold = launched // 2 + 1
+        hdr = [
+            f"PANEL: {launched} launched · {usable} usable · quorum "
+            f"{threshold}: {'MET' if usable >= threshold else 'NOT MET'}"
+        ]
+        if usable < threshold:
+            hdr.append("an APPROVED verdict cannot be recorded from this panel")
+        prefix = "\n".join(hdr) + "\n\n"
+
     parses = [parse_seat(r) for r in results]
     parsed_idx = [i for i, p in enumerate(parses) if p.findings_parsed]
 
     if not parsed_idx:
-        # zero findings-parsed -> exactly today's faithful concatenation.
-        return render.render_panel(results)
+        # zero findings-parsed -> exactly today's faithful concatenation
+        # (behind the quorum header when one was supplied).
+        return prefix + render.render_panel(results)
 
     # A "ran" seat is one that actually executed — a named-but-SKIPPED seat (no
     # result file / no usable block) did NOT run, so it is excluded from the
@@ -552,7 +579,7 @@ def render_digest(results: list[ProviderResult], repo_root: str | None = None) -
         blocks = [render.render_block(results[i]) for i in raw_idx]
         lines.append(sep.join(blocks))
 
-    return "\n".join(lines)
+    return prefix + "\n".join(lines)
 
 
 def unparsed_seats(results: list[ProviderResult]) -> list[str]:
