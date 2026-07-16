@@ -19,9 +19,12 @@ seat ad-hoc), ``render`` (build ONE seat's prompt, no execution), ``seats``
 (print the resolved subprocess seat list, one per line, for per-seat fan-out),
 ``collect`` (collapse the named per-seat ``<seat>.json`` result files into
 ONE faithful ``render_panel`` markdown digest — reads EXACTLY the seats named in
-``--seats``, never globs), ``wait`` (block until every named subprocess seat's
-result file exists, the review flows' barrier primitive; Task seats refused,
-the orchestrator persists those itself), and ``review-prep`` (the deterministic PREP for the
+``--seats``, never globs), ``wait`` (the one blocking primitive over two targets:
+by default every named subprocess seat's result file, the review flows' barrier
+(Task seats refused, the orchestrator persists those itself), or, with
+``--signal <tag>``, an agent's completion marker), ``signal`` (write that marker;
+the convention a LONG-LIVED teammate uses to say it is done or blocked, since it
+has no Task return to say it for it), and ``review-prep`` (the deterministic PREP for the
 review-bearing commands: resolve target + ``--panel``/``--seats`` → subprocess +
 task split, mint the run-scoped review dir (``review_runs``: identity, run.json,
 snapshot), stage EVERY seat prompt against the snapshot, and PRINT the JSON
@@ -2097,6 +2100,274 @@ def cmd_collect(args: argparse.Namespace) -> int:
     return 0
 
 
+_SIGNALS_SUBDIR = "signals"
+
+# What silence on a tag actually means. One text for both output modes, because
+# the ambiguity is the whole diagnostic: a timeout must never read as "the work
+# failed".
+_SIGNAL_SILENCE_NOTE = (
+    "The agent may still be working, or may have FINISHED WITHOUT signalling: "
+    "signalling is the agent's convention, not something this command can "
+    "enforce. Check the working tree before concluding the work failed."
+)
+
+
+def _signals_dir(session_id: str) -> Path:
+    """``.crew/reviews/<session-id>/signals/`` — agent signal markers.
+
+    Their own subdir, so a tag can never name a seat result or a run-dir
+    control file: the two namespaces share no directory. Session-scoped like
+    everything else under the sanitizing ``_reviews_subdir`` chokepoint, so a
+    hostile ``--session-id`` collapses to one child dir here too.
+    """
+    return _reviews_subdir(session_id) / _SIGNALS_SUBDIR
+
+
+def cmd_signal(args: argparse.Namespace) -> int:
+    """Write an agent's completion marker at ``signals/<tag>.json``.
+
+    A one-shot ``Task`` seat needs nothing here: its RETURN is the completion
+    signal, and the harness cannot forget to deliver it. A LONG-LIVED teammate
+    (messaged repeatedly to keep its context warm) has no such signal, because
+    a persistent agent never completes, it only goes IDLE. So it says so
+    explicitly, and ``wait --signal <tag>`` blocks on the marker.
+
+    Be clear about what this is: CONVENTION, not enforcement. Nothing here can
+    make an agent signal, and a forgotten signal looks exactly like an agent
+    still working. What the protocol buys is a deterministic path to read the
+    report from (replacing out-of-order agent messages, where a stale report
+    can be acted on twice) and, via ``wait``'s timeout, a BOUNDED failure
+    instead of a poll that never ends.
+
+    A ``blocked`` status is as important as ``done``: the worst case is an
+    agent that silently gives up, so an executor that cannot finish must still
+    signal, with the reason as its report.
+
+    ``--clear`` removes the marker instead of writing one, and is the
+    ORCHESTRATOR's call before it dispatches a round: it is the ONE thing that
+    makes a REUSED tag safe, because markers persist (``wait`` reads and leaves
+    them, so the report stays readable at the path it printed) and ``wait``
+    releases on any marker, so a previous round's surviving marker would release
+    the next round's wait instantly with a stale report. Cleared before the round
+    is dispatched, no writer exists yet to race the clear.
+
+    ``--session-id`` is REQUIRED here (no ``CLAUDE_SESSION_ID`` fallback, unlike
+    every other subcommand): the marker must land in the ORCHESTRATOR's session
+    dir, and a long-lived teammate's env names the TEAMMATE's session, so a
+    fallback would silently file the marker where nobody is waiting. Only the
+    delegating prompt knows the right value, so it must be passed. ``wait
+    --signal`` keeps the fallback: the orchestrator waits in its own session,
+    where the env value IS the right one.
+
+    No reserved-stem check: that rule protects a run dir's control files
+    (``run.json``/``current-run.json``), and this subdir has none, so it would
+    only reject a plausible tag like ``run`` while guarding nothing.
+    """
+    session_id = (args.session_id or "").strip()
+    if not session_id:
+        print(
+            "error: signal requires an explicit --session-id: the marker must "
+            "land in the ORCHESTRATOR's session dir, which is the session id "
+            "your delegating prompt gave you. There is no env fallback here, "
+            "because a long-lived teammate's own session id would file the "
+            "marker where nobody is waiting.",
+            file=sys.stderr,
+        )
+        return 2
+    if "<" in session_id or ">" in session_id:
+        print(
+            f"error: session id looks like an unsubstituted placeholder "
+            f"({session_id!r}); pass your actual session id (the "
+            "[Session ID: …] value), not the literal template",
+            file=sys.stderr,
+        )
+        return 2
+    tag = (args.tag or "").strip()
+    # The tag IS the filename stem, so it earns the same charset guard seat
+    # names get, checked BEFORE any path is built.
+    if not tag or re.sub(r"[^A-Za-z0-9_-]", "", tag) != tag:
+        print(
+            f"error: invalid signal tag {args.tag!r}; tags must match "
+            "[A-Za-z0-9_-] (no path separators or dots)",
+            file=sys.stderr,
+        )
+        return 2
+
+    path = _signals_dir(session_id) / f"{tag}.json"
+    if args.clear:
+        if args.file:
+            print(
+                "error: --clear removes a marker, so it has no report to read; "
+                "drop -f (or drop --clear if you meant to signal)",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            print(f"error: cannot clear {path}: {exc}", file=sys.stderr)
+            return 2
+        # Exit 0 whether or not a marker existed: the caller asked for "no
+        # marker for this tag", and an absent one already satisfies that. A
+        # clear that failed on the common case (a tag reused for the first
+        # time, nothing to remove) would make the safe pre-dispatch habit look
+        # like an error and train callers out of it.
+        print(str(path))
+        return 0
+
+    if args.file:
+        try:
+            report = Path(args.file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot read {args.file!r}: {exc}", file=sys.stderr)
+            return 2
+    else:
+        report = sys.stdin.read()
+    # An empty report is allowed, unlike persist-seat's empty seat output: there
+    # a body IS the deliverable (an empty one would be a fabricated review), here
+    # the ARRIVAL is the deliverable and the report is context. A terse agent must
+    # never be discouraged from signalling.
+    marker = {
+        "tag": tag,
+        "status": args.status,
+        "report": report,
+        "session_id": session_id,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    try:
+        # Atomic: a concurrent `wait --signal` must never read a torn marker.
+        # Re-signalling the same tag OVERWRITES: a retried round signals again,
+        # and the newest report is the truth about where the work stands.
+        review_runs.write_text_atomic(
+            path, json.dumps(marker, ensure_ascii=False, indent=2) + "\n")
+    except review_runs.ReviewRunError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(str(path))
+    return 0
+
+
+def _wait_for_signal(args: argparse.Namespace, session_id: str) -> int:
+    """``wait --signal <tag>``: block until an agent's marker lands.
+
+    The other target of the one waiting primitive. Seats are RESULT files in a
+    run dir; signals are AGENT markers in the session's signals dir, so the
+    scope flags do not apply and passing them is a usage error rather than a
+    silently ignored flag.
+
+    A successful wait LEAVES THE MARKER IN PLACE: the printed path is the whole
+    point of the protocol (the orchestrator Reads the report there instead of
+    racing out-of-order agent messages), so a wait that deleted it would hand
+    back a path to nothing. Staleness on a reused tag is the orchestrator's
+    ``signal --clear`` before dispatch, which is the ONE mechanism for it.
+    """
+    conflicts = [
+        flag for flag, given in (
+            ("--seats", (args.seats or "").strip()),
+            ("--run-id", args.run_id),
+        ) if given
+    ]
+    if conflicts:
+        print(
+            f"error: --signal cannot be combined with {'/'.join(conflicts)}; "
+            "they name DIFFERENT targets (--seats/--run-id wait on seat result "
+            "files in a review run's dir, --signal waits on an agent's marker "
+            "in the session's signals dir). Run one wait per target.",
+            file=sys.stderr,
+        )
+        return 2
+    tag = (args.signal or "").strip()
+    if not tag or re.sub(r"[^A-Za-z0-9_-]", "", tag) != tag:
+        print(
+            f"error: invalid signal tag {args.signal!r}; tags must match "
+            "[A-Za-z0-9_-] (no path separators or dots)",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not session_id:
+        # `signal` REQUIRES an explicit session id, so no marker can ever land in
+        # the sessionless dir: waiting there would poll a path with no writer and
+        # then time out after the full duration, reporting silence as if an agent
+        # had been asked and stayed quiet.
+        print(
+            "error: --signal needs a session id (pass --session-id or set "
+            "CLAUDE_SESSION_ID): markers are session-scoped and `crew signal` "
+            "refuses to write without an explicit one, so nothing can ever land "
+            "for a sessionless wait. Use the session id you gave the agent.",
+            file=sys.stderr,
+        )
+        return 2
+
+    path = _signals_dir(session_id) / f"{tag}.json"
+    start = time.monotonic()
+    while True:
+        landed = path.is_file()
+        elapsed = time.monotonic() - start
+        if landed or elapsed >= args.timeout:
+            break
+        # ~1s poll, quiet stdout, same as the seat barrier.
+        time.sleep(min(1.0, max(0.05, args.timeout - elapsed)))
+
+    if not landed:
+        if args.json:
+            # Seat-mode `wait --json` emits its payload on timeout too: one
+            # waiting primitive gives one machine-readable shape whichever
+            # target it polled, so a caller parsing stdout never has to special-
+            # case the mode that stayed silent.
+            print(json.dumps({
+                "tag": tag, "landed": False, "elapsed": round(elapsed, 1),
+                "note": _SIGNAL_SILENCE_NOTE,
+            }, ensure_ascii=False))
+        print(
+            f"error: timed out after {args.timeout:g}s waiting for signal "
+            f"{tag!r} (no marker at {path}). {_SIGNAL_SILENCE_NOTE}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        marker = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(marker, dict):
+            raise ValueError("signal marker is not a JSON object")
+    except (OSError, ValueError) as exc:
+        # The write is atomic, so a marker that appeared cannot be torn: an
+        # unreadable one was damaged from outside and is a real error, never a
+        # reason to keep polling a tag that already arrived.
+        print(f"error: cannot read the signal marker {path}: {exc}",
+              file=sys.stderr)
+        return 2
+
+    # A marker must SAY it is the one being waited on. Without this any JSON
+    # object at the path (`{}` included) releases the wait, and the orchestrator
+    # then reads a report that describes other work. A mismatch is not "still
+    # working" either: the file already exists, so polling on would never end.
+    if marker.get("tag") != tag or marker.get("session_id") != session_id:
+        print(
+            f"error: the marker at {path} does not describe this wait (it "
+            f"records tag {marker.get('tag')!r} / session "
+            f"{marker.get('session_id')!r}; this wait is on tag {tag!r} / "
+            f"session {session_id!r}). Something copied, hand-placed, or "
+            "damaged it; clear it with `crew signal --clear` and re-dispatch.",
+            file=sys.stderr,
+        )
+        return 2
+
+    status = marker.get("status")
+    if args.json:
+        # The marker's own fields plus its path: both modes must answer "where
+        # do I read this from" without the caller rebuilding the filename.
+        print(json.dumps({**marker, "path": str(path)}, ensure_ascii=False))
+    else:
+        print(f"wait: signal {tag} landed · status {status} · {path} "
+              f"· elapsed {elapsed:.0f}s")
+    # A `blocked` status still exits 0. The wait asks "did the agent speak?",
+    # and it did; the status carries the bad news. Failing here would conflate
+    # "the agent says it is stuck" with "the agent never spoke", which are
+    # opposite situations for the caller.
+    return 0
+
+
 def cmd_wait(args: argparse.Namespace) -> int:
     """Block until every named SUBPROCESS seat's ``<seat>.json`` exists: the
     engine half of the review flows' wait-for-both barrier.
@@ -2118,6 +2389,10 @@ def cmd_wait(args: argparse.Namespace) -> int:
     the seats still missing so the orchestrator can report or relaunch. Scope
     resolves through the same requested-scope helpers ``collect`` uses,
     inheriting every fail-closed rule.
+
+    ``--signal <tag>`` switches to the OTHER target (an agent's marker; see
+    ``_wait_for_signal``). One waiting primitive, two targets, one timeout
+    semantics.
     """
     session_id = _resolve_session_id(args.session_id)
     if "<" in session_id or ">" in session_id:
@@ -2128,6 +2403,14 @@ def cmd_wait(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # Dispatch on presence, never truth: a supplied-but-empty flag value is input
+    # to VALIDATE (the tag guard rejects it), not a signal of absence. Falsy-
+    # checking it here would send `--signal ""` down seat mode, skipping both the
+    # tag guard and the seats/run-id conflict check. Same rule as the `--run-id`
+    # intakes; any flag added here follows it.
+    if getattr(args, "signal", None) is not None:
+        return _wait_for_signal(args, session_id)
 
     try:
         results_dir, scope_rid = _resolve_read_scope(
@@ -3977,12 +4260,24 @@ def build_parser() -> argparse.ArgumentParser:
              "landed (it has finished). Exit 0 all landed; exit 1 on timeout "
              "naming the missing seats; exit 2 on misuse. Task seats are "
              "REFUSED: the orchestrator persists them itself, so waiting on "
-             "one would deadlock.",
+             "one would deadlock. With --signal it waits on an AGENT MARKER "
+             "instead (the other target of the one waiting primitive).",
     )
     wt.add_argument(
         "--session-id", dest="session_id", default=None,
         help="session id for .crew/reviews/<session-id>/ (default: "
              "CLAUDE_SESSION_ID env)",
+    )
+    wt.add_argument(
+        "--signal", dest="signal", default=None, metavar="TAG",
+        help="wait on an agent's signals/<TAG>.json marker (from `crew "
+             "signal`) instead of seat result files. Mutually exclusive with "
+             "--seats/--run-id (different targets; passing both exits 2). "
+             "Exit 0 on arrival, printing the marker path + status (a "
+             "`blocked` status RELEASES too: the agent spoke, and the status "
+             "carries the bad news); exit 1 on timeout. The marker STAYS at the "
+             "printed path for you to read; a marker naming another tag/session "
+             "exits 2.",
     )
     wt.add_argument(
         "--run-id", dest="run_id", default=None,
@@ -4006,9 +4301,48 @@ def build_parser() -> argparse.ArgumentParser:
     wt.add_argument(
         "--json", action="store_true",
         help="print {landed, missing, elapsed} as JSON instead of the "
-             "one-line summary",
+             "one-line summary (with --signal: the marker's own fields plus "
+             "its path)",
     )
     wt.set_defaults(func=cmd_wait)
+
+    sg = sub.add_parser(
+        "signal",
+        help="Write an agent's completion marker to "
+             ".crew/reviews/<session-id>/signals/<tag>.json (the report from "
+             "-f/stdin), which `wait --signal <tag>` blocks on. For a "
+             "LONG-LIVED teammate, which has no completion signal of its own "
+             "(a one-shot Task's return needs nothing here). --status blocked "
+             "records an agent that CANNOT finish: a silent stuck agent is the "
+             "worst case, so it must still signal. Re-signalling a tag "
+             "overwrites (newest report wins). --clear removes a tag's marker "
+             "instead (the orchestrator's pre-dispatch call, so a reused tag "
+             "cannot release the next wait on the last round's report). Prints "
+             "the marker path.",
+    )
+    sg.add_argument("tag", help="the signal's name; it is the filename stem, "
+                                "so it must match [A-Za-z0-9_-]")
+    sg.add_argument("--session-id", dest="session_id", default=None,
+                    help="REQUIRED: the ORCHESTRATOR's session id, which your "
+                         "delegating prompt gave you (the marker lands in "
+                         ".crew/reviews/<session-id>/signals/). No "
+                         "CLAUDE_SESSION_ID fallback here: your own session id "
+                         "would file the marker where nobody is waiting.")
+    sg.add_argument("--clear", action="store_true",
+                    help="remove this tag's marker instead of writing one; "
+                         "exit 0 whether or not one existed. The orchestrator "
+                         "calls this BEFORE dispatching a round that reuses a "
+                         "tag (no writer exists yet to race it).")
+    sg.add_argument("--status", dest="status", default="done",
+                    choices=("done", "blocked"),
+                    help="done (finished) or blocked (cannot finish; the "
+                         "report says why). Default: done. Either status "
+                         "releases the wait.")
+    sg.add_argument("-f", "--file", dest="file", default=None,
+                    help="read the report payload from this file (default: "
+                         "stdin). An empty report is allowed: the arrival is "
+                         "the signal.")
+    sg.set_defaults(func=cmd_signal)
 
     rs = sub.add_parser(
         "repair-seat",

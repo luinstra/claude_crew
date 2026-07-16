@@ -10593,6 +10593,395 @@ def test_wait():
               "note key present", f"rc={wzj.returncode} out={wzj.stdout[:150]!r}")
 
 
+def test_signal():
+    log_section("crew signal + wait --signal (the persistent-agent marker)")
+
+    def _signal(args, cwd, stdin=None):
+        try:
+            os.chmod(CREW_DISPATCHER, 0o755)
+        except OSError:
+            pass
+        return subprocess.run(
+            [str(CREW_DISPATCHER), "signal", *args],
+            input=stdin, capture_output=True, text=True,
+            env=_neutral_env(), cwd=cwd, timeout=30,
+        )
+
+    def _marker(cwd, session, tag):
+        p = Path(cwd) / ".crew" / "reviews" / session / "signals" / f"{tag}.json"
+        return json.loads(p.read_text(encoding="utf-8")) if p.is_file() else None
+
+    # A report worth checking VERBATIM: the payload is the whole point, so any
+    # normalization (trailing newline, unicode) would be a silent lie.
+    REPORT = "did the thing\nremaining: nothing · ✓\n"
+
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        (tdp / "report.txt").write_text(REPORT, encoding="utf-8")
+
+        # 1. -f round-trip: the path is echoed, the fields are right, the
+        #    report survives byte-for-byte.
+        s1 = _signal(["exec-1", "--session-id", "S", "-f", "report.txt"], td)
+        want_path = str(Path(".crew") / "reviews" / "S" / "signals" / "exec-1.json")
+        m1 = _marker(td, "S", "exec-1")
+        check("signal -f: prints the marker path and writes the full record",
+              s1.returncode == 0 and s1.stdout.strip() == want_path
+              and m1 == {"tag": "exec-1", "status": "done", "report": REPORT,
+                         "session_id": "S", "created_at": m1.get("created_at")}
+              and isinstance(m1.get("created_at"), str) and m1["created_at"],
+              f"exit 0, {want_path}, faithful fields",
+              f"rc={s1.returncode} out={s1.stdout[:120]!r} marker={m1!r}")
+
+        # 2. stdin is the default payload source (persist-seat's idiom).
+        s2 = _signal(["exec-2", "--session-id", "S"], td, stdin=REPORT)
+        m2 = _marker(td, "S", "exec-2")
+        check("signal with no -f reads the report from stdin",
+              s2.returncode == 0 and m2["report"] == REPORT,
+              "report from stdin", f"rc={s2.returncode} marker={m2!r}")
+
+        # 3. An empty report is ALLOWED (unlike persist-seat's empty output):
+        #    the arrival is the signal, so a terse agent still gets recorded.
+        s3 = _signal(["exec-3", "--session-id", "S"], td, stdin="   \n")
+        m3 = _marker(td, "S", "exec-3")
+        check("an empty/whitespace report is allowed and recorded faithfully",
+              s3.returncode == 0 and m3 is not None and m3["report"] == "   \n"
+              and m3["status"] == "done",
+              "exit 0, marker written, payload verbatim",
+              f"rc={s3.returncode} marker={m3!r}")
+
+        # 4. --status blocked: an agent that cannot finish must still speak.
+        s4 = _signal(["exec-4", "--session-id", "S", "--status", "blocked"],
+                     td, stdin="the API does not exist")
+        m4 = _marker(td, "S", "exec-4")
+        check("--status blocked is recorded with its report",
+              s4.returncode == 0 and m4["status"] == "blocked"
+              and m4["report"] == "the API does not exist",
+              "status=blocked", f"rc={s4.returncode} marker={m4!r}")
+
+        # 5. Re-signalling OVERWRITES: a retried round re-signals, and the
+        #    newest report is the truth about where the work stands.
+        s5 = _signal(["exec-1", "--session-id", "S", "--status", "blocked"],
+                     td, stdin="round 2: stuck")
+        m5 = _marker(td, "S", "exec-1")
+        check("re-signalling the same tag overwrites with the newest report",
+              s5.returncode == 0 and m5["report"] == "round 2: stuck"
+              and m5["status"] == "blocked",
+              "newest report wins", f"rc={s5.returncode} marker={m5!r}")
+
+        # 6. The tag names a FILE, so a hostile one is refused before any path
+        #    is built: nothing written anywhere.
+        before = sorted(p.name for p in
+                        (tdp / ".crew" / "reviews" / "S" / "signals").iterdir())
+        for bad in ("../x", "a/b", "exec.1", ""):
+            sb = _signal([bad, "--session-id", "S"], td, stdin="x")
+            check(f"a bad tag {bad!r} exits 2 (charset guard)",
+                  sb.returncode == 2 and "invalid signal tag" in sb.stderr,
+                  "exit 2", f"rc={sb.returncode} err={sb.stderr[:120]!r}")
+        after = sorted(p.name for p in
+                       (tdp / ".crew" / "reviews" / "S" / "signals").iterdir())
+        check("a rejected tag writes NOTHING",
+              before == after, f"{before}", f"{after}")
+
+    # 7. A hostile session id COLLAPSES into one child dir (sanitization, the
+    #    shared reviews-subdir posture), never escaping the reviews tree.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        sh = _signal(["t", "--session-id", "../../evil"], td, stdin="x")
+        landed = str(Path(".crew") / "reviews" / "evil" / "signals" / "t.json")
+        escaped = list(tdp.parent.glob("signals")) + list(tdp.parent.glob("t.json"))
+        check("a hostile --session-id is contained by sanitization",
+              sh.returncode == 0 and sh.stdout.strip() == landed
+              and (tdp / landed).is_file() and not escaped,
+              f"{landed}, nothing outside the tree",
+              f"rc={sh.returncode} out={sh.stdout[:120]!r} escaped={escaped}")
+
+    # 8. wait --signal on an ALREADY-landed marker: releases at once with the
+    #    path + status, so the caller reads the report at a known location.
+    with tempfile.TemporaryDirectory() as td:
+        _signal(["exec-1", "--session-id", "S"], td, stdin=REPORT)
+        want_path = str(Path(".crew") / "reviews" / "S" / "signals" / "exec-1.json")
+        start = _time_now()
+        w1 = _run_dispatcher(["wait", "--session-id", "S", "--signal", "exec-1",
+                              "--timeout", "10"], cwd=td, timeout=30)
+        quick = (_time_now() - start) < 8
+        check("wait --signal on an existing marker: exit 0 with path + status, no stall",
+              w1.returncode == 0 and want_path in w1.stdout
+              and "done" in w1.stdout and quick,
+              "exit 0, path + status printed",
+              f"rc={w1.returncode} out={w1.stdout[:150]!r} quick={quick}")
+
+        w1j = _run_dispatcher(["wait", "--session-id", "S", "--signal", "exec-1",
+                               "--timeout", "10", "--json"], cwd=td, timeout=30)
+        try:
+            j1 = json.loads(w1j.stdout)
+        except (json.JSONDecodeError, ValueError):
+            j1 = {}
+        check("wait --signal --json prints the marker's own fields plus its path",
+              w1j.returncode == 0 and j1.get("tag") == "exec-1"
+              and j1.get("status") == "done" and j1.get("report") == REPORT
+              and j1.get("session_id") == "S" and j1.get("path") == want_path,
+              "marker fields + path", f"rc={w1j.returncode} json={j1!r}")
+
+        # 9. A blocked marker RELEASES too (exit 0): the wait asks whether the
+        #    agent spoke, and the status carries the bad news.
+        _signal(["exec-b", "--session-id", "S", "--status", "blocked"], td,
+                stdin="cannot proceed")
+        wb = _run_dispatcher(["wait", "--session-id", "S", "--signal", "exec-b",
+                              "--timeout", "10"], cwd=td, timeout=30)
+        check("a blocked marker releases the wait (exit 0) with the status visible",
+              wb.returncode == 0 and "blocked" in wb.stdout,
+              "exit 0 + status blocked",
+              f"rc={wb.returncode} out={wb.stdout[:150]!r}")
+
+        # 10. Misuse: --signal and the SCOPE flags name different targets.
+        wc = _run_dispatcher(["wait", "--session-id", "S", "--signal", "exec-1",
+                              "--seats", "codex", "--timeout", "2"],
+                             cwd=td, timeout=30)
+        check("--signal with --seats exits 2 naming the conflict",
+              wc.returncode == 2 and "--seats" in wc.stderr
+              and "--signal" in wc.stderr,
+              "exit 2", f"rc={wc.returncode} err={wc.stderr[:180]!r}")
+        wr = _run_dispatcher(["wait", "--session-id", "S", "--signal", "exec-1",
+                              "--run-id", "run-abcdef123456", "--timeout", "2"],
+                             cwd=td, timeout=30)
+        check("--signal with --run-id exits 2 naming the conflict",
+              wr.returncode == 2 and "--run-id" in wr.stderr
+              and "--signal" in wr.stderr,
+              "exit 2", f"rc={wr.returncode} err={wr.stderr[:180]!r}")
+
+    # 11. Timeout: exit 1 naming the tag, and saying plainly that silence is
+    #     AMBIGUOUS (still working vs finished without signalling). That exact
+    #     ambiguity is why the diagnostic must not read as "the work failed".
+    with tempfile.TemporaryDirectory() as td:
+        start = _time_now()
+        wt = _run_dispatcher(["wait", "--session-id", "S", "--signal", "never",
+                              "--timeout", "2"], cwd=td, timeout=30)
+        elapsed = _time_now() - start
+        check("wait --signal timeout: exit 1 naming the tag, ambiguity stated",
+              wt.returncode == 1 and "'never'" in wt.stderr
+              and "may still be working" in wt.stderr
+              and "WITHOUT signalling" in wt.stderr
+              and 1.5 < elapsed < 12,
+              "exit 1 + honest diagnostic",
+              f"rc={wt.returncode} err={wt.stderr[:220]!r} elapsed={elapsed:.1f}")
+
+    # 12. A marker landing MID-WAIT releases the barrier. No pre-wait crutch:
+    #     the wait is running BEFORE the signal is written, which is the whole
+    #     race the poll exists to handle.
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            os.chmod(CREW_DISPATCHER, 0o755)
+        except OSError:
+            pass
+        proc = subprocess.Popen(
+            [str(CREW_DISPATCHER), "wait", "--session-id", "S",
+             "--signal", "late", "--timeout", "20"],
+            cwd=td, env=_neutral_env(),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        time.sleep(2)
+        _signal(["late", "--session-id", "S"], td, stdin="landed late")
+        out, err = proc.communicate(timeout=30)
+        check("a marker landing mid-wait releases the barrier (exit 0)",
+              proc.returncode == 0 and "late" in out and "done" in out,
+              "exit 0 after the mid-wait signal",
+              f"rc={proc.returncode} out={out[:150]!r} err={err[:150]!r}")
+
+    # 13. THE HAZARD, pinned as the contract: `wait` releases on ANY marker for
+    #     the tag, so a surviving one from a PREVIOUS round releases the next
+    #     round's wait at once with the STALE report. This is why the
+    #     orchestrator clears before it dispatches; the test exists so the
+    #     clear's value stays visible rather than looking like ceremony.
+    with tempfile.TemporaryDirectory() as td:
+        _signal(["reused", "--session-id", "S"], td, stdin="ROUND 1 report")
+        w = _run_dispatcher(["wait", "--session-id", "S", "--signal", "reused",
+                             "--timeout", "10", "--json"], cwd=td, timeout=30)
+        try:
+            j = json.loads(w.stdout)
+        except (json.JSONDecodeError, ValueError):
+            j = {}
+        check("a stale marker released the wait with the PREVIOUS round's report",
+              w.returncode == 0 and j.get("report") == "ROUND 1 report",
+              "exit 0 on the stale report (the hazard --clear answers)",
+              f"rc={w.returncode} json={j!r}")
+
+    # 14. `signal --clear` before the dispatch closes it: the wait now BLOCKS on
+    #     the tag until the NEW round speaks, and releases on the FRESH report.
+    with tempfile.TemporaryDirectory() as td:
+        _signal(["reused", "--session-id", "S"], td, stdin="ROUND 1 report")
+        c = _signal(["reused", "--session-id", "S", "--clear"], td)
+        gone = _marker(td, "S", "reused") is None
+        check("signal --clear removes the previous round's marker",
+              c.returncode == 0 and gone,
+              "exit 0, marker gone", f"rc={c.returncode} gone={gone}")
+
+        proc = subprocess.Popen(
+            [str(CREW_DISPATCHER), "wait", "--session-id", "S",
+             "--signal", "reused", "--timeout", "20", "--json"],
+            cwd=td, env=_neutral_env(),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        time.sleep(2)
+        still_waiting = proc.poll() is None
+        _signal(["reused", "--session-id", "S"], td, stdin="ROUND 2 report")
+        out, err = proc.communicate(timeout=30)
+        try:
+            j2 = json.loads(out)
+        except (json.JSONDecodeError, ValueError):
+            j2 = {}
+        check("after --clear the wait BLOCKS, then releases on the fresh report",
+              still_waiting and proc.returncode == 0
+              and j2.get("report") == "ROUND 2 report",
+              "blocked past the stale marker, released on round 2",
+              f"waiting={still_waiting} rc={proc.returncode} json={j2!r} "
+              f"err={err[:150]!r}")
+
+        c2 = _signal(["never-existed", "--session-id", "S", "--clear"], td)
+        check("--clear on a tag with no marker exits 0 (idempotent)",
+              c2.returncode == 0,
+              "exit 0", f"rc={c2.returncode} err={c2.stderr[:150]!r}")
+
+    # 15. The POINT of the printed path: a successful wait LEAVES the marker, so
+    #     the orchestrator can Read the report there (reading it at a known path
+    #     instead of racing agent messages is why the payload exists at all). A
+    #     wait that removed it would print a path to nothing.
+    with tempfile.TemporaryDirectory() as td:
+        _signal(["once", "--session-id", "S"], td, stdin=REPORT)
+        w = _run_dispatcher(["wait", "--session-id", "S", "--signal", "once",
+                             "--timeout", "10"], cwd=td, timeout=30)
+        printed = str(Path(".crew") / "reviews" / "S" / "signals" / "once.json")
+        on_disk = (Path(td) / printed)
+        m = _marker(td, "S", "once")
+        check("a successful wait leaves the marker readable at the printed path",
+              w.returncode == 0 and printed in w.stdout and on_disk.is_file()
+              and m is not None and m["report"] == REPORT,
+              "exit 0, report intact at the printed path",
+              f"rc={w.returncode} out={w.stdout[:150]!r} marker={m!r}")
+
+        # And it stays readable across waits: nothing about reading consumes.
+        w2 = _run_dispatcher(["wait", "--session-id", "S", "--signal", "once",
+                              "--timeout", "10"], cwd=td, timeout=30)
+        check("a second wait on the same tag still releases on the intact marker",
+              w2.returncode == 0 and printed in w2.stdout
+              and _marker(td, "S", "once")["report"] == REPORT,
+              "exit 0, marker still there",
+              f"rc={w2.returncode} out={w2.stdout[:150]!r}")
+
+    # 16. --session-id is REQUIRED for `signal`, env fallback and all: a
+    #     long-lived teammate's own session id would file the marker in a dir
+    #     nobody waits on, which is the exact stranding this protocol prevents.
+    with tempfile.TemporaryDirectory() as td:
+        env = {**_neutral_env(), "CLAUDE_SESSION_ID": "TEAMMATE"}
+        try:
+            os.chmod(CREW_DISPATCHER, 0o755)
+        except OSError:
+            pass
+        ns = subprocess.run(
+            [str(CREW_DISPATCHER), "signal", "exec-1"],
+            input="x", capture_output=True, text=True, env=env, cwd=td,
+            timeout=30)
+        wrote = list((Path(td) / ".crew").rglob("*.json"))
+        check("signal without --session-id exits 2 even with CLAUDE_SESSION_ID set",
+              ns.returncode == 2 and "--session-id" in ns.stderr and not wrote,
+              "exit 2, no env fallback, nothing written",
+              f"rc={ns.returncode} err={ns.stderr[:180]!r} wrote={wrote}")
+
+        # The asymmetry is deliberate: `wait` runs in the ORCHESTRATOR's own
+        # session, so its env value is the right one and the fallback stands.
+        _signal(["exec-1", "--session-id", "TEAMMATE"], td, stdin=REPORT)
+        we = _run_dispatcher(["wait", "--signal", "exec-1", "--timeout", "10"],
+                             env=env, cwd=td, timeout=30)
+        check("wait --signal keeps the CLAUDE_SESSION_ID fallback",
+              we.returncode == 0 and "exec-1" in we.stdout,
+              "exit 0 via the env session", f"rc={we.returncode} "
+              f"out={we.stdout[:150]!r} err={we.stderr[:150]!r}")
+
+    # 17. The waiter VALIDATES what it releases on: any JSON object at the path
+    #     (`{}` included) would otherwise pass, handing back a report that
+    #     describes other work. A mismatch is exit 2, not more polling: the file
+    #     is already there, so waiting on would never end.
+    with tempfile.TemporaryDirectory() as td:
+        sig_dir = Path(td) / ".crew" / "reviews" / "S" / "signals"
+        sig_dir.mkdir(parents=True)
+        (sig_dir / "wrong-tag.json").write_text(json.dumps(
+            {"tag": "other", "status": "done", "report": "x",
+             "session_id": "S"}), encoding="utf-8")
+        wm = _run_dispatcher(["wait", "--session-id", "S", "--signal",
+                              "wrong-tag", "--timeout", "10"], cwd=td, timeout=30)
+        check("a marker whose tag does not match exits 2",
+              wm.returncode == 2 and "does not describe this wait" in wm.stderr,
+              "exit 2", f"rc={wm.returncode} err={wm.stderr[:180]!r}")
+
+        (sig_dir / "wrong-sid.json").write_text(json.dumps(
+            {"tag": "wrong-sid", "status": "done", "report": "x",
+             "session_id": "OTHER"}), encoding="utf-8")
+        ws = _run_dispatcher(["wait", "--session-id", "S", "--signal",
+                              "wrong-sid", "--timeout", "10"], cwd=td, timeout=30)
+        check("a marker whose session does not match exits 2",
+              ws.returncode == 2 and "does not describe this wait" in ws.stderr,
+              "exit 2", f"rc={ws.returncode} err={ws.stderr[:180]!r}")
+
+        (sig_dir / "empty.json").write_text("{}", encoding="utf-8")
+        we2 = _run_dispatcher(["wait", "--session-id", "S", "--signal",
+                               "empty", "--timeout", "10"], cwd=td, timeout=30)
+        check("an empty JSON object no longer releases the wait",
+              we2.returncode == 2,
+              "exit 2", f"rc={we2.returncode} err={we2.stderr[:180]!r}")
+
+    # 18. --json symmetry: seat-mode `wait --json` emits its payload on timeout,
+    #     so signal-mode must too, ambiguity note included.
+    with tempfile.TemporaryDirectory() as td:
+        wj = _run_dispatcher(["wait", "--session-id", "S", "--signal", "never",
+                              "--timeout", "2", "--json"], cwd=td, timeout=30)
+        try:
+            jt = json.loads(wj.stdout)
+        except (json.JSONDecodeError, ValueError):
+            jt = {}
+        check("wait --signal --json emits a payload on timeout too",
+              wj.returncode == 1 and jt.get("tag") == "never"
+              and jt.get("landed") is False
+              and isinstance(jt.get("elapsed"), (int, float))
+              and "WITHOUT signalling" in (jt.get("note") or ""),
+              "exit 1 + JSON {tag, landed, elapsed, note}",
+              f"rc={wj.returncode} json={jt!r}")
+
+    # 19. `--signal ""` is SUPPLIED, so it is input to validate: the tag guard
+    #     rejects it. Falsy-checking the flag would treat it as absent and fall
+    #     through to seat mode, where the empty tag and the --seats conflict both
+    #     go unchecked (the mistake already fixed on the --run-id intakes).
+    with tempfile.TemporaryDirectory() as td:
+        we3 = _run_dispatcher(["wait", "--session-id", "S", "--signal", "",
+                               "--timeout", "2"], cwd=td, timeout=30)
+        check("wait --signal '' exits 2 on the tag guard, never falls into seat mode",
+              we3.returncode == 2 and "invalid signal tag" in we3.stderr
+              and "flat mode has no manifest" not in we3.stderr,
+              "exit 2 from the signal path",
+              f"rc={we3.returncode} err={we3.stderr[:180]!r}")
+
+        # The conflict check must run for an empty tag too: seat mode would have
+        # accepted --seats silently.
+        wq = _run_dispatcher(["wait", "--session-id", "S", "--signal", "",
+                              "--seats", "codex", "--timeout", "2"],
+                             cwd=td, timeout=30)
+        check("wait --signal '' --seats still exits 2 (the conflict check ran)",
+              wq.returncode == 2 and "--signal" in wq.stderr,
+              "exit 2", f"rc={wq.returncode} err={wq.stderr[:180]!r}")
+
+    # 20. No session id ANYWHERE: fail fast. `signal` requires an explicit one,
+    #     so nothing can ever land in the sessionless dir, and polling it to the
+    #     full timeout would report silence as if an agent had been asked.
+    with tempfile.TemporaryDirectory() as td:
+        env = _neutral_env()
+        env.pop("CLAUDE_SESSION_ID", None)
+        start = _time_now()
+        wn = _run_dispatcher(["wait", "--signal", "exec-1", "--timeout", "20"],
+                             env=env, cwd=td, timeout=30)
+        elapsed = _time_now() - start
+        check("wait --signal with no session id exits 2 promptly, not a timeout",
+              wn.returncode == 2 and "--session-id" in wn.stderr
+              and elapsed < 5,
+              "exit 2 naming the missing session id",
+              f"rc={wn.returncode} err={wn.stderr[:200]!r} elapsed={elapsed:.1f}")
+
+
 def _time_now():
     import time as _t
     return _t.monotonic()
@@ -10824,6 +11213,7 @@ def main():
     test_run_scoped_reviews()
     test_collect_run_scoped()
     test_wait()
+    test_signal()
     test_quorum_header()
 
     print()

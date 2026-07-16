@@ -39,7 +39,7 @@ their results into the same six-field shape the engine returns.
 
 ```
 multiagent/
-├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher) — subcommands: review | council | debate | run | dispatch | render (incl. --stage-all) | seats (incl. --debate) | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | wait | doctor | probe | scaffold-config
+├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher) — subcommands: review | council | debate | run | dispatch | render (incl. --stage-all) | seats (incl. --debate) | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | wait (incl. --signal) | signal | doctor | probe | scaffold-config
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
@@ -74,7 +74,52 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   job). Default seat list = the manifest's kind=subprocess names; a task-kind name is REFUSED (the
   orchestrator persists Task seats itself, so waiting on one would deadlock); flat mode requires
   --seats. Exit 0 all landed; exit 1 on timeout naming the missing seats (default 900s). Scope
-  resolves through the same requested-scope fail-closed helpers `collect` uses.
+  resolves through the same requested-scope fail-closed helpers `collect` uses. `--signal <tag>` is
+  the OTHER target of the same primitive: it blocks on an agent's `signals/<tag>.json` marker instead
+  of seat files (mutually exclusive with `--seats`/`--run-id`, which exits 2 naming the conflict:
+  seats are result files in a run dir, signals are agent markers). Exit 0 on arrival printing the
+  marker path + status (`--json`: the marker's fields + path); a `blocked` status RELEASES too (the
+  agent spoke, and the status carries the bad news; exit 1 would conflate it with never speaking);
+  exit 1 on timeout naming the tag, and saying plainly that the agent may still be working OR may
+  have finished WITHOUT signalling, so check the tree rather than assume failure (`--json` prints
+  `{tag, landed:false, elapsed, note}` on timeout too, matching seat-mode's emit-even-on-timeout
+  payload). It VALIDATES before releasing: the marker's `tag` and `session_id` must match the wait,
+  else exit 2 (without it any JSON object, `{}` included, releases and hands back a report about
+  other work; and a mismatch can't be "still working", the file is already there). A successful wait
+  LEAVES the marker in place, so the orchestrator can Read the report at the printed path: that known
+  path is the whole point (it replaces racing out-of-order agent messages), and a wait that deleted it
+  would hand back a path to nothing. Staleness is `signal --clear`'s job, not the waiter's.
+- `signal <tag>` — write an agent's completion marker to `signals/<tag>.json` (`{tag, status, report,
+  session_id, created_at}`; report from `-f`/stdin, empty allowed since the ARRIVAL is the signal;
+  `--status done|blocked`, blocked for an agent that cannot finish, because a silently stuck agent is
+  the worst case). Atomic (a concurrent `wait` never reads a torn marker) and session-scoped through
+  the same sanitizing chokepoint; re-signalling a tag overwrites (a retried round re-signals, newest
+  report wins). Prints the marker path. `--session-id` is REQUIRED here (exit 2 naming why, no
+  `CLAUDE_SESSION_ID` fallback): the marker must land in the ORCHESTRATOR's session dir, and a
+  long-lived teammate's env names the TEAMMATE's session, so a fallback would file the marker where
+  nobody waits, which is the exact stranding this protocol exists to prevent. The delegating prompt
+  supplies the tag AND the orchestrator's session id; `wait --signal` keeps the fallback (the
+  orchestrator waits in its own session, where the env value IS correct): the asymmetry is
+  deliberate. `--clear <tag>` removes a marker instead of writing one (exit 0 whether or not one
+  existed; refuses `-f`, since a clear has no payload).
+  **Reusing a tag:** markers PERSIST until cleared (`wait` reads and leaves them, so the report stays
+  readable at the path it printed), and `wait` releases on ANY marker for the tag, so a surviving
+  marker from a prior round releases the next round's wait IMMEDIATELY with the stale report.
+  `signal <tag> --clear` before dispatch is the ONE mechanism against that, and the orchestrator MUST
+  run it before dispatching a round that reuses a tag (at that point no writer exists to race the
+  clear). Residual, stated honestly: an orchestrator that reuses a tag WITHOUT clearing, over a marker
+  that survived, CAN read a stale report. The clear-before-dispatch rule is what prevents that, and it
+  is convention like the rest of this protocol. Markers therefore accumulate under
+  `.crew/reviews/<sid>/signals/` (gitignored and harmless; a future sweep can cover the dir).
+  **Honest caveat:** this protocol is CONVENTION, not
+  enforcement. A one-shot `Task` seat needs none of it (its RETURN is the completion signal and the
+  harness cannot forget to deliver it); the signal exists for a LONG-LIVED teammate, which has no
+  completion signal at all (it never completes, it only goes idle), and the agent must actually call
+  it. A forgotten signal is indistinguishable from an agent still working: `wait`'s timeout is what
+  makes that failure bounded and loud rather than a poll that never ends. The standing rule lives in
+  `agents/executor.md` (signal LAST, always, blocked included, iff the prompt named a tag). The
+  review-bearing flows (`review`/`build`/`measure-twice`) do NOT use this: they delegate via one-shot
+  Tasks whose returns already signal, so a signal step there would be pure ceremony.
 - `repair-seat` — write the haiku repair to a seat's SEPARATE `repaired_output` field, never overwriting `output`.
 - `review-prep` — resolve target + split panel, mint the run-scoped review dir
   (`review_runs.py`: identity from content hash + review inputs, write-once
