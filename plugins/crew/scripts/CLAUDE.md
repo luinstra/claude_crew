@@ -762,9 +762,16 @@ rules are load-bearing; each one is a bug that already happened.
 4. **`max_parked_fires` is the escape valve.** The park signal is broad: ANY
    harness-tracked background shell (a dev server, a `tail -f`) parks every Stop,
    which would otherwise disable the loop entirely (no nudge, no bound, no
-   diagnostic). So `parked_fires` counts CONSECUTIVE parks, resets on any fire
-   with nothing in flight, and past `max_parked_fires` (20) a parked Stop is
-   nudged like an ordinary one and costs a `stop_fire`. 20 is generous on
+   diagnostic). So `parked_fires` counts CONSECUTIVE parks and resets on any
+   BLOCKING fire: a fire with nothing in flight, or a past-cap parked fire
+   that got nudged (the nudge forces a working turn, which ends the unbroken
+   run of parks the cap bounds). Past `max_parked_fires` (20) a parked Stop is
+   nudged like an ordinary one and costs a `stop_fire`; because the nudge also
+   resets the run, a shell that never exits costs one nudge per cap-length run
+   of parks, never a blocked stop on EVERY later turn-end (in a session whose
+   every turn-end is parked, the nothing-in-flight reset is unreachable, so a
+   kept counter once let legitimate panel waits exhaust the cap cumulatively).
+   20 is generous on
    purpose: an honest seat wait costs one or two parked fires per round.
 
 5. **Termination beats parking.** The bounds are evaluated BEFORE the parked

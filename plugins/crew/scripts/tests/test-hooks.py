@@ -3329,6 +3329,64 @@ def main():
                              f"parked_fires={after.get('parked_fires')}, "
                              f"stop_fires={after.get('stop_fires')}")
 
+                # --- the budget bounds UNBROKEN runs of parks, never the
+                # session's lifetime total: park under the cap, take one
+                # blocking fire, and a fresh run of parks is fully allowed
+                # (a cumulative counter would exhaust a cap of 5 on the sixth
+                # lifetime park) ---
+                _clear_state_files()
+                state_path = _write_loop_state(
+                    loop, stop_fires=0, parked_fires=0, max_parked_fires=5)
+                run_outs = [run_script(persistent_mode, _parked_payload(one_task))
+                            for _ in range(3)]
+                run_script(persistent_mode, stop_payload)  # blocking fire: resets
+                run_outs += [run_script(persistent_mode, _parked_payload(one_task))
+                             for _ in range(3)]
+                after = _read_state_json(state_path)
+                all_parks_allowed = all(
+                    '"decision": "block"' not in o for o in run_outs)
+                if (all_parks_allowed and after.get("parked_fires") == 3
+                        and after.get("stop_fires") == 1):
+                    log_pass(f"{loop}: 3 parks + a blocking fire + 3 parks all allow "
+                             f"(the run resets; a lifetime total would exhaust cap 5)")
+                else:
+                    log_fail(f"{loop}: 3 parks + a blocking fire + 3 parks all allow "
+                             f"(the run resets; a lifetime total would exhaust cap 5)",
+                             "6 parked allows, parked_fires=3, stop_fires=1",
+                             f"allowed={all_parks_allowed}, "
+                             f"parked_fires={after.get('parked_fires')}, "
+                             f"stop_fires={after.get('stop_fires')}")
+
+                # --- the past-cap NUDGE also resets the run: the nudge forces a
+                # working turn, so the next parks start a NEW run instead of
+                # every later park being a blocked stop fire (the kept counter
+                # once let panel waits exhaust the cap cumulatively in a
+                # session whose every turn-end was parked) ---
+                _clear_state_files()
+                state_path = _write_loop_state(
+                    loop, stop_fires=0, parked_fires=3, max_parked_fires=3)
+                out_trip = json.loads(run_script(persistent_mode, _parked_payload(one_task)))
+                after_trip = _read_state_json(state_path)
+                out_next = json.loads(run_script(persistent_mode, _parked_payload(one_task)))
+                after_next = _read_state_json(state_path)
+                if (out_trip.get("decision") == "block"
+                        and after_trip.get("stop_fires") == 1
+                        and after_trip.get("parked_fires") == 0
+                        and "decision" not in out_next
+                        and after_next.get("parked_fires") == 1
+                        and after_next.get("stop_fires") == 1):
+                    log_pass(f"{loop}: the cap trips on cap consecutive parks, and the nudge "
+                             f"RESETS the run (next park is allowed again)")
+                else:
+                    log_fail(f"{loop}: the cap trips on cap consecutive parks, and the nudge "
+                             f"RESETS the run (next park is allowed again)",
+                             "trip: block + stop_fires=1 + parked_fires=0; next: allow + parked_fires=1",
+                             f"trip decision={out_trip.get('decision')}, "
+                             f"trip parked={after_trip.get('parked_fires')}, "
+                             f"next out={json.dumps(out_next)[:60]}, "
+                             f"next parked={after_next.get('parked_fires')}, "
+                             f"next fires={after_next.get('stop_fires')}")
+
                 # A parked fire must never carry a block decision, however phrased.
                 if all('"decision": "block"' not in o for o in parked_outs):
                     log_pass(f"{loop}: a parked fire emits no block decision")

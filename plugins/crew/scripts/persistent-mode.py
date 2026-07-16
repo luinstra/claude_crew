@@ -289,13 +289,21 @@ what did not, and what you were waiting on."""
         # stop_fire). The park signal cannot tell crew's own seats from an
         # unrelated long-lived shell (a dev server, a `tail -f`), and such a
         # shell would otherwise park every Stop and silently disable the loop:
-        # no nudge, no bound, no diagnostic. The counter is NOT reset here, so
-        # a wait that never produces a working turn keeps costing stop_fires
-        # until the circuit breaker trips.
-        _persist_fires(loop_file, state, stop_delta=1, parked="keep")
+        # no nudge, no bound, no diagnostic. The counter RESETS here too: the
+        # nudge forces a working turn, which ends the unbroken run of parks the
+        # cap exists to bound. A kept counter turned this one-time backstop
+        # into a permanent penalty; in a session where a long-lived shell
+        # parked EVERY turn-end, the non-parked reset below was unreachable,
+        # so legitimate panel waits exhausted the cap cumulatively and every
+        # later turn-end burned a stop_fire. The next cap-length run of parks
+        # still costs a nudge + a stop_fire, and the wall-clock deadline still
+        # bounds a loop that only ever parks (termination beats parking).
+        _persist_fires(loop_file, state, stop_delta=1, parked="reset")
     else:
         # parked_fires counts CONSECUTIVE parks: a fire with nothing in flight
-        # means the session came back and did work, so the wait was real.
+        # means the session came back and did work, so the wait was real. (Any
+        # BLOCKING fire resets the run; this branch and the past-cap nudge
+        # above are the two.)
         _persist_fires(loop_file, state, stop_delta=1, parked="reset")
 
     # The full recipe is CREW_VERBOSE-only. It used to also print on the first
