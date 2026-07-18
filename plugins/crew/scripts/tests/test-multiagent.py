@@ -1116,6 +1116,206 @@ def test_targets():
               t.diff_cmd == "git --no-pager diff HEAD",
               "git --no-pager diff HEAD", str(t.diff_cmd))
 
+    # a working-tree target NEVER sees the engine's own .crew/ artifacts as
+    # untracked content: the panel writes state/run dirs there mid-review, so
+    # including them would re-hash the target on every run and completion would
+    # warn on the engine's own bookkeeping. core.excludesFile=/dev/null pins the
+    # exclusion to the code under test, not a stray global gitignore.
+    with tempfile.TemporaryDirectory() as td:
+        from multiagent import review_runs as _rr
+        _init_repo(td)
+        _git(["config", "core.excludesFile", "/dev/null"], td)
+        (Path(td) / "a.txt").write_text("hello\nreviewed\n")  # the real change
+        before = targets.resolve("working-tree", cwd=td)
+        h_before = _rr.sha256_text(before.content)
+        # The panel's own artifacts appear mid-review (untracked, not ignored).
+        crew_run = Path(td) / ".crew" / "reviews" / "sess-1" / "run-abc123def456"
+        crew_run.mkdir(parents=True)
+        (crew_run / "run.json").write_text('{"run_id": "run-abc123def456"}\n')
+        (crew_run / "codex.json").write_text('{"ok": true}\n')
+        (Path(td) / ".crew" / "build-state-sess-1.json").write_text('{"active": true}\n')
+        after = targets.resolve("working-tree", cwd=td)
+        check("working-tree hash is stable across the appearance of .crew/ artifacts",
+              _rr.sha256_text(after.content) == h_before,
+              "hash unchanged", f"{h_before[:12]} -> {_rr.sha256_text(after.content)[:12]}")
+        check("working-tree content never includes an engine .crew/ path",
+              ".crew" not in after.content, "no .crew in content", after.content[:200])
+        check("working-tree notes never list an engine .crew/ artifact as untracked",
+              not any(".crew" in n for n in after.notes),
+              "no .crew in notes", str(after.notes))
+
+    # ONE untracked enumeration feeds dirtiness, content, AND the reproduced
+    # command. A tree whose ONLY uncommitted content is .crew/ artifacts is NOT
+    # dirty, so `auto` falls through to the branch diff instead of resolving an
+    # empty working-tree a panel could review and approve.
+    with tempfile.TemporaryDirectory() as td:
+        _init_repo(td)
+        _git(["config", "core.excludesFile", "/dev/null"], td)
+        _git(["checkout", "-q", "-b", "feature"], td)
+        (Path(td) / "a.txt").write_text("hello\nbranch-work\n")
+        _git(["commit", "-aqm", "feature work"], td)
+        # Engine artifacts appear untracked, and NOTHING else is uncommitted.
+        crew_run = Path(td) / ".crew" / "reviews" / "sess-1" / "run-abc123def456"
+        crew_run.mkdir(parents=True)
+        (crew_run / "codex.json").write_text('{"ok": true}\n')
+        t = targets.resolve("auto", base="main", cwd=td)
+        check("auto with ONLY .crew/ artifacts uncommitted resolves the branch diff, "
+              "not an empty working-tree",
+              t.kind == "code" and "branch" in t.scope and "working-tree" not in t.scope
+              and "branch-work" in t.content,
+              "branch diff w/ branch-work", f"scope={t.scope}")
+        check("that branch-diff content never includes a .crew/ artifact",
+              ".crew" not in t.content, "no .crew in content", t.content[:200])
+
+    # A STAT-dirty file (touched, bytes identical) must not make `auto` pick an
+    # empty working-tree. Two layers guard this: `_has_tracked_changes` refreshes
+    # the index (so the dirtiness predicate stops false-reporting), and
+    # `_resolve_auto` falls through whenever the working tree carries NO content
+    # regardless of what the predicate said. The fallthrough is the durable one:
+    # force `_is_dirty` True and confirm `auto` STILL resolves the branch diff.
+    with tempfile.TemporaryDirectory() as td:
+        _init_repo(td)
+        _git(["config", "core.excludesFile", "/dev/null"], td)
+        _git(["checkout", "-q", "-b", "feature"], td)
+        (Path(td) / "a.txt").write_text("hello\nbranch-work\n")
+        _git(["commit", "-aqm", "feature work"], td)
+        # Rewrite identical bytes (a touch): no content change, just a fresh mtime.
+        (Path(td) / "a.txt").write_text("hello\nbranch-work\n")
+        t = targets.resolve("auto", base="main", cwd=td)
+        check("a touched-but-unchanged file resolves auto to the branch diff, "
+              "not an empty working-tree",
+              t.kind == "code" and "branch" in t.scope
+              and "working-tree" not in t.scope and "branch-work" in t.content,
+              "branch diff", f"scope={t.scope}")
+        # The invariant independent of the predicate: even if dirtiness misfires,
+        # an empty working tree must fall through to the committed diff.
+        orig_is_dirty = targets._is_dirty
+        targets._is_dirty = lambda cwd=None: True
+        try:
+            t2 = targets.resolve("auto", base="main", cwd=td)
+        finally:
+            targets._is_dirty = orig_is_dirty
+        check("auto falls through to the branch diff when the working tree is "
+              "empty even though _is_dirty reports True",
+              t2.kind == "code" and "branch" in t2.scope
+              and "working-tree" not in t2.scope and "branch-work" in t2.content,
+              "branch diff despite forced-dirty", f"scope={t2.scope}")
+
+    # A real edit BESIDE .crew/ artifacts still resolves working-tree, and the
+    # artifacts are excluded from BOTH the content AND the command a seat replays.
+    with tempfile.TemporaryDirectory() as td:
+        _init_repo(td)
+        _git(["config", "core.excludesFile", "/dev/null"], td)
+        (Path(td) / "a.txt").write_text("hello\nreal-edit\n")   # tracked change
+        (Path(td) / "b.txt").write_text("brand new\n")          # included untracked
+        crew_run = Path(td) / ".crew" / "reviews" / "sess-1" / "run-abc123def456"
+        crew_run.mkdir(parents=True)
+        (crew_run / "codex.json").write_text('{"ok": true}\n')
+        t = targets.resolve("auto", base="main", cwd=td)
+        check("a real edit beside .crew/ artifacts resolves working-tree",
+              t.kind == "code" and "working-tree" in t.scope
+              and "real-edit" in t.content and "brand new" in t.content,
+              "working-tree w/ the edit", f"scope={t.scope}")
+        check("the working-tree content excludes the .crew/ artifacts",
+              ".crew" not in t.content, "no .crew in content", t.content[:200])
+        # Actually REPLAY the reproduced command in the repo: its output must
+        # carry the real change but never a .crew/ artifact.
+        replayed = subprocess.run(
+            t.diff_cmd, shell=True, cwd=td, capture_output=True, text=True)
+        check("the reproduced diff command replays the edit but no .crew/ artifact",
+              "real-edit" in replayed.stdout and "brand new" in replayed.stdout
+              and ".crew" not in replayed.stdout,
+              "edit present, .crew absent in replay", replayed.stdout[:200])
+
+    # An untracked DIRECTORY / nested repo (git lists it as one `dir/` entry that
+    # --no-index cannot render) is NAMED as not-included, never silently claimed
+    # to be in the snapshot.
+    with tempfile.TemporaryDirectory() as td:
+        _init_repo(td)
+        _git(["config", "core.excludesFile", "/dev/null"], td)
+        (Path(td) / "a.txt").write_text("hello\nkept-change\n")  # keeps content non-empty
+        nested = Path(td) / "nested"
+        nested.mkdir()
+        _git(["init", "-q"], str(nested))  # a nested repo -> ls-files reports `nested/`
+        (nested / "inner.txt").write_text("inner\n")
+        t = targets.resolve("working-tree", cwd=td)
+        check("an untracked nested repo is NAMED in notes as not-included",
+              any("nested/" in n and "not included" in n for n in t.notes),
+              "present-but-not-included note naming nested/", str(t.notes))
+        check("the untracked nested repo contributes no bytes to the content",
+              "nested" not in t.content and "inner" not in t.content,
+              "no nested content", t.content[:200])
+
+    # EXCLUDED-ONLY tree: when the ONLY uncommitted state is an excluded entry (a
+    # nested repo), the working-tree target resolves to NO content, but its notes
+    # must STILL name the nested repo. Collapsing to a bare "clean" would tell a
+    # reviewer of an all-excluded tree nothing was here, hiding a whole repository
+    # that was set aside.
+    with tempfile.TemporaryDirectory() as td:
+        _init_repo(td)
+        _git(["config", "core.excludesFile", "/dev/null"], td)
+        nested = Path(td) / "nested"
+        nested.mkdir()
+        _git(["init", "-q"], str(nested))  # ls-files reports one `nested/` entry
+        (nested / "inner.txt").write_text("inner\n")
+        t = targets.resolve("working-tree", cwd=td)
+        check("excluded-only working tree resolves to no content",
+              not t.content.strip(), "empty content", repr(t.content[:120]))
+        check("excluded-only tree still names the nested repo as not-included",
+              any("nested/" in n and "not included" in n for n in t.notes),
+              "present-but-not-included note naming nested/", str(t.notes))
+        check("excluded-only tree keeps the clean/empty message alongside the note",
+              any("nothing to review" in n for n in t.notes),
+              "clean message retained", str(t.notes))
+
+    # EXCLUDED-ONLY tree, `auto` variant: an excluded nested repo carries no
+    # bytes, so `auto` is NOT dirty and falls through to the branch diff. That
+    # committed-diff target must STILL name the nested repo as not-included, the
+    # same promise the working-tree path keeps, or a reviewer of the fall-through
+    # target is never told a whole repository was set aside.
+    with tempfile.TemporaryDirectory() as td:
+        _init_repo(td)
+        _git(["config", "core.excludesFile", "/dev/null"], td)
+        nested = Path(td) / "nested"
+        nested.mkdir()
+        _git(["init", "-q"], str(nested))  # ls-files reports one `nested/` entry
+        (nested / "inner.txt").write_text("inner\n")
+        t = targets.resolve("auto", base="main", cwd=td)
+        check("excluded-only tree resolves auto to the committed diff, not working-tree",
+              "working-tree" not in t.scope, "committed-diff scope", f"scope={t.scope}")
+        check("auto fall-through target still names the nested repo as not-included",
+              any("nested/" in n and "not included" in n for n in t.notes),
+              "present-but-not-included note naming nested/", str(t.notes))
+        check("the nested repo contributes no bytes to the auto fall-through content",
+              "nested" not in t.content and "inner" not in t.content,
+              "no nested content", t.content[:200])
+
+    # `auto` must not capture the tracked diff twice: the dirtiness test uses a
+    # QUIET predicate (`git diff --quiet`), so the heavy `git diff HEAD` capture
+    # runs exactly ONCE, inside `_resolve_working_tree`. Pinned via a call count
+    # because the perf change is observable (two captures before the fix, one now).
+    with tempfile.TemporaryDirectory() as td:
+        _init_repo(td)
+        (Path(td) / "a.txt").write_text("hello\nchanged\n")
+        real_git = targets._git
+        heavy = []
+
+        def _counting_git(args, cwd=None):
+            if args == ["diff", "HEAD"]:  # the full patch capture, not `--quiet`
+                heavy.append(tuple(args))
+            return real_git(args, cwd=cwd)
+
+        targets._git = _counting_git
+        try:
+            t = targets.resolve("auto", cwd=td)
+        finally:
+            targets._git = real_git
+        check("auto captures the heavy 'git diff HEAD' exactly once (quiet dirtiness check)",
+              len(heavy) == 1, "1 heavy capture", f"{len(heavy)}: {heavy}")
+        check("auto still resolves the dirty working tree after the perf change",
+              t.kind == "code" and "working-tree" in t.scope and "changed" in t.content,
+              "working-tree w/ change", f"scope={t.scope}")
+
     # ref range A..B (and A...B) -> diff between pinned SHAs
     with tempfile.TemporaryDirectory() as td:
         _init_repo(td)
@@ -11029,9 +11229,10 @@ def test_quorum_header():
               cq.returncode == 0
               and "PANEL: 7 launched · 1 usable · quorum 4: NOT MET" in cq.stdout,
               "the exact header line", cq.stdout[:200])
-        check("NOT MET adds the cannot-record line",
-              "an APPROVED verdict cannot be recorded from this panel" in cq.stdout,
-              "cannot-record line present", cq.stdout[:200])
+        check("NOT MET adds the capability-neutral quorum line (no --force verb)",
+              "an APPROVED verdict is not backed by quorum from this panel"
+              in cq.stdout and "--force" not in cq.stdout,
+              "neutral quorum line present, no --force", cq.stdout[:200])
         # Faithful mode (no --group) and the --full sibling never carry the header.
         cf = _run_dispatcher(
             ["collect", "--session-id", "S", "--run-id", o1["run_id"],
@@ -11215,6 +11416,7 @@ def main():
     test_wait()
     test_signal()
     test_quorum_header()
+    test_swab()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")
@@ -11224,6 +11426,398 @@ def main():
         sys.exit(1)
     print(f"{GREEN}All tests passed!{NC}")
     sys.exit(0)
+
+
+def _swab_run(project_dir, *, yes=False, as_json=False, cwd=None):
+    """Invoke cmd_swab in-process against ``project_dir`` (env-isolated), returning
+    ``(rc, stdout, stderr)``. HOME is neutralized so no real ~/.crew-config leaks.
+
+    ``cwd`` defaults to ``project_dir``: swab resolves ``.crew`` cwd-relatively
+    (IDENTICALLY to the review/debate writers), so the process must run IN the tree
+    the writers wrote. Passing a different ``cwd`` (while CLAUDE_PROJECT_DIR still
+    names ``project_dir``) is how the divergence test proves swab follows cwd, not
+    CLAUDE_PROJECT_DIR."""
+    import argparse as _argparse
+    import contextlib as _contextlib
+    import io as _io
+    from multiagent import cli as _cli
+
+    saved = {k: os.environ.get(k) for k in ("CLAUDE_PROJECT_DIR", "HOME")}
+    os.environ["CLAUDE_PROJECT_DIR"] = str(project_dir)
+    os.environ["HOME"] = _NEUTRAL_HOME
+    saved_cwd = os.getcwd()
+    os.chdir(str(cwd if cwd is not None else project_dir))
+    out, err = _io.StringIO(), _io.StringIO()
+    try:
+        ns = _argparse.Namespace(yes=yes, json=as_json)
+        with _contextlib.redirect_stdout(out), _contextlib.redirect_stderr(err):
+            rc = _cli.cmd_swab(ns)
+    finally:
+        os.chdir(saved_cwd)
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return rc, out.getvalue(), err.getvalue()
+
+
+def _old_mtime(path):
+    """Age a path past every staleness threshold (8 days)."""
+    old = time.time() - 8 * 86400
+    os.utime(path, (old, old))
+
+
+def test_swab():
+    log_section("swab: attended artifact pruning")
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        _init_repo(td)
+        _git(["config", "core.excludesFile", "/dev/null"], td)
+        crew = td / ".crew"
+        reviews = crew / "reviews" / "sess1"
+        reviews.mkdir(parents=True)
+
+        # A real orphaned run: exact mint grammar + run.json, no active loop.
+        orphan = reviews / "run-abc123def456"
+        orphan.mkdir()
+        (orphan / "run.json").write_text('{"run_id":"run-abc123def456"}')
+        (orphan / "codex.json").write_text('{"ok":true}')
+
+        # Foreign / malformed names that must NEVER be candidates.
+        for bad in ("run-backup", "run-notes2", "run-DEADBEEF", "run-gggggggggggg"):
+            d = reviews / bad
+            d.mkdir()
+            (d / "run.json").write_text("{}")  # even WITH run.json, the name fails
+        # A minted-shape name but NO run.json (not crew's, or torn between mkdir/write).
+        norj = reviews / "run-000000000000"
+        norj.mkdir()
+
+        # A run frozen in an ACTIVE loop is protected at any age.
+        live = reviews / "run-1111abcd2222"
+        live.mkdir()
+        (live / "run.json").write_text('{"run_id":"run-1111abcd2222"}')
+        (crew / "build-state-sess1.json").write_text(
+            '{"active": true, "run_id": "run-1111abcd2222", "session_id": "sess1"}'
+        )
+
+        # A symlinked run dir (name a valid mint) whose target is OUTSIDE reviews/:
+        # refused by the resolved-within containment check.
+        outside_target = td / "outside-target"
+        outside_target.mkdir()
+        (outside_target / "run.json").write_text('{"run_id":"run-caf0cafe0caf"}')
+        (outside_target / "secret.txt").write_text("do not delete me")
+        symrun = reviews / "run-caf0cafe0caf"
+        os.symlink(str(outside_target), str(symrun))
+
+        # A symlinked run dir whose target is a real dir INSIDE reviews/ (so the
+        # containment check would pass): refused by own_dir's symlink refusal alone,
+        # so this proves that guard independently. The target has a non-minted name,
+        # so it is never itself a candidate.
+        inside_target = reviews / "keepdir"
+        inside_target.mkdir()
+        (inside_target / "run.json").write_text('{"run_id":"run-dddddddddddd"}')
+        (inside_target / "secret.txt").write_text("do not delete me either")
+        symrun_in = reviews / "run-dddddddddddd"
+        os.symlink(str(inside_target), str(symrun_in))
+
+        # Plans are decisions: never in scope.
+        plans = crew / "plans"
+        plans.mkdir()
+        (plans / "keep.md").write_text("# decision")
+
+        # Debates: stale-no-synthesis pruned; fresh kept; completed kept at any age.
+        debates = crew / "debates"
+        debates.mkdir()
+        stale_deb = debates / "20200101-120000-old"
+        stale_deb.mkdir()
+        (stale_deb / "question.md").write_text("q")
+        _old_mtime(stale_deb)
+        fresh_deb = debates / "20990101-120000-new"
+        fresh_deb.mkdir()
+        (fresh_deb / "question.md").write_text("q")
+        done_deb = debates / "20200101-130000-done"
+        done_deb.mkdir()
+        (done_deb / "synthesis.md").write_text("decided")
+        _old_mtime(done_deb)
+        user_deb = debates / "my-notes"  # non-generated name
+        user_deb.mkdir()
+        _old_mtime(user_deb)
+
+        # --- dry-run: lists the two real orphans, deletes NOTHING ---
+        rc, out, err = _swab_run(td)
+        check("swab dry-run exits 0", rc == 0, "0", str(rc))
+        check("swab dry-run names the orphaned review run",
+              "run-abc123def456" in out, "run-abc123def456 listed", out)
+        check("swab dry-run names the stale debate dir",
+              "20200101-120000-old" in out, "stale debate listed", out)
+        check("swab dry-run closing line points at --yes",
+              "crew swab --yes" in out and "2 items" in out,
+              "2 items ... --yes", out)
+        check("swab dry-run deletes nothing (orphan survives)", orphan.exists(),
+              "orphan present", "gone")
+        check("swab dry-run deletes nothing (stale debate survives)",
+              stale_deb.exists(), "debate present", "gone")
+
+        # --- dry-run --json shape ---
+        rc, out, err = _swab_run(td, as_json=True)
+        payload = json.loads(out)
+        check("swab --json has prunable/removed/failed/total_bytes",
+              set(payload) == {"prunable", "removed", "failed", "total_bytes"},
+              "{prunable, removed, failed, total_bytes}", str(sorted(payload)))
+        check("swab --json dry-run removed is empty", payload["removed"] == [],
+              "[]", str(payload["removed"]))
+        check("swab --json dry-run failed is empty", payload["failed"] == [],
+              "[]", str(payload["failed"]))
+        names = {i["name"] for i in payload["prunable"]}
+        check("swab --json prunable = exactly the two orphans",
+              names == {"run-abc123def456", "20200101-120000-old"},
+              "{run-abc123def456, 20200101-120000-old}", str(names))
+        check("swab --json items carry kind/name/path/bytes",
+              all(set(i) == {"kind", "name", "path", "bytes"} for i in payload["prunable"]),
+              "kind/name/path/bytes", str(payload["prunable"][:1]))
+        check("swab --json total_bytes is a positive int",
+              isinstance(payload["total_bytes"], int) and payload["total_bytes"] > 0,
+              ">0 int", str(payload["total_bytes"]))
+
+        # --- --yes: deletes exactly the prunable set, nothing else ---
+        rc, out, err = _swab_run(td, yes=True)
+        check("swab --yes exits 0", rc == 0, "0", str(rc))
+        check("swab --yes removes the orphaned run", not orphan.exists(),
+              "orphan gone", "still present")
+        check("swab --yes removes the stale debate", not stale_deb.exists(),
+              "debate gone", "still present")
+        check("swab --yes reports removed count", "removed 2 items" in out,
+              "removed 2 items", out)
+
+        # Everything the guards protect SURVIVES --yes:
+        check("foreign run-backup survives --yes", (reviews / "run-backup").exists(),
+              "present", "deleted")
+        check("foreign run-notes2 survives --yes", (reviews / "run-notes2").exists(),
+              "present", "deleted")
+        check("wrong-length/case run-DEADBEEF survives --yes",
+              (reviews / "run-DEADBEEF").exists(), "present", "deleted")
+        check("non-hex run-gggggggggggg survives --yes",
+              (reviews / "run-gggggggggggg").exists(), "present", "deleted")
+        check("minted-name-but-no-run.json survives --yes", norj.exists(),
+              "present", "deleted")
+        check("active-loop-owned run survives --yes", live.exists(),
+              "present", "deleted")
+        check("symlinked run dir (outside target) survives --yes, target intact",
+              symrun.exists() and (outside_target / "secret.txt").exists(),
+              "link + target present", "followed/deleted")
+        check("symlinked run dir (inside target) survives --yes, target intact",
+              symrun_in.exists() and (inside_target / "secret.txt").exists(),
+              "link + target present", "followed/deleted")
+        check("plans dir untouched by --yes", (plans / "keep.md").exists(),
+              "plan present", "deleted")
+        check("fresh debate survives --yes", fresh_deb.exists(),
+              "present", "deleted")
+        check("completed debate (synthesis.md) survives --yes", done_deb.exists(),
+              "present", "deleted")
+        check("user-named debate dir survives --yes", user_deb.exists(),
+              "present", "deleted")
+
+        # --- clean tree: nothing left to swab ---
+        rc, out, err = _swab_run(td)
+        check("swab on a clean tree reports decks clean",
+              "decks are clean" in out, "decks are clean", out)
+
+    # --- flat/sessionless layout: run dir directly under reviews/ ---
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        flat = Path(td) / ".crew" / "reviews" / "run-0a1b2c3d4e5f"
+        flat.mkdir(parents=True)
+        (flat / "run.json").write_text('{"run_id":"run-0a1b2c3d4e5f"}')
+        rc, out, err = _swab_run(td, as_json=True)
+        payload = json.loads(out)
+        check("swab lists a flat sessionless orphan run",
+              [i["name"] for i in payload["prunable"]] == ["run-0a1b2c3d4e5f"],
+              "run-0a1b2c3d4e5f", str(payload["prunable"]))
+        rc, out, err = _swab_run(td, yes=True)
+        check("swab --yes removes a flat sessionless orphan run", not flat.exists(),
+              "gone", "present")
+
+    # --- pointer hygiene helper: drop_dangling_pointer removes a pointer left
+    # naming a just-removed run. Through swab a POINTED run is now protected (see
+    # the in-flight cases above), so this belt-and-suspenders helper is exercised
+    # directly: it drops the pointer iff its run_id is in the removed set, and
+    # leaves a pointer naming a surviving run untouched. ---
+    from multiagent import review_runs as _rr
+    import artifact_prune as _ap
+    with tempfile.TemporaryDirectory() as td:
+        sess = Path(td) / ".crew" / "reviews" / "sessP"
+        sess.mkdir(parents=True)
+        (sess / _rr.POINTER_NAME).write_text('{"run_id":"run-deadbeef0000"}')
+        _ap.drop_dangling_pointer(sess, {"run-deadbeef0000"})
+        check("drop_dangling_pointer drops a pointer naming a removed run",
+              not (sess / _rr.POINTER_NAME).exists(), "pointer gone", "dangling")
+        # A pointer naming a DIFFERENT (surviving) run is left alone.
+        (sess / _rr.POINTER_NAME).write_text('{"run_id":"run-cafecafe0000"}')
+        _ap.drop_dangling_pointer(sess, {"run-deadbeef0000"})
+        check("drop_dangling_pointer keeps a pointer naming a surviving run",
+              (sess / _rr.POINTER_NAME).exists(), "pointer kept", "dropped")
+
+    # --- in-flight protection: a run named by a current-run.json survives --yes ---
+    # (a standalone review, or a loop run prepped before begin-review froze it, is
+    # named by NO loop yet, so only the pointer protects it from a mid-review --yes.)
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        reviews = Path(td) / ".crew" / "reviews" / "sessX"
+        reviews.mkdir(parents=True)
+        # In play: pointed at by the SESSION pointer, no loop names it.
+        inflight = reviews / "run-aaaabbbbcccc"
+        inflight.mkdir()
+        (inflight / "run.json").write_text('{"run_id":"run-aaaabbbbcccc"}')
+        (reviews / "current-run.json").write_text('{"run_id":"run-aaaabbbbcccc"}')
+        # A genuine orphan in the SAME session: no loop, no pointer names it.
+        orph = reviews / "run-ddddeeeeffff"
+        orph.mkdir()
+        (orph / "run.json").write_text('{"run_id":"run-ddddeeeeffff"}')
+
+        rc, out, err = _swab_run(td, as_json=True)
+        names = {i["name"] for i in json.loads(out)["prunable"]}
+        check("session pointer-named run is NOT prunable",
+              "run-aaaabbbbcccc" not in names, "protected", str(names))
+        check("orphan alongside a pointer IS still prunable",
+              "run-ddddeeeeffff" in names, "prunable", str(names))
+        rc, out, err = _swab_run(td, yes=True)
+        check("session pointer-named run survives --yes", inflight.exists(),
+              "present", "deleted")
+        check("orphan alongside a pointer is removed by --yes", not orph.exists(),
+              "gone", "present")
+
+    # --- flat current-run.json protects a flat sessionless run ---
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        flat_reviews = Path(td) / ".crew" / "reviews"
+        flat_reviews.mkdir(parents=True)
+        pointed = flat_reviews / "run-1a2b3c4d5e6f"
+        pointed.mkdir()
+        (pointed / "run.json").write_text('{"run_id":"run-1a2b3c4d5e6f"}')
+        (flat_reviews / "current-run.json").write_text('{"run_id":"run-1a2b3c4d5e6f"}')
+        rc, out, err = _swab_run(td, as_json=True)
+        names = {i["name"] for i in json.loads(out)["prunable"]}
+        check("flat pointer-named run is NOT prunable",
+              "run-1a2b3c4d5e6f" not in names, "protected", str(names))
+        _swab_run(td, yes=True)
+        check("flat pointer-named run survives --yes", pointed.exists(),
+              "present", "deleted")
+
+    # --- root resolution: swab follows cwd (the writers' tree), not CLAUDE_PROJECT_DIR ---
+    # A destructive command MUST target the same .crew the review/debate writers
+    # resolved (cwd-relative _REVIEWS_BASE), even if CLAUDE_PROJECT_DIR diverges.
+    with tempfile.TemporaryDirectory() as writers_tree, \
+         tempfile.TemporaryDirectory() as other_dir:
+        writers_tree = Path(writers_tree)
+        wr = writers_tree / ".crew" / "reviews" / "sessW"
+        wr.mkdir(parents=True)
+        wrun = wr / "run-9f8e7d6c5b4a"
+        wrun.mkdir()
+        (wrun / "run.json").write_text('{"run_id":"run-9f8e7d6c5b4a"}')
+        # cwd = the writers' tree; CLAUDE_PROJECT_DIR points ELSEWHERE (empty).
+        rc, out, err = _swab_run(other_dir, as_json=True, cwd=writers_tree)
+        names = {i["name"] for i in json.loads(out)["prunable"]}
+        check("swab enumerates the cwd tree the writers wrote (ignores divergent "
+              "CLAUDE_PROJECT_DIR)", names == {"run-9f8e7d6c5b4a"},
+              "run-9f8e7d6c5b4a", str(names))
+
+    # --- --yes exits nonzero on a failed delete; --json lists it under failed ---
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        reviews_root = Path(td) / ".crew" / "reviews"
+        good_sess = reviews_root / "sessG"
+        good_sess.mkdir(parents=True)
+        good = good_sess / "run-000000000000"
+        good.mkdir()
+        (good / "run.json").write_text('{"run_id":"run-000000000000"}')
+        # An undeletable orphan: rmdir of the run dir needs write on its parent
+        # session dir, so a read+exec-only parent makes the final rmdir fail.
+        bad_sess = reviews_root / "sessB"
+        bad_sess.mkdir()
+        bad = bad_sess / "run-111111111111"
+        bad.mkdir()
+        (bad / "run.json").write_text('{"run_id":"run-111111111111"}')
+        os.chmod(bad_sess, 0o500)
+        try:
+            rc, out, err = _swab_run(td, yes=True, as_json=True)
+            payload = json.loads(out)
+            check("swab --yes exits nonzero when a delete failed", rc == 1,
+                  "1", str(rc))
+            failed_names = {i["name"] for i in payload["failed"]}
+            check("swab --yes lists the undeletable run under failed",
+                  "run-111111111111" in failed_names, "failed lists it",
+                  str(failed_names))
+            removed_names = {i["name"] for i in payload["removed"]}
+            check("swab --yes still removes the deletable run",
+                  "run-000000000000" in removed_names and not good.exists(),
+                  "good removed", str(removed_names))
+        finally:
+            os.chmod(bad_sess, 0o755)
+
+    # --- nested candidate dedupe: a minted run planted inside a flat run is listed
+    # ONCE (the outermost), so bytes aren't double-counted and --yes never rmtree's
+    # a parent then hits the vanished child as a false failure. ---
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        reviews_root = Path(td) / ".crew" / "reviews"
+        outer = reviews_root / "run-aaaaaaaaaaaa"
+        outer.mkdir(parents=True)
+        (outer / "run.json").write_text('{"run_id":"run-aaaaaaaaaaaa"}')
+        inner = outer / "run-bbbbbbbbbbbb"
+        inner.mkdir()
+        (inner / "run.json").write_text('{"run_id":"run-bbbbbbbbbbbb"}')
+
+        rc, out, err = _swab_run(td, as_json=True)
+        names = [i["name"] for i in json.loads(out)["prunable"]]
+        check("nested run inside a flat run is listed once (outermost only)",
+              names == ["run-aaaaaaaaaaaa"], "[run-aaaaaaaaaaaa]", str(names))
+        rc, out, err = _swab_run(td, yes=True, as_json=True)
+        payload = json.loads(out)
+        check("swab --yes removes the nested subtree with no false failure",
+              rc == 0 and payload["failed"] == [] and not outer.exists(),
+              "clean removal", f"rc={rc} failed={payload['failed']}")
+
+    # --- symlinked `.crew` ROOT: a `.crew` that is a symlink out of the tree means
+    # this is not the tree crew created. own_dir refuses a symlinked reviews_root
+    # BELOW, but a symlinked `.crew` PARENT one level up leaves a real .crew/reviews
+    # at the link target, so without the own_dir(crew_dir) guard a --yes would
+    # rmtree dirs outside the project. collect_prunable must return [] and swab must
+    # prune NOTHING. ---
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        # A real crew tree with a genuine orphan run, OUTSIDE the project.
+        real_tree = td / "real"
+        real_reviews = real_tree / ".crew" / "reviews" / "sessS"
+        real_reviews.mkdir(parents=True)
+        real_run = real_reviews / "run-abcabc123123"
+        real_run.mkdir()
+        (real_run / "run.json").write_text('{"run_id":"run-abcabc123123"}')
+        # The project's `.crew` is a SYMLINK to that out-of-tree crew dir.
+        project = td / "proj"
+        project.mkdir()
+        os.symlink(str(real_tree / ".crew"), str(project / ".crew"))
+
+        import artifact_prune as _ap_sym
+        # crew_dir cwd-relative == Path(".crew") when run in the project.
+        saved_cwd = os.getcwd()
+        os.chdir(str(project))
+        try:
+            direct = _ap_sym.collect_prunable(Path(".crew"), time.time())
+        finally:
+            os.chdir(saved_cwd)
+        check("collect_prunable returns [] under a symlinked .crew root",
+              direct == [], "[]", str([p.name for p in direct]))
+
+        rc, out, err = _swab_run(project, as_json=True)
+        names = {i["name"] for i in json.loads(out)["prunable"]}
+        check("swab lists nothing under a symlinked .crew root",
+              names == set(), "empty", str(names))
+        rc, out, err = _swab_run(project, yes=True)
+        check("swab --yes prunes nothing through a symlinked .crew root "
+              "(out-of-tree run intact)", real_run.exists(),
+              "run intact", "followed/deleted")
 
 
 if __name__ == "__main__":

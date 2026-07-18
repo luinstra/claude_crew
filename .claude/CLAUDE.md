@@ -195,19 +195,43 @@ plugins/
 The crew plugin uses Python scripts to manage persistence:
 
 ```
-User starts loop → crew state init → JSON state file created
+User starts loop → crew state init → JSON state file created (phase: drafting)
     ↓
 Claude works → session continues
     ↓
 Claude tries to stop → Stop hook reads state → blocks if loop active
     ↓
+Panel prepped → crew state begin-review → run identity frozen (phase: reviewing)
+    ↓
+Panel verdict → crew state record-verdict → a COMPLETING verdict (APPROVED, or
+                                            REVISE --minor-only) leaves phase: done
+                                            (a REVISE with [BLOCKING] issues,
+                                            REJECT, and a lone FAILED return it to
+                                            drafting; a SECOND consecutive FAILED
+                                            deactivates the loop terminally in the
+                                            same transaction, exit_kind: review_failed)
+    ↓
 Loop complete → crew state deactivate → JSON kept with active: false
 ```
+
+`deactivate` is GATED: it turns a live loop off only from `phase: done` (either
+completing verdict on record, stamped `exit_kind: approved`) or with an explicit
+`--cancel` (stamped `cancelled`), so an unreviewed finish cannot pass for an
+approved one.
 
 State files are **session-scoped** and are **not deleted** on deactivate — the
 loop is turned off in place by flipping `active: false` (plus a `completed_at`
 timestamp), so the record survives for inspection. `session-start` cleanup later
 sweeps inactive files older than a day.
+
+**Orphan Cleanup (report-only for dirs).** `session-start` still auto-cleans the
+ephemeral bookkeeping classes (stale state files, context snapshots, lock/temp
+set-asides, and aged agent signal markers). But it NO LONGER deletes review-run
+or debate directories: destructive rmtree of the user's disk from an unattended
+hook was the wrong venue. Instead it REPORTS those orphans (a one-line count,
+pointing at `crew swab`; exact sizing is deferred to the attended command),
+enumerated by the one shared `artifact_prune` finder. The attended `crew swab` command OWNS their deletion (dry-run by default,
+`--yes` to remove).
 
 **State files** (in project's `.crew/`):
 - `build-state-<session-id>.json` — Build loop (legacy unsuffixed `build-state.json` still read)

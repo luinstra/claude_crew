@@ -30,12 +30,12 @@ from pathlib import Path
 from models import (
     StopInput,
     HookResult,
-    BuildState,
-    MeasureTwiceState,
+    LoopState,
     StateLockError,
     update_state_json,
     read_hook_input,
     is_verbose,
+    override_completion_note,
     truncate,
     utc_now_iso,
     elapsed_minutes,
@@ -50,7 +50,7 @@ from models import (
     LOAD_CORRUPT,
     LOAD_FUTURE_SCHEMA,
 )
-from state_discovery import find_session_state_file
+from state_discovery import find_session_state_file, is_active_value
 
 # The parsed Stop payload, for the fail-open handler (which runs outside main()
 # and would otherwise have nothing to say about the fire that failed).
@@ -148,6 +148,17 @@ def _normalize_bounds(state) -> None:
     state.started_at = effective_started_at(state.started_at)[0]
 
 
+def _is_completed_phase(phase) -> bool:
+    """Has the loop already recorded its completing verdict?
+
+    A completing verdict leaves `phase=done, active=true`: `record-verdict` sets
+    the phase and `deactivate` stamps the outcome, so `done` is the handoff
+    window between the two, not an unfinished loop. Read defensively like the
+    counters: a garbage value answers False rather than raising.
+    """
+    return (phase or "drafting") == "done"
+
+
 def _termination_reason(state):
     """Why this loop must stop NOW, or None to keep going.
 
@@ -178,25 +189,42 @@ def _termination_reason(state):
 
 
 def _elapsed_note(state) -> str:
-    """One-line budget line for the nudge, so a runaway loop is VISIBLE."""
+    """One-line budget + position line for the nudge, so a runaway loop is VISIBLE.
+
+    The hook OWNS neither phase nor round (the review verbs write both), it only
+    reports them: a nudge that says "continue" without saying where the loop
+    stands leaves the orchestrator to guess which verb is legal next. Both are
+    read defensively, like the counters: a garbage value renders, never raises.
+    """
     minutes = elapsed_minutes(state.started_at)
     deadline = effective_deadline(
         state.deadline_minutes,
         opted_out=getattr(state, "no_deadline", False) is True)
     limit = "none" if deadline == NO_DEADLINE else str(deadline)
     clock = f"{minutes:.0f}/{limit} min" if minutes is not None else "unknown"
-    return f"Elapsed: {clock} · stop fires: {state.stop_fires}/{state.max_stop_fires}"
+    phase = getattr(state, "phase", "") or "drafting"
+    review_round = effective_count(getattr(state, "revision_round", 0), 0)
+    return (
+        f"Elapsed: {clock} · stop fires: {state.stop_fires}/{state.max_stop_fires}"
+        f" · phase={phase} round={review_round}"
+    )
 
 
 def _hook_owned(data: dict, state) -> dict:
     """Stamp the keys the Stop hook owns onto the dict on disk, in place.
 
     The hook writes ONLY these. A whole-state write (`asdict(state)`) would also
-    drop every key this install does not model and revert an agent-owned field
-    (`last_verdict`, `plan_file`) that `crew state set` landed between the hook's
-    load and its save: the mirror image of the stale-snapshot hazard the CLI's
-    field-level write closes.
+    drop every key this install does not model and revert whatever another writer
+    landed between the hook's load and its save: the mirror image of the
+    stale-snapshot hazard the CLI's field-level write closes. Two writers are in
+    that window. `crew state set` lands `plan_file` (its whole allowlist), and the
+    review verbs land the review record (`last_verdict`, `phase`, the frozen run
+    identity). Neither is the hook's to write back.
     """
+    # Adopting a legacy file stamps the version without backfilling `task`/`loop`:
+    # a `schema: 3` file on disk is therefore NOT a guarantee of the schema-3 key
+    # shape. Reads survive because every task read coalesces the legacy keys, so a
+    # writer must coalesce too rather than trust the stamp for key presence.
     data["schema"] = SCHEMA_VERSION
     data["session_id"] = state.session_id
     data["started_at"] = state.started_at
@@ -230,27 +258,90 @@ def _persist_fires(loop_file: Path, state, stop_delta: int = 0, parked: str = "k
     update_state_json(loop_file, mutate, default=asdict(state))
 
 
-def _force_exit(loop_file: Path, state, reason: str) -> None:
+def _force_exit(loop_file: Path, state, reason: str) -> bool:
     """Turn the loop off the way `crew state deactivate` does, stamping
     `completed_at` + `reason` alongside `active=False`. Without them a
     force-exited loop is indistinguishable from a clean finish on later
-    inspection. The `force_exit` marker is what `crew state init` reads to refuse
-    a fresh loop over a tripped bound without `--force`.
+    inspection. This is the ONE writer of `exit_kind="force_exit"` (the `reason`
+    alongside it says WHICH bound tripped). The `force_exit` marker is what `crew
+    state init` reads to refuse a fresh loop over a tripped bound without
+    `--force`.
+
+    INVARIANT: this never relabels a loop that has already reached a terminal or
+    completing state, so there is ONE condition here, not a growing list of them.
+
+    Such a loop is past the hook's reach in two shapes, and both are the same
+    fact: it is already inactive (a `deactivate` or a terminal FAILED won the race
+    to end it, and restamping `exit_kind="force_exit"` over that would make the
+    audit metadata describe an ending that never happened), or it sits at
+    `phase=done` (it finished, and stamping a safety failure over signed-off work
+    would be a lie; `deactivate` is the one step left, which the guidance routes
+    to). The pre-lock read cannot settle either one, since either can land in its
+    own transaction before this one takes the lock, so the re-check happens INSIDE
+    the lock on the on-disk bytes, via the shared truthiness rule the rest of the
+    state surface uses.
+
+    Returns True only when this call actually deactivated the loop, so the caller
+    announces a deactivation only when one happened: the no-op branch leaves the
+    bytes alone, and a "Loop deactivated" banner over it reports a write that never
+    landed.
     """
+    transitioned = False
+
     def mutate(data: dict) -> dict:
+        nonlocal transitioned
+        if (not is_active_value(data.get("active", False))
+                or _is_completed_phase(data.get("phase", ""))):
+            return data
         _hook_owned(data, state)
         data["stop_fires"] = state.stop_fires
         data["parked_fires"] = state.parked_fires
         data["active"] = False
         data["completed_at"] = utc_now_iso()
         data["reason"] = reason
+        data["exit_kind"] = "force_exit"
         data[FORCE_EXIT_KEY] = True
+        transitioned = True
         return data
 
     update_state_json(loop_file, mutate, default=asdict(state))
+    return transitioned
 
 
-def _handle_loop(loop_file, state, parked, banner, task_text, detail_lines, recipe, cancel_cmd):
+def _done_body(loop, session_flag, closing, cancel_cmd, state) -> str:
+    """The phase=done guidance: ONE remaining step (deactivate), described
+    honestly for how the completing verdict was recorded.
+
+    A completion whose `last_verdict_overrides` is non-empty was recorded on a
+    human's `--force` over one or more advisories, NOT a clean sign-off. Keyed on
+    the stamp so the nudge and the session-start banner tell the same story; a
+    clean completion (empty overrides) reads exactly as a plain approval, and its
+    deactivate reason stays "Panel approved".
+    """
+    note = override_completion_note(getattr(state, "last_verdict_overrides", None))
+    if note:
+        opening = (
+            f"This loop's completing verdict was {note} (phase=done), so the "
+            f"review verbs are finished with this loop: begin-review and "
+            f"record-verdict both refuse from here."
+        )
+        reason = "Completion forced over advisories"
+    else:
+        opening = (
+            "The panel's completing verdict is already recorded (phase=done), so "
+            "the review verbs are finished with this loop: begin-review and "
+            "record-verdict both refuse from here."
+        )
+        reason = "Panel approved"
+    return f"""{opening} ONE step remains:
+
+"${{CLAUDE_PLUGIN_ROOT}}/crew" state deactivate {loop} --reason "{reason}"{session_flag}
+
+{closing} To exit without that: `{cancel_cmd}`"""
+
+
+def _handle_loop(loop_file, state, parked, banner, task_text, detail_lines, recipe,
+                 cancel_cmd, done_body=""):
     """Shared Stop handling for both loops. Emits output; returns True if handled.
 
     The hook writes ONLY what it can honestly observe: `stop_fires`,
@@ -260,18 +351,28 @@ def _handle_loop(loop_file, state, parked, banner, task_text, detail_lines, reci
     escape a limit it kept hitting for merely waiting.
     """
     _normalize_bounds(state)
-    reason = _termination_reason(state)
+    completed = _is_completed_phase(getattr(state, "phase", ""))
+    # The bounds bound WORK, and a completed loop has none left: it outran them,
+    # so it routes to its one legal remaining step (deactivate, below) rather than
+    # tripping a limit that would record signed-off work as a safety failure. A
+    # loop still drafting or reviewing faces both bounds exactly as before.
+    reason = None if completed else _termination_reason(state)
     if reason:
-        _force_exit(loop_file, state, reason)
-        print(HookResult.block(
-            f"""[{banner} - Safety Limit Reached]
+        if _force_exit(loop_file, state, reason):
+            print(HookResult.block(
+                f"""[{banner} - Safety Limit Reached]
 
 Loop deactivated: {reason}.
 
 Do NOT re-init the loop. Report where the work actually stands: what completed,
 what did not, and what you were waiting on."""
-        ).to_json())
-        return True
+            ).to_json())
+            return True
+        # The bound tripped against the pre-lock read, but the loop reached a
+        # terminal or completing state before the lock took, so nothing was
+        # deactivated. Announcing one would report a write that never landed; the
+        # real remaining step is the one a completed loop already routes to.
+        completed = True
 
     if parked:
         if state.parked_fires < state.max_parked_fires:
@@ -306,12 +407,20 @@ what did not, and what you were waiting on."""
         # above are the two.)
         _persist_fires(loop_file, state, stop_delta=1, parked="reset")
 
-    # The full recipe is CREW_VERBOSE-only. It used to also print on the first
-    # fire, but the first fire is not special: the loop parks and re-fires many
-    # times per round, so that only bought a wall of text at the least useful
+    # From `done` the guidance is phase-specific and REPLACES both bodies: the
+    # verdict is already recorded, so `begin-review` and `record-verdict` would
+    # both refuse, and a loop nudged onto them cannot progress while the hook
+    # keeps blocking. The terse wait guard is wrong here too (a recorded verdict
+    # means no seat is in flight), so `done` overrides verbosity rather than
+    # sitting behind it.
+    if done_body and completed:
+        body = done_body
+    # Otherwise the full recipe is CREW_VERBOSE-only. It used to also print on the
+    # first fire, but the first fire is not special: the loop parks and re-fires
+    # many times per round, so that only bought a wall of text at the least useful
     # moment. The one line that must survive terse mode is the wait guard:
     # re-running a panel mid-flight deletes the seats that already landed.
-    if is_verbose():
+    elif is_verbose():
         body = recipe
     else:
         body = (
@@ -345,7 +454,7 @@ def main():
     # Priority 1: Build Loop (session-scoped lookup)
     loop_file = find_session_state_file(crew_dir, "build-state", session_id)
     if loop_file:
-        loop_state, status = BuildState.load_with_status(loop_file)
+        loop_state, status = LoopState.load_with_status(loop_file)
         if _handle_load_status(loop_file, status):
             return
 
@@ -362,21 +471,27 @@ def main():
                 loop_state,
                 hook_input.is_parked,
                 banner="Build Loop",
-                task_text=truncate(loop_state.prompt, 120),
+                task_text=truncate(loop_state.task, 120),
                 detail_lines=[],
                 recipe=f"""
 Continue working. When complete, verify via the multi-model panel
 (/crew:build Step 2):
 1. "${{CLAUDE_PLUGIN_ROOT}}/crew" review-prep working-tree{session_flag}
-2. Fan out the PENDING seats from the prep JSON (a resumed run relaunches only those), wait for every seat, collect the FULL roster, synthesize
-3. If APPROVED and the digest's quorum header reads MET (or is absent), deactivate the loop and summarize
-4. If REVISE with [BLOCKING] issues, fix and re-verify
-5. If the quorum header reads NOT MET, never deactivate: relaunch the pending seats (same --run-id) or surface the shortfall
+2. "${{CLAUDE_PLUGIN_ROOT}}/crew" state begin-review bl{session_flag} (freeze the run identity BEFORE any seat runs; leave the tree alone until the verdict is recorded)
+3. Fan out the PENDING seats from the prep JSON (a resumed run relaunches only those), wait for every seat, collect the FULL roster, synthesize
+4. Choose the verdict the digest supports. If its quorum header reads NOT MET, a COMPLETING verdict (APPROVED, or REVISE --minor-only) needs the user's explicit --force at step 5: quorum gates sign-off only. Where the usable seats found real blocking issues, choose a plain REVISE (or REJECT); otherwise relaunch the pending seats (same --run-id) or surface the shortfall, then re-collect and choose from the new digest
+5. Record that ONE chosen verdict: "${{CLAUDE_PLUGIN_ROOT}}/crew" state record-verdict bl <APPROVED|REVISE [--minor-only]|REJECT|FAILED>{session_flag} (the ONE place any verdict is recorded, whichever branch chose it; FAILED only when no seat returned anything usable). A completing verdict may exit 3 (a completion advisory tripped: short quorum, a drifted tree): it recorded NOTHING. Do NOT add --force yourself. Surface the advisory to the user, say what --force would do, and WAIT; re-run with --force ONLY on the user's explicit say-so (it is the human's authorization, never yours to originate)
+6. If that verdict completed the loop (APPROVED, or REVISE --minor-only), it printed phase=done: deactivate the loop and summarize
+7. If REVISE with [BLOCKING] issues, fix and re-verify from step 1
 
 If you are WAITING on seats that are still running, just wait. Do NOT re-run
 the panel and do NOT clear seat files that already landed.
 
 To exit early: `/crew:cancel-build`""",
+                done_body=_done_body(
+                    "bl", session_flag,
+                    "Then summarize what was accomplished.",
+                    "/crew:cancel-build", loop_state),
                 cancel_cmd="/crew:cancel-build",
             )
             return
@@ -384,7 +499,7 @@ To exit early: `/crew:cancel-build`""",
     # Priority 2: Measure-Twice Loop (session-scoped lookup)
     measure_file = find_session_state_file(crew_dir, "measure-twice-state", session_id)
     if measure_file:
-        measure_state, status = MeasureTwiceState.load_with_status(measure_file)
+        measure_state, status = LoopState.load_with_status(measure_file)
         if _handle_load_status(measure_file, status):
             return
 
@@ -397,21 +512,27 @@ To exit early: `/crew:cancel-build`""",
                 measure_state,
                 hook_input.is_parked,
                 banner="Measure-Twice Loop",
-                task_text=truncate(measure_state.task_description, 120),
+                task_text=truncate(measure_state.task, 120),
                 detail_lines=[f"Plan: {measure_state.plan_file}"],
                 recipe=f"""
 Continue refining the plan. Verify via the multi-model panel
 (/crew:measure-twice Phase 3):
 1. If you just received panel feedback, revise the plan to address [BLOCKING] issues
 2. "${{CLAUDE_PLUGIN_ROOT}}/crew" review-prep {shlex.quote(measure_state.plan_file)}{session_flag}
-3. Fan out the PENDING seats from the prep JSON (a resumed run relaunches only those), wait for every seat, collect the FULL roster, synthesize
-4. When APPROVED (or only [MINOR] issues) and the digest's quorum header reads MET (or is absent), deactivate the loop and present the final plan
-5. If the quorum header reads NOT MET, never deactivate: relaunch the pending seats (same --run-id) or surface the shortfall
+3. "${{CLAUDE_PLUGIN_ROOT}}/crew" state begin-review mt{session_flag} (freeze the run identity BEFORE any seat runs; leave the plan alone until the verdict is recorded)
+4. Fan out the PENDING seats from the prep JSON (a resumed run relaunches only those), wait for every seat, collect the FULL roster, synthesize
+5. Choose the verdict the digest supports. If its quorum header reads NOT MET, a COMPLETING verdict (APPROVED, or REVISE --minor-only) needs the user's explicit --force at step 6: quorum gates sign-off only. Where the usable seats found real blocking issues, choose a plain REVISE (or REJECT); otherwise relaunch the pending seats (same --run-id) or surface the shortfall, then re-collect and choose from the new digest
+6. Record that ONE chosen verdict: "${{CLAUDE_PLUGIN_ROOT}}/crew" state record-verdict mt <APPROVED|REVISE [--minor-only]|REJECT|FAILED>{session_flag} (the ONE place any verdict is recorded, whichever branch chose it; FAILED only when no seat returned anything usable). A completing verdict may exit 3 (a completion advisory tripped: short quorum, a drifted plan): it recorded NOTHING. Do NOT add --force yourself. Surface the advisory to the user, say what --force would do, and WAIT; re-run with --force ONLY on the user's explicit say-so (it is the human's authorization, never yours to originate)
+7. If that verdict completed the loop (APPROVED, or REVISE --minor-only), it printed phase=done: deactivate the loop and present the final plan
 
 If you are WAITING on seats that are still running, just wait. Do NOT re-run
 the panel and do NOT clear seat files that already landed.
 
 To exit early: `/crew:cancel-measure-twice`""",
+                done_body=_done_body(
+                    "mt", session_flag,
+                    "Then present the final plan.",
+                    "/crew:cancel-measure-twice", measure_state),
                 cancel_cmd="/crew:cancel-measure-twice",
             )
             return

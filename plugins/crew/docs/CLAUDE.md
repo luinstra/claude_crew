@@ -63,15 +63,17 @@ Skills provide specialized guidance that activates automatically based on contex
 
 | Command | Description |
 |---------|-------------|
-| `/crew:build "task"` | Verified persistence loop — a multi-model panel must approve before completion |
+| `/crew:build "task"` | Verified persistence loop — a multi-model panel normally approves before completion (a human may `--force` over an advisory) |
 | `/crew:cancel-build` | Exit an active build loop |
-| `/crew:measure-twice "task"` | Self-refining plan loop — a panel reviews until approved |
+| `/crew:measure-twice "task"` | Self-refining plan loop — a panel reviews toward approval (a human may `--force` completion over an advisory) |
 | `/crew:cancel-measure-twice` | Exit an active measure-twice loop |
 | `/crew:plan "description"` | Start a planning session |
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (saves context) |
 | `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff → `APPROVED`/`REVISE` verdict |
 | `/crew:debate "question"` | Multi-model debate — single-round council by default, or `--rounds N` for rebuttals; synthesized into agreement/disagreement/recommendation |
 | `/crew:dispatch "[--seat <name>] <task>"` | Delegate a WORK task to ONE non-Claude seat (default `codex`) in WRITE mode — edits left UNCOMMITTED + UNSTAGED on the same branch to review (keep / revert / pipe into `/crew:review`); a HEAD/staged/branch guard surfaces any commit/stage/branch made against instruction |
+
+In `/crew:build` and `/crew:measure-twice` completion is normally reached by a completing verdict (`APPROVED`, or `REVISE --minor-only`). The panel's sign-off is advisory, not a hard gate: a human may authorize completion over an advisory (a `NOT MET` quorum, target drift) with `--force`, which is stamped in `last_verdict_overrides` as an explicit override for the audit trail (never laundered into a clean sign-off).
 
 **Panel size (build / measure-twice / review / debate):** prefix the argument with a panel flag. Not every change needs the full panel — e.g. `/crew:build --panel lite "fix the bug"`.
 - No flag: the configured `default_panel` (or built-in `full` if unset); `"${CLAUDE_PLUGIN_ROOT}/crew" seats` prints its available external-CLI seats (the Claude voices complete it). `--panel full` selects the `full` preset, which a `[panels].full` config entry can redefine; print any preset's resolved roster with `"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --panel <name>`.
@@ -110,7 +112,7 @@ Skills provide specialized guidance that activates automatically based on contex
 4. Use `/crew:review` to evaluate the plan if needed
 5. Use `/crew:execute` to run the plan via executor agent (keeps main context clean)
 
-**Measure-Twice Loop:** For critical tasks, `/crew:measure-twice` iterates until a multi-model panel approves the plan (handling BLOCKING issues automatically, accepting MINOR issues).
+**Measure-Twice Loop:** For critical tasks, `/crew:measure-twice` iterates toward a completing verdict on the plan (handling BLOCKING issues automatically, accepting MINOR issues), completed normally by an `APPROVED` (or `REVISE --minor-only`) or by a human `--force` over an advisory.
 
 ## Build Loop (Verified Persistence)
 
@@ -118,7 +120,7 @@ For tasks requiring multi-model panel verification before completion:
 
 1. Start with `/crew:build "your task description"`
 2. Claude works until the task appears complete
-3. A multi-model panel must verify and approve completion before accepting "done"
+3. A multi-model panel verifies completion; a completing verdict (`APPROVED`, or `REVISE --minor-only`) accepts "done" (a human may `--force` completion over an advisory, stamped for the audit trail)
 4. Use `/crew:cancel-build` to exit early if needed
 
 **Note:** For simpler persistence without panel verification, consider the official `ralph-wiggum` plugin.
@@ -144,6 +146,6 @@ Before concluding ANY work session, verify:
 
 **If ANY checkbox is unchecked, CONTINUE WORKING.**
 
-Active build / measure-twice loops are enforced by the Stop hook: they won't end until the multi-model panel approves, you cancel (`/crew:cancel-build` / `/crew:cancel-measure-twice`), or a hook-owned safety limit trips (the stop-fire cap or the wall-clock deadline, which force-exit the loop).
+Active build / measure-twice loops are enforced by the Stop hook: they won't end until the panel reaches a completing verdict (`APPROVED`, or `REVISE --minor-only`; a human may `--force` completion over an advisory), a SECOND consecutive `FAILED` verdict ends the loop terminally in place (`review_failed`; a single FAILED does not), you cancel (`/crew:cancel-build` / `/crew:cancel-measure-twice`), or a hook-owned safety limit trips (the stop-fire cap or the wall-clock deadline, which force-exit the loop).
 
 A **parked turn** is the exception: while the session has background work in flight (panel seats, but also any unrelated background shell), the Stop is ALLOWED and the turn ends with the loop still active. Waiting is not quitting, and the session resumes when that work completes. Consecutive parked turns are capped (20), so a background process that never exits cannot silently switch the loop off.

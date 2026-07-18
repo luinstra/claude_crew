@@ -1,34 +1,35 @@
 """Layered crew config loaders + typed validating getters.
 
 Two small, optional, PERSONAL config files tune the default panel choice (when
-the user names no panel), the panel ROSTER (``[panels]`` — what's *in* a preset),
-the SEAT catalog (``[seats.<name>]`` — availability, model pins, per-provider
+the user names no panel), the panel ROSTER (``[panels]``: what's *in* a preset),
+the SEAT catalog (``[seats.<name>]`` for availability, model pins, per-provider
 tunes, and whole new seats: resolved in ``seats.py`` over ``raw_layers()``, not
 by a getter here), the global per-seat ``timeout``, and the persistence loops'
 wall clock (``[tuning].deadline_minutes``):
 
   * per-repo  ``<project>/.crew/config.toml`` (resolved against
-    ``CLAUDE_PROJECT_DIR`` → cwd — the SAME resolution the other ``.crew/`` paths
-    use), and
+    ``CLAUDE_PROJECT_DIR`` → cwd, the same resolution the STATE-layer ``.crew/``
+    paths use; the review-ENGINE dirs (``_REVIEWS_BASE``) resolve cwd-relative
+    instead, so the two roots agree only when cwd IS the project root), and
   * global    ``~/.crew-config.toml`` (resolved against ``$HOME`` via
     ``Path.home()``).
 
 This module is a PURE loader: it imports NOTHING from ``cli``/``providers`` at
 module load (so the providers can import it without a cycle, and it stays
-independently testable) — the only ``seats``/``providers`` imports are LAZY,
+independently testable): the only ``seats``/``providers`` imports are LAZY,
 inside the getters that validate against the catalog. Each file is loaded ONCE
 per process (memoized, one cache per layer), and every getter VALIDATES and
 returns ``None``/the default on a missing/invalid value so callers never see a
 raw exception or a bad-typed value.
 
-Precedence (enforced HERE — each getter resolves per-key, per-repo first):
+Precedence (enforced HERE, each getter resolves per-key, per-repo first):
 
     explicit CLI flag  >  per-repo .crew/config.toml  >  global ~/.crew-config.toml  >  built-in
 
 For ``[seats.<name>]`` tables the resolution is PER-SEAT-PER-KEY: a per-repo
 ``[seats.codex].model`` wins over a global one, and a seat tuned only in the
-global file still applies (no whole-table deep-merge — key-by-key resolution is
-predictable). The ``CREW_MA_*`` env surface is RETIRED — it is consulted nowhere.
+global file still applies (no whole-table deep-merge, key-by-key resolution is
+predictable). The ``CREW_MA_*`` env surface is RETIRED: it is consulted nowhere.
 
 Error handling (a review seat must NEVER die because of a config typo):
   * Missing file → no-op; getters return ``None`` (callers use defaults).
@@ -40,10 +41,10 @@ Error handling (a review seat must NEVER die because of a config typo):
     returns ``None`` / drops the entry (with a one-time warn) so callers never hit
     a raw ``KeyError``.
 
-ALL diagnostics go to STDERR (never stdout — the orchestrator parses stdout
+ALL diagnostics go to STDERR (never stdout, the orchestrator parses stdout
 JSON). Warnings fire AT MOST ONCE per process: each memoized load plus a
 per-warning-key guard. The keys are LAYER-QUALIFIED (``<field>:<layer>``) so a
-bad per-repo value and a bad global value each warn once, independently — a bad
+bad per-repo value and a bad global value each warn once, independently: a bad
 per-repo value never swallows a legitimate global warning.
 """
 
@@ -67,7 +68,9 @@ _warned: set[str] = set()
 
 
 def _project_dir() -> Path:
-    """Project dir — ``CLAUDE_PROJECT_DIR`` → cwd (same as the other .crew paths)."""
+    """Project dir: ``CLAUDE_PROJECT_DIR`` → cwd (same as the STATE-layer .crew
+    paths; the review-engine dirs resolve cwd-relative, so the two agree only when
+    cwd IS the project root)."""
     return Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()))
 
 

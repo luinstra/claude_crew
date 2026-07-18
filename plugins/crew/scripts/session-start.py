@@ -29,13 +29,15 @@ if sys.version_info < (3, 10):
 
 import os
 import re
-import shutil
 import time
 from pathlib import Path
 
+import artifact_prune
 from models import (
     SessionStartInput,
     SessionStartResult,
+    coalesce_task,
+    override_completion_note,
     read_hook_input,
     effective_count,
     effective_deadline,
@@ -50,7 +52,7 @@ from models import (
     LOAD_FUTURE_SCHEMA,
     LOAD_OK,
 )
-from state_discovery import is_loop_state_file, is_active_state_file
+from state_discovery import is_loop_state_file, is_active_state_file, is_active_value
 
 
 MAX_AGE_DAYS = 7
@@ -177,51 +179,116 @@ def cleanup_stale_files(directory: Path) -> None:
                 pass
 
 
-# Generated debate-dir names only: run-<...> OR a YYYYMMDD-HHMMSS timestamp
-# prefix. Guards cleanup against deleting arbitrary user dirs under .crew/debates/.
-_DEBATE_DIR_RE = re.compile(r"^(run-|\d{8}-\d{6})")
+# `crew signal` mints EXACTLY `<tag>.json` with the tag in [A-Za-z0-9_-], so the
+# marker name grammar is this sweep's anchor: a bare `*.json` would reap whatever
+# else was parked in the dir.
+_SIGNAL_MARKER_RE = re.compile(r"^[A-Za-z0-9_-]+\.json$")
+
+REVIEWS_SUBDIR = "reviews"
+SIGNALS_SUBDIR = "signals"
 
 
-def cleanup_stale_debate_dirs(crew_dir: Path) -> None:
-    """Remove stale, INCOMPLETE debate run directories from .crew/debates/.
+def _sweep_signal_markers(session_dir: Path, now: float) -> None:
+    """Reap aged agent signal markers under ``<session>/signals/``.
 
-    Debate runs are directories (not JSON files), so they need shutil.rmtree
-    rather than unlink.  Uses the INACTIVE (1-day) threshold — never the 7-day
-    active threshold — so a live debate mid-write is never nuked.
-
-    Only removes dirs matching a GENERATED debate-dir name — never an arbitrary
-    hyphenated dir a user may have parked under .crew/debates/:
-    - ``run-<...>``              multi-round debate runs
-    - ``<YYYYMMDD-HHMMSS>[-...]`` single-round ``<timestamp>-<slug>`` dirs
-
-    A stale generated dir is deleted ONLY when it has NO ``synthesis.md`` inside
-    it — i.e. an abandoned/incomplete debate or a bare scaffold. A dir that
-    DOES contain ``synthesis.md`` is a completed decision record and is KEPT
-    regardless of age (never deleted by this cleanup).
+    Nothing else prunes them (``wait`` reads and LEAVES a marker so the report
+    stays readable at the path it printed), so they accumulate forever. The age
+    rule needs no liveness check of its own: a wait blocks for minutes, so a
+    marker this old cannot be one a live wait is about to read, and an
+    orchestrator reusing a tag clears it before dispatch regardless.
     """
-    debates_dir = crew_dir / "debates"
-    if not debates_dir.is_dir():
+    # own_dir (is_dir AND not is_symlink), never a plain is_dir: this sweep
+    # unlink()s under signals/ UNATTENDED every session start, so a symlinked
+    # signals/ segment would let it delete normally-named JSON at the link target,
+    # OUTSIDE the project. A symlinked segment means this is not the tree crew
+    # created, so skip it (leak, never delete-through).
+    signals_dir = session_dir / SIGNALS_SUBDIR
+    if not artifact_prune.own_dir(signals_dir):
+        return
+    for marker in signals_dir.glob("*.json"):
+        try:
+            if not marker.is_file() or not _SIGNAL_MARKER_RE.match(marker.name):
+                continue
+            if now - marker.stat().st_mtime > MAX_AGE_SECONDS:
+                marker.unlink()
+        except OSError:
+            continue
+
+
+def sweep_signal_markers_all(crew_dir: Path | None = None) -> None:
+    """Reap aged agent signal markers across every session under ``.crew/reviews/``.
+
+    Signal markers are ephemeral bookkeeping (the same sanctioned auto-clean class
+    as state files): nothing else prunes them, so ``session-start`` still reaps the
+    aged ones. This function is signal-sweeping ONLY. It deletes NO review-run dir:
+    that destructive venue moved to the attended ``crew swab`` command, and
+    ``report_stale_artifacts`` merely reports the orphans it would remove.
+
+    The `.crew` root defaults to CWD-RELATIVE (`Path(".crew")`), matching `crew
+    swab` and the engine's review/signal WRITERS (which resolve `_REVIEWS_BASE =
+    ".crew/reviews"` cwd-relative and never consult CLAUDE_PROJECT_DIR). A
+    CLAUDE_PROJECT_DIR root would make this sweep look where no markers were
+    written when cwd != CLAUDE_PROJECT_DIR. An explicit `crew_dir` is honored (the
+    tests pass one).
+    """
+    if crew_dir is None:
+        crew_dir = Path(".crew")
+    # own_dir at EVERY directory segment, `.crew` root FIRST (then reviews root,
+    # each session dir, and the signals dir inside _sweep_signal_markers): a
+    # symlinked segment would redirect this unattended unlink() sweep to delete
+    # files outside the project. is_dir() follows symlinks and would delete-through;
+    # own_dir refuses the link. Guarding reviews_root alone leaves the one-level-up
+    # gap: a symlinked `.crew` still resolves to a real reviews/ at the link target,
+    # so reviews_root would pass and aged external JSON would be unlinked.
+    if not artifact_prune.own_dir(crew_dir):
+        return
+    reviews_root = crew_dir / REVIEWS_SUBDIR
+    if not artifact_prune.own_dir(reviews_root):
         return
 
     now = time.time()
-
-    for entry in debates_dir.iterdir():
-        try:
-            if not entry.is_dir():
-                continue
-            # Match ONLY our generated dir names (run-* or a YYYYMMDD-HHMMSS
-            # timestamp prefix) — NOT any dir that merely contains a hyphen.
-            if not _DEBATE_DIR_RE.match(entry.name):
-                continue
-            age = now - entry.stat().st_mtime  # OSError raised here if stat fails
-        except OSError:
-            continue  # Skip entries whose stat() raises (e.g. dangling symlink)
-        # A completed debate (has synthesis.md) is a decision record — KEEP it
-        # regardless of age. Only sweep stale, incomplete/abandoned scaffolds.
-        if (entry / "synthesis.md").exists():
+    for session_dir in reviews_root.iterdir():
+        if not artifact_prune.own_dir(session_dir):
             continue
-        if age > STALE_INACTIVE_SECONDS:
-            shutil.rmtree(str(entry), ignore_errors=True)
+        _sweep_signal_markers(session_dir, now)
+
+
+def report_stale_artifacts(crew_dir: Path | None = None) -> str:
+    """RETURN a one-line COUNT-ONLY notice about stale review-run + debate orphans, or "".
+
+    Destructive rmtree of the user's disk from the unattended session-start hook
+    is the wrong venue: an unattended sweep has no human reading the list before
+    it deletes. This is the report-only replacement: it reuses the ONE shared
+    enumerator every safety rule already lives in
+    (`artifact_prune.collect_prunable`, the same list `crew swab` acts on) and
+    returns a single terse line pointing the human at `crew swab`, which OWNS the
+    deletion. Returning (not printing) lets `main()` ride the notice on
+    the SessionStart `additionalContext` channel, the one carrier a successful
+    hook actually delivers to the user/Claude, rather than stderr (which no one
+    reliably sees). Empty string when there are no candidates.
+
+    It enumerates with `with_sizes=False`, so the notice carries a COUNT but NO
+    byte total: exact per-dir sizing is an unbounded recursive walk that belongs to
+    the ATTENDED `crew swab` (where the human waits), not to every session start,
+    where a big stale tree could slow the hook and suppress restored context. The
+    count stays ACCURATE (every validation runs; only the sizing walk is skipped).
+
+    The `.crew` root defaults to CWD-RELATIVE (`Path(".crew")`), matching `crew
+    swab` and the engine writers (cwd-relative `_REVIEWS_BASE`, never
+    CLAUDE_PROJECT_DIR): the whole point of this report is to recommend `crew
+    swab`, so the two MUST enumerate the SAME tree, or a report naming artifacts
+    swab won't touch is worse than none. An explicit `crew_dir` is honored (the
+    tests pass one).
+    """
+    if crew_dir is None:
+        crew_dir = Path(".crew")
+    items = artifact_prune.collect_prunable(crew_dir, time.time(), with_sizes=False)
+    if not items:
+        return ""
+    return (
+        f"[crew] {len(items)} stale crew artifact(s) under .crew/; "
+        f"run `crew swab` to review or remove them."
+    )
 
 
 def cleanup_stale_todos(todos_dir: Path) -> None:
@@ -435,6 +502,58 @@ def loop_budget_line(data: dict) -> str:
     return f"Budget: stop fires {fires}/{max_fires} · elapsed {elapsed}/{limit} min"
 
 
+def loop_next_step(data: dict, ongoing: str, loop: str) -> str:
+    """What the restored loop's NEXT move is, which depends on its phase.
+
+    From `done` a completing verdict (APPROVED, or REVISE --minor-only) is
+    already on record and both review verbs refuse, so the only move left is
+    `deactivate`: telling that loop to keep working toward panel approval strands
+    it, since the Stop hook goes on blocking while every verb it was pointed at
+    says no. Phase is read defensively (a garbage value falls back to the ongoing
+    guidance, never raises).
+
+    `loop` is the caller's alias (`bl`/`mt`), which `deactivate` requires: a bare
+    `crew state deactivate` just errors on the missing positional, so the one step
+    the guidance names has to be the runnable command.
+    """
+    if (data.get("phase") or "drafting") == "done":
+        note = override_completion_note(data.get("last_verdict_overrides"))
+        if note:
+            # A forced completion is NOT a clean sign-off: say what it was
+            # recorded over, so the banner never launders a --force into approval.
+            return (
+                f"This completion was {note}: the verdict is recorded and the "
+                f"only step left is `crew state deactivate {loop}`, then summarize."
+            )
+        return (
+            "The panel signed off on this (APPROVED, or REVISE with nothing "
+            "blocking): the verdict is recorded and the only step left is "
+            f"`crew state deactivate {loop}`, then summarize."
+        )
+    return ongoing
+
+
+def orphan_loop_line(label: str, loop: str, file_session: str, task: str, age_days: int) -> str:
+    """One entry per ACTIVE loop owned by a DIFFERENT session, with the exact
+    command that ends it.
+
+    A resumed session gets a NEW id, so a loop started before the resume is
+    invisible to this session's banner and unreachable by a bare `deactivate`,
+    while its Stop hook goes on blocking the session that owns it. Adopting it
+    here would be a guess (that session may be genuinely alive in another
+    terminal), so this only REPORTS and hands over the command: the human
+    decides. `--cancel` is the sanctioned way to end a loop with no verdict, and
+    the line carries the two things the reader cannot derive, the loop positional
+    (a bare `deactivate` just errors on the missing argument) and the OLD
+    session's full id (the banner's 8-char prefix elsewhere is display-only).
+    """
+    return (
+        f"- {label} (session {file_session}, {age_days}d old): {task}\n"
+        f'  End it if it is dead: "${{CLAUDE_PLUGIN_ROOT}}/crew" state deactivate '
+        f'{loop} --session-id {file_session} --cancel --reason "orphaned session"'
+    )
+
+
 def build_session_status(
     directory: Path,
     home: Path,
@@ -479,7 +598,7 @@ def build_session_status(
                 data, load_status = read_state_json(json_file)
                 if load_status != LOAD_OK or data is None:
                     continue
-                if not data.get("active", False):
+                if not is_active_value(data.get("active", False)):
                     continue
 
                 file_session = data.get("session_id", "")
@@ -491,20 +610,25 @@ def build_session_status(
 
                 # Build status line
                 if json_file.name.startswith("build-state"):
-                    prompt = data.get("prompt", "")
+                    prompt = coalesce_task(data)
                     if is_this_session:
                         this_session_loops.append(
                             f"[Build Loop Active]\n"
                             f"{loop_budget_line(data)}\n"
                             f"Task: {prompt}\n"
-                            f"Continue until the multi-model panel approves completion."
+                            + loop_next_step(
+                                data,
+                                "Continue until the multi-model panel approves completion.",
+                                "bl")
                         )
                     else:
                         other_session_loops.append(
-                            f"Build loop (session {file_session[:8]}...): {prompt[:50]}"
+                            orphan_loop_line(
+                                "Build loop", "bl", file_session, prompt[:60],
+                                get_file_age_days(json_file))
                         )
                 elif json_file.name.startswith("measure-twice-state"):
-                    task = data.get("task_description", "")
+                    task = coalesce_task(data)
                     plan = data.get("plan_file", "")
                     if is_this_session:
                         this_session_loops.append(
@@ -512,11 +636,14 @@ def build_session_status(
                             f"{loop_budget_line(data)}\n"
                             f"Task: {task}\n"
                             f"Plan: {plan}\n"
-                            f"Continue until the panel approves the plan."
+                            + loop_next_step(
+                                data, "Continue until the panel approves the plan.", "mt")
                         )
                     else:
                         other_session_loops.append(
-                            f"Measure-twice loop (session {file_session[:8]}...): {task[:50]}"
+                            orphan_loop_line(
+                                "Measure-twice loop", "mt", file_session, task[:60],
+                                get_file_age_days(json_file))
                         )
             except (OSError, json.JSONDecodeError, KeyError, ValueError):
                 continue
@@ -525,7 +652,13 @@ def build_session_status(
 
     if other_session_loops:
         messages.append(
-            "[Other Sessions]\n" + "\n".join(f"- {l}" for l in other_session_loops)
+            "[Other Sessions]\n"
+            "Active loops this session does not own. Nothing was adopted or "
+            "cancelled: they may be live in another terminal, or orphaned by a "
+            "/resume (which hands the session a new id, leaving the old id's "
+            "loop blocking on its own Stop hook). Ask the user before running "
+            "any line below.\n"
+            + "\n".join(other_session_loops)
         )
 
     # Check for saved context snapshot
@@ -563,7 +696,14 @@ def main():
     cleanup_stale_todos(home / ".claude" / "todos")
     cleanup_stale_files(home / ".claude")
     cleanup_stale_files(directory / ".crew")
-    cleanup_stale_debate_dirs(directory / ".crew")
+    # State-file/todo/snapshot sweeps stay on the CLAUDE_PROJECT_DIR root (state
+    # files really are resolved via CLAUDE_PROJECT_DIR by crew-state/models). The
+    # review-run/debate REPORT and the signal-marker sweep resolve `.crew`
+    # cwd-relative instead, to match `crew swab` and the cwd-relative engine
+    # writers (default arg = Path(".crew")); pinning them to CLAUDE_PROJECT_DIR
+    # would diverge from the command the report points the human at.
+    sweep_signal_markers_all()
+    swab_notice = report_stale_artifacts()
 
     # Detect project stack
     stack_hints = detect_project_stack(directory)
@@ -578,6 +718,10 @@ def main():
     context_parts = [guidance]
     if status_messages:
         context_parts.append("\n".join(status_messages))
+    # The swab notice rides the same additionalContext channel as the rest of the
+    # session context (a successful hook's only reliably-delivered carrier).
+    if swab_notice:
+        context_parts.append(swab_notice)
 
     full_context = "\n\n".join(context_parts)
 

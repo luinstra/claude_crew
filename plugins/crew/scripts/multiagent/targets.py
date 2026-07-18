@@ -90,33 +90,107 @@ def _has_commits(cwd: str | None = None) -> bool:
     return cp.returncode == 0
 
 
-def _is_dirty(cwd: str | None = None) -> bool:
-    cp = _git(["status", "--porcelain"], cwd=cwd)
-    return cp.returncode == 0 and bool(cp.stdout.strip())
+def _is_engine_artifact(path: str) -> bool:
+    # The engine writes its own state, run dirs, and signals under ``.crew/``.
+    # A working-tree review that included them would re-hash on every run (the
+    # panel's own artifacts land mid-review), so completion would warn on the
+    # engine's own bookkeeping. Excluded here so drift reflects reviewed content.
+    return path == ".crew" or path.startswith(".crew/")
 
 
-def _untracked_files(cwd: str | None = None) -> list[str]:
-    """List untracked, non-ignored files (read-only).
+def _untracked_partition(
+    cwd: str | None = None,
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """The SINGLE enumeration of the working-tree target's untracked entries.
 
-    Uses ``-z`` so paths with spaces or unusual characters survive intact
-    (NUL-separated, never shell-quoted).
+    Every consumer of "what is untracked here" derives from THIS one call, so the
+    three cannot disagree on what the snapshot holds: ``_is_dirty`` (does ``auto``
+    pick the working tree), the content/hash the panel reviews, and the shell
+    command a reference-mode seat replays (``_worktree_diff_cmd`` mirrors the same
+    exclusions). Extend HERE, never add a fourth view.
+
+    Returns ``(included, excluded)``: ``included`` are renderable new-file paths;
+    ``excluded`` are ``(path, reason)`` pairs kept OUT of the content and NAMED in
+    the notes, never silently claimed as reviewed. ``-z`` keeps paths with spaces
+    or newlines intact (NUL-separated, never shell-quoted).
+
+    Two kinds never reach the content:
+      * engine artifacts under ``.crew/`` are dropped SILENTLY (they land
+        mid-review, so naming or hashing them would churn on the panel's own
+        bookkeeping: documented policy, not a surprise worth a note).
+      * an untracked DIRECTORY / nested repo / linked worktree, which ``git
+        ls-files --others`` reports as one trailing-slash ``dir/`` entry, is
+        NAMED as not-included: ``git diff --no-index /dev/null <dir>`` fails on it
+        and renders no bytes, so a consumer must not claim it is in the snapshot.
     """
     cp = _git(["ls-files", "--others", "--exclude-standard", "-z"], cwd=cwd)
     if cp.returncode != 0:
-        return []
-    return [f for f in cp.stdout.split("\0") if f]
+        return [], []
+    included: list[str] = []
+    excluded: list[tuple[str, str]] = []
+    for f in cp.stdout.split("\0"):
+        if not f or _is_engine_artifact(f):
+            continue
+        if f.endswith("/"):
+            excluded.append((f, "untracked directory / nested repo"))
+        else:
+            included.append(f)
+    return included, excluded
 
 
-def _untracked_diff(cwd: str | None = None) -> str:
-    """Render untracked files as new-file diffs (read-only).
+def _has_tracked_changes(cwd: str | None = None) -> bool:
+    """Quiet dirtiness predicate for tracked files (staged + unstaged): ``git diff
+    --quiet`` reports via EXIT CODE (1 = differences) and captures no patch, so
+    ``auto`` can test dirtiness without the heavy diff capture ``_resolve_working_tree``
+    runs again during resolution. Working-tree semantics (no ``--cached``), same
+    unborn-repo empty-tree base. Only exit 1 counts as dirty: exit 0 is clean and any
+    other code is a git error, matching the old capture-then-``strip()`` predicate that
+    treated a failed diff as not-dirty.
 
-    ``git diff --no-index -- /dev/null <file>`` produces a full add-diff for
-    each untracked file without touching the index or working tree. That
-    command exits 1 whenever the files differ (always true vs ``/dev/null``),
-    so the return code is intentionally ignored and only stdout is collected.
+    No index refresh: `--quiet` skips it, so a STAT-dirty file (touched, bytes
+    identical) can false-report as a difference here. That is harmless and left
+    unguarded on purpose: `_resolve_auto` falls through to the committed diff
+    whenever the resolved working tree carries no content, so a stat-dirty
+    false-positive never becomes an empty auto target. Refreshing would WRITE
+    index metadata during read-only target discovery, which this predicate must
+    not do."""
+    if _has_commits(cwd):
+        cp = _git(["diff", "--quiet", "HEAD"], cwd=cwd)
+        return cp.returncode == 1
+    empty = _git(["hash-object", "-t", "tree", "/dev/null"], cwd=cwd)
+    if empty.returncode != 0:
+        return False
+    cp = _git(["diff", "--quiet", empty.stdout.strip()], cwd=cwd)
+    return cp.returncode == 1
+
+
+def _is_dirty(cwd: str | None = None) -> bool:
+    # DERIVED from the SAME enumeration the working-tree target is built from, so
+    # `auto` never picks a working tree that resolves to EMPTY: a tree whose only
+    # uncommitted content is filtered-out entries (`.crew/` artifacts, an untracked
+    # nested repo) is NOT dirty, and `auto` falls through to the branch diff.
+    # Dirty == the target would carry content: tracked changes OR at least one
+    # INCLUDED (renderable) untracked file. No separate `.crew`-unaware git-status
+    # view. The tracked check is the QUIET predicate (exit code, no patch): the full
+    # capture happens once, inside `_resolve_working_tree`, when `auto` picks it.
+    if _has_tracked_changes(cwd):
+        return True
+    included, _ = _untracked_partition(cwd)
+    return bool(included)
+
+
+def _untracked_diff(included: list[str], cwd: str | None = None) -> str:
+    """Render the INCLUDED untracked files as new-file diffs (read-only).
+
+    ``git diff --no-index -- /dev/null <file>`` produces a full add-diff for each
+    without touching the index or working tree. That command exits 1 whenever the
+    files differ (always true vs ``/dev/null``), so the return code is
+    intentionally ignored and only stdout is collected. ``included`` comes from
+    ``_untracked_partition`` (the ONE enumeration), so excluded entries never
+    reach here.
     """
     parts: list[str] = []
-    for f in _untracked_files(cwd):
+    for f in included:
         cp = _git(["diff", "--no-index", "--", "/dev/null", f], cwd=cwd)
         if cp.stdout:
             parts.append(cp.stdout)
@@ -134,15 +208,22 @@ def _worktree_diff_cmd(base: str) -> str:
 
     Tracked changes vs ``base`` PLUS untracked (non-ignored) files rendered as
     new-file diffs. ``-z`` + a NUL-delimited read loop keeps paths with spaces
-    or newlines intact (matching the Python-side ``_untracked_files``). The
+    or newlines intact (matching the Python-side ``_untracked_partition``). The
     ``--no-index`` calls exit 1 whenever content differs (always, for a new file)
     — expected and harmless. Fully read-only (no index/ref/tree mutation).
     NB: the read loop assumes a bash/zsh-compatible shell (`read -d`).
+
+    The ``case`` skip mirrors ``_untracked_partition``'s exclusions so a seat
+    replays the bytes the snapshot froze: engine artifacts under ``.crew/`` and
+    untracked directories / nested repos (the trailing-slash entries ``--no-index``
+    cannot render).
     """
     return (
         f"git --no-pager diff {base}; "
         "git ls-files --others --exclude-standard -z | "
-        'while IFS= read -r -d "" f; do git --no-pager diff --no-index -- /dev/null "$f"; done'
+        'while IFS= read -r -d "" f; do '
+        'case "$f" in .crew|.crew/*|*/) continue ;; esac; '
+        'git --no-pager diff --no-index -- /dev/null "$f"; done'
     )
 
 
@@ -185,13 +266,22 @@ def _resolve_plan(path: str) -> Target:
 # diff targets
 # =============================================================================
 
-def _untracked_note(cwd: str | None) -> list[str]:
-    untracked = _untracked_files(cwd)
-    if untracked:
-        listed = ", ".join(untracked[:20])
-        more = "" if len(untracked) <= 20 else f" (+{len(untracked) - 20} more)"
-        return [f"{len(untracked)} untracked file(s) included as new-file diffs: {listed}{more}"]
-    return []
+def _untracked_note(
+    included: list[str], excluded: list[tuple[str, str]]
+) -> list[str]:
+    notes: list[str] = []
+    if included:
+        listed = ", ".join(included[:20])
+        more = "" if len(included) <= 20 else f" (+{len(included) - 20} more)"
+        notes.append(
+            f"{len(included)} untracked file(s) included as new-file diffs: "
+            f"{listed}{more}"
+        )
+    # Name what is present but deliberately NOT in the snapshot, so a reader is
+    # never told an entry was reviewed when it contributed no bytes.
+    for path, reason in excluded:
+        notes.append(f"present but not included ({reason}): {path}")
+    return notes
 
 
 def _resolve_working_tree(cwd: str | None) -> Target:
@@ -211,15 +301,15 @@ def _resolve_working_tree(cwd: str | None) -> Target:
             dcp = _git(["diff", tree], cwd=cwd)
             if dcp.returncode == 0:
                 content = dcp.stdout
-        untracked = _untracked_files(cwd)
-        content += _untracked_diff(cwd)
-        notes += _untracked_note(cwd)
+        included, excluded = _untracked_partition(cwd)
+        content += _untracked_diff(included, cwd)
+        notes += _untracked_note(included, excluded)
         if not content.strip():
             notes.append("working tree is empty (nothing to review)")
         # No HEAD here — the reproduced command MUST NOT use `git diff HEAD`
         # (that fails in an unborn repo and would omit staged initial files).
         # Diff staged content against the empty tree, plus untracked files.
-        if untracked:
+        if included:
             diff_cmd = _worktree_diff_cmd(_EMPTY_TREE_BASE)
         elif content.strip():
             diff_cmd = f"git --no-pager diff {_EMPTY_TREE_BASE}"
@@ -242,25 +332,30 @@ def _resolve_working_tree(cwd: str | None) -> Target:
     if cp.returncode != 0:
         raise TargetError(f"git diff failed: {cp.stderr.strip()}")
 
-    untracked = _untracked_files(cwd)
+    included, excluded = _untracked_partition(cwd)
     tracked = cp.stdout
-    content = tracked + _untracked_diff(cwd)
+    content = tracked + _untracked_diff(included, cwd)
     notes = []
     if not tracked.strip():
         notes.append("working tree has no tracked changes")
-    notes += _untracked_note(cwd)
+    notes += _untracked_note(included, excluded)
     if not content.strip():
-        notes = ["working tree is clean (nothing to review)"]
+        # Nothing renders, but a set-aside nested repo / linked worktree must still
+        # be named: collapsing to a bare "clean" would tell a reviewer of an
+        # all-excluded tree nothing was here, hiding what was deliberately left out.
+        notes = ["working tree is clean (nothing to review)"] + _untracked_note(
+            [], excluded
+        )
     return Target(
         kind="code",
         scope="working-tree",
         content=content,
         descriptor="code: working-tree (uncommitted, staged + unstaged)",
         notes=notes,
-        # When untracked files are present, plain `git diff HEAD` would miss
-        # them — hand the seat the compound command that includes them.
+        # When INCLUDED untracked files are present, plain `git diff HEAD` would
+        # miss them: hand the seat the compound command that includes them.
         # --no-pager guards against a TTY pager hang on a large diff.
-        diff_cmd=_WORKTREE_DIFF_CMD if untracked else "git --no-pager diff HEAD",
+        diff_cmd=_WORKTREE_DIFF_CMD if included else "git --no-pager diff HEAD",
         replay_spec="working-tree",
     )
 
@@ -370,18 +465,34 @@ def _resolve_ref_range(spec: str, cwd: str | None) -> Target:
 
 def _resolve_auto(base: str, cwd: str | None) -> Target:
     if _is_dirty(cwd):
-        return _resolve_working_tree(cwd)
+        wt = _resolve_working_tree(cwd)
+        # The invariant that makes auto correct independent of the dirtiness
+        # predicate: a working-tree target that resolves to NO content (e.g. a
+        # stat-dirty file the predicate mistook for a real change) must never be
+        # what auto returns, so fall through to the committed diff below.
+        if wt.content.strip():
+            return wt
     if not _has_commits(cwd):
         # Clean and no commits — nothing committed, fall back to working-tree
-        # (which will report the empty/new state clearly).
+        # (which will report the empty/new state clearly, excluded entries named).
         return _resolve_working_tree(cwd)
     # Clean: last commit vs base merge-base.
     mb = _merge_base(base, cwd)
     if mb is None:
         # No resolvable base (e.g. detached HEAD with no base, shallow clone):
         # fall back to last commit vs its parent.
-        return _resolve_commit("HEAD", cwd)
-    return _resolve_branch(base, cwd)
+        target = _resolve_commit("HEAD", cwd)
+    else:
+        target = _resolve_branch(base, cwd)
+    # Excluded entries (an untracked nested repo / linked worktree) carry no
+    # bytes, so when they are the ONLY working-tree dirtiness auto skips the
+    # working tree entirely. Name them on the committed-diff target anyway: the
+    # promise that omitted directories are always named must hold here too, the
+    # same way the working-tree empty-target path names them.
+    _, excluded = _untracked_partition(cwd)
+    if excluded:
+        target.notes = target.notes + _untracked_note([], excluded)
+    return target
 
 
 # =============================================================================

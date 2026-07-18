@@ -16,8 +16,14 @@ session-scoped state file the loop was init'd with; otherwise the scoped file
 stays active and keeps blocking Stop:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" state deactivate bl --reason "User cancelled via /crew:cancel-build" --session-id <session-id>
+"${CLAUDE_PLUGIN_ROOT}/crew" state deactivate bl --cancel --reason "User cancelled via /crew:cancel-build" --session-id <session-id>
 ```
+
+`--cancel` is required and is the point of this command: it ends the loop WITHOUT
+a panel verdict, which is exactly what the user asked for, and records the exit as
+a cancellation rather than an approval. Without it, a loop that no panel signed off
+on is refused. It is legal from any phase (an escape hatch a phase check could
+veto would not be one).
 
 ## After Running
 

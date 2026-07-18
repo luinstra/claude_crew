@@ -469,7 +469,11 @@ def render_digest(
     manifest read). When given, the digest opens with one PANEL header line
     stating the strict-majority threshold (``launched // 2 + 1``) and whether
     the usable count meets it; a NOT MET header adds the line that an APPROVED
-    verdict cannot be recorded. The header prepends in the no-parse fallback
+    verdict is not backed by quorum from this panel. That line is capability-
+    NEUTRAL (this digest is SHARED by standalone /crew:review, which has no
+    override verb): it states the fact only, and the surfaces that own a
+    completion verb (build.md / measure-twice.md) carry the --force guidance. The
+    header prepends in the no-parse fallback
     too (the quorum facts hold regardless of parseability); with ``quorum``
     omitted, output is byte-identical to before the header existed.
     """
@@ -482,7 +486,9 @@ def render_digest(
             f"{threshold}: {'MET' if usable >= threshold else 'NOT MET'}"
         ]
         if usable < threshold:
-            hdr.append("an APPROVED verdict cannot be recorded from this panel")
+            hdr.append(
+                "an APPROVED verdict is not backed by quorum from this panel"
+            )
         prefix = "\n".join(hdr) + "\n\n"
 
     parses = [parse_seat(r) for r in results]

@@ -5,6 +5,10 @@
 # Local Claude settings (user-specific permissions)
 .claude/settings.local.json
 
+# Linked git worktrees: a worktree's checkout must never be tracked by the parent
+# repo (the rest of .claude/, incl. the tracked .claude/CLAUDE.md, stays tracked).
+.claude/worktrees/
+
 # Eval workspace
 skill-eval-workspace/
 

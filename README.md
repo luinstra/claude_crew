@@ -9,7 +9,7 @@ A Claude Code plugin for persistence, specialized agents, and tech-stack guidanc
 
 ## What It Does
 
-- **Persistence** — Don't stop until work is complete (build & measure-twice loops)
+- **Persistence**: loops persist toward completion (they won't stop on a premature stop), and also end on a completing verdict, your cancel, or a safety bound (build & measure-twice loops)
 - **Specialized Agents** — Delegate to focused agents for specific tasks
 - **Tech-Stack Skills** — Auto-injected guidance for Kotlin, Exposed, Gradle, Trino (via `sk` plugin)
 - **Session Restoration** — Resume where you left off after restarts
@@ -20,8 +20,8 @@ The intended path for real work, in order:
 
 1. **Frame and discuss the problem** in plain conversation. No commands yet, just get the shape of it right.
 2. **`/crew:debate "question"`** at a decision point you're unsure about. A multi-model council argues it out and hands back where the seats agree, where they don't, and a recommendation.
-3. **`/crew:measure-twice "task"`** to loop on the *plan document*, revising until a review panel approves it.
-4. **`/crew:build "task"`** to loop on *executing* that plan, persisting until a panel approves the result.
+3. **`/crew:measure-twice "task"`** to loop on the *plan document*, revising until the loop completes (normally a review panel's completing verdict, or a human `--force` over an advisory — see the panel section below).
+4. **`/crew:build "task"`** to loop on *executing* that plan, persisting until the loop completes (same completing-verdict-or-`--force` rule).
 
 Steps 2 and 3 are cheap next to step 4. A decision settled in a debate costs one round; the same decision re-litigated mid-build costs a rewrite.
 
@@ -101,9 +101,9 @@ repo-relative path.
 | `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (natural-language dispatch) → `APPROVED`/`REVISE` verdict |
 | `/crew:debate "question"` | Crew-native council — single-round multi-model take on a question (the default review panel), synthesized into agreement/disagreement/recommendation |
 | `/crew:dispatch "[--seat <name>] <task>"` | Delegate a WORK task to ONE non-Claude seat (default `codex`) in write mode — it edits the working tree and leaves changes UNCOMMITTED + UNSTAGED for you to review (keep / revert / pipe into `/crew:review`) |
-| `/crew:build "task"` | Start a persistence loop — Claude won't stop until task is verified complete |
+| `/crew:build "task"` | Start a persistence loop: persists toward completion, also ending on a completing verdict, your cancel, or a safety bound |
 | `/crew:cancel-build` | Exit an active build loop early |
-| `/crew:measure-twice "task"` | Start a self-refining plan loop — generates plan, reviews, revises until approved |
+| `/crew:measure-twice "task"` | Start a self-refining plan loop — generates plan, reviews, revises toward loop completion (a panel's completing verdict, or a human `--force`) |
 | `/crew:cancel-measure-twice` | Exit an active measure-twice loop early |
 
 ### Utilities
@@ -167,7 +167,10 @@ from whichever seats succeed, and only an all-seats-failed panel skips the
 verdict. Certification is quorum-gated, though: the grouped digest opens with a
 `PANEL: … quorum <n>: MET|NOT MET` header (a strict majority of the launched
 panel), and a `NOT MET` panel cannot certify an `APPROVED`; the orchestrator
-relaunches the pending seats or surfaces the shortfall instead.
+relaunches the pending seats or surfaces the shortfall instead. In the `/crew:build`
+and `/crew:measure-twice` loops a human may still authorize completion over a
+`NOT MET` panel with `--force`, which is recorded as an explicit override for the
+audit trail.
 
 **Why some seats are opt-in.** `codex` already covers the GPT lineage and `agy`
 covers the Gemini lineage flat-rate, so the premium cursor seats stay off the
@@ -325,6 +328,28 @@ exits 0; on failure it prints the error to stderr and exits nonzero (in `--json`
 mode it always exits 0 with the `ok` flag in the JSON). **Always use this wrapper
 for ad-hoc calls — never raw `agy -p` / `codex exec`.**
 
+#### Cleaning up stale artifacts (`crew swab`)
+
+Attended cleanup of stale crew artifacts under the project `.crew/`: orphaned
+review-run dirs (no active loop and no current-run pointer names them) and stale
+debate dirs (past the 1-day threshold, no synthesis). It is DRY-RUN by default,
+modelled on `git clean -n`: with no flag it only lists what it would remove, so
+reading the list is the safety step.
+
+```bash
+# list candidates, delete nothing (default)
+"${CLAUDE_PLUGIN_ROOT}/crew" swab
+
+# the destructive step: rmtree the listed candidates
+"${CLAUDE_PLUGIN_ROOT}/crew" swab --yes
+```
+
+`--yes` is the only destructive mode (it exits nonzero if any delete failed). A
+review run is protected while an active loop or a current-run pointer names it,
+and plans and loop state are never in scope, so swab only ever removes stale
+review/debate debris. `--json` emits the machine payload (`prunable`, `removed`,
+`failed`, `total_bytes`).
+
 ## Agents
 
 Specialized agents for different tasks. Use via `Task(subagent_type="crew:agent-name", prompt="...")`.
@@ -385,7 +410,7 @@ When a build loop or measure-twice loop is active:
 1. Claude attempts to stop
 2. The Stop hook intercepts
 3. Claude is reminded to continue working
-4. Loop continues until truly complete
+4. Loop persists toward completion (it can also end via your cancel, a safety bound, or a second consecutive FAILED verdict, per the exits listed below)
 
 Priority order: build loop → measure-twice
 
@@ -394,7 +419,7 @@ that natively.
 
 To exit early: `/crew:cancel-build` or `/crew:cancel-measure-twice`
 
-A build loop normally ends when the multi-model review panel approves completion. Three other things can end a turn:
+A build loop normally ends on a completing verdict from the multi-model review panel (`APPROVED`, or `REVISE` with only `[MINOR]` issues; a human may `--force` completion over an advisory), and it ends terminally on a second consecutive `FAILED` verdict (`review_failed`). Three other things can end a turn:
 
 - **Cancelling** (`/crew:cancel-build`).
 - **A hook-owned safety limit** (a stop-fire cap or the wall-clock deadline), which force-exits the loop and asks for a status report instead of an approval.

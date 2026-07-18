@@ -81,6 +81,7 @@ from multiagent.providers import (
     get_provider,
     known_seat_names,
 )
+import artifact_prune
 # One-time stderr notes for panel/availability resolution (mirrors config.py's
 # memoized-warn posture; keyed so each distinct note fires at most once/process).
 _warned: set[str] = set()
@@ -2067,9 +2068,11 @@ def cmd_collect(args: argparse.Namespace) -> int:
             # validated field-level (recorded at mint precisely so the digest
             # never needs a mutable read). The roster LISTS are outside the
             # identity and untyped, so they are never trusted for counting.
-            # This header is what the command markdowns honor at synthesis
-            # time (a NOT MET digest must not certify an APPROVED); loop state
-            # persists no run identity, so nothing downstream recounts it.
+            # This header stays ADVISORY: it is a digest reader's summary, and
+            # the command markdowns honor it at synthesis time (a NOT MET digest
+            # must not certify an APPROVED). It is not the authority. The
+            # completion gate recounts usable seats itself, against the identity
+            # frozen in loop state, and its count is what decides.
             launched = len(dict(run_record.get("seat_signatures") or {}))
             quorum = (launched, len(usable_names))
         else:
@@ -4064,6 +4067,136 @@ def _finite_positive_seconds(text: str) -> float:
     return value
 
 
+def _fmt_bytes(n: int) -> str:
+    """Human byte size (B up to PB, one decimal above bytes)."""
+    if n < 1024:
+        return f"{n} B"
+    size = float(n)
+    for unit in ("KB", "MB", "GB", "TB"):
+        size /= 1024
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+    return f"{size / 1024:.1f} PB"
+
+
+def _swab_item_json(item: "artifact_prune.Prunable") -> dict:
+    return {
+        "kind": item.kind,
+        "name": item.name,
+        "path": str(item.path),
+        "bytes": item.bytes,
+    }
+
+
+def cmd_swab(args: argparse.Namespace) -> int:
+    """swab the decks: list (dry-run) or prune (--yes) stale crew artifacts.
+
+    DRY-RUN BY DEFAULT, modelled on ``git clean -n``: the read-the-list moment IS
+    the safety mechanism. Prunes two artifact families under the project ``.crew/``:
+    ORPHANED review-run dirs (no active loop AND no current-run pointer names them;
+    there is deliberately no review-run age threshold) and stale debate dirs (past
+    the 1-day threshold, no synthesis). Signal markers are deliberately left
+    untouched: they carry no clean orphan signal at an attended moment, so this
+    command does not delete them (session-start's aged sweep still reaps them).
+
+    ``--yes`` exits NONZERO if any rmtree failed and lists the survivors under
+    ``failed`` in ``--json``, so a caller checking the exit code is never told a
+    partial delete succeeded.
+
+    The ``--json`` ``total_bytes`` key is mode-dependent (both are the natural total
+    for their mode): in dry-run it is what WOULD be freed (the sum over the prunable
+    candidates); under ``--yes`` it is the byte total of the FULLY removed candidates
+    (a candidate whose ``rmtree`` raised lands in ``failed`` and contributes 0, even
+    if it was partially deleted).
+
+    The ``.crew/reviews`` and ``.crew/debates`` roots are resolved from
+    ``_REVIEWS_BASE`` (a cwd-relative path), IDENTICALLY to how ``review-prep`` /
+    ``collect`` / ``run`` resolve them: a destructive command and the writers must
+    never target different trees when ``CLAUDE_PROJECT_DIR`` and cwd diverge.
+    """
+    # Path(".crew/reviews").parent == Path(".crew"): the same cwd-relative root the
+    # review/debate writers resolve, so swab enumerates exactly where they wrote.
+    # Deliberately NOT a CLAUDE_PROJECT_DIR-or-cwd root (the config-path resolution):
+    # the review/debate writers never consult CLAUDE_PROJECT_DIR, so resolving swab
+    # that way would make a DESTRUCTIVE command target a different .crew than the one
+    # the engine wrote whenever CLAUDE_PROJECT_DIR != cwd, reintroducing the very
+    # divergence this shared source closes. swab and the writers must derive their
+    # root from the ONE _REVIEWS_BASE.
+    crew_dir = Path(_REVIEWS_BASE).parent
+    items = artifact_prune.collect_prunable(crew_dir, time.time())
+
+    if args.yes:
+        removed: list = []
+        failed: list = []
+        removed_run_names: dict = {}
+        for item in items:
+            try:
+                shutil.rmtree(str(item.path))
+            except OSError as exc:
+                print(f"error removing {item.path}: {exc}", file=sys.stderr)
+                failed.append(item)
+                continue
+            removed.append(item)
+            if item.kind == "review-run":
+                removed_run_names.setdefault(item.session_dir, set()).add(item.name)
+        # A removed run may have been the one a session's pointer named; drop it in
+        # the same pass so launch-time derivation never resolves a missing dir.
+        for session_dir, names in removed_run_names.items():
+            artifact_prune.drop_dangling_pointer(session_dir, names)
+
+        removed_bytes = sum(it.bytes for it in removed)
+        if args.json:
+            print(json.dumps({
+                "prunable": [_swab_item_json(it) for it in items],
+                "removed": [_swab_item_json(it) for it in removed],
+                "failed": [_swab_item_json(it) for it in failed],
+                "total_bytes": removed_bytes,
+            }, ensure_ascii=False))
+            return 1 if failed else 0
+        for it in removed:
+            print(f"removed {it.path} ({_fmt_bytes(it.bytes)})")
+        print(f"removed {len(removed)} items, {_fmt_bytes(removed_bytes)} total.")
+        if failed:
+            print(
+                f"failed to remove {len(failed)} items (see errors above).",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+
+    # Dry-run (default): list, delete nothing. ``failed`` is always empty here (a
+    # machine reader gets the same key set as ``--yes``).
+    total = sum(it.bytes for it in items)
+    if args.json:
+        print(json.dumps({
+            "prunable": [_swab_item_json(it) for it in items],
+            "removed": [],
+            "failed": [],
+            "total_bytes": total,
+        }, ensure_ascii=False))
+        return 0
+
+    if not items:
+        print("Nothing to swab: the decks are clean.")
+        return 0
+
+    review = [it for it in items if it.kind == "review-run"]
+    debate = [it for it in items if it.kind == "debate"]
+    if review:
+        print("Review runs (orphaned, no active loop owns them):")
+        for it in review:
+            print(f"  {it.path} ({_fmt_bytes(it.bytes)})")
+    if debate:
+        print("Debate dirs (stale, no synthesis):")
+        for it in debate:
+            print(f"  {it.path} ({_fmt_bytes(it.bytes)})")
+    print(
+        f"{len(items)} items, {_fmt_bytes(total)} total; "
+        "run `crew swab --yes` to remove them."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multiagent",
@@ -4740,6 +4873,27 @@ def build_parser() -> argparse.ArgumentParser:
              "stderr 'detection skipped' note; GIVEN-but-missing/empty/malformed → error.",
     )
     sc.set_defaults(func=cmd_scaffold_config)
+
+    swab = sub.add_parser(
+        "swab",
+        help="swab the decks: review and prune stale crew artifacts (orphaned "
+             "review runs with no active loop or current-run pointer, and stale "
+             "debate transcripts). Dry-run by default; pass --yes to delete.",
+    )
+    swab.add_argument(
+        "--yes", action="store_true",
+        help="actually delete the listed artifacts (default: dry-run, lists only, "
+             "deletes nothing; read the list first, like `git clean -n`). Exits "
+             "nonzero if any delete failed.",
+    )
+    swab.add_argument(
+        "--json", action="store_true",
+        help="emit {prunable, removed, failed, total_bytes} JSON for a machine "
+             "reader instead of the human-readable grouped listing. total_bytes is "
+             "what WOULD be freed in dry-run and, under --yes, the byte total of the "
+             "fully removed candidates (a candidate whose removal failed contributes 0)",
+    )
+    swab.set_defaults(func=cmd_swab)
 
     return parser
 

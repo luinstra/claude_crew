@@ -17,6 +17,8 @@ import sys
 import tempfile
 import time
 
+from state_discovery import is_active_value
+
 try:
     import fcntl
 except ImportError:  # non-POSIX: no interprocess lock primitive available
@@ -258,11 +260,14 @@ class SessionStartResult:
 # newer-crew file that must be REFUSED, never rewritten (see LOAD_FUTURE_SCHEMA).
 # 2 added the hook-owned termination fields (stop_fires / started_at); a schema-1
 # file loads with their defaults, and the hook stamps started_at on first fire.
-# The parked counters and the removal of the old round counter did NOT need a new
-# version: every read defaults a missing field and ignores an unknown one, so a
-# file stays legible in both directions. Bumping would make an older install
-# refuse to touch a live loop for a change it degrades safely on.
-SCHEMA_VERSION = 2
+# 3 unified the two loop dataclasses into ONE LoopState: `task` replaces the
+# per-loop `prompt`/`task_description` (reads coalesce the legacy keys, see
+# coalesce_task), a `loop` stamp names which loop owns the file, and the
+# review-gate fields (phase / run identity / exit_kind) join the shape.
+# `completion_promise` is gone. The bump is what makes an OLDER install refuse
+# to touch a live schema-3 loop instead of silently dropping those fields on a
+# whole-state write.
+SCHEMA_VERSION = 3
 
 # Termination bounds, both hook-owned. They are deliberately generous: a bound
 # that trips during legitimate work teaches the agent to route around it, which
@@ -569,16 +574,89 @@ def update_state_json(path: Path, mutate, default: Optional[dict] = None):
         return updated, status
 
 
+def normalize_overrides(value) -> list:
+    """The advisory names a `--force` completion recorded over, read defensively.
+
+    `record-verdict` stamps `last_verdict_overrides` only when a forced record
+    tripped advisories, so the key is often absent, and the state file is
+    hand-editable, so a schema-3 stamp guarantees neither presence nor a list of
+    strings. Anything but a list of non-empty strings reads as "no overrides"
+    (a clean sign-off) rather than raising into a surface that only describes.
+    """
+    if not isinstance(value, list):
+        return []
+    return [v for v in value if isinstance(v, str) and v]
+
+
+def override_completion_note(value) -> str:
+    """Honest fragment for a completion recorded OVER advisories on a human's
+    `--force`, or "" for a clean sign-off (empty/absent overrides).
+
+    Keyed on the `last_verdict_overrides` stamp so every surface that would
+    otherwise call a forced completion "approved"/"signed off" says instead that
+    it was recorded over one or more advisories on a human's explicit override,
+    naming them. Single-sourced so the banner and the nudge never disagree.
+    """
+    names = normalize_overrides(value)
+    if not names:
+        return ""
+    return (
+        f"recorded over {len(names)} advisory condition(s) "
+        f"({', '.join(names)}) on a human's explicit --force, not a clean "
+        f"panel sign-off"
+    )
+
+
+def coalesce_task(data: dict) -> str:
+    """The loop's task text off a state dict, coalescing the legacy keys.
+
+    Schema-2 files carried the text as ``prompt`` (build) or
+    ``task_description`` (measure-twice); schema 3 unifies them as ``task``.
+    The read-side coalesce keeps a mid-upgrade ACTIVE loop's task visible in
+    the nudge, ``show``, and the session-start banner. This is the whole
+    compatibility story, not a migration layer.
+    """
+    for key in ("task", "prompt", "task_description"):
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 @dataclass
-class BuildState:
-    """State for build loop persistence with multi-model panel verification."""
+class LoopState:
+    """The ONE state shape for both persistence loops (build and measure-twice).
+
+    The two on-disk file prefixes (``build-state-*`` / ``measure-twice-state-*``)
+    and the ``bl``/``mt`` aliases stay: they are load-bearing across the Stop
+    hook, state discovery, and the session-start cleanup globs. What unified is
+    the SHAPE: one dataclass, one ``task`` field, one allowlist, plus the
+    review-gate fields the completion machinery reads.
+    """
     active: bool = False
-    prompt: str = ""
-    completion_promise: str = "DONE"
+    loop: str = ""                 # "bl" | "mt"
+    task: str = ""                 # was prompt / task_description
+    plan_file: str = ""            # meaningful for mt; inert but accepted on bl
+                                   # (one shared allowlist governs both loops)
+    phase: str = "drafting"        # drafting | reviewing | done
+    revision_round: int = 0
+    last_verdict: str = ""         # APPROVED | REVISE | REJECT | FAILED
+    # The advisory names a `--force` completion was recorded over (empty on a
+    # clean sign-off). record-verdict WRITES this; the model carries it so the
+    # banner and nudge can describe a forced completion honestly.
+    last_verdict_overrides: list = field(default_factory=list)
+    run_id: str = ""
+    target_sha256: str = ""        # full 64-hex
+    target_spec: str = ""          # bare resolver spec, never "auto"
+    target_base: str = ""
+    expected_seats: list = field(default_factory=list)
+    consecutive_review_failures: int = 0
+    exit_kind: str = ""            # approved | cancelled | review_failed | force_exit
     session_id: str = ""
     # Hook-owned fields: the Stop hook is the ONLY writer of all five. There is
-    # deliberately no round counter here, because nothing in the Stop path can
-    # honestly observe a revision round.
+    # deliberately no round counter among them, because nothing in the Stop path
+    # can honestly observe a revision round (revision_round above is written by
+    # the review verbs, never by the hook).
     stop_fires: int = 0
     max_stop_fires: int = DEFAULT_MAX_STOP_FIRES
     started_at: str = ""
@@ -589,16 +667,17 @@ class BuildState:
     parked_fires: int = 0
     max_parked_fires: int = DEFAULT_MAX_PARKED_FIRES
 
-    # The ONLY fields `crew state set` will write. Everything else (every field
-    # the termination predicate reads) is refused, because a safety limit the
-    # agent can rewrite is not a safety limit: a live loop reset its own counter
-    # 30 times to stay under a cap it kept hitting merely for waiting, making the
-    # force-exit unreachable.
-    AGENT_SETTABLE: ClassVar[frozenset] = frozenset({"completion_promise"})
+    # The ONLY fields `crew state set` will write. Everything the termination
+    # predicate reads is refused because a safety limit the agent can rewrite is
+    # not a safety limit (a live loop once reset its own counter 30 times), and
+    # the verdict/run-identity fields are refused because they belong to the
+    # review verbs that VALIDATE what they record; `set` would be an unaudited
+    # back door around that gate.
+    AGENT_SETTABLE: ClassVar[frozenset] = frozenset({"plan_file"})
 
     @classmethod
     def load_with_status(cls, path: Path):
-        """Load + classify. Returns ``(BuildState, status)``.
+        """Load + classify. Returns ``(LoopState, status)``.
 
         status ∈ {ok, missing, corrupt, future_schema}. Non-OK statuses return
         the DEFAULT state so callers that only want a value degrade safely; the
@@ -608,10 +687,24 @@ class BuildState:
         data, status = read_state_json(path)
         if status != LOAD_OK:
             return cls(), status
+        seats = data.get("expected_seats")
         return cls(
-            active=data.get("active", False),
-            prompt=data.get("prompt", ""),
-            completion_promise=data.get("completion_promise", "DONE"),
+            active=is_active_value(data.get("active", False)),
+            loop=data.get("loop", ""),
+            task=coalesce_task(data),
+            plan_file=data.get("plan_file", ""),
+            phase=data.get("phase", "drafting"),
+            revision_round=data.get("revision_round", 0),
+            last_verdict=data.get("last_verdict", ""),
+            last_verdict_overrides=normalize_overrides(
+                data.get("last_verdict_overrides")),
+            run_id=data.get("run_id", ""),
+            target_sha256=data.get("target_sha256", ""),
+            target_spec=data.get("target_spec", ""),
+            target_base=data.get("target_base", ""),
+            expected_seats=seats if isinstance(seats, list) else [],
+            consecutive_review_failures=data.get("consecutive_review_failures", 0),
+            exit_kind=data.get("exit_kind", ""),
             session_id=data.get("session_id", ""),
             stop_fires=data.get("stop_fires", 0),
             max_stop_fires=data.get("max_stop_fires", DEFAULT_MAX_STOP_FIRES),
@@ -623,7 +716,7 @@ class BuildState:
         ), LOAD_OK
 
     @classmethod
-    def load(cls, path: Path) -> "BuildState":
+    def load(cls, path: Path) -> "LoopState":
         """Load from file, returning default state if file is missing/unreadable."""
         return cls.load_with_status(path)[0]
 
@@ -711,61 +804,3 @@ def get_file_age_days(path: Path) -> int:
         return 999
 
 
-@dataclass
-class MeasureTwiceState:
-    """State for measure-twice plan-review-revise loop."""
-    active: bool = False
-    task_description: str = ""
-    plan_file: str = ""  # Path to current plan, e.g., ".crew/plans/auth-system.md"
-    last_verdict: str = ""  # APPROVED, REVISE, REJECT, or empty
-    session_id: str = ""
-    # Hook-owned fields (see BuildState).
-    stop_fires: int = 0
-    max_stop_fires: int = DEFAULT_MAX_STOP_FIRES
-    started_at: str = ""
-    deadline_minutes: int = DEFAULT_DEADLINE_MINUTES
-    # Second half of the no-deadline marker (see BuildState / NO_DEADLINE).
-    no_deadline: bool = False
-    parked_fires: int = 0
-    max_parked_fires: int = DEFAULT_MAX_PARKED_FIRES
-
-    # See BuildState.AGENT_SETTABLE. `last_verdict` and `plan_file` are settable
-    # because recording a verdict and pointing at the current plan are the
-    # orchestrator's job; every field the Stop hook's bounds read is not.
-    AGENT_SETTABLE: ClassVar[frozenset] = frozenset({"last_verdict", "plan_file"})
-
-    @classmethod
-    def load_with_status(cls, path: Path):
-        """Load + classify. Returns ``(MeasureTwiceState, status)``.
-
-        status ∈ {ok, missing, corrupt, future_schema}; non-OK statuses return
-        the DEFAULT state (see BuildState.load_with_status).
-        """
-        data, status = read_state_json(path)
-        if status != LOAD_OK:
-            return cls(), status
-        return cls(
-            active=data.get("active", False),
-            task_description=data.get("task_description", ""),
-            plan_file=data.get("plan_file", ""),
-            last_verdict=data.get("last_verdict", ""),
-            session_id=data.get("session_id", ""),
-            stop_fires=data.get("stop_fires", 0),
-            max_stop_fires=data.get("max_stop_fires", DEFAULT_MAX_STOP_FIRES),
-            started_at=data.get("started_at", ""),
-            deadline_minutes=data.get("deadline_minutes", DEFAULT_DEADLINE_MINUTES),
-            no_deadline=data.get("no_deadline", False) is True,
-            parked_fires=data.get("parked_fires", 0),
-            max_parked_fires=data.get("max_parked_fires", DEFAULT_MAX_PARKED_FIRES),
-        ), LOAD_OK
-
-    @classmethod
-    def load(cls, path: Path) -> "MeasureTwiceState":
-        """Load from file, returning default state if file is missing/unreadable."""
-        return cls.load_with_status(path)[0]
-
-    def save(self, path: Path) -> None:
-        """Atomically save to file, 0600 from birth, stamping the schema."""
-        data = asdict(self)
-        data["schema"] = SCHEMA_VERSION
-        atomic_write_json(path, data)

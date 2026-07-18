@@ -21,6 +21,7 @@ scripts/
 ├── models.py            # Dataclasses for all JSON structures
 ├── persistent-mode.py   # Stop hook: enforces continuation
 ├── session-start.py     # SessionStart hook: restores state
+├── artifact_prune.py    # ENUMERATE-only stale-artifact finder (single source shared by `crew swab` + the session-start reporter); never deletes
 ├── tests/               # Unit tests (test-hooks.py, test-multiagent.py, fixtures/)
 └── multiagent/          # Multi-model review/council engine (see below)
 ```
@@ -39,7 +40,7 @@ their results into the same six-field shape the engine returns.
 
 ```
 multiagent/
-├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher) — subcommands: review | council | debate | run | dispatch | render (incl. --stage-all) | seats (incl. --debate) | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | wait (incl. --signal) | signal | doctor | probe | scaffold-config
+├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher) — subcommands: review | council | debate | run | dispatch | render (incl. --stage-all) | seats (incl. --debate) | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | wait (incl. --signal) | signal | doctor | probe | scaffold-config | swab
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
@@ -110,7 +111,8 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   clear). Residual, stated honestly: an orchestrator that reuses a tag WITHOUT clearing, over a marker
   that survived, CAN read a stale report. The clear-before-dispatch rule is what prevents that, and it
   is convention like the rest of this protocol. Markers therefore accumulate under
-  `.crew/reviews/<sid>/signals/` (gitignored and harmless; a future sweep can cover the dir).
+  `.crew/reviews/<sid>/signals/` (gitignored and harmless); `session-start` reaps markers past
+  7 days, anchored to the `<tag>.json` grammar this command mints.
   **Honest caveat:** this protocol is CONVENTION, not
   enforcement. A one-shot `Task` seat needs none of it (its RETURN is the completion signal and the
   harness cannot forget to deliver it); the signal exists for a LONG-LIVED teammate, which has no
@@ -136,6 +138,26 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
 - `doctor` — `/crew:init` provider probe (NON-billable: installed-CLI detection).
 - `probe` — opt-in BILLABLE live seat smoke test (doctor proves the CLI is installed; probe proves it returns usable output).
 - `scaffold-config` — `/crew:init` commented-config generator.
+- `swab` — attended cleanup of stale crew artifacts (orphaned review-run dirs +
+  stale debate dirs). DRY-RUN BY DEFAULT (lists only, like `git clean -n`);
+  `--yes` is the DESTRUCTIVE step (rmtree), scoped to enumerated candidates from
+  `artifact_prune.collect_prunable` and exiting nonzero if any delete failed. A
+  review run is protected while an active loop OR a current-run pointer names it
+  (no age threshold); debates prune by the existing staleness rule.
+
+**Known limitation: crew assumes the process cwd IS the project root
+(cwd == CLAUDE_PROJECT_DIR).** The engine (review-prep/collect/run/swab, via
+`_REVIEWS_BASE = ".crew/reviews"`) resolves review dirs cwd-relative, while the
+state layer (`crew state` verbs + `models`, via `get_project_dir()` =
+`CLAUDE_PROJECT_DIR or cwd`) resolves them through CLAUDE_PROJECT_DIR. In all normal
+operation the two agree (cwd == repo root == CLAUDE_PROJECT_DIR). Running crew from a
+cwd that differs from CLAUDE_PROJECT_DIR is UNSUPPORTED, and the consequence is NOT
+guaranteed-loud: begin-review may fail loudly (no prepped panel found under this
+root), OR it may SILENTLY read a DIFFERENT, older run that exists under
+CLAUDE_PROJECT_DIR and, if that run's target still hashes the same, freeze/certify
+the wrong tree's results with no loud error. The mitigation is operational (keep cwd
+at the project root); unifying the two roots onto one shared resolver is a deferred
+follow-up.
 
 Key contracts (do NOT regress):
 - **Six-field `ProviderResult` core** (`name, model, ok, output, error, elapsed`) — the
@@ -351,10 +373,15 @@ Key contracts (do NOT regress):
     seat verbatim (a finding is NEVER dropped). A RUN-SCOPED grouped digest opens with one quorum
     header, `PANEL: <N> launched · <usable> usable · quorum <N//2+1>: MET|NOT MET` (N = distinct
     manifest names from `run.json`; usable = the success-only `result_valid` tier; NOT MET adds
-    "an APPROVED verdict cannot be recorded from this panel"). The command markdowns HONOR this
+    "an APPROVED verdict is not backed by quorum from this panel", a capability-NEUTRAL statement
+    of fact, since this digest is SHARED with standalone `/crew:review`, which has no override verb;
+    the `--force` guidance lives only in build.md / measure-twice.md). The command markdowns HONOR this
     header at synthesis time: a NOT MET digest must not certify an APPROVED (nor a
-    REVISE-minor-only completion); loop state persists no run identity, so the header is the quorum
-    authority the synthesis reads. Flat-mode
+    REVISE-minor-only completion) without the user's explicit `--force`. The header is ADVISORY (a
+    digest reader's summary); `crew state
+    record-verdict` recounts usable seats itself against the identity frozen in loop state, and that
+    count is what decides (a below-quorum completion is exit 3, clearable with `--force`, not a hard
+    refusal). Flat-mode
     `--group` renders NO header plus a one-line stderr note (quorum facts need a run manifest).
     Merge predicate: severity is the only hard partition;
     within it, COMPLETE-LINKAGE clustering on `path_compatible AND line_compatible AND jaccard>=0.5`.
@@ -529,14 +556,14 @@ State is stored as JSON in `.crew/`:
 
 ```python
 from pathlib import Path
-from models import BuildState
+from models import LoopState
 
 # Get project directory (from env or cwd)
 directory = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()))
 
-# Load state (returns default if file missing)
+# Load state (returns default if file missing; one dataclass serves both loops)
 state_file = directory / ".crew" / "build-state.json"
-state = BuildState.load(state_file)
+state = LoopState.load(state_file)
 
 # Modify. Only fields the WRITER owns: the Stop hook owns the bounds (stop_fires /
 # parked_fires / started_at), the orchestrator owns the task fields. Mutations go
@@ -547,7 +574,7 @@ state = BuildState.load(state_file)
 # the temp file 0600 FROM BIRTH (tempfile.mkstemp), then os.replace: no chmod window.
 update_state_json(
     state_file,
-    lambda data: {**data, "completion_promise": "SHIPPED", "schema": SCHEMA_VERSION},
+    lambda data: {**data, "plan_file": ".crew/plans/next.md", "schema": SCHEMA_VERSION},
 )
 # state.save(path) still exists (a WHOLE-state write) and is right only where a
 # fresh state REPLACES the file, never for editing a live loop.
@@ -630,23 +657,71 @@ crew state init bl --prompt "Fix the auth bug" --deadline-minutes 90 --session-i
 # Check if this session has conflicts (other sessions ignored)
 crew state check-conflicts --session-id abc123
 
-# Set a field. ONLY the loop's AGENT_SETTABLE allowlist (bl: completion_promise;
-# mt: last_verdict, plan_file). Any other field exits 2 and writes nothing.
+# Set a field. ONLY the loop's AGENT_SETTABLE allowlist (plan_file, for both
+# loops). Any other field exits 2 and writes nothing: the hook owns the bounds,
+# and the verdict/run-identity fields belong to the review verbs.
 # FIELD-LEVEL: it edits the ONE key in the on-disk dict and writes the rest back
 # verbatim (unknown keys included). A whole-state save would let an allowlisted
 # write also restore this process's stale `stop_fires`/`parked_fires` snapshot,
 # reverting a bump the Stop hook landed in between: the counter-reset hole the
 # allowlist exists to close, reopened through a field the agent IS allowed to set.
-crew state set mt last_verdict REVISE --session-id abc123
+crew state set mt plan_file .crew/plans/auth-system.md --session-id abc123
+
+# Begin a review: run it right after `crew review-prep`, BEFORE any seat runs.
+# It reads the prepped run's OWN run.json (never the pointer: seat results are
+# stamped from that record, so the gate must judge against the same authority)
+# and freezes the run id, target sha/spec/base, and the seat roster (from
+# `seat_signatures`, the roster INSIDE the hashed identity) into loop state, then
+# stamps phase=reviewing and prints `phase=reviewing run=<id> seats=<N>`.
+# Legal from `drafting` AND from `reviewing` (a re-prep after a compaction
+# re-arms the freeze rather than hitting an error the orchestrator would route
+# around); strictness lives at record-verdict, where a stale identity could
+# actually certify the wrong bytes. Refuses (exit 2) with no pointer, an
+# unverifiable/spec-less run record, or an empty roster.
+crew state begin-review bl --session-id abc123
+
+# Record the panel's verdict against the frozen identity. Legal ONLY from
+# `reviewing`, and the results are resolved EXCLUSIVELY from state
+# (`.crew/reviews/<sid>/<state.run_id>`): a pointer or flat-dir fallback would
+# let a re-prep decide which results a verdict is made of.
+# Every verdict but FAILED needs >= 1 usable seat (an all-failed panel recorded
+# as REVISE would look like progress and reset the failure counter).
+# COMPLETING verdicts (APPROVED, or REVISE --minor-only) additionally face
+# quorum (len(expected)//2+1 usable), pointer divergence, and a target re-hash
+# (drift). These plus the zero-usable check are ADVISORY, not hard refusals: a
+# trip COLLECTS every tripped condition into one combined diagnostic and exits 3
+# (distinct from the exit-2 hard errors), recording nothing. `--force` records
+# anyway and stamps the tripped names in `last_verdict_overrides` for the audit
+# trail; it exists for a HUMAN's explicit call, never an agent's convenience. The
+# HARD checks (loop inactive, wrong phase, no/invalid run identity, FAILED over a
+# usable panel, no frozen target spec) stay exit 2 and are never forced. A
+# degraded panel may always demand more work; a completing verdict leaves
+# phase=done, which is what deactivate requires.
+# REVISE/REJECT advance revision_round (the one place it moves) and return the
+# loop to `drafting`. FAILED is legal ONLY with zero usable seats; the second
+# consecutive one deactivates the loop terminally IN the same transaction
+# (exit_kind=review_failed), never via a follow-up call.
+crew state record-verdict bl APPROVED --session-id abc123
+crew state record-verdict bl REVISE --minor-only --session-id abc123
+crew state record-verdict mt FAILED --session-id abc123
 
 # Deactivate — pass the SAME --session-id init used, so deactivate targets the
 # exact session-scoped file (init and deactivate/cancel of one loop MUST resolve
 # to the same file; cmd_deactivate additionally reuses the Stop hook's
 # find_session_state_file so an adopted legacy file is also turned off).
-# On an already FORCE-EXITED file the `--reason` lands in `deactivate_reason`, not
-# `reason`: `reason` there is the bound that tripped, and `init` quotes it back
-# when it refuses to restart the loop.
-crew state deactivate bl --reason "User cancelled" --session-id abc123
+# GATED: a live loop is turned off either after a completing verdict (phase=done,
+# stamped exit_kind=approved) or with an explicit --cancel (stamped cancelled);
+# anything else exits 2 naming both, with the bytes untouched. --cancel is legal
+# from ANY phase (an escape hatch a phase check could veto is not one), and
+# deactivating an already-off loop is a no-op success.
+crew state deactivate bl --session-id abc123            # after record-verdict APPROVED
+crew state deactivate bl --cancel --reason "User cancelled" --session-id abc123
+
+# On a loop that is already off (a FORCE-EXITED file, a terminally FAILED panel)
+# the `--reason` lands in `deactivate_reason`, not `reason`: `reason` there is the
+# exit that ended the loop, and `init` quotes a tripped bound back when it refuses
+# to restart. The exit_kind of such a loop is likewise left as its first terminal
+# writer stamped it.
 ```
 
 **Session ID resolution order:**
@@ -659,10 +734,12 @@ crew state deactivate bl --reason "User cancelled" --session-id abc123
 - `measure-twice-state-{session_id}.json`
 
 **Schema version + refuse-to-touch.** Every write stamps
-`"schema": SCHEMA_VERSION` (currently 2; 2 added the hook-owned termination
-fields); an ABSENT `schema` loads as 1 (legacy files keep working, and the hook
-stamps their missing `started_at` on first fire so an adopted old loop is still
-bounded). Reads classify a file via `read_state_json` /
+`"schema": SCHEMA_VERSION` (currently 3; 2 added the hook-owned termination
+fields, 3 unified both loops into one LoopState with a single `task` field);
+an ABSENT `schema` loads as 1, and schema-1/2 files keep working: the load
+coalesces the legacy `prompt`/`task_description` into `task` (coalesce_task),
+and the hook stamps a missing `started_at` on first fire so an adopted old
+loop is still bounded). Reads classify a file via `read_state_json` /
 `load_with_status` into `LOAD_OK` / `LOAD_MISSING` / `LOAD_CORRUPT` /
 `LOAD_FUTURE_SCHEMA`. Every MUTATING path — the Stop hook AND the crew-state CLI
 (`init` / `set` / `deactivate`) honors the SAME contract:
@@ -736,52 +813,47 @@ HookResult.block("Must continue")    # {"decision": "block", "reason": "..."}
 > attempt). `{"decision": "block", "reason": ...}` is the load-bearing,
 > smoke-verified blocking shape.
 
-### BuildState
+### LoopState (one dataclass, both loops)
 
 ```python
 @dataclass
-class BuildState:
+class LoopState:
     active: bool = False
-    prompt: str = ""              # Original task
-    completion_promise: str = "DONE"
-    session_id: str = ""          # Session that owns this loop
-    stop_fires: int = 0           # hook-owned livelock circuit breaker
+    loop: str = ""                 # "bl" | "mt"
+    task: str = ""                 # was prompt / task_description (load coalesces the legacy keys)
+    plan_file: str = ""            # meaningful for mt; inert but accepted on bl
+    phase: str = "drafting"        # drafting | reviewing | done
+    revision_round: int = 0
+    last_verdict: str = ""         # APPROVED | REVISE | REJECT | FAILED
+    last_verdict_overrides: list = field(default_factory=list)  # advisories a completion was forced over (empty on a clean sign-off)
+    run_id: str = ""
+    target_sha256: str = ""        # full 64-hex
+    target_spec: str = ""          # bare resolver spec, never "auto"
+    target_base: str = ""
+    expected_seats: list = field(default_factory=list)
+    consecutive_review_failures: int = 0
+    exit_kind: str = ""            # approved | cancelled | review_failed | force_exit
+    session_id: str = ""           # Session that owns this loop
+    stop_fires: int = 0            # hook-owned livelock circuit breaker
     max_stop_fires: int = 150
-    started_at: str = ""          # hook-owned wall clock (ISO, UTC)
-    deadline_minutes: int = 240   # 1..MAX_DEADLINE_MINUTES (1440) at init; 0 only with no_deadline
-    no_deadline: bool = False     # 2nd half of the config-only opt-out marker; only init writes it
-    parked_fires: int = 0         # hook-owned CONSECUTIVE parked-Stop counter
+    started_at: str = ""           # hook-owned wall clock (ISO, UTC)
+    deadline_minutes: int = 240    # 1..MAX_DEADLINE_MINUTES (1440) at init; 0 only with no_deadline
+    no_deadline: bool = False      # 2nd half of the config-only opt-out marker; only init writes it
+    parked_fires: int = 0          # hook-owned CONSECUTIVE parked-Stop counter
     max_parked_fires: int = 20
 
-    AGENT_SETTABLE = frozenset({"completion_promise"})
+    AGENT_SETTABLE = frozenset({"plan_file"})
 ```
 
-There is **no round counter**. A Stop hook cannot observe a revision round (only
-its own fires), and no other writer bumps one, so the field would be a frozen
-`Round 1/N` lie on every surface that printed it. The budget the loop actually
-runs on is `stop_fires`/`max_stop_fires` plus elapsed-vs-`deadline_minutes`, and
-that is what `crew state show`, the nudge, and the SessionStart banner report.
-
-### MeasureTwiceState
-
-```python
-@dataclass
-class MeasureTwiceState:
-    active: bool = False
-    task_description: str = ""
-    plan_file: str = ""           # e.g., ".crew/plans/auth-system.md"
-    last_verdict: str = ""        # APPROVED, REVISE, REJECT
-    session_id: str = ""          # Session that owns this loop
-    stop_fires: int = 0           # hook-owned livelock circuit breaker
-    max_stop_fires: int = 150
-    started_at: str = ""          # hook-owned wall clock (ISO, UTC)
-    deadline_minutes: int = 240   # 1..MAX_DEADLINE_MINUTES (1440) at init; 0 only with no_deadline
-    no_deadline: bool = False     # 2nd half of the config-only opt-out marker; only init writes it
-    parked_fires: int = 0         # hook-owned CONSECUTIVE parked-Stop counter
-    max_parked_fires: int = 20
-
-    AGENT_SETTABLE = frozenset({"last_verdict", "plan_file"})
-```
+The two on-disk file prefixes (`build-state-*` / `measure-twice-state-*`) and
+the `bl`/`mt` aliases stay: they are load-bearing across the hook, state
+discovery, and the session-start cleanup globs. What unified is the SHAPE.
+`revision_round` is written by the review verbs, never the hook: the Stop hook
+still counts nothing but its own fires. A Stop hook cannot observe a revision
+round, and a round field with no honest writer would be a frozen `Round 1/N`
+lie on every surface that printed it. The budget the loop actually runs on is
+`stop_fires`/`max_stop_fires` plus elapsed-vs-`deadline_minutes`, and that is
+what `crew state show`, the nudge, and the SessionStart banner report.
 
 ## Stop hook: the loop contract (do NOT regress)
 
@@ -908,7 +980,7 @@ with open(state_file) as f:
 
 ✅ **Use model's load() method**
 ```python
-state = BuildState.load(state_file)  # Returns default if missing
+state = LoopState.load(state_file)  # Returns default if missing
 ```
 
 ## Orphan Cleanup
@@ -938,12 +1010,35 @@ The `session-start.py` hook cleans up stale state files on every session start:
     `suffix=".tmp"`), so the sweep globs exactly those anchored names
     (`.build-state.json.*.tmp` / `.build-state-*.json.*.tmp` and the
     measure-twice pair), NEVER a bare `.*.tmp`.
+  - agent signal markers (`<session>/signals/<tag>.json`, from `crew signal`) past
+    7 days, anchored to the `[A-Za-z0-9_-]+.json` tag grammar, never a bare
+    `*.json`. Nothing else prunes them (`wait` reads and LEAVES a marker); no
+    liveness check is needed because a `wait` blocks for minutes, so no marker this
+    old can be one a live wait is about to read. `session-start` sweeps them via
+    `sweep_signal_markers_all`, which walks every `.crew/reviews/<session>/` dir
+    (signal-sweeping ONLY, it deletes no run dir).
   - state-lock siblings (`<state-filename>.lock`, from `models.state_lock`), globbed
     on the same exact + `-<id>` anchoring (`build-state.json.lock` /
     `build-state-*.json.lock` and the measure-twice pair), NEVER a bare `*.lock`.
     An acquire touches the lock's mtime, so only locks whose loop is long gone reach
     the age threshold: deleting one mid-use would split that loop's writers across
     two inodes.
+
+**Review-run + debate dirs: REPORTED, never deleted here.** `session-start` no
+longer `rmtree`s review-run dirs (`.crew/reviews/<session>/run-*`) or stale debate
+dirs (`.crew/debates/`): destructive removal of the user's disk from an unattended
+hook was the wrong venue. Instead `report_stale_artifacts` enumerates the orphans
+through the ONE shared `artifact_prune.collect_prunable` finder (the same list
+`crew swab` acts on, with the same active-loop / current-run-pointer protections
+and mint-grammar/symlink guards) and RETURNS a single terse line that `main()`
+rides on the SessionStart `additionalContext` channel (a successful hook's only
+reliably-delivered carrier, not stderr). It enumerates count-only
+(`with_sizes=False`), so the notice names the orphan COUNT + the `crew swab` hint
+with NO byte total: exact per-dir sizing is the attended swab's job, never a walk
+on every session start. It deletes NOTHING. The attended `crew
+swab` command OWNS the deletion (dry-run by default; `--yes` removes). Removing the
+old delete path also retired the three data-loss bugs the review-run sweep carried
+(over-broad `RUN_ID_RE`, symlink-follow, live-run-swept).
 
 ## Testing
 

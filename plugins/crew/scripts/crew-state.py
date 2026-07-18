@@ -11,8 +11,7 @@ from pathlib import Path
 
 # Import from models.py (same directory)
 from models import (
-    BuildState,
-    MeasureTwiceState,
+    LoopState,
     StateLockError,
     effective_count,
     effective_deadline,
@@ -30,23 +29,31 @@ from models import (
     LOAD_FUTURE_SCHEMA,
     LOAD_OK,
 )
-from multiagent import config
-from state_discovery import find_adoptable_legacy, find_session_state_file
+from multiagent import config, review_runs, targets
+from state_discovery import (
+    find_adoptable_legacy,
+    find_session_state_file,
+    is_active_value,
+)
 
 LOOP_ALIASES = {
     "build": "bl", "bl": "bl",
     "measure-twice": "mt", "mt": "mt",
 }
 
-LOOP_CLASSES = {
-    "bl": BuildState,
-    "mt": MeasureTwiceState,
-}
+# One dataclass serves both loops (the aliases and file prefixes below are
+# what still distinguish them on disk).
 
 LOOP_PREFIXES = {
     "bl": "build-state",
     "mt": "measure-twice-state",
 }
+
+VERDICTS = ("APPROVED", "REVISE", "REJECT", "FAILED")
+
+# Two all-failed panels in a row is systemic, not a transient outage: it ends the
+# loop instead of leaving it to re-prep a panel that is not returning.
+MAX_CONSECUTIVE_REVIEW_FAILURES = 2
 
 
 def _refuse_future_schema(path: Path, status: str) -> None:
@@ -104,6 +111,79 @@ def _mutate_state(cls, path: Path, mutate) -> dict:
     _refuse_future_schema(path, status)
     _refuse_corrupt(path, status)
     return data
+
+
+class _Refusal(Exception):
+    """A check inside the state lock said no.
+
+    Raised from a mutate function, so it escapes ``update_state_json`` BEFORE the
+    write: the refusal and the untouched bytes are one guarantee rather than two
+    things that have to stay in agreement.
+    """
+
+
+def _refuse(message: str):
+    raise _Refusal(message)
+
+
+class _Advisory(Exception):
+    """One or more completion checks tripped that a trusted human may override.
+
+    Distinct from ``_Refusal`` (exit 2, "called wrong or out of order"): an
+    advisory names a world that drifted from what the panel saw (a partial panel,
+    a moved pointer, an edited target), which is a judgment call, not a
+    contradiction. Raised from a mutate BEFORE the write, so exit-3 leaves the
+    bytes untouched exactly as exit-2 does. Raised ONLY on the non-force path (a
+    ``--force`` record never raises: it stamps ``last_verdict_overrides`` and
+    writes), so it carries just the human-facing diagnostic.
+    """
+
+    def __init__(self, diagnostic: str):
+        super().__init__(diagnostic)
+        self.diagnostic = diagnostic
+
+
+def _mutate_or_refuse(path: Path, mutate) -> dict:
+    """``_mutate_state`` where the mutate function may refuse: a refusal exits 2
+    with a diagnostic naming the fix, and nothing is written."""
+    try:
+        return _mutate_state(LoopState, path, mutate)
+    except _Refusal as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _reviews_dir(session_id: str) -> Path:
+    """The session's review tree, resolved through the engine's own sanitizer so
+    the gate reads exactly the dir review-prep wrote.
+
+    Two roots resolve this tree, and they agree only when cwd IS the project root.
+    This line roots it at `get_project_dir()` (CLAUDE_PROJECT_DIR or cwd), the
+    SAME resolver as the loop-STATE file; the review ENGINE
+    (review-prep/collect/run) writes these dirs cwd-relative. In normal use
+    (cwd == CLAUDE_PROJECT_DIR == repo root) the two land on one tree.
+
+    Running crew from a cwd that diverges from CLAUDE_PROJECT_DIR is UNSUPPORTED
+    and NOT guaranteed-loud: begin-review may fail loudly (no prepped panel under
+    this root), OR it may SILENTLY read a different, older run that exists under
+    CLAUDE_PROJECT_DIR whose target still hashes the same, freezing the wrong
+    tree's results. The mitigation is operational (keep cwd at the project root);
+    unifying both layers onto one shared resolver is deferred.
+    """
+    base = get_project_dir() / ".crew" / "reviews"
+    return review_runs.reviews_dir(session_id, base=str(base))
+
+
+def _distinct_seats(value) -> list:
+    """Non-empty seat names off a roster, order preserved, duplicates dropped.
+
+    Read defensively: rosters come off disk, and a schema stamp does not prove
+    the key shape that schema implies (an adopted legacy file is stamped without
+    being rewritten).
+    """
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(s for s in value if isinstance(s, str) and s))
 
 
 def get_loop_filename(canonical: str, session_id: str = "") -> str:
@@ -197,10 +277,7 @@ def _compact_show(state, canonical: str) -> str:
     """Format state as a compact single-line summary."""
     active_str = "true" if state.active else "false"
 
-    if canonical == "bl":
-        raw_task = getattr(state, "prompt", "")
-    else:
-        raw_task = getattr(state, "task_description", "")
+    raw_task = state.task
 
     # Normalize newlines and truncate task to 80 chars
     task = raw_task.replace("\n", " ")
@@ -210,8 +287,16 @@ def _compact_show(state, canonical: str) -> str:
     # Escape double quotes in task for safe inline display
     task_escaped = task.replace('"', '\\"')
 
+    # phase/round are the two facts that say WHERE the loop is (which verb is
+    # legal next, and how many times the panel sent it back). Read defensively:
+    # a compact line is an inspection surface, so garbage on disk must render,
+    # not raise.
+    phase = getattr(state, "phase", "") or "drafting"
+    review_round = effective_count(getattr(state, "revision_round", 0), 0)
+
     line = (
-        f'loop={canonical} active={active_str} {_budget_summary(state)} '
+        f'loop={canonical} active={active_str} phase={phase} '
+        f'round={review_round} {_budget_summary(state)} '
         f'task="{task_escaped}"'
     )
 
@@ -227,8 +312,7 @@ def cmd_show(args):
     session_id = resolve_session_id(args)
     path = _resolve_loop_path(args.loop, session_id)
     canonical = LOOP_ALIASES[args.loop]
-    cls = LOOP_CLASSES[canonical]
-    state = cls.load(path)
+    state = LoopState.load(path)
 
     verbose = getattr(args, "verbose", False)
     if verbose:
@@ -249,8 +333,7 @@ def cmd_is_active(args):
     """Check if a loop is active. Exit 0 if active, exit 1 if not."""
     session_id = resolve_session_id(args)
     path = _resolve_loop_path(args.loop, session_id)
-    cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
-    state = cls.load(path)
+    state = LoopState.load(path)
     sys.exit(0 if state.active else 1)
 
 
@@ -320,7 +403,7 @@ def cmd_set(args):
     """
     session_id = resolve_session_id(args)
     path = _resolve_loop_path(args.loop, session_id)
-    cls = LOOP_CLASSES[LOOP_ALIASES[args.loop]]
+    cls = LoopState
     defaults = cls()
 
     if not hasattr(defaults, args.field):
@@ -330,11 +413,12 @@ def cmd_set(args):
     if args.field not in cls.AGENT_SETTABLE:
         allowed = ", ".join(sorted(cls.AGENT_SETTABLE)) or "(none)"
         print(
-            f"Error: '{args.field}' is not settable: it is owned by the Stop "
-            f"hook, which enforces this loop's termination bounds.\n"
+            f"Error: '{args.field}' is not settable: the termination bounds are "
+            f"owned by the Stop hook, and the verdict/run-identity fields are "
+            f"owned by the review verbs that validate what they record.\n"
             f"  Settable fields: {allowed}\n"
-            f"  To stop the loop:  crew state deactivate {args.loop} "
-            f"--reason '<why>' --session-id <id>",
+            f"  To stop the loop early:  crew state deactivate {args.loop} "
+            f"--cancel --reason '<why>' --session-id <id>",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -353,12 +437,12 @@ def check_for_conflicts(session_id: str = ""):
     crew_dir = project_dir / ".crew"
 
     checks = (
-        ("bl", BuildState,
+        ("bl",
          "ERROR: build loop is already active. Run /crew:cancel-build first or let it complete."),
-        ("mt", MeasureTwiceState,
+        ("mt",
          "ERROR: measure-twice loop is already active. Run /crew:cancel-measure-twice first or let it complete."),
     )
-    for canonical, cls, active_msg in checks:
+    for canonical, active_msg in checks:
         # Check the scoped target AND any adoptable legacy file INDEPENDENTLY:
         # init must not ignore an active legacy loop that other verbs and
         # sessions would still adopt (that would orphan it as a permanently
@@ -372,7 +456,7 @@ def check_for_conflicts(session_id: str = ""):
             if legacy is not None:
                 candidates.append(legacy)
         for path in candidates:
-            state, status = cls.load_with_status(path)
+            state, status = LoopState.load_with_status(path)
             # A newer-schema file is treated as a conflict (refuse-to-touch): we
             # cannot parse it as our schema, so init must NOT clobber it, and we
             # surface it as a blocking condition instead of silently overwriting.
@@ -486,7 +570,7 @@ def cmd_init(args):
     # Refuse-to-touch: never overwrite a newer-schema file (already
     # blocked as a conflict above), and set a corrupt one aside (mirroring the
     # Stop hook) before re-init so a fresh loop starts on clean state.
-    _, target_status = LOOP_CLASSES[canonical].load_with_status(path)
+    _, target_status = LoopState.load_with_status(path)
     _refuse_future_schema(path, target_status)
     if target_status == LOAD_CORRUPT:
         corrupt_path = path.with_name(path.name + ".corrupt")
@@ -516,10 +600,10 @@ def cmd_init(args):
             print("Error: --prompt or -f required for build loop", file=sys.stderr)
             sys.exit(1)
         deadline = _resolve_deadline(args)
-        state = BuildState(
+        state = LoopState(
             active=True,
-            prompt=prompt,
-            completion_promise="DONE",
+            loop=canonical,
+            task=prompt,
             session_id=session_id,
             started_at=utc_now_iso(),
             deadline_minutes=deadline,
@@ -545,11 +629,11 @@ def cmd_init(args):
             sys.exit(1)
 
         deadline = _resolve_deadline(args)
-        state = MeasureTwiceState(
+        state = LoopState(
             active=True,
-            task_description=task,
+            loop=canonical,
+            task=task,
             plan_file=plan_file,
-            last_verdict="",
             session_id=session_id,
             started_at=utc_now_iso(),
             deadline_minutes=deadline,
@@ -567,7 +651,7 @@ def cmd_init(args):
     # reason / force_exit), which would otherwise leave the new loop looking
     # force-exited. It still goes through the lock so it cannot interleave with a
     # Stop-hook write and leave a half-old, half-new file behind.
-    _mutate_state(LOOP_CLASSES[canonical], path, lambda _data: fresh)
+    _mutate_state(LoopState, path, lambda _data: fresh)
 
 
 def deadline_minutes_arg(value: str) -> int:
@@ -593,10 +677,17 @@ def deadline_minutes_arg(value: str) -> int:
 
 
 def cmd_deactivate(args):
-    """Deactivate a loop with timestamp and optional reason."""
+    """Turn a loop off through one of its two sanctioned exits.
+
+    A loop ends either on a recorded completing verdict (`record-verdict` leaves
+    `phase == done`) or on an explicit `--cancel`. Anything else is refused: a
+    plain deactivate mid-loop is how an unreviewed finish used to pass for an
+    approved one, since the state file kept no record of which it had been.
+    `--cancel` is legal from ANY phase (an escape hatch that a phase check could
+    veto is not an escape hatch); it is audited by the `cancelled` exit_kind it
+    leaves behind.
+    """
     session_id = resolve_session_id(args)
-    canonical = LOOP_ALIASES[args.loop]
-    cls = LOOP_CLASSES[canonical]
 
     # Session-id symmetry: deactivate the SAME file the Stop hook would find (the
     # session-scoped file if present, else an adoptable legacy file), so a loop
@@ -605,30 +696,431 @@ def cmd_deactivate(args):
     # shares this resolver so all mutating verbs agree on which file they touch.
     # Fall back to the scoped path when nothing is found.
     path = _resolve_loop_path(args.loop, session_id)
+    cancelling = bool(getattr(args, "cancel", False))
 
     def mutate(data: dict) -> dict:
-        data["schema"] = SCHEMA_VERSION
-        data["active"] = False
-        # utc_now_iso, NOT a naive local `datetime.now()`: the Stop hook's
-        # force-exit stamps this same field in aware UTC, and `parse_iso` reads a
-        # naive stamp AS UTC, so two clocks in one field would be off by the local
-        # offset.
-        data["completed_at"] = utc_now_iso()
+        # is_active_value, never `is True`: ONE rule decides "is this loop on"
+        # across the Stop hook, discovery, and this gate. A garbage truthy
+        # `active` ("true", 1) blocks Stop, so it must be turned OFF here rather
+        # than fall through as an already-off no-op, which is what left the
+        # escape hatch dead on precisely the files that needed it.
+        active = is_active_value(data.get("active", False))
+        phase = data.get("phase") or "drafting"
+        if active and not cancelling and phase != "done":
+            _refuse(
+                f"loop '{args.loop}' is in phase '{phase}', so no panel has "
+                f"signed off on this work. A loop ends on a completing verdict "
+                f"(`crew state record-verdict {args.loop} APPROVED --session-id "
+                f"{session_id or '<id>'}`, which leaves phase=done) or on an "
+                f"explicit `crew state deactivate {args.loop} --cancel`. Nothing "
+                f"was written."
+            )
+        if active:
+            data["schema"] = SCHEMA_VERSION
+            data["active"] = False
+            # utc_now_iso, NOT a naive local `datetime.now()`: the Stop hook's
+            # force-exit stamps this same field in aware UTC, and `parse_iso` reads
+            # a naive stamp AS UTC, so two clocks in one field would be off by the
+            # local offset.
+            data["completed_at"] = utc_now_iso()
+            # exit_kind is the terminal CATEGORY, not the verdict: "approved"
+            # covers every completing verdict, a REVISE --minor-only finish
+            # included. `last_verdict` is what says which one it actually was.
+            data["exit_kind"] = "cancelled" if cancelling else "approved"
+        # An already-off loop falls through every stamp above: whatever ended it
+        # (a tripped bound, a terminal verdict, an earlier deactivate) recorded how
+        # and when, so turning it off again changes nothing rather than restamping
+        # someone else's exit. Idempotent, not an error.
         if args.reason:
-            if data.get(FORCE_EXIT_KEY):
-                # `reason` on a force-exited file is the bound that tripped, and
-                # `init` quotes it back when it refuses to restart the loop.
-                # Overwriting it would make a later refusal cite "User cancelled"
-                # as though THAT were the safety limit. Cancelling after a trip is
-                # recorded next to it, not over it.
+            if not active or data.get(FORCE_EXIT_KEY):
+                # `reason` on a loop that is already off is the exit that ended it
+                # (the bound that tripped, the panel that returned nothing), and
+                # `init` quotes a tripped bound back when it refuses to restart the
+                # loop. Overwriting it would make a later refusal cite "User
+                # cancelled" as though THAT were the safety limit. A cancel after a
+                # trip is recorded next to it, not over it.
                 data["deactivate_reason"] = args.reason
             else:
                 data["reason"] = args.reason
         return data
 
     # Refuse-to-touch + field-level edit under the lock: same contract as the hook,
-    # writing back only the keys this verb owns (see _mutate_state).
-    _mutate_state(cls, path, mutate)
+    # writing back only the keys this verb owns (see _mutate_state). The gate lives
+    # INSIDE the mutate so a refusal and the untouched bytes are one guarantee.
+    _mutate_or_refuse(path, mutate)
+
+
+def cmd_begin_review(args):
+    """Freeze the identity of the panel this loop is about to launch.
+
+    Legal from `drafting` (the first panel) and from `reviewing` too: an
+    orchestrator that re-prepped after a compaction re-arms the freeze rather
+    than hitting a transition error it would only route around. Strictness
+    belongs at `record-verdict`, which is where a stale identity could actually
+    certify the wrong bytes.
+
+    Everything frozen comes from the run dir's own `run.json`, never from the
+    pointer: seat results are stamped from that record, so the gate has to judge
+    against the same authority. The pointer only names WHICH run.
+    """
+    session_id = resolve_session_id(args)
+    path = _resolve_loop_path(args.loop, session_id)
+    reviews = _reviews_dir(session_id)
+
+    run_id = review_runs.read_pointer_run_id(reviews)
+    if not run_id:
+        print(
+            f"Error: no usable run pointer at "
+            f"{reviews / review_runs.POINTER_NAME}: there is no prepped panel to "
+            f"freeze. Run `crew review-prep <target> --session-id "
+            f"{session_id or '<id>'}` first.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    run_d = reviews / run_id
+    try:
+        record = review_runs.read_run_json(run_d)
+        review_runs.verify_run_record(
+            record, expected_run_id=run_id,
+            source=run_d / review_runs.RUN_JSON_NAME,
+        )
+    except review_runs.ReviewRunError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    target_spec = record.get("target_spec") or ""
+    if not target_spec:
+        # Without a replayable spec the completion gate could never re-hash the
+        # target, so it would have to certify on trust. Refuse at the freeze.
+        print(
+            f"Error: run {run_id} carries no replayable target spec; re-prep it "
+            f"(remove {run_d} and run `crew review-prep` again).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # The frozen roster comes from `seat_signatures`, never the
+    # `subprocess_seats`/`task_seats` lists: the signature map is INSIDE the
+    # hashed identity `verify_run_record` just checked, the lists are outside it
+    # and untyped, so only the signatures can say who the panel was without the
+    # record's own digest being able to disagree. An edited list would otherwise
+    # shrink the roster (and the quorum threshold with it) on a record that still
+    # verifies. `collect`'s quorum header counts from this same field.
+    sigs = record.get("seat_signatures")
+    expected = _distinct_seats(list(sigs)) if isinstance(sigs, dict) else []
+    if not expected:
+        # An empty roster freezes a panel no seat can ever satisfy: the quorum
+        # check would later report the uninterpretable "0 of 0 launched seats, 1
+        # needed". Refuse where the spec check does, while the fix is still one
+        # re-prep away.
+        print(
+            f"Error: run {run_id} names no seats, so a panel over it could never "
+            f"reach quorum; re-prep it (its manifest is what carries the roster): "
+            f"remove {run_d} and run `crew review-prep` again.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    def mutate(data: dict) -> dict:
+        # is_active_value, never `is True`: the Stop hook reads a truthy `active`
+        # (1, "true") as ON and goes on blocking, so a verb that read it as OFF
+        # would strand the loop with no way to progress through review.
+        if not is_active_value(data.get("active", False)):
+            _refuse(
+                f"loop '{args.loop}' is not active, so it has nothing to review. "
+                f"Start it with `crew state init {args.loop} …`."
+            )
+        phase = data.get("phase") or "drafting"
+        if phase not in ("drafting", "reviewing"):
+            _refuse(
+                f"cannot begin a review from phase '{phase}': the loop already "
+                f"has a completing verdict on record. Deactivate it, or start a "
+                f"fresh loop."
+            )
+        data["schema"] = SCHEMA_VERSION
+        data["phase"] = "reviewing"
+        # Tie an adopted legacy flat-state file to the owning session, but only
+        # when we HAVE one: on the legacy path (no --session-id, no env) the
+        # resolved id is "", and stamping that would clobber a stored owner an
+        # adopted file already carries. Guarded, so a real id stamps and an empty
+        # one preserves what is on disk.
+        if session_id:
+            data["session_id"] = session_id
+        data["run_id"] = run_id
+        data["target_sha256"] = record.get("target_sha256") or ""
+        data["target_spec"] = target_spec
+        data["target_base"] = record.get("target_base") or ""
+        data["expected_seats"] = expected
+        return data
+
+    _mutate_or_refuse(path, mutate)
+    print(f"phase=reviewing run={run_id} seats={len(expected)}")
+
+
+def _usable_seats(run_d: Path, seats: list, run_id: str, target_sha256: str) -> list:
+    """The manifest seats whose result in THIS run dir counts.
+
+    The predicate is the engine's success-only tier (`seat_landed_valid` ->
+    `result_valid`), the same one the digest counts with, so the header the
+    orchestrator reads and the gate that decides can never disagree about what a
+    usable seat is. A run dir that is not there yields zero: absence is a
+    refusal, never a pass.
+    """
+    return [
+        s for s in seats
+        if review_runs.seat_landed_valid(run_d, s, run_id, target_sha256)
+    ]
+
+
+def cmd_record_verdict(args):
+    """Record the panel's verdict, gated on the frozen run identity.
+
+    Legal only from `reviewing`. The scan resolves EXCLUSIVELY from state
+    (`.crew/reviews/<sid>/<state.run_id>`): a pointer or flat-dir fallback would
+    let a re-prep, or a stray dir, decide which results a verdict is made of,
+    which is the whole hole this closes.
+
+    A verdict that COMPLETES the loop (APPROVED, or REVISE with nothing blocking)
+    faces three further checks (quorum, pointer, target drift) that REVISE and
+    REJECT skip, because a degraded panel may always demand more work, it just can
+    never sign off. Every verdict but FAILED needs at least one usable seat: a
+    panel that returned nothing found nothing, whatever it is recorded as.
+
+    Those completion checks plus the zero-usable one are ADVISORY, not hard: for a
+    single trusted user, walling off the whole loop on a mid-review comment edit
+    (target drift) is over-strong. So without ``--force`` they COLLECT every
+    tripped condition, print one combined diagnostic, record nothing, and exit 3
+    (distinct from the exit-2 hard errors so a caller can tell "ask the human"
+    from "you called it wrong"); with ``--force`` they are a warning and the
+    verdict records, stamped in ``last_verdict_overrides`` for the audit trail.
+    The HARD checks (loop inactive, wrong phase, no/invalid run identity, FAILED
+    over a usable panel, no frozen spec) stay exit 2 and still run first: they are
+    contradictions, not judgment calls.
+    """
+    session_id = resolve_session_id(args)
+    path = _resolve_loop_path(args.loop, session_id)
+    verdict = args.verdict
+    minor_only = bool(getattr(args, "minor_only", False))
+    if minor_only and verdict != "REVISE":
+        print(
+            f"Error: --minor-only qualifies a REVISE (the panel found nothing "
+            f"blocking); it means nothing on {verdict}.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    completing = verdict == "APPROVED" or (verdict == "REVISE" and minor_only)
+    force = bool(getattr(args, "force", False))
+    reviews = _reviews_dir(session_id)
+    # Carries the (name, fix-text) pairs a --force record overrode OUT of the
+    # locked mutate, so the warning prints only after the write actually lands.
+    overrode: list = []
+
+    def mutate(data: dict) -> dict:
+        # is_active_value, never `is True` (see begin-review).
+        if not is_active_value(data.get("active", False)):
+            _refuse(
+                f"loop '{args.loop}' is not active: a verdict describes a panel a "
+                f"LIVE loop launched. Nothing was recorded."
+            )
+        phase = data.get("phase") or "drafting"
+        if phase != "reviewing":
+            _refuse(
+                f"cannot record a verdict from phase '{phase}': this loop has no "
+                f"panel in flight. Run `crew review-prep`, then `crew state "
+                f"begin-review {args.loop} --session-id {session_id or '<id>'}`."
+            )
+        run_id = data.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            _refuse(
+                f"this loop froze no run identity, so there is nothing to judge "
+                f"the results against. Run `crew state begin-review {args.loop} "
+                f"--session-id {session_id or '<id>'}` after review-prep."
+            )
+        try:
+            review_runs.validate_run_id(run_id)
+        except review_runs.ReviewRunError as exc:
+            _refuse(f"the frozen run identity is unusable ({exc}); re-run begin-review.")
+
+        target_sha256 = data.get("target_sha256") or ""
+        expected = _distinct_seats(data.get("expected_seats"))
+        run_d = reviews / run_id
+        usable = _usable_seats(run_d, expected, run_id, target_sha256)
+
+        if verdict == "FAILED":
+            if usable:
+                _refuse(
+                    f"FAILED says the panel returned nothing, but run {run_id} "
+                    f"holds {len(usable)} usable result(s) "
+                    f"({', '.join(usable)}): record REVISE/APPROVED/REJECT "
+                    f"instead. Nothing was recorded."
+                )
+            failures = effective_count(
+                data.get("consecutive_review_failures"), 0) + 1
+            data["schema"] = SCHEMA_VERSION
+            data["last_verdict"] = verdict
+            # The override stamp pairs with last_verdict; FAILED overrides nothing.
+            data.pop("last_verdict_overrides", None)
+            data["consecutive_review_failures"] = failures
+            data["phase"] = "drafting"
+            if failures >= MAX_CONSECUTIVE_REVIEW_FAILURES:
+                # In THIS transaction, never a follow-up deactivate call: an
+                # unlocked gap between recording the failure and turning the loop
+                # off is a window where a reader sees a half-transitioned loop.
+                data["active"] = False
+                data["exit_kind"] = "review_failed"
+                data["completed_at"] = utc_now_iso()
+                data["reason"] = (
+                    f"{failures} consecutive review runs produced no usable seat "
+                    f"results (most recent: {run_id}); ending the loop rather "
+                    f"than re-prepping a panel that is not returning."
+                )
+            return data
+
+        # A completing verdict with no replayable spec is a malformed freeze, not
+        # a drifted world: there is nothing to re-hash against, so this stays a
+        # HARD refusal (exit 2) checked before the advisory gathering below.
+        spec = data.get("target_spec") or ""
+        if completing and not spec:
+            _refuse(
+                "this loop froze no replayable target spec, so the reviewed "
+                "content cannot be proven unchanged. Re-run review-prep + "
+                "begin-review + the panel."
+            )
+
+        # ADVISORY gathering: every remaining check describes a world that
+        # drifted from what the panel saw, which is a human's call. Collect ALL
+        # that trip (never stop at the first) so the combined diagnostic names
+        # every one; without --force this raises exit 3, with --force it records
+        # and stamps the list. Each entry is (short-name, existing fix text).
+        advisory: list = []
+        if not usable:
+            # The symmetric half of FAILED's refusal: FAILED requires zero usable
+            # seats, so every other verdict requires at least one. Recorded as
+            # progress an all-failed panel would reset consecutive_review_failures
+            # and the returning-nothing bound would never trip: a --force here is
+            # a human choosing to record over a panel they read themselves.
+            advisory.append((
+                "zero-usable",
+                f"a {verdict} verdict describes what the panel found, but 0 of "
+                f"{len(expected)} launched seats returned a usable result in run "
+                f"{run_id}, so the panel found nothing. Record FAILED instead "
+                f"(the verdict for a panel that produced nothing)."
+            ))
+        if completing:
+            needed = len(expected) // 2 + 1
+            if len(usable) < needed:
+                advisory.append((
+                    "quorum-not-met",
+                    f"quorum not met: {len(usable)} of {len(expected)} launched "
+                    f"seats returned a usable result in run {run_id}, {needed} "
+                    f"needed. Fix: re-run the missing seats against this run, or "
+                    f"record REVISE/REJECT (a partial panel may demand more work, "
+                    f"never sign off)."
+                ))
+            pointer_run_id = review_runs.read_pointer_run_id(reviews)
+            if pointer_run_id != run_id:
+                advisory.append((
+                    "pointer-divergence",
+                    f"pointer divergence: the run pointer names "
+                    f"{pointer_run_id or 'nothing'} but this loop froze {run_id}, "
+                    f"so the panel was re-prepped (or the pointer swept) after the "
+                    f"freeze. Fix: `crew state begin-review {args.loop} "
+                    f"--session-id {session_id or '<id>'}` so the frozen identity "
+                    f"matches the latest prep, then run the panel over it."
+                ))
+            # Re-resolved with the base VERBATIM as frozen (empty for every kind
+            # but branch, where the flag is what the diff was derived from):
+            # substituting a default here would re-hash something the panel never
+            # read.
+            # This resolve shells out to git while the state lock is HELD, so a
+            # concurrent Stop hook can time out on it. Accepted: that path fails
+            # open loudly without writing, and it costs seconds at most. Resolving
+            # outside the lock would trade it for a re-hash of bytes the gate never
+            # judged, which is the drift this check exists to catch.
+            # Root assumption: this drift re-hash resolves the target relative to
+            # the process cwd, under the SAME cwd==project-root assumption as
+            # `_reviews_dir` (see there). A divergent cwd yields a spurious drift
+            # advisory (clearable with `--force`), never a false clean PASS.
+            try:
+                fresh = review_runs.sha256_text(
+                    targets.resolve(spec, base=data.get("target_base") or "").content
+                )
+            except targets.TargetError as exc:
+                advisory.append((
+                    "target-no-longer-resolves",
+                    f"the reviewed target {spec!r} no longer resolves ({exc}), so "
+                    f"it cannot be shown to be what the panel read. Fix: re-run "
+                    f"`crew review-prep` + begin-review + the panel."
+                ))
+            else:
+                if fresh != target_sha256:
+                    advisory.append((
+                        "target-drift",
+                        f"target drift: {spec!r} now hashes to {fresh}, but the "
+                        f"panel reviewed {target_sha256 or '(nothing)'}. The thing "
+                        f"on disk is not the thing that was reviewed. Fix: re-run "
+                        f"`crew review-prep` + begin-review + the panel over the "
+                        f"current content."
+                    ))
+
+        if advisory and not force:
+            names = ", ".join(n for n, _ in advisory)
+            body = "\n".join(f"  - {text}" for _, text in advisory)
+            raise _Advisory(
+                f"Advisory: recording {verdict} names a world changed from what "
+                f"the panel reviewed ({len(advisory)} condition(s): {names}). "
+                f"These are advisories, not errors: surface them to the user, and "
+                f"record with --force ONLY on the user's explicit say-so "
+                f"(otherwise fix and re-panel). Nothing was recorded.\n{body}"
+            )
+
+        data["schema"] = SCHEMA_VERSION
+        data["last_verdict"] = verdict
+        # Any verdict that is not FAILED is evidence the panel CAN return.
+        data["consecutive_review_failures"] = 0
+        if completing:
+            data["phase"] = "done"
+        else:
+            # The one place a revision round advances.
+            data["revision_round"] = effective_count(
+                data.get("revision_round"), 0) + 1
+            data["phase"] = "drafting"
+        if advisory:
+            # --force reached here: stamp the audit trail with the same names the
+            # warning prints, and carry them out for the post-write warning.
+            overrode.extend(advisory)
+            data["last_verdict_overrides"] = [n for n, _ in advisory]
+        else:
+            # Keep the stamp paired with last_verdict: a clean record clears any
+            # override left by a prior round.
+            data.pop("last_verdict_overrides", None)
+        return data
+
+    try:
+        data = _mutate_state(LoopState, path, mutate)
+    except _Advisory as exc:
+        # The diagnostic already opens `Advisory:`, so the exit-3 tier the exit
+        # code distinguishes is visible in the text too, never mislabeled
+        # `Error:` (which would read as "you called it wrong, force it").
+        print(exc.diagnostic, file=sys.stderr)
+        sys.exit(3)
+    except _Refusal as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    if overrode:
+        names = ", ".join(n for n, _ in overrode)
+        print(
+            f"Warning: recorded {verdict} over {len(overrode)} advisory "
+            f"condition(s) via --force ({names}); the override is stamped in "
+            f"last_verdict_overrides.",
+            file=sys.stderr,
+        )
+    print(
+        f"verdict={verdict} phase={data.get('phase')} "
+        f"round={data.get('revision_round', 0)} "
+        f"active={'true' if data.get('active') else 'false'}"
+    )
 
 
 def main():
@@ -695,8 +1187,45 @@ def main():
     p_deact = subparsers.add_parser("deactivate", help="Deactivate a loop")
     p_deact.add_argument("loop", choices=list(LOOP_ALIASES.keys()))
     p_deact.add_argument("--reason", help="Reason for deactivation")
+    p_deact.add_argument(
+        "--cancel", action="store_true",
+        help="End the loop WITHOUT a completing verdict (the human escape hatch; "
+             "legal from any phase, recorded as exit_kind=cancelled)",
+    )
     p_deact.add_argument("--session-id", dest="session_id", help="Session ID for scoped state")
     p_deact.set_defaults(func=cmd_deactivate)
+
+    # begin-review
+    p_begin = subparsers.add_parser(
+        "begin-review",
+        help="Freeze the prepped panel's run identity into the loop (phase=reviewing)",
+    )
+    p_begin.add_argument("loop", choices=list(LOOP_ALIASES.keys()))
+    p_begin.add_argument("--session-id", dest="session_id", help="Session ID for scoped state")
+    p_begin.set_defaults(func=cmd_begin_review)
+
+    # record-verdict
+    p_verdict = subparsers.add_parser(
+        "record-verdict",
+        help="Record the panel's verdict against the frozen run identity",
+    )
+    p_verdict.add_argument("loop", choices=list(LOOP_ALIASES.keys()))
+    p_verdict.add_argument("verdict", choices=list(VERDICTS))
+    p_verdict.add_argument(
+        "--minor-only", dest="minor_only", action="store_true", default=False,
+        help="REVISE with nothing blocking: completes the loop like APPROVED, so "
+             "it faces the same quorum/pointer/drift checks",
+    )
+    p_verdict.add_argument(
+        "--force", action="store_true", default=False,
+        help="Record despite tripped ADVISORY conditions (quorum, pointer, "
+             "target drift, unresolvable target, zero usable seats): they warn "
+             "to stderr and stamp last_verdict_overrides instead of refusing "
+             "(exit 3). The hard errors (inactive/wrong phase/no run identity/"
+             "no frozen target spec) are never forced.",
+    )
+    p_verdict.add_argument("--session-id", dest="session_id", help="Session ID for scoped state")
+    p_verdict.set_defaults(func=cmd_record_verdict)
 
     args = parser.parse_args()
     args.func(args)

@@ -9,6 +9,18 @@ from pathlib import Path
 import json
 
 
+def is_active_value(value: object) -> bool:
+    """THE rule for "is this loop on", shared by every reader of the field.
+
+    Truthiness, not `is True`: the Stop hook blocks on any truthy `active`, so a
+    hand-edited `"true"` or `1` is a loop that is ON, and every other reader
+    (discovery, the session banner, the deactivate gate) has to agree. A stricter
+    rule in the gate made `deactivate --cancel` a no-op on exactly those files:
+    the escape hatch went dead while the hook kept blocking.
+    """
+    return bool(value)
+
+
 def is_loop_state_file(filename: str) -> bool:
     """Check if a filename is a loop state file (legacy or session-scoped).
 
@@ -84,6 +96,6 @@ def is_active_state_file(path: Path) -> bool:
     try:
         with open(path) as f:
             data = json.load(f)
-        return bool(data.get("active", False))
+        return is_active_value(data.get("active", False))
     except (OSError, json.JSONDecodeError):
         return False

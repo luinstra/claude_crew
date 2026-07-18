@@ -171,6 +171,29 @@ staged), **SKIP only the 2a.2 per-seat loop** — go to Step 2b; you STILL persi
 the Task seats (Step 2c) and run the SAME grouped `collect` (Step 2c.5) with
 `--seats <task_seats only>`.
 
+**2a.1b: freeze the run identity into loop state.** Immediately after prep
+prints its JSON and BEFORE any seat runs:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/crew" state begin-review bl --session-id <session-id>
+```
+
+This reads the prepped run's own `run.json` and freezes the run id, the target
+hash + spec, and the seat roster into the loop's state (the identity Step 3's
+`record-verdict` judges the panel's results against). It prints `phase=reviewing
+run=<run_id> seats=<N>`. Re-running it after a re-prep is fine (it re-arms the
+freeze against the newest run). Skip it and the verdict is unrecordable, and a
+loop with no recorded verdict cannot be completed at all.
+
+**Keep the working tree quiet from here until the verdict is recorded.**
+`record-verdict` re-hashes the reviewed target, and if the bytes on disk are no
+longer the bytes the panel read it raises drift as a completion advisory (exit 3,
+below): nothing is recorded until the user authorizes `--force`. The seats are
+read-only, so nothing moves unless YOU edit mid-review: don't. If the tree does
+drift, the advisory names it rather than certifying work no panel saw, and the
+clean fix is a fresh `review-prep` + `begin-review` + panel over the current
+content (the user may instead `--force` the completion over the drift).
+
 **2a.2 — run EACH seat in its own parallel shell.** Do NOT delete seat files:
 results are RUN-SCOPED. Each `review-prep` mints a run identity from the reviewed
 content + panel, so a re-verification of CHANGED work lands in a NEW `<run_dir>`
@@ -395,11 +418,16 @@ the existing verdict format:
 - APPROVED: Work is complete and code quality is acceptable.
 - REVISE: Issues found. Classify each as [BLOCKING] or [MINOR].
 
-If APPROVED or only [MINOR] issues, state: `VERDICT: APPROVED`. Stating it
-additionally requires the digest's quorum header to read MET, or to be absent
-(a flat/legacy digest with no `PANEL:` header carries no quorum gate); a NOT
-MET digest renders the could-not-verify-quorum outcome below instead.
-If [BLOCKING] issues exist, state: `VERDICT: REVISE` with the list of issues.
+If the panel found nothing at all, state: `VERDICT: APPROVED`. If it found only
+[MINOR] issues, state `VERDICT: REVISE` with those issues listed: the loop
+still completes (Step 3's `--minor-only` row), but the verdict says what the
+panel actually said instead of laundering minor findings into a sign-off. If any
+[BLOCKING] issues exist, state `VERDICT: REVISE` with the list of issues.
+
+Either completing verdict expects the digest's quorum header to read MET, or to
+be absent (a flat/legacy digest with no `PANEL:` header carries no quorum gate);
+a NOT MET digest can still complete, but only on the user's explicit `--force`
+(see Step 3), and otherwise renders the could-not-verify-quorum outcome below.
 
 `panel.md` has four sections, read them ALL: **VERDICTS** (roster of every seat that
 ran + tally — reference seats by LABEL, never positionally), **CRITERIA MATRIX**
@@ -409,17 +437,19 @@ weighed ON ITS MERITS, never dismissed for being one seat), and **RAW / UNPARSED
 SEATS** (any seat that didn't parse even after repair, verbatim — **still read
 these**, a partial seat's prose findings live here).
 
-**The quorum header gates certification.** A run-scoped grouped digest opens
-with a `PANEL:` header. When it reads `NOT MET`, you MUST NOT emit APPROVED and
-MUST NOT complete on REVISE-with-only-[MINOR]: too few usable seats reviewed
-this content for the panel to certify it. Report the outcome as `could not
-verify quorum: <usable>/<N> usable (threshold from the header)`, name the seats
-that are pending or failed, and either relaunch the pending seats (same
-`--run-id`; a landed valid seat is never overwritten) or surface the shortfall
-to the user. This gates only how much SUCCESS certification requires: a failed
-seat still never aborts the review (never-choke below is unchanged), and the
-digest header is the authority on the count. Zero usable seats stays the
-all-failed branch below.
+**The quorum header is advisory.** A run-scoped grouped digest opens with a
+`PANEL:` header. When it reads `NOT MET`, too few usable seats reviewed this
+content for a clean sign-off, and a completing `record-verdict` will exit 3
+rather than certify it (see Step 3). That is NOT a hard stop: it means the loop
+cannot certify WITHOUT the user's explicit `--force`. Report the outcome as
+`could not verify quorum without the user's explicit --force: <usable>/<N>
+usable (threshold from the header)`, name the seats that are pending or failed,
+and either relaunch the pending seats (same `--run-id`; a landed valid seat is
+never overwritten), surface the shortfall to the user, or complete with
+`--force` ONLY on the user's explicit say-so. This gates only how much SUCCESS
+certification requires: a failed seat still never aborts the review (never-choke
+below is unchanged), and the digest header is the authority on the count. Zero
+usable seats stays the all-failed branch below.
 
 **Never choke — synthesize from whatever succeeded.** A failed/skipped seat
 (subprocess OR Task) NEVER aborts the verification and is NEVER silently dropped (it
@@ -432,13 +462,50 @@ diagnostics>`.
 
 | Verdict                             | Action                                                                       |
 | ----------------------------------- | ---------------------------------------------------------------------------- |
-| **APPROVED** (quorum MET)           | Complete the loop (Step 4)                                                   |
-| **REVISE with only [MINOR]** (quorum MET) | Accept and complete the loop (Step 4)                                  |
-| **REVISE with any [BLOCKING]**      | Re-delegate to executor with the issues (below), then return to Step 2       |
-| **Quorum NOT MET** (the digest's `PANEL:` header) | Non-completing: relaunch the pending seats (same `--run-id`) or surface the shortfall to the user, then return to Step 2c.5 |
+| **APPROVED** (quorum MET)           | `record-verdict bl APPROVED`, then complete the loop (Step 4)                |
+| **REVISE with only [MINOR]** (quorum MET) | `record-verdict bl REVISE --minor-only`, then complete the loop (Step 4) |
+| **REVISE with any [BLOCKING]**      | `record-verdict bl REVISE`, then re-delegate to executor with the issues (below), then return to Step 2 |
+| **Quorum NOT MET** (the digest's `PANEL:` header), or any completion advisory (target drift, pointer divergence) | A completing `record-verdict` exits 3 and records NOTHING: the loop CANNOT certify WITHOUT the user's explicit `--force`. Surface the advisory to the user (below); relaunch the pending seats (same `--run-id`), or complete with `--force` ONLY on the user's say-so |
+| **Zero usable seats** (the all-failed branch of Step 2d) | `record-verdict bl FAILED`, then report the per-seat diagnostics |
 
-The completing rows require the digest's quorum header to read MET (or to be
-absent: a flat/legacy digest with no `PANEL:` header carries no quorum gate).
+The completing rows expect the digest's quorum header to read MET (or to be
+absent: a flat/legacy digest with no `PANEL:` header carries no quorum gate); a
+NOT MET header does not block completion outright, it routes through the exit-3
+advisory flow below (the user's `--force` decides).
+
+**Record the verdict through the engine before acting on it.** The loop's state
+is what completion checks, so an unrecorded verdict leaves the loop unfinishable:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/crew" state record-verdict bl <APPROVED|REVISE|REJECT|FAILED> [--minor-only] --session-id <session-id>
+```
+
+`--minor-only` is the REVISE-with-nothing-blocking row: it completes the loop, so
+it faces the same checks APPROVED does. The engine re-checks what this table
+already told you (at least one usable seat for any non-FAILED verdict, plus
+quorum, run-pointer agreement, and target drift for a completing one). It exits
+one of three ways:
+
+- **Exit 0**: recorded (a completing verdict printed `phase=done`): proceed to Step 4.
+- **Exit 3**: a completion advisory tripped (quorum short, zero usable seats on
+  a plain REVISE/REJECT, the tree drifted
+  since the panel, the run pointer moved, the target no longer resolves): NOTHING
+  was recorded and the engine printed every tripped condition. **Do NOT re-run
+  with `--force` on your own.** Surface the advisory text to the user, state
+  plainly what tripped and that `--force` would record the completion over it,
+  and WAIT for the user's explicit decision. Only if the user says to proceed do
+  you re-run the SAME call with `--force` appended (it records and stamps
+  `last_verdict_overrides`). If the user says no, do not complete: re-run the
+  pending seats (same `--run-id`), re-prep, or stop, per what the user wants.
+  **`--force` is the HUMAN's authorization, carried out by you on their say-so;
+  you never originate it.** That is the whole reason the check is
+  advisory-with-a-human rather than a silent auto-pass.
+- **Exit 2**: a hard error (wrong phase, no run identity, FAILED over a usable
+  panel): a real contradiction to FIX, never forced.
+
+FAILED is only for a panel that returned nothing usable; the SECOND consecutive
+FAILED ends the loop itself (it stamps the state inactive, so no deactivate
+follows) rather than re-prepping a panel that is not returning.
 
 ### Re-delegating on REVISE [BLOCKING]
 
@@ -475,8 +542,15 @@ Then go back to Step 2 to verify the revised work.
 ## Step 4: Complete the Loop
 
 When the panel's verdict is APPROVED (or REVISE with only [MINOR] issues) AND
-the digest's quorum header read MET or was absent (a NOT MET panel cannot
-certify completion; see Step 2d):
+`record-verdict` recorded it: exit 0 on a met/absent quorum header, or a
+`--force` the user explicitly authorized over a NOT MET header or another
+completion advisory (see Step 3):
+
+Step 3 already recorded the verdict, and that is the ONLY place it is recorded:
+`record-verdict` refuses from `phase=done`, so a second call here would fail. Its
+success printed `phase=done`, which is the phase the deactivate below requires: a
+loop with no completing verdict on record is refused there, because a plain
+deactivate is otherwise indistinguishable from an unreviewed finish.
 
 1. **Deactivate the loop** — pass the SAME `--session-id` the init used (the
    `[Session ID: …]` value, as a literal, NOT a `${CLAUDE_SESSION_ID}` shell
@@ -485,13 +559,19 @@ certify completion; see Step 2d):
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" state deactivate bl --reason "Panel approved" --session-id <session-id>
 ```
+   When the completion required `--force` (a NOT MET panel the user authorized),
+   the `--reason` must name that instead: `--reason "Completion forced over
+   advisories"`, matching the reason the Stop-hook nudge already prints for a
+   forced completion; a clean completion keeps `"Panel approved"`.
 
 2. **Summarize what was accomplished** and let the user know the task is complete.
 
 ## Early Exit
 
-The loop can end before the panel approves in three ways:
+The loop can end without the panel approving in these ways:
 
+- A SECOND consecutive `FAILED` verdict: the loop deactivates terminally in place
+  (`exit_kind=review_failed`; see Step 3). A single FAILED does not end it.
 - User runs `/crew:cancel-build`
 - A hook-owned safety limit trips: the stop-fire cap or the wall-clock deadline
   (both force-exit the loop; see `scripts/CLAUDE.md`). Report where the work
