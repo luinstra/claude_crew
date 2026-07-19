@@ -1,5 +1,5 @@
 ---
-description: Delegate a WORK task to ONE non-Claude seat in write mode (default codex) — the seat edits the working tree and leaves changes UNCOMMITTED + UNSTAGED for you to review. Override with a leading --seat <name>. Use for delegated edits, not read-only review.
+description: Delegate a WORK task to ONE non-Claude seat in write mode (engine-resolved default seat): the seat edits the working tree and leaves changes UNCOMMITTED + UNSTAGED for you to review. Override with a leading --seat <name>. Use for delegated edits, not read-only review.
 argument-hint: "[--seat <name>] <task description>"
 allowed-tools: Bash, Read, Glob, Write
 ---
@@ -10,8 +10,8 @@ $ARGUMENTS
 
 > **What this is.** The EXECUTION complement to `/crew:review` / `/crew:debate`.
 > Where review/debate fan a PANEL of seats at a target **read-only**, dispatch
-> sends **ONE** chosen subprocess seat (default `codex`, override with `--seat`)
-> at the live working tree with **write** access — the external-model analog of
+> sends **ONE** chosen subprocess seat (an engine-resolved default seat, override
+> with `--seat`) at the live working tree with **write** access, the external-model analog of
 > `crew:executor`. The seat edits files in place and is instructed to leave ALL
 > changes **UNCOMMITTED and UNSTAGED and on the same branch**. You then review the
 > dirty tree and decide what to do (keep / revert / pipe into `/crew:review`).
@@ -25,7 +25,7 @@ $ARGUMENTS
 > **Seat resolution is ENGINE-OWNED.** This command NEVER reads config and NEVER
 > hardcodes a seat. It passes `--seat` to the engine ONLY when you explicitly
 > named one; otherwise the engine applies its own resolution (`[dispatch].seat`
-> config → built-in `codex`). So the command cannot honestly know the resolved
+> config → a built-in default). So the command cannot honestly know the resolved
 > seat before the run — the authoritative resolved-seat line is read from the
 > returned envelope's `seat` field POST-run (step 4).
 
@@ -93,6 +93,16 @@ the seat itself):
 ```
 
 (When the user named a seat, add `--seat <seat>` to the command.)
+
+**Immediately sweep the task spill.** The returned process no longer needs the `-f`
+file by the time the call returns (it has either read the task or exited before
+doing so), so delete it NOW, right after the invocation and BEFORE checking exit
+status. Doing it here (not at the end) means EVERY exit path
+sweeps it, including the exit-2 STOP in step 4 that returns before the report:
+
+```bash
+rm -f .crew/dispatch/<session-id>-task.txt
+```
 
 ## Step 4 — Check exit status, then read the envelope
 
@@ -162,21 +172,38 @@ must not be spilled into the transcript — open what you care about yourself):
 git status --porcelain -z
 ```
 
-**NEVER run `git add` / `git add -N`** (that mutates the index, breaks the unstaged
-contract, and would trip the engine's own staged-changes guard). Surfacing is
+**NEVER run `git add` / `git add -N`** (that mutates the index and breaks the
+UNSTAGED contract the user relies on when triaging the seat's diff: dispatch's
+whole point is to leave the seat's edits unstaged for review). This is NOT about
+the engine's staged-changes guard: that guard's after-capture already ran by the
+time you surface the diff, so staging here would trip nothing. Surfacing is
 read-only only.
 
-> **Dirty-tree attribution.** The shown `git diff` is the FULL working-tree delta —
-> if the tree was ALREADY dirty before dispatch, those pre-existing edits are
-> included and are NOT solely the dispatched seat's work.
+> **Dirty-tree attribution.** The shown `git diff` is the UNSTAGED working-tree
+> delta (worktree vs the INDEX): the unstaged changes in the tree, which is NOT a
+> complete picture of what the seat did (and, on a pre-dirty tree, not solely the
+> seat's work either). Content the seat STAGED (`git add`),
+> COMMITTED, or moved by switching branches is NOT in this diff: a staged hunk lives
+> in the index, a commit would be measured against the new HEAD, and a branch switch
+> describes a different branch. So if a guard WARNING fired in step 5 (HEAD moved,
+> staged changed, or branch changed), that content is NOT surfaced here: consult the
+> guard warnings plus `git status` / `git log` to see it, not the diff alone. And if
+> the tree was ALREADY dirty before dispatch, those pre-existing edits are included
+> in the diff and are NOT solely the seat's work.
 
 ## Step 7 — Report and hand back
 
 Report the seat summary (`envelope.output`) + the diff, and hand back to the user to
-decide next: keep the changes, revert them (`git checkout -- .` / `git restore`), or
-pipe them into `/crew:review`. Do NOT commit, stage, push, or switch branches
-yourself. (If step 4 surfaced a FAILURE banner, report that banner PLUS the
-read-only recovery diff of any partial edits — never a success summary.)
+decide next: keep the changes, revert selectively, or pipe them into `/crew:review`.
+Do NOT commit, stage, push, or switch branches yourself. (If step 4 surfaced a
+FAILURE banner, report that banner PLUS the read-only recovery diff of any partial
+edits, never a success summary.)
+
+> **No blanket revert.** Without a pre-run snapshot of the tree there is no way to
+> isolate the seat's edits from changes that were ALREADY present, so NEVER offer or
+> run `git checkout -- .` / `git restore` wholesale: that can destroy pre-existing
+> work the seat never touched. To undo, review the diff and revert SELECTIVELY,
+> naming the specific files or hunks that are the seat's.
 
 ---
 

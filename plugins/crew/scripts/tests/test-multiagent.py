@@ -6608,6 +6608,43 @@ def test_dispatch():
                   rc == 1 and wrote and envf and envf["ok"] is False
                   and "seat blew up" in err.getvalue(),
                   "exit1 + envelope file written", f"rc={rc} wrote={wrote} {envf}")
+
+            # A seat that FAILED (ok=false) but left edits AND committed them must
+            # STILL surface the HEAD + staged guard warnings on stderr: the early
+            # failure return used to drop them, the exact partial-failure case where
+            # they matter most. Mock the git probes so head_moved + staged_changed
+            # both fire around the failing run.
+            err = io.StringIO()
+            with mock.patch("multiagent.cli.get_provider", return_value=_Fail()), \
+                 mock.patch("multiagent.cli._git_head", side_effect=["AAA", "BBB"]), \
+                 mock.patch("multiagent.cli._git_staged", side_effect=["s1", "s2"]), \
+                 mock.patch("multiagent.cli._git_branch", side_effect=["main", "main"]):
+                with contextlib.redirect_stderr(err):
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+            fail_out = err.getvalue()
+            check("dispatch FAILURE path prints HEAD + staged guard warnings, not just the error (1.1)",
+                  rc == 1 and "seat blew up" in fail_out
+                  and any("moved HEAD" in l for l in fail_out.splitlines()
+                          if l.startswith("WARNING:"))
+                  and any(STAGED_MARK in l for l in fail_out.splitlines()
+                          if l.startswith("WARNING:")),
+                  "error + HEAD + staged warnings on stderr", repr(fail_out))
+            # NON-VACUITY: the SAME failing seat with NO head move and NO stage change
+            # (git before == after) prints the error and ZERO guard warnings: proving
+            # the warnings above come from the guards actually firing, not from
+            # unconditional text emitted on every failure.
+            err = io.StringIO()
+            with mock.patch("multiagent.cli.get_provider", return_value=_Fail()), \
+                 mock.patch("multiagent.cli._git_head", side_effect=["AAA", "AAA"]), \
+                 mock.patch("multiagent.cli._git_staged", side_effect=["s1", "s1"]), \
+                 mock.patch("multiagent.cli._git_branch", side_effect=["main", "main"]):
+                with contextlib.redirect_stderr(err):
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+            clean_out = err.getvalue()
+            check("dispatch FAILURE path with no guard trip prints NO warnings (1.1 non-vacuity)",
+                  rc == 1 and "seat blew up" in clean_out
+                  and not any(l.startswith("WARNING:") for l in clean_out.splitlines()),
+                  "error only, zero WARNING lines", repr(clean_out))
         finally:
             os.chdir(saved_cwd)
             if saved_pd is None:

@@ -1229,6 +1229,76 @@ def _git_branch(repo_dir: str) -> str | None:
     return None
 
 
+def _dispatch_guard_warnings(
+    head_moved: bool,
+    head_before: str | None,
+    head_after: str | None,
+    staged_changed: bool,
+    branch_changed: bool,
+    branch_before: str | None,
+    branch_after: str | None,
+) -> list[str]:
+    """Build the HEAD/staged/branch guard WARNING lines (fixed HEAD->staged->branch
+    order). Shared by the success and the failure human-mode paths so a seat that
+    FAILED after committing or leaving edits still surfaces the guards, not just the
+    error. Text is byte-identical across both paths."""
+    lines: list[str] = []
+    if head_moved:
+        if head_before == _UNBORN:
+            lines.append(
+                f"WARNING: the dispatched seat moved HEAD {head_before} -> "
+                f"{head_after} (it made the repo's FIRST commit against "
+                f"instruction; undo with: git update-ref -d HEAD)"
+            )
+        else:
+            lines.append(
+                f"WARNING: the dispatched seat moved HEAD {head_before} -> "
+                f"{head_after} (it committed against instruction; undo with: "
+                f"git reset --soft HEAD@{{1}})"
+            )
+    # ALWAYS surface a staged change when staged_changed fires: a safety guard must
+    # never silently drop a real staged violation. The earlier `not head_moved`
+    # suppression was too coarse: a seat that COMMITS and then STAGES additional
+    # changes has REAL staged content with head_moved=true, and suppressing the
+    # staged line would hide it (the HEAD remedy `git reset --soft HEAD@{1}` leaves
+    # those extra staged changes behind). Over-warning is safe for a guard;
+    # under-warning is not. To stay non-misleading in BOTH cases, a pure commit
+    # (where the index is clean vs the NEW HEAD and `git reset` would be a no-op) AND
+    # a real independent stage, the line is DESCRIPTIVE: it reports that the index
+    # content changed and points at `git status` to inspect, rather than asserting
+    # `git reset` is THE fix (which would be a false no-op promise on a pure commit).
+    # The JSON envelope's staged_changed stays computed faithfully.
+    if staged_changed:
+        lines.append(
+            "WARNING: staged/index content changed since before the run — "
+            "inspect with `git status`; unstage any unintended changes with "
+            "`git reset`"
+        )
+    if branch_changed:
+        # Pick the recovery target for branch_before. When dispatch STARTED on a
+        # detached HEAD, branch_before is the (impossible-refname) sentinel: `git
+        # checkout <sentinel>` is nonsense; the way back to the original detached
+        # state is `git checkout --detach <head_before>` (the ORIGINAL commit sha). A
+        # real branch name uses a plain `git checkout`. Null-guard head_before: if
+        # the original HEAD probe returned None (a detached HEAD whose _git_head
+        # errored while _git_branch succeeded, extremely unlikely but unguarded),
+        # fall back to a safe generic hint rather than emitting the literal
+        # `--detach None`.
+        if branch_before == _DETACHED:
+            recover = (
+                f"git checkout --detach {head_before}"
+                if head_before is not None
+                else "re-detach to your original commit"
+            )
+        else:
+            recover = f"git checkout {branch_before}"
+        lines.append(
+            f"WARNING: the dispatched seat changed branch {branch_before} -> "
+            f"{branch_after} against instruction (return with: {recover})"
+        )
+    return lines
+
+
 def cmd_dispatch(args: argparse.Namespace) -> int:
     """Send ONE subprocess seat at the working tree in WRITE mode (/crew:dispatch).
 
@@ -1395,6 +1465,10 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         return 0
 
     # Human (non-JSON) output: header + seat output + warnings LAST in fixed order.
+    guard_warnings = _dispatch_guard_warnings(
+        head_moved, head_before, head_after,
+        staged_changed, branch_changed, branch_before, branch_after,
+    )
     if not result.ok:
         err = result.error or "unknown error"
         # When -o is set, still WRITE the envelope file on failure so the caller
@@ -1404,63 +1478,14 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         if args.out:
             _emit(json.dumps(envelope, ensure_ascii=False), args.out)
         print(err, file=sys.stderr)
+        # A seat that FAILED may still have left edits and/or committed them, so the
+        # guard warnings matter MOST here: surface them (stderr) instead of dropping
+        # them at the early failure return.
+        for warning in guard_warnings:
+            print(warning, file=sys.stderr)
         return 1
     header = f"dispatch: {seat}" + (f" ({result.model})" if result.model else "")
-    lines = [header, "", result.output]
-    if head_moved:
-        if head_before == _UNBORN:
-            lines.append(
-                f"WARNING: the dispatched seat moved HEAD {head_before} -> "
-                f"{head_after} (it made the repo's FIRST commit against "
-                f"instruction; undo with: git update-ref -d HEAD)"
-            )
-        else:
-            lines.append(
-                f"WARNING: the dispatched seat moved HEAD {head_before} -> "
-                f"{head_after} (it committed against instruction; undo with: "
-                f"git reset --soft HEAD@{{1}})"
-            )
-    # BLOCKING-1: ALWAYS surface a staged change when staged_changed fires — a
-    # safety guard must never silently drop a real staged violation. The earlier
-    # `not head_moved` suppression was too coarse: a seat that COMMITS and then
-    # STAGES additional changes has REAL staged content with head_moved=true, and
-    # suppressing the staged line would hide it (the HEAD remedy `git reset --soft
-    # HEAD@{1}` leaves those extra staged changes behind). Over-warning is safe for
-    # a guard; under-warning is not. To stay non-misleading in BOTH cases — a pure
-    # commit (where the index is clean vs the NEW HEAD and `git reset` would be a
-    # no-op) AND a real independent stage — the line is DESCRIPTIVE: it reports
-    # that the index content changed and points at `git status` to inspect, rather
-    # than asserting `git reset` is THE fix (which would be a false no-op promise
-    # on a pure commit). The JSON envelope's staged_changed stays computed
-    # faithfully.
-    if staged_changed:
-        lines.append(
-            "WARNING: staged/index content changed since before the run — "
-            "inspect with `git status`; unstage any unintended changes with "
-            "`git reset`"
-        )
-    if branch_changed:
-        # BLOCKING-2: pick the recovery target for branch_before. When dispatch
-        # STARTED on a detached HEAD, branch_before is the (impossible-refname)
-        # sentinel — `git checkout <sentinel>` is nonsense; the way back to the
-        # original detached state is `git checkout --detach <head_before>` (the
-        # ORIGINAL commit sha). A real branch name uses a plain `git checkout`.
-        # MINOR-1: null-guard head_before — if the original HEAD probe returned
-        # None (a detached HEAD whose _git_head errored while _git_branch
-        # succeeded — extremely unlikely but unguarded), fall back to a safe
-        # generic hint rather than emitting the literal `--detach None`.
-        if branch_before == _DETACHED:
-            recover = (
-                f"git checkout --detach {head_before}"
-                if head_before is not None
-                else "re-detach to your original commit"
-            )
-        else:
-            recover = f"git checkout {branch_before}"
-        lines.append(
-            f"WARNING: the dispatched seat changed branch {branch_before} -> "
-            f"{branch_after} against instruction (return with: {recover})"
-        )
+    lines = [header, "", result.output] + guard_warnings
     _emit("\n".join(lines), args.out)
     if args.out:
         print(args.out)
