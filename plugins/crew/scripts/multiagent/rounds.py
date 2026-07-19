@@ -26,8 +26,16 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from state_discovery import crew_base  # the ONE `.crew` root resolver (leaf, no cycle)
+
 RUN_ID_RE = re.compile(r"^run-[A-Za-z0-9_-]+$")
-_DEFAULT_BASE = ".crew/debates"
+
+
+def _default_base() -> str:
+    """The anchored `.crew/debates` root, resolved at CALL time so a caller that
+    omits ``base_dir=`` inherits the shared ``crew_base()`` root, not a cwd-relative
+    path."""
+    return str(crew_base() / ".crew" / "debates")
 
 
 class RoundError(Exception):
@@ -67,13 +75,17 @@ def validate_run_id(run_id: str) -> str:
     return run_id
 
 
-def run_dir(run_id: str, *, base_dir: str = _DEFAULT_BASE) -> Path:
-    """Resolve the run directory for ``run_id`` (validated; not created)."""
+def run_dir(run_id: str, *, base_dir: str | None = None) -> Path:
+    """Resolve the run directory for ``run_id`` (validated; not created).
+    ``base_dir=None`` inherits the anchored ``_default_base()``."""
+    if base_dir is None:
+        base_dir = _default_base()
     return Path(base_dir) / validate_run_id(run_id)
 
 
-def ensure_run_dir(run_id: str, *, base_dir: str = _DEFAULT_BASE) -> Path:
-    """Create (if needed) and return the run directory for ``run_id``."""
+def ensure_run_dir(run_id: str, *, base_dir: str | None = None) -> Path:
+    """Create (if needed) and return the run directory for ``run_id``.
+    ``base_dir=None`` inherits the anchored ``_default_base()``."""
     d = run_dir(run_id, base_dir=base_dir)
     try:
         d.mkdir(parents=True, exist_ok=True)

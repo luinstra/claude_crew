@@ -116,13 +116,21 @@ synthesis is built from whichever seats succeed; only an all-empty panel aborts.
 ## A1 — Scaffold the debate dir (one allowlistable call)
 
 Write the question to a staging file with the **Write tool** (robust for quotes /
-newlines), then run the engine `debate` subcommand with **`--seats none`** to
-scaffold the dir and copy the question into `question.md` — WITHOUT running any
-subprocess seats (the per-seat fan-out happens visibly in A2). One allowlistable
-call, no `mkdir`/heredoc/redirect:
+newlines) at an ABSOLUTE anchored path,
+`<project-root>/.crew/debates/staged-question-<slug>.txt` (substitute your absolute
+`CLAUDE_PROJECT_DIR` value for `<project-root>` in the WRITE-tool path, safe as a
+literal there). Then run the engine `debate` subcommand with **`--seats none`** to
+scaffold the dir and copy the question into `question.md`, WITHOUT running any
+subprocess seats (the per-seat fan-out happens visibly in A2). The `-f` recipe uses
+the SHELL EXPANSION `"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/..."` (resolving to the SAME
+`.crew` at runtime, so a project root containing `$(…)`, backticks, `$VAR`, or a
+quote cannot execute or mangle the command): `debate` resolves an explicit `-f`
+against the shell cwd, which need not be the project root, so a bare
+`.crew/debates/...` could land in the wrong tree. One allowlistable call, no
+`mkdir`/heredoc/redirect:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" debate -f .crew/debates/staged-question-<slug>.txt --slug <short-kebab-slug> --seats none --consume
+"${CLAUDE_PLUGIN_ROOT}/crew" debate -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/staged-question-<slug>.txt" --slug <short-kebab-slug> --seats none --consume
 ```
 
 **Always `--seats none` here** — though `debate` is ALWAYS scaffold-only and
@@ -134,7 +142,17 @@ identical A1 call and simply skips A2). `--consume` deletes the staging file aft
 the question is copied in. The subcommand creates `.crew/debates/<timestamp>-<slug>/`,
 writes `question.md` (and an always-empty `subprocess.json`), and prints a JSON
 summary with **`dir`** and `seats: []` — read it; that's the debate dir where
-every per-seat result + the synthesis go.
+every per-seat result + the synthesis go. **`dir` is an ABSOLUTE path** (the engine
+anchors it to the project root, which need not equal the shell's cwd). Use that
+printed path VERBATIM as `<dir>` for the **Write-tool** and **Task `Read`**
+references below (they take a literal path, no shell). The **Bash recipes** below
+instead reconstruct it as `"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<dir-name>/..."`,
+where `<dir-name>` is the LAST path segment (basename) of the printed `dir` (a safe
+engine-minted `<timestamp>-<slug>`): the shell resolves the SAME dir the literal
+names, but a project root containing `$(…)`, backticks, `$VAR`, or a quote cannot
+execute or mangle the command. Do NOT paste the whole absolute `dir` into a Bash
+arg, and do NOT use a bare cwd-relative `.crew/debates/...` (that can miss the
+anchored tree the engine wrote to).
 
 ## A2 — Fan out subprocess seats (one visible shell PER SEAT)
 
@@ -162,7 +180,7 @@ shape Section B uses, minus the `--run-id`/`--round` round-threading — a singl
 round has no prior):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role <seat> -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-<seat>.txt
+"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role <seat> -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<dir-name>/question.md" -o "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<dir-name>/.prompt-<seat>.txt"
 ```
 
 This labels each subprocess seat ("acting as the **<seat>** seat") — a deliberate
@@ -176,7 +194,7 @@ launch a SEPARATE `crew run <seat>` Bash call, all concurrently (e.g. background
 calls) so they are distinct shells you can watch and kill individually:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f .crew/debates/<dir>/.prompt-<seat>.txt --json -o .crew/debates/<dir>/<seat>.json
+"${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<dir-name>/.prompt-<seat>.txt" --json -o "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<dir-name>/<seat>.json"
 ```
 
 - `run --json` ALWAYS exits 0 and writes the six-field result
@@ -190,7 +208,7 @@ calls) so they are distinct shells you can watch and kill individually:
 **A2.3 — collect.** WAIT for every A2.2 `run` shell to exit first — a seat whose
 `-o` file hasn't been written yet is still running, not failed (the same wait
 discipline as the Task seats in A3/A4). Then read each
-`.crew/debates/<dir>/<seat>.json` (one six-field result apiece) and carry them
+`<dir>/<seat>.json` (one six-field result apiece) and carry them
 into A4 alongside the Task seats.
 
 ## A3 — Fan out task seats (parallel)
@@ -203,7 +221,7 @@ parallel:
 
 ```bash
 # for each <seat> in task_seats:
-"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role <seat> -f .crew/debates/<dir>/question.md -o .crew/debates/<dir>/.prompt-<seat>.txt
+"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role <seat> -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<dir-name>/question.md" -o "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<dir-name>/.prompt-<seat>.txt"
 ```
 
 Dispatch each seat **by reference** — point the panelist at its rendered file and
@@ -214,7 +232,7 @@ its model):
 
 ```
 # for each <seat> in task_seats:
-Task(subagent_type="crew:panelist", model="<task_seat_models[<seat>]>", prompt="You are the <seat> seat. Read .crew/debates/<dir>/.prompt-<seat>.txt and follow it exactly.")
+Task(subagent_type="crew:panelist", model="<task_seat_models[<seat>]>", prompt="You are the <seat> seat. Read <dir>/.prompt-<seat>.txt and follow it exactly.")
 ```
 
 (Review mode: render with `--mode review <target>` instead of `-f question`, and
@@ -246,7 +264,7 @@ debates are discuss.)
 
 Gather every seat into the six-field shape (`name, model, ok, output, error,
 elapsed`): the subprocess seats are already six-field — read each
-`.crew/debates/<dir>/<seat>.json` from A2.3 (IGNORE the empty `subprocess.json`
+`<dir>/<seat>.json` from A2.3 (IGNORE the empty `subprocess.json`
 the A1 scaffold wrote — the real per-seat results live in the individual
 `<seat>.json` files, not that bundled file); normalize each task seat (A3) into the
 same shape from its returned Task result. A failed/skipped seat (subprocess OR
@@ -267,17 +285,32 @@ prior round in as DATA) + `run` + the run-dir convention + the Write tool.
 ## B1 — Open the run
 
 Pick a run-id `run-<short-slug>` (must match `^run-[A-Za-z0-9_-]+$`). The slug
-must use ONLY `[A-Za-z0-9_-]` characters — no spaces, dots, slashes, or other
-punctuation — else the first `render --run-id` call fails with a `RoundError`
-(that's `rounds.py`'s `^run-[A-Za-z0-9_-]+$` traversal guard rejecting it). Write
-the question once with the **Write tool** to:
+must use ONLY `[A-Za-z0-9_-]` characters (no spaces, dots, slashes, or other
+punctuation) else the first `render --run-id` call fails with a `RoundError`
+(that's `rounds.py`'s `^run-[A-Za-z0-9_-]+$` traversal guard rejecting it).
+
+**Establish ONE absolute run directory and use it for EVERY read, write, and
+Task reference in this section.** Define:
 
 ```
-.crew/debates/<run-id>/question.md
+<run-dir> = <project-root>/.crew/debates/<run-id>
 ```
 
-(Writing the file creates the run dir. This is the dir `render --run-id`
-reads prior rounds from.)
+Substitute your absolute `CLAUDE_PROJECT_DIR` value for `<project-root>` (a literal
+absolute path, correct for the Write tool and the Task Read references below, which
+take no shell). The **Bash recipes** below instead spell out the SHELL EXPANSION
+`"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<run-id>/..."` in place of `<run-dir>`:
+the shell resolves it at runtime, so a project root containing `$(…)`, backticks,
+`$VAR`, or a quote cannot execute or mangle the command, and it resolves to the SAME
+dir the literal does. This is the SAME anchored root the engine's `render --run-id`
+resolves prior rounds from (its default `crew_base()/.crew/debates`, anchored to
+`CLAUDE_PROJECT_DIR`, not the shell cwd), so the orchestrator's writes and the
+engine's reads land in ONE tree. Do NOT use a bare cwd-relative `.crew/debates/...`
+anywhere below.
+
+Write the question once with the **Write tool** to `<run-dir>/question.md`
+(writing the file creates the run dir; this is the dir `render --run-id` reads
+prior rounds from).
 
 ## B2 — For each round n = 1 … N
 
@@ -286,10 +319,17 @@ and folds them in as injection-guarded DATA — on round 1 there is no prior):
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role <seat> \
-  -f .crew/debates/<run-id>/question.md \
-  --run-id <run-id> --round <n> --base-dir .crew/debates \
-  -o .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt
+  -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<run-id>/question.md" \
+  --run-id <run-id> --round <n> \
+  -o "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<run-id>/.prompt-<seat>-r<n>.txt"
 ```
+
+Do NOT pass `--base-dir` here: omitting it lets the engine resolve the run dir it
+reads prior rounds from through its ANCHORED default (the project-root `.crew/debates`,
+the same resolver every other `.crew` consumer uses). Passing a cwd-relative
+`--base-dir .crew/debates` instead would make the engine resolve it against its own
+cwd, which need not be the project root, splitting the prior-round read from the
+`round-NN.md` files the orchestrator writes at the project root.
 
 Render EVERY seat in the panel — every `subprocess_seats` entry AND every
 `task_seats` entry from the split — exactly as A3 renders one prompt per seat;
@@ -300,7 +340,7 @@ Then run the round's seats (in parallel where possible):
 
 - **Subprocess seats** (the external-CLI entries): execute the rendered prompt via the engine —
   ```bash
-  "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt --json -o .crew/debates/<run-id>/<seat>-r<n>.json
+  "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<run-id>/.prompt-<seat>-r<n>.txt" --json -o "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<run-id>/<seat>-r<n>.json"
   ```
 - **Task seats** (`task_seats` from the split): dispatch one `crew:panelist` per
   Task seat in the panel, **pinning each seat's model from `task_seat_models[<seat>]`**
@@ -312,7 +352,7 @@ Then run the round's seats (in parallel where possible):
   the seat name is its model:
   ```
   # for each <seat> in task_seats:
-  Task(subagent_type="crew:panelist", model="<task_seat_models[<seat>]>", prompt="You are the <seat> seat. Read .crew/debates/<run-id>/.prompt-<seat>-r<n>.txt and follow it exactly.")
+  Task(subagent_type="crew:panelist", model="<task_seat_models[<seat>]>", prompt="You are the <seat> seat. Read <run-dir>/.prompt-<seat>-r<n>.txt and follow it exactly.")
   ```
   Use each Task's RETURNED result as its take and completion signal — never an output-file size or other proxy (see A3).
 
@@ -321,7 +361,7 @@ Then run the round's seats (in parallel where possible):
 seat's Task result first; a seat still running is not a failed seat:
 
 ```
-.crew/debates/<run-id>/round-<NN>.md      (zero-padded: round-01.md, round-02.md, …)
+<run-dir>/round-<NN>.md      (zero-padded: round-01.md, round-02.md, …)
 ```
 
 This file is what the NEXT round's `render` folds in — so it must contain each

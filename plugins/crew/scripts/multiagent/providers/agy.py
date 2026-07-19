@@ -46,6 +46,8 @@ import re
 import shutil
 import time
 
+from state_discovery import crew_base  # the ONE `.crew`/project-root resolver
+
 from . import Provider, ProviderResult
 from ._proc import TIMEOUT, run_reaped
 
@@ -269,12 +271,13 @@ class AgyProvider(Provider):
         # cwd by default, which can diverge from the dispatch guard's repo_dir. In
         # write mode pin the subprocess cwd to CLAUDE_WORKING_DIRECTORY (the SAME
         # expression cmd_dispatch uses for repo_dir) so the seat edits the tree
-        # the guard inspects. Read-only passes NO cwd (None) — review/debate is
-        # byte-for-byte unchanged.
+        # the guard inspects. A READ-ONLY review seat pins to crew_base() (the
+        # project root the run dir + snapshot anchor to) so a divergent process
+        # cwd cannot make the seat inspect the wrong repo.
         run_cwd = (
             (os.environ.get("CLAUDE_WORKING_DIRECTORY") or os.getcwd())
             if sandbox == "workspace-write"
-            else None
+            else str(crew_base())
         )
 
         # Shared reaped runner: start_new_session + SIGTERM→SIGKILL killpg

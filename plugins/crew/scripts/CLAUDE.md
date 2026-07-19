@@ -145,19 +145,16 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   review run is protected while an active loop OR a current-run pointer names it
   (no age threshold); debates prune by the existing staleness rule.
 
-**Known limitation: crew assumes the process cwd IS the project root
-(cwd == CLAUDE_PROJECT_DIR).** The engine (review-prep/collect/run/swab, via
-`_REVIEWS_BASE = ".crew/reviews"`) resolves review dirs cwd-relative, while the
-state layer (`crew state` verbs + `models`, via `get_project_dir()` =
-`CLAUDE_PROJECT_DIR or cwd`) resolves them through CLAUDE_PROJECT_DIR. In all normal
-operation the two agree (cwd == repo root == CLAUDE_PROJECT_DIR). Running crew from a
-cwd that differs from CLAUDE_PROJECT_DIR is UNSUPPORTED, and the consequence is NOT
-guaranteed-loud: begin-review may fail loudly (no prepped panel found under this
-root), OR it may SILENTLY read a DIFFERENT, older run that exists under
-CLAUDE_PROJECT_DIR and, if that run's target still hashes the same, freeze/certify
-the wrong tree's results with no loud error. The mitigation is operational (keep cwd
-at the project root); unifying the two roots onto one shared resolver is a deferred
-follow-up.
+**RESOLVED: all `.crew` paths anchor to CLAUDE_PROJECT_DIR via one resolver.**
+Every `.crew` root in the codebase now derives from the single `crew_base()`
+resolver (`state_discovery.py`: `CLAUDE_PROJECT_DIR or cwd`). The engine
+(review-prep/collect/run/swab, via `_reviews_base()` and the anchored
+`review_runs`/`rounds` defaults), the state layer (`crew state` verbs + `models`,
+via `get_project_dir()`), `config.py`, and the session-start sweeps all resolve
+`.crew` through that one function, so a cwd that differs from CLAUDE_PROJECT_DIR
+no longer spawns a phantom nested `.crew`: the two layers land on the same tree.
+The earlier cwd-relative split (the engine resolved `.crew` cwd-relative while the
+state layer anchored to CLAUDE_PROJECT_DIR) is closed.
 
 Key contracts (do NOT regress):
 - **Six-field `ProviderResult` core** (`name, model, ok, output, error, elapsed`) — the
@@ -302,8 +299,8 @@ Key contracts (do NOT regress):
   the full `identity_digest`; frozen snapshot `target.md`/`target.diff`; the
   `current-run.json` pointer as a launch-time handoff), stages the shared subprocess prompt AND one
   prompt per Task seat against the SNAPSHOT, and PRINTS `{prompt_path, subprocess_seats, task_seats,
-  task_seat_models, run_dir, run_id, target_sha256, task_prompt_paths, pending_subprocess_seats,
-  pending_task_seats}` as JSON — it runs NOTHING. A re-prep of an identical spec RESUMES the same dir
+  task_seat_models, run_dir, run_id, target_sha256, session_segment, task_prompt_paths,
+  pending_subprocess_seats, pending_task_seats}` as JSON — it runs NOTHING. A re-prep of an identical spec RESUMES the same dir
   (`run.json` byte-untouched, landed-valid seats excluded from the pending lists); changed content or
   review inputs mint a DIFFERENT dir, so stale results are unreachable rather than merely inadvisable.
   Before printing, prep CLEARS every pending seat's stale non-valid `<seat>.json` (a prior launch's
@@ -557,9 +554,12 @@ State is stored as JSON in `.crew/`:
 ```python
 from pathlib import Path
 from models import LoopState
+from state_discovery import crew_base
 
-# Get project directory (from env or cwd)
-directory = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()))
+# Project root via the ONE resolver (CLAUDE_PROJECT_DIR, else cwd); every `.crew`
+# path in the codebase derives from crew_base(), so the state layer and the review
+# engine can never resolve `.crew` to different trees.
+directory = crew_base()
 
 # Load state (returns default if file missing; one dataclass serves both loops)
 state_file = directory / ".crew" / "build-state.json"
@@ -643,7 +643,10 @@ crew state init mt --task "Add user profiles" --auto-plan --session-id abc123
 # (incl. non-UTF-8) file exits nonzero with NO state file created. The loop
 # commands (build.md / measure-twice.md) Write the spill file then rm it after a
 # successful init (the session-start orphan-cleanup patterns do NOT cover these task files).
-crew state init bl -f .crew/task-bl-abc123.txt --session-id abc123
+# Anchor -f to the project root and double-quote it: `state init` resolves an
+# explicit -f against the shell cwd (which need not BE the project root), and the
+# path can contain spaces.
+crew state init bl -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/task-bl-abc123.txt" --session-id abc123
 
 # The loop's wall clock: --deadline-minutes (1..1440; the flag REJECTS 0, the
 # agent invokes init) > [tuning].deadline_minutes (per-repo, then global; 0 here
@@ -665,7 +668,7 @@ crew state check-conflicts --session-id abc123
 # write also restore this process's stale `stop_fires`/`parked_fires` snapshot,
 # reverting a bump the Stop hook landed in between: the counter-reset hole the
 # allowlist exists to close, reopened through a field the agent IS allowed to set.
-crew state set mt plan_file .crew/plans/auth-system.md --session-id abc123
+crew state set mt plan_file "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/plans/auth-system.md" --session-id abc123
 
 # Begin a review: run it right after `crew review-prep`, BEFORE any seat runs.
 # It reads the prepped run's OWN run.json (never the pointer: seat results are
@@ -964,9 +967,10 @@ print(result.to_json())
 state_file = Path("/Users/me/project/.crew/state.json")
 ```
 
-✅ **Read from environment**
+✅ **Resolve via the one `crew_base()` root**
 ```python
-directory = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()))
+from state_discovery import crew_base
+directory = crew_base()            # CLAUDE_PROJECT_DIR, else cwd (the ONE resolver)
 state_file = directory / ".crew" / "state.json"
 ```
 
@@ -1065,7 +1069,7 @@ Tests cover:
 ## Working Here Checklist
 
 - [ ] Import models from `models.py`, don't duplicate dataclasses
-- [ ] Use `CLAUDE_PROJECT_DIR` env var for directory
+- [ ] Resolve the project root via `crew_base()` (the ONE resolver: CLAUDE_PROJECT_DIR, else cwd), never a hand-rolled `os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())`
 - [ ] Handle missing state files gracefully (return defaults)
 - [ ] Mutate a live loop's state ONLY via `update_state_json` (locked read-modify-write, own keys only); `state.save` is a whole-state REPLACE, never an edit
 - [ ] Never hand-roll a write + chmod (`atomic_write_json` is 0600-from-birth, atomic)

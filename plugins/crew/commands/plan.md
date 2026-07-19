@@ -21,7 +21,14 @@ You are facilitating a planning session. Your role is to gather requirements, th
 → **Skip Phase 1** (requirements already captured in the document)
 → **Go directly to Phase 2** using that document as the requirements source
 
-Read the referenced document and use it as the basis for plan generation. Do NOT re-interview the user — the design doc contains the requirements.
+Read the referenced document and use it as the basis for plan generation. If
+the path is RELATIVE (e.g. `.crew/plans/bar.md`), resolve it against the project
+root before reading: the Read tool takes a literal path with no shell, so read
+`<project-root>/.crew/plans/bar.md` (substitute your `CLAUDE_PROJECT_DIR` value
+for `<project-root>`, the same absolute-literal convention the plan WRITE uses),
+NEVER a bare cwd-relative path a divergent cwd would resolve against the wrong
+tree. An ABSOLUTE path the user gives is read as-is. Do NOT re-interview the
+user; the design doc contains the requirements.
 
 ---
 
@@ -54,7 +61,9 @@ Requirements:
 Constraints:
 - [constraint 1]
 
-Save the plan to `.crew/plans/[descriptive-name].md`
+Save the plan to `<project-root>/.crew/plans/[descriptive-name].md`
+(substitute the CLAUDE_PROJECT_DIR value for `<project-root>`; the engine's
+auto-plan and every plan reader resolve this dir against the project root)
 ```
 
 3. Return the advisor's plan to the user

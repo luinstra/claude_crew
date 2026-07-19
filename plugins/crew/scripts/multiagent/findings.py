@@ -28,10 +28,10 @@ Design contracts (do NOT regress):
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass, field
 
+from state_discovery import crew_base  # the ONE `.crew` / project-root resolver
 from . import render
 from .providers import ProviderResult
 
@@ -340,7 +340,7 @@ def normalize_path(raw: str | None, repo_root: str | None = None) -> list[str] |
         return None
     p = raw.strip().replace("\\", "/")
     if repo_root is None:
-        repo_root = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+        repo_root = str(crew_base())
     root = (repo_root or "").replace("\\", "/").rstrip("/")
     if root:
         low_p, low_root = p.lower(), root.lower()

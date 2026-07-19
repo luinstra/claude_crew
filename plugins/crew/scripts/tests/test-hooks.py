@@ -73,6 +73,21 @@ def run_script(script: Path, input_data: str, extra_env: dict = None) -> str:
     env.pop("CREW_VERBOSE", None)
     if extra_env:
         env.update(extra_env)
+    # These subprocesses run with cwd=SCRIPT_DIR, but a hook resolves its `.crew`
+    # via crew_base() (CLAUDE_PROJECT_DIR, else cwd) and the payload no longer
+    # carries a directory hint. So mimic the harness: derive CLAUDE_PROJECT_DIR
+    # from the stdin payload's `directory`/`cwd` when a test did not pin it. The
+    # parse is defensive (some tests feed malformed/non-JSON stdin on purpose)
+    # and only a non-empty STRING sets it, so `{"directory": 123}` does not.
+    if "CLAUDE_PROJECT_DIR" not in env:
+        try:
+            _payload = json.loads(input_data)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            _payload = None
+        if isinstance(_payload, dict):
+            _proj = _payload.get("directory") or _payload.get("cwd")
+            if isinstance(_proj, str) and _proj:
+                env["CLAUDE_PROJECT_DIR"] = _proj
     result = subprocess.run(
         [sys.executable, str(script)],
         input=input_data,
@@ -1273,12 +1288,19 @@ def main():
             else:
                 log_fail("init mt --auto-plan - derives plan filename", ".crew/plans/build-auth-system.md", stdout)
 
-            # Verify state has the auto-derived plan file (use --verbose for JSON field check)
+            # Verify state stores the auto-derived plan file as an ANCHORED ABSOLUTE
+            # path (crew_base()/.crew/plans/...), not a cwd-relative string: later
+            # plan writes and review-prep consume plan_file as-is, so a relative
+            # value would re-resolve against a possibly-different cwd. Here
+            # CLAUDE_PROJECT_DIR == test_path, so the stored value must be exactly
+            # <test_path>/.crew/plans/build-auth-system.md.
+            expected_plan = str(test_path / ".crew" / "plans" / "build-auth-system.md")
             stdout2, _, _ = run_crew_state(["show", "mt", "--verbose"], test_path)
-            if '"plan_file": ".crew/plans/build-auth-system.md"' in stdout2:
-                log_pass("init mt --auto-plan - stores derived path in state")
+            if f'"plan_file": "{expected_plan}"' in stdout2:
+                log_pass("init mt --auto-plan - stores ANCHORED absolute path in state")
             else:
-                log_fail("init mt --auto-plan - stores derived path in state", "plan_file with derived path", stdout2)
+                log_fail("init mt --auto-plan - stores ANCHORED absolute path in state",
+                         f'plan_file == {expected_plan}', stdout2)
 
             # show mt compact: contains plan= field
             stdout_mt_c, _, code_mt_c = run_crew_state(["show", "mt"], test_path)
@@ -2488,8 +2510,9 @@ def main():
             # --- The OBSERVABLE hook output: main() must ride the swab notice on
             # the SessionStart additionalContext channel (not stderr), since that is
             # the only carrier a successful hook reliably delivers. The notice
-            # resolves `.crew` CWD-RELATIVE, so the subprocess cwd IS the tree under
-            # test. ---
+            # resolves `.crew` through the ANCHORED crew_base() root; the helper
+            # below sets CLAUDE_PROJECT_DIR to the tree under test (and matches cwd
+            # to it), so the sweep lands on that tree. ---
             def _session_start_context(cwd: Path) -> str:
                 env = _neutral_env()
                 env.pop("CREW_VERBOSE", None)
@@ -2636,12 +2659,13 @@ def main():
             finally:
                 _ap.own_dir = _saved_own_dir
 
-            # --- Divergence: both resolve `.crew` CWD-RELATIVE, never from
-            # CLAUDE_PROJECT_DIR. The default-arg calls (as `main()` makes them)
-            # must act on the tree the WRITERS/swab wrote (cwd), so with cwd and
-            # CLAUDE_PROJECT_DIR pointing at DIFFERENT trees the report/sweep name
-            # the cwd tree's artifacts, not the CLAUDE_PROJECT_DIR tree's. Mirrors
-            # the swab divergence test in test-multiagent.py. ---
+            # --- Anchoring: both resolve `.crew` through the shared crew_base()
+            # (CLAUDE_PROJECT_DIR or cwd), never cwd-relative. The default-arg
+            # calls (as `main()` makes them) act on the CLAUDE_PROJECT_DIR tree the
+            # WRITERS/swab now also resolve, so with cwd and CLAUDE_PROJECT_DIR
+            # pointing at DIFFERENT trees the report/sweep name the
+            # CLAUDE_PROJECT_DIR tree's artifacts, not the cwd tree's. Mirrors the
+            # swab anchoring test in test-multiagent.py. ---
             dv_cwd = test_path / "divergence" / "cwd"
             dv_proj = test_path / "divergence" / "projdir"
 
@@ -2660,12 +2684,15 @@ def main():
                 _age(m, over_mtime)
                 return m
 
-            # The CWD tree: exactly ONE orphan review run + one aged marker.
+            # The CWD tree: exactly ONE orphan review run + one aged marker. After
+            # anchoring, the default-arg sweeps must IGNORE this tree entirely.
             dv_cwd_orphan = _mk_orphan(dv_cwd / ".crew", "run-dddddddddddd")
             dv_cwd_marker = _mk_aged_marker(dv_cwd / ".crew", "exec-cwd")
             # The CLAUDE_PROJECT_DIR tree: a DIFFERENT count (TWO orphans) + its own
-            # aged marker. A wrong CLAUDE_PROJECT_DIR resolution would report "2"
-            # and reap this marker, so both are non-vacuity discriminators.
+            # aged marker. This is the tree crew_base() resolves, so the report must
+            # say "2" and the sweep must reap THIS marker; the cwd tree's ONE and its
+            # marker are the non-vacuity discriminators (a cwd-relative regression
+            # would report "1" and spare this marker).
             dv_proj_orphan_a = _mk_orphan(dv_proj / ".crew", "run-eeeeeeeeeeee")
             dv_proj_orphan_b = _mk_orphan(dv_proj / ".crew", "run-ffffffffffff")
             dv_proj_marker = _mk_aged_marker(dv_proj / ".crew", "exec-proj")
@@ -2675,8 +2702,8 @@ def main():
             os.chdir(str(dv_cwd))
             os.environ["CLAUDE_PROJECT_DIR"] = str(dv_proj)
             try:
-                _dvreport = report_stale_artifacts()   # no arg -> cwd-relative
-                sweep_signal_markers_all()             # no arg -> cwd-relative
+                _dvreport = report_stale_artifacts()   # no arg -> crew_base() root
+                sweep_signal_markers_all()             # no arg -> crew_base() root
             finally:
                 os.chdir(_dv_saved_cwd)
                 if _dv_saved_proj is None:
@@ -2684,20 +2711,20 @@ def main():
                 else:
                     os.environ["CLAUDE_PROJECT_DIR"] = _dv_saved_proj
 
-            # Report names the CWD tree's ONE artifact, not the projdir tree's TWO.
-            if "1 stale crew artifact(s)" in _dvreport:
-                log_pass("report_stale_artifacts (default arg) reports the CWD tree, not CLAUDE_PROJECT_DIR")
+            # Report names the CLAUDE_PROJECT_DIR tree's TWO artifacts, not the cwd tree's ONE.
+            if "2 stale crew artifact(s)" in _dvreport:
+                log_pass("report_stale_artifacts (default arg) reports the CLAUDE_PROJECT_DIR tree, not cwd")
             else:
-                log_fail("report_stale_artifacts (default arg) reports the CWD tree, not CLAUDE_PROJECT_DIR",
-                         "'1 stale crew artifact(s)' (cwd tree)", repr(_dvreport))
+                log_fail("report_stale_artifacts (default arg) reports the CLAUDE_PROJECT_DIR tree, not cwd",
+                         "'2 stale crew artifact(s)' (projdir tree)", repr(_dvreport))
 
-            # Signal sweep reaped the CWD marker, left the projdir marker (non-vacuity).
-            if not dv_cwd_marker.exists() and dv_proj_marker.exists():
-                log_pass("sweep_signal_markers_all (default arg) reaps the CWD tree's marker, spares CLAUDE_PROJECT_DIR's")
+            # Signal sweep reaped the projdir marker, left the cwd marker (non-vacuity).
+            if not dv_proj_marker.exists() and dv_cwd_marker.exists():
+                log_pass("sweep_signal_markers_all (default arg) reaps the CLAUDE_PROJECT_DIR tree's marker, spares cwd's")
             else:
-                log_fail("sweep_signal_markers_all (default arg) reaps the CWD tree's marker, spares CLAUDE_PROJECT_DIR's",
-                         "cwd marker gone, projdir marker kept",
-                         f"cwd_exists={dv_cwd_marker.exists()} proj_exists={dv_proj_marker.exists()}")
+                log_fail("sweep_signal_markers_all (default arg) reaps the CLAUDE_PROJECT_DIR tree's marker, spares cwd's",
+                         "projdir marker gone, cwd marker kept",
+                         f"proj_exists={dv_proj_marker.exists()} cwd_exists={dv_cwd_marker.exists()}")
 
             # The report deleted nothing in either tree.
             if (dv_cwd_orphan.exists() and dv_proj_orphan_a.exists()
@@ -5957,15 +5984,17 @@ def main():
             # JSON on stdout) and LOUD (diagnostic on stderr + the hook's own
             # documented output channel: Stop uses
             # systemMessage; SessionStart uses its documented
-            # hookSpecificOutput.additionalContext channel). Fault: a
-            # non-string "directory" makes Path() raise TypeError inside
-            # main().
+            # hookSpecificOutput.additionalContext channel). Fault: a non-object
+            # JSON payload makes `from_dict`'s `.get()` raise AttributeError
+            # inside main(). (A non-string "directory" is no longer a crash
+            # vector: the hook does not read the payload directory anymore, it
+            # resolves the project root through crew_base().)
             for hook_path in (persistent_mode, session_start_path):
                 crash_env = _neutral_env()
-                crash_env.pop("CLAUDE_PROJECT_DIR", None)  # force the stdin fault path
+                crash_env.pop("CLAUDE_PROJECT_DIR", None)  # resolver falls back to cwd
                 proc = subprocess.run(
                     [sys.executable, str(hook_path)],
-                    input='{"directory": 123}',
+                    input='[1, 2]',
                     capture_output=True, text=True, cwd=SCRIPT_DIR, env=crash_env,
                 )
                 name = f"{hook_path.name}: crash fails open + loud"

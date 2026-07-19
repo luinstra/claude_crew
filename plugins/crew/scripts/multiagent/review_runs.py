@@ -40,8 +40,15 @@ from pathlib import Path
 # dir for cleanup targeting, and the charset admits no `/` or `.`, so a hostile
 # --run-id can never escape the reviews dir (path-traversal guard).
 from multiagent.rounds import RUN_ID_RE
+from state_discovery import crew_base  # the ONE `.crew` root resolver (leaf, no cycle)
 
-_DEFAULT_BASE = ".crew/reviews"
+
+def _default_base() -> str:
+    """The anchored `.crew/reviews` root, resolved at CALL time so a caller that
+    omits ``base=`` inherits the shared ``crew_base()`` root, not a cwd-relative
+    path. Callers that pass ``base=`` (cli.py's ``_reviews_base()``) already
+    derive from the same resolver."""
+    return str(crew_base() / ".crew" / "reviews")
 POINTER_NAME = "current-run.json"
 RUN_JSON_NAME = "run.json"
 
@@ -81,8 +88,13 @@ def session_segment(session_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "", session_id or "")
 
 
-def reviews_dir(session_id: str, *, base: str = _DEFAULT_BASE) -> Path:
-    """Resolve ``.crew/reviews/<sanitized-session-id>`` (flat when no session)."""
+def reviews_dir(session_id: str, *, base: str | None = None) -> Path:
+    """Resolve ``.crew/reviews/<sanitized-session-id>`` (flat when no session).
+
+    ``base=None`` resolves the anchored default (``_default_base()``); an explicit
+    ``base`` (cli.py already derives it from ``crew_base()``) is honored as-is."""
+    if base is None:
+        base = _default_base()
     seg = session_segment(session_id)
     return Path(base) / seg if seg else Path(base)
 
@@ -101,8 +113,9 @@ def validate_run_id(run_id: str) -> str:
     return run_id
 
 
-def run_dir(session_id: str, run_id: str, *, base: str = _DEFAULT_BASE) -> Path:
-    """Resolve the run directory (validated; not created)."""
+def run_dir(session_id: str, run_id: str, *, base: str | None = None) -> Path:
+    """Resolve the run directory (validated; not created). ``base=None`` inherits
+    the anchored default via ``reviews_dir``."""
     return reviews_dir(session_id, base=base) / validate_run_id(run_id)
 
 

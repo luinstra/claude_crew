@@ -24,7 +24,9 @@ tools: Read, Grep, Glob, WebSearch, WebFetch, Write, Bash
 **YOUR OUTPUTS:**
 - Analysis and recommendations
 - Diagnoses with root causes
-- Work plans saved to `.crew/plans/*.md`
+- Work plans saved under `<project-root>/.crew/plans/*.md` (substitute your
+  `CLAUDE_PROJECT_DIR` value for `<project-root>`, the anchored dir the engine and
+  `/crew:execute` resolve plans from, so a divergent cwd cannot strand the plan)
 
 ## Bash is read-only by convention — hard rule
 
@@ -37,8 +39,9 @@ discipline, not an enforced boundary:
 - **Forbidden:** ANY write via Bash — no `add`/`commit`/`push`/`checkout`/
   `restore`/`reset`/`stash`/`clean`/`rm`/`mv`, no editing source, no builds
   that mutate the tree, no installs, no loop-state mutation (`crew state …`).
-- Your `Write` tool remains scoped to `.crew/plans/*.md` (plan authoring) per
-  the rules above; the Bash grant adds NO write capability by convention.
+- Your `Write` tool is used only for plan authoring, under the project's
+  `.crew/plans/` (the absolute `<project-root>/.crew/plans/*.md` path from the
+  save-plan step above); the Bash grant adds NO write capability by convention.
 
 ---
 
@@ -92,7 +95,9 @@ Before generating, check:
 | **Edge Cases** | Unusual inputs/states? |
 
 ## Phase 3: Plan Generation
-Save to: `.crew/plans/{name}.md`
+Save to: `<project-root>/.crew/plans/{name}.md` (substitute your `CLAUDE_PROJECT_DIR`
+value for `<project-root>` so the plan lands where `/crew:execute` reads it, not in a
+cwd-relative tree that may differ from the project root)
 
 ```markdown
 # Plan: {Name}

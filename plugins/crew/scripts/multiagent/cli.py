@@ -29,8 +29,9 @@ review-bearing commands: resolve target + ``--panel``/``--seats`` → subprocess
 task split, mint the run-scoped review dir (``review_runs``: identity, run.json,
 snapshot), stage EVERY seat prompt against the snapshot, and PRINT the JSON
 contract (``prompt_path, subprocess_seats, task_seats, task_seat_models`` plus
-the run-scoped keys ``run_dir, run_id, target_sha256, task_prompt_paths,
-pending_subprocess_seats, pending_task_seats``): it runs NOTHING; the per-seat
+the run-scoped keys ``run_dir, run_id, target_sha256, session_segment,
+task_prompt_paths, pending_subprocess_seats, pending_task_seats``): it runs
+NOTHING; the per-seat
 ``run`` loop + the Task-seat dispatch stay in the command markdown).
 
 The engine EXECUTES only subprocess seats (codex-*/agy/cursor-*), but ``render`` BUILDS the
@@ -82,6 +83,7 @@ from multiagent.providers import (
     known_seat_names,
 )
 import artifact_prune
+from state_discovery import crew_base  # the ONE `.crew` root resolver (state layer shares it)
 # One-time stderr notes for panel/availability resolution (mirrors config.py's
 # memoized-warn posture; keyed so each distinct note fires at most once/process).
 _warned: set[str] = set()
@@ -379,7 +381,14 @@ def _resolve_debate_seats(panel_arg: str | None, seats_arg: str | None) -> list[
     return [n for n in names if not (n in seen or seen.add(n))]
 
 
-_REVIEWS_BASE = ".crew/reviews"
+def _reviews_base() -> str:
+    """The `.crew/reviews` root, anchored under the shared ``crew_base()`` so the
+    engine resolves review dirs at the SAME project root as the state layer.
+
+    Computed per call (crew_base reads the env/cwd live), so a test or a caller
+    that sets CLAUDE_PROJECT_DIR sees it honored without a module-load snapshot.
+    """
+    return str(crew_base() / ".crew" / "reviews")
 
 
 def _resolve_session_id(arg: str | None) -> str:
@@ -408,7 +417,7 @@ def _reviews_subdir(session_id: str) -> Path:
     session id the dir is flat (``.crew/reviews/``) — sequential same-project use
     still works; only cross-session isolation is lost.
     """
-    return review_runs.reviews_dir(session_id, base=_REVIEWS_BASE)
+    return review_runs.reviews_dir(session_id, base=_reviews_base())
 
 
 def _pointer_run_dir(session_id: str) -> Path | None:
@@ -444,7 +453,7 @@ def _results_dir(session_id: str, run_id: str | None = None) -> Path:
     mechanism.
     """
     if run_id is not None:
-        return review_runs.run_dir(session_id, run_id, base=_REVIEWS_BASE)
+        return review_runs.run_dir(session_id, run_id, base=_reviews_base())
     return _pointer_run_dir(session_id) or _reviews_subdir(session_id)
 
 
@@ -1813,7 +1822,7 @@ def _resolve_read_scope(session_id: str, explicit_rid):
     """
     if explicit_rid is not None:
         return (
-            review_runs.run_dir(session_id, explicit_rid, base=_REVIEWS_BASE),
+            review_runs.run_dir(session_id, explicit_rid, base=_reviews_base()),
             explicit_rid,
         )
     base_dir = _reviews_subdir(session_id)
@@ -2805,7 +2814,10 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     against the SNAPSHOT as the reviewed content. Then it prints ONE JSON
     object (the original four keys ``prompt_path, subprocess_seats, task_seats,
     task_seat_models`` in order, then ``run_dir, run_id, target_sha256,
-    task_prompt_paths, pending_subprocess_seats, pending_task_seats``;
+    session_segment, task_prompt_paths, pending_subprocess_seats,
+    pending_task_seats``; ``session_segment`` is the SANITIZED session dir
+    segment (``review_runs.session_segment(session_id)``) the orchestrator
+    reconstructs shell paths from, never the raw session id;
     ``ensure_ascii=False``) and exits.
 
     THIS function owns ``--panel``/``--seats`` → seat-split + model-pin
@@ -3215,6 +3227,11 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
         "run_dir": str(run_d),
         "run_id": run_id,
         "target_sha256": target_sha,
+        # The SANITIZED session dir segment the run dir was built from (the same
+        # sanitizer reviews_dir uses). The orchestrator reconstructs shell paths
+        # from THIS, never the raw session id: a raw id could diverge from the
+        # engine's dir (or a crafted one traverse), and the two must name one file.
+        "session_segment": review_runs.session_segment(session_id),
         "task_prompt_paths": task_prompt_paths,
         "pending_subprocess_seats": pending_sub,
         "pending_task_seats": pending_task,
@@ -4109,20 +4126,16 @@ def cmd_swab(args: argparse.Namespace) -> int:
     (a candidate whose ``rmtree`` raised lands in ``failed`` and contributes 0, even
     if it was partially deleted).
 
-    The ``.crew/reviews`` and ``.crew/debates`` roots are resolved from
-    ``_REVIEWS_BASE`` (a cwd-relative path), IDENTICALLY to how ``review-prep`` /
-    ``collect`` / ``run`` resolve them: a destructive command and the writers must
-    never target different trees when ``CLAUDE_PROJECT_DIR`` and cwd diverge.
+    The ``.crew/reviews`` and ``.crew/debates`` roots are resolved from the shared
+    ``crew_base()`` root, IDENTICALLY to how ``review-prep`` / ``collect`` / ``run``
+    resolve them (they derive from the same resolver): a destructive command and the
+    writers must never target different trees when ``CLAUDE_PROJECT_DIR`` and cwd
+    diverge.
     """
-    # Path(".crew/reviews").parent == Path(".crew"): the same cwd-relative root the
-    # review/debate writers resolve, so swab enumerates exactly where they wrote.
-    # Deliberately NOT a CLAUDE_PROJECT_DIR-or-cwd root (the config-path resolution):
-    # the review/debate writers never consult CLAUDE_PROJECT_DIR, so resolving swab
-    # that way would make a DESTRUCTIVE command target a different .crew than the one
-    # the engine wrote whenever CLAUDE_PROJECT_DIR != cwd, reintroducing the very
-    # divergence this shared source closes. swab and the writers must derive their
-    # root from the ONE _REVIEWS_BASE.
-    crew_dir = Path(_REVIEWS_BASE).parent
+    # The same anchored `.crew` root the review/debate writers resolve (every
+    # `.crew` path derives from crew_base now), so swab enumerates exactly where
+    # they wrote even when CLAUDE_PROJECT_DIR != cwd.
+    crew_dir = crew_base() / ".crew"
     items = artifact_prune.collect_prunable(crew_dir, time.time())
 
     if args.yes:
@@ -4276,8 +4289,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     debate.add_argument(
         "--base-dir",
-        default=".crew/debates",
-        help="parent dir for debate logs (default: .crew/debates)",
+        default=str(crew_base() / ".crew" / "debates"),
+        help="parent dir for debate logs (default: <project>/.crew/debates, "
+             "anchored to CLAUDE_PROJECT_DIR)",
     )
     debate.add_argument(
         "--seats", default=None,
@@ -4743,8 +4757,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="explicit prior-round text file (alternative to --run-id/--round)",
     )
     rndr.add_argument(
-        "--base-dir", dest="base_dir", default=".crew/debates",
-        help="parent dir for debate runs (used to resolve --run-id)",
+        "--base-dir", dest="base_dir",
+        default=str(crew_base() / ".crew" / "debates"),
+        help="parent dir for debate runs (used to resolve --run-id); default "
+             "<project>/.crew/debates, anchored to CLAUDE_PROJECT_DIR",
     )
     rndr.add_argument("--base", default="main", help="base ref for branch/auto diffs")
     rndr.add_argument(

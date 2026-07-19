@@ -115,6 +115,11 @@ _NEUTRAL_HOME = tempfile.mkdtemp(prefix="crew-test-neutral-home-")
 def _neutral_env() -> dict:
     env = dict(os.environ)
     env["HOME"] = _NEUTRAL_HOME
+    # Drop CLAUDE_PROJECT_DIR so the shared crew_base() resolver falls back to the
+    # subprocess cwd (the temp dir each e2e test passes). An ambient value from the
+    # surrounding session/CI would otherwise anchor `.crew` OUTSIDE the temp tree,
+    # so every e2e path assertion below is denominated against cwd, not the ambient.
+    env.pop("CLAUDE_PROJECT_DIR", None)
     return env
 
 
@@ -693,23 +698,26 @@ def test_stage():
         else:
             os.environ["CLAUDE_SESSION_ID"] = saved
 
-    # _stage_path: derives .crew/reviews/<session>/prompt-<role>.txt from
-    # seat-role + session; flat when no session; charset-guards the segment.
+    # _stage_path: derives <crew_base>/.crew/reviews/<session>/prompt-<role>.txt
+    # from seat-role + session; flat when no session; charset-guards the segment.
+    # The `.crew` root is ANCHORED to crew_base() (CLAUDE_PROJECT_DIR or cwd), so
+    # the tail below is joined under the resolved base, not a bare relative string.
+    _sb = cli._reviews_base()  # <crew_base>/.crew/reviews (absolute)
     check("stage path derives from session id + seat-role",
-          cli._stage_path("abc123", "opus") == ".crew/reviews/abc123/prompt-opus.txt",
-          ".crew/reviews/abc123/prompt-opus.txt", cli._stage_path("abc123", "opus"))
+          cli._stage_path("abc123", "opus") == f"{_sb}/abc123/prompt-opus.txt",
+          f"{_sb}/abc123/prompt-opus.txt", cli._stage_path("abc123", "opus"))
     check("stage path is flat when session id is empty",
-          cli._stage_path("", "sonnet") == ".crew/reviews/prompt-sonnet.txt",
-          ".crew/reviews/prompt-sonnet.txt", cli._stage_path("", "sonnet"))
+          cli._stage_path("", "sonnet") == f"{_sb}/prompt-sonnet.txt",
+          f"{_sb}/prompt-sonnet.txt", cli._stage_path("", "sonnet"))
     check("stage path charset-guards the session segment (no traversal)",
-          cli._stage_path("../../etc", "opus") == ".crew/reviews/etc/prompt-opus.txt",
-          ".crew/reviews/etc/prompt-opus.txt", cli._stage_path("../../etc", "opus"))
+          cli._stage_path("../../etc", "opus") == f"{_sb}/etc/prompt-opus.txt",
+          f"{_sb}/etc/prompt-opus.txt", cli._stage_path("../../etc", "opus"))
     check("stage path charset-guards the seat-role too (no traversal)",
-          cli._stage_path("s", "../../evil") == ".crew/reviews/s/prompt-evil.txt",
-          ".crew/reviews/s/prompt-evil.txt", cli._stage_path("s", "../../evil"))
+          cli._stage_path("s", "../../evil") == f"{_sb}/s/prompt-evil.txt",
+          f"{_sb}/s/prompt-evil.txt", cli._stage_path("s", "../../evil"))
     check("stage path defaults role to 'seat' when seat-role missing",
-          cli._stage_path("s", None) == ".crew/reviews/s/prompt-seat.txt",
-          ".crew/reviews/s/prompt-seat.txt", cli._stage_path("s", None))
+          cli._stage_path("s", None) == f"{_sb}/s/prompt-seat.txt",
+          f"{_sb}/s/prompt-seat.txt", cli._stage_path("s", None))
 
     # _seat_role_slug: the ONE canonical role→filename-slug source _stage_path /
     # --stage-all funnel through. A `.`-bearing role like opus-4.6 is charset-
@@ -1420,6 +1428,248 @@ def test_targets():
         except targets.TargetError as exc:
             check("missing base ref -> TargetError with clear message",
                   "merge-base" in str(exc) or "base" in str(exc), "base msg", str(exc))
+
+    # Divergent process cwd: target resolution ANCHORS to CLAUDE_PROJECT_DIR
+    # (crew_base), never the process cwd, so the panel reviews the PROJECT's diff
+    # even when git is invoked from a subdir (which would miss out-of-subtree
+    # untracked files) or from a DIFFERENT repo (which would freeze foreign bytes).
+    # core.excludesFile=/dev/null pins the exclusion to the code under test.
+    with tempfile.TemporaryDirectory() as proj, tempfile.TemporaryDirectory() as other:
+        _init_repo(proj)
+        _git(["config", "core.excludesFile", "/dev/null"], proj)
+        (Path(proj) / "sub").mkdir()
+        # Untracked file at the PROJECT ROOT, OUTSIDE the `sub` subtree: a git run
+        # from `sub` would never enumerate it.
+        (Path(proj) / "root_untracked.txt").write_text("project-only untracked\n")
+        # A DIFFERENT repo with its OWN untracked file, to prove a foreign cwd's
+        # diff never leaks into the project's target.
+        _init_repo(other)
+        _git(["config", "core.excludesFile", "/dev/null"], other)
+        (Path(other) / "other_untracked.txt").write_text("foreign untracked\n")
+
+        saved_env = os.environ.get("CLAUDE_PROJECT_DIR")
+        saved_cwd = os.getcwd()
+        try:
+            os.environ["CLAUDE_PROJECT_DIR"] = proj
+
+            # (a) cwd = a SUBDIR of the project.
+            os.chdir(Path(proj) / "sub")
+            t_sub = targets.resolve("working-tree")
+            check("divergent cwd (subdir): resolves the PROJECT untracked file outside the subtree",
+                  "root_untracked.txt" in t_sub.content
+                  and "project-only untracked" in t_sub.content,
+                  "root_untracked.txt in content", t_sub.content[:200])
+
+            # (b) cwd = a DIFFERENT repo.
+            os.chdir(other)
+            t_other = targets.resolve("working-tree")
+            check("divergent cwd (foreign repo): resolves the PROJECT diff, not the cwd's",
+                  "root_untracked.txt" in t_other.content
+                  and "other_untracked.txt" not in t_other.content,
+                  "project diff only", t_other.content[:200])
+
+            # NON-VACUITY: the PRE-FIX behavior (git run in the process cwd) returns
+            # the FOREIGN repo's target (proof the anchor is load-bearing, not a no-op).
+            t_prefix = targets.resolve("working-tree", cwd=os.getcwd())
+            check("non-vacuity: a cwd-relative resolve reviews the FOREIGN repo (the bug the anchor closes)",
+                  "other_untracked.txt" in t_prefix.content
+                  and "root_untracked.txt" not in t_prefix.content,
+                  "foreign target under process cwd", t_prefix.content[:200])
+        finally:
+            os.chdir(saved_cwd)
+            if saved_env is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved_env
+
+    # A RELATIVE plan-file target anchors its filesystem read to crew_base() too,
+    # so a legacy relative plan_file (`.crew/plans/x.md`) resolves the PROJECT's
+    # plan even when the process cwd is a subdir or a DIFFERENT repo. An absolute
+    # plan path is untouched.
+    with tempfile.TemporaryDirectory() as proj, tempfile.TemporaryDirectory() as other:
+        plans = Path(proj) / ".crew" / "plans"
+        plans.mkdir(parents=True)
+        (plans / "x.md").write_text("# PROJECT PLAN BODY\n")
+        # A same-named plan in the foreign cwd, to prove the anchor reads the
+        # PROJECT's bytes, not whatever happens to sit under the process cwd.
+        other_plans = Path(other) / ".crew" / "plans"
+        other_plans.mkdir(parents=True)
+        (other_plans / "x.md").write_text("# FOREIGN PLAN BODY\n")
+
+        saved_env = os.environ.get("CLAUDE_PROJECT_DIR")
+        saved_cwd = os.getcwd()
+        try:
+            os.environ["CLAUDE_PROJECT_DIR"] = proj
+            os.chdir(other)
+            t = targets.resolve(".crew/plans/x.md")
+            check("divergent cwd: relative plan_file resolves the PROJECT plan (anchored read)",
+                  t.kind == "plan" and "PROJECT PLAN BODY" in t.content
+                  and "FOREIGN PLAN BODY" not in t.content,
+                  "project plan bytes", t.content[:120])
+            # NON-VACUITY: resolving against the process cwd reads the FOREIGN plan,
+            # proving the crew_base anchor is load-bearing.
+            t_cwd = targets.resolve(".crew/plans/x.md", cwd=other)
+            check("non-vacuity: a cwd-relative plan resolve reads the FOREIGN plan",
+                  "FOREIGN PLAN BODY" in t_cwd.content
+                  and "PROJECT PLAN BODY" not in t_cwd.content,
+                  "foreign plan under process cwd", t_cwd.content[:120])
+        finally:
+            os.chdir(saved_cwd)
+            if saved_env is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved_env
+
+
+# =============================================================================
+# Read-only review seats run in crew_base(), not the process cwd
+# =============================================================================
+
+def test_provider_readonly_cwd():
+    """A READ-ONLY review seat's subprocess cwd is crew_base() (the project root
+    the run dir + snapshot anchor to), NOT the process cwd. Workspace-write keeps
+    its CLAUDE_WORKING_DIRECTORY pin (the seat's edit tree). Asserts the cwd the
+    provider CONSTRUCTS (captured by the fake bin's os.getcwd()); no live seat run.
+    """
+    log_section("Provider read-only cwd = crew_base()")
+    from multiagent.providers.codex import CodexProvider
+    from multiagent.providers.agy import AgyProvider
+    from multiagent.providers.cursor import CursorProvider
+
+    def rp(p):
+        return os.path.realpath(str(p))
+
+    with tempfile.TemporaryDirectory() as root:
+        proj = Path(root) / "proj"       # crew_base (CLAUDE_PROJECT_DIR)
+        other = Path(root) / "other"     # a DIVERGENT process cwd
+        wsdir = Path(root) / "ws"        # the workspace-write edit tree
+        binp = Path(root) / "bin"
+        for d in (proj, other, wsdir, binp):
+            d.mkdir()
+        cap = Path(root) / "cwd.txt"
+
+        # codex: argv has `-o <file>`; write getcwd to cap + the -o file, exit 0.
+        make_fake_bin(binp, "codex", f"""
+        import sys, os
+        args = sys.argv[1:]
+        out = args[args.index("-o") + 1] if "-o" in args else None
+        open({str(cap)!r}, "w").write(os.getcwd())
+        if out:
+            open(out, "w").write("REVIEW OK")
+        sys.exit(0)
+        """)
+        # agy: prints a review-shaped body to stdout (no auth markers), caps getcwd.
+        make_fake_bin(binp, "agy", f"""
+        import sys, os
+        open({str(cap)!r}, "w").write(os.getcwd())
+        sys.stdout.write("[BLOCKING] finding. CONFIDENCE: high")
+        sys.exit(0)
+        """)
+        # cursor `agent`: answer --version, else cap getcwd + print body.
+        make_fake_bin(binp, "agent", f"""
+        import sys, os
+        if "--version" in sys.argv:
+            print("2026.06.24-00-45-58-9f61de7"); sys.exit(0)
+        open({str(cap)!r}, "w").write(os.getcwd())
+        sys.stdout.write("PASS review body")
+        sys.exit(0)
+        """)
+
+        saved = {k: os.environ.get(k) for k in
+                 ("CLAUDE_PROJECT_DIR", "CLAUDE_WORKING_DIRECTORY", "PATH")}
+        saved_cwd = os.getcwd()
+        try:
+            os.environ["CLAUDE_PROJECT_DIR"] = str(proj)
+            os.environ["PATH"] = str(binp) + os.pathsep + saved["PATH"]
+            os.chdir(other)  # process cwd DIVERGES from crew_base
+
+            # --- read-only: cwd must be crew_base (proj), never the process cwd ---
+            os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+
+            CodexProvider("codex", "o3").run("P", sandbox="read-only", timeout=30)
+            check("codex read-only seat runs in crew_base(), not the process cwd",
+                  rp(cap.read_text()) == rp(proj) and rp(cap.read_text()) != rp(other),
+                  rp(proj), rp(cap.read_text()))
+
+            AgyProvider("agy", "Gemini 3.1 Pro (High)").run("P", sandbox="read-only", timeout=30)
+            check("agy read-only seat runs in crew_base(), not the process cwd",
+                  rp(cap.read_text()) == rp(proj) and rp(cap.read_text()) != rp(other),
+                  rp(proj), rp(cap.read_text()))
+
+            CursorProvider("cursor-glm", "glm-5.2-max").run("P", sandbox="read-only", timeout=30)
+            check("cursor read-only seat runs in crew_base(), not the process cwd",
+                  rp(cap.read_text()) == rp(proj) and rp(cap.read_text()) != rp(other),
+                  rp(proj), rp(cap.read_text()))
+
+            # --- workspace-write: cwd stays CLAUDE_WORKING_DIRECTORY (unchanged) ---
+            os.environ["CLAUDE_WORKING_DIRECTORY"] = str(wsdir)
+
+            CodexProvider("codex", "o3").run("P", sandbox="workspace-write", timeout=30)
+            check("codex workspace-write cwd stays CLAUDE_WORKING_DIRECTORY (unchanged)",
+                  rp(cap.read_text()) == rp(wsdir), rp(wsdir), rp(cap.read_text()))
+
+            AgyProvider("agy", "Gemini 3.1 Pro (High)").run("P", sandbox="workspace-write", timeout=30)
+            check("agy workspace-write cwd stays CLAUDE_WORKING_DIRECTORY (unchanged)",
+                  rp(cap.read_text()) == rp(wsdir), rp(wsdir), rp(cap.read_text()))
+
+            CursorProvider("cursor-glm", "glm-5.2-max").run("P", sandbox="workspace-write", timeout=30)
+            check("cursor workspace-write cwd stays CLAUDE_WORKING_DIRECTORY (unchanged)",
+                  rp(cap.read_text()) == rp(wsdir), rp(wsdir), rp(cap.read_text()))
+        finally:
+            os.chdir(saved_cwd)
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
+# =============================================================================
+# Bash recipe metacharacter-root safety (the ${CLAUDE_PROJECT_DIR:-$PWD} form)
+# =============================================================================
+
+def test_recipe_metacharacter_root():
+    """The shipped Bash recipes reference `.crew` via the SHELL EXPANSION
+    "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/...", not an orchestrator-pasted literal.
+    A project root containing `$(...)`/backticks then resolves as a plain string
+    at runtime instead of executing. This asserts the mechanism the fix adopts.
+    """
+    log_section("Bash recipe metacharacter-root safety")
+    with tempfile.TemporaryDirectory() as root:
+        # A project root whose NAME carries a command substitution + a backtick.
+        evil = Path(root) / "proj$(touch pwned)`touch also_pwned`"
+        evil.mkdir()
+        # An injected `touch` runs in the shell's cwd (root), so that is where a
+        # fired side-effect would land.
+        marker_a = Path(root) / "pwned"
+        marker_b = Path(root) / "also_pwned"
+
+        env = dict(os.environ)
+        env["CLAUDE_PROJECT_DIR"] = str(evil)
+
+        # SAFE form: the recipe references the env var through the expansion; the
+        # shell resolves it as a value, so the metacharacters never execute.
+        safe = subprocess.run(
+            ["bash", "-c", 'printf %s "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/task.txt"'],
+            capture_output=True, text=True, env=env, cwd=root, timeout=30,
+        )
+        check("expansion form resolves the metacharacter root as a plain string",
+              safe.returncode == 0 and safe.stdout == str(evil) + "/.crew/task.txt",
+              str(evil) + "/.crew/task.txt", safe.stdout)
+        check("expansion form fires NO injection (no side-effect files)",
+              not marker_a.exists() and not marker_b.exists(),
+              "no pwned/also_pwned", f"pwned={marker_a.exists()} also={marker_b.exists()}")
+
+        # NON-VACUITY: the OLD literal-substitution form pastes the path INTO the
+        # command text, so the same root's `$(...)`/backticks DO execute (the
+        # exact injection the expansion form closes).
+        vuln = subprocess.run(
+            ["bash", "-c", f'printf %s "{evil}/.crew/task.txt"'],
+            capture_output=True, text=True, env=env, cwd=root, timeout=30,
+        )
+        check("non-vacuity: literal-substitution form EXECUTES the injected substitution",
+              marker_a.exists() and marker_b.exists(),
+              "pwned + also_pwned created", f"pwned={marker_a.exists()} also={marker_b.exists()}")
 
 
 # =============================================================================
@@ -2956,10 +3206,12 @@ def test_stage_all():
             check("--stage-all prints a JSON {role: path} map", False,
                   "valid json", f"{exc}: {proc.stdout[:150]}")
         if out_map is not None:
+            # crew_base() resolves via os.getcwd(), so on macOS the printed base is
+            # the /private-real path; resolve() the expectation to match.
             check("--stage-all JSON map == per-role _stage_path values",
                   out_map == {
-                      "opus": ".crew/reviews/sess-XYZ/prompt-opus.txt",
-                      "sonnet": ".crew/reviews/sess-XYZ/prompt-sonnet.txt",
+                      "opus": str(opus_f.resolve()),
+                      "sonnet": str(sonnet_f.resolve()),
                   },
                   "{opus:…/prompt-opus.txt, sonnet:…/prompt-sonnet.txt}", str(out_map))
 
@@ -4193,16 +4445,53 @@ def test_review_prep():
             check("review-prep prints valid JSON", False, "valid json",
                   f"{exc}: {proc.stdout[:150]!r} err={proc.stderr[:150]!r}")
         if obj is not None:
-            check("review-prep JSON keys keep the original four IN ORDER then append the run-scoped six, exit 0",
+            check("review-prep JSON keys keep the original four IN ORDER then append the run-scoped seven, exit 0",
                   proc.returncode == 0
                   and list(obj.keys()) == [
                       "prompt_path", "subprocess_seats", "task_seats",
                       "task_seat_models", "run_dir", "run_id", "target_sha256",
-                      "task_prompt_paths", "pending_subprocess_seats",
-                      "pending_task_seats"],
+                      "session_segment", "task_prompt_paths",
+                      "pending_subprocess_seats", "pending_task_seats"],
                   "exact key order", f"rc={proc.returncode} keys={list(obj.keys()) if obj else None}")
         check("review-prep stdout has no \\uXXXX escaping (ensure_ascii=False)",
               "\\u" not in proc.stdout, "no \\u", repr(proc.stdout[:160]))
+
+    # 1b. session_segment is the SANITIZED session dir segment the run dir was
+    #     built from — the value the recipes reconstruct shell paths with, never
+    #     the raw session id. Assert it equals review_runs.session_segment(id),
+    #     and for an id that NEEDS sanitizing that it is the sanitized value AND
+    #     names the run dir's actual parent (a raw-id reconstruction would miss it
+    #     or traverse). Non-vacuous: the sanitizer strips chars from this id.
+    from multiagent import review_runs as _rr_seg  # noqa: E402
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        # Plain id: session_segment == the id (idempotent), a clean-case control.
+        proc = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex", "--session-id", "seg1"],
+            cwd=td, timeout=30)
+        obj = json.loads(proc.stdout)
+        check("review-prep JSON exposes session_segment == session_segment(id) (plain id)",
+              obj.get("session_segment") == _rr_seg.session_segment("seg1") == "seg1",
+              "seg1", str(obj.get("session_segment")))
+        # Hostile/needs-sanitizing id: '../ev!l/x' collapses to 'evlx'. The field
+        # must be that SANITIZED value (not the raw id), it must differ from the
+        # raw id (non-vacuity), and reconstructing .crew/reviews/<session_segment>
+        # must equal the run dir's real parent basename (no divergence, no escape).
+        raw_id = "../ev!l/x"
+        expected_seg = _rr_seg.session_segment(raw_id)
+        proc = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex", "--session-id", raw_id],
+            cwd=td, timeout=30)
+        obj = json.loads(proc.stdout)
+        seg = obj.get("session_segment")
+        run_parent = Path(obj.get("run_dir", "?")).parent.name
+        check("review-prep session_segment is the SANITIZED value for a hostile id (non-vacuous)",
+              seg == expected_seg == "evlx" and seg != raw_id,
+              "sanitized 'evlx' != raw id", f"seg={seg!r} raw={raw_id!r}")
+        check("review-prep reconstructed reviews/<session_segment> == the run dir's real parent (no traversal)",
+              run_parent == seg, "run-dir parent basename == session_segment",
+              f"parent={run_parent!r} seg={seg!r}")
 
     # 2. Subprocess-seats-only + opaque task echo.
     with tempfile.TemporaryDirectory() as td:
@@ -4366,9 +4655,12 @@ def test_review_prep():
         # raise; the run dir nests under the CONTAINED session dir.
         prep_path = json.loads(trav.stdout)["prompt_path"] if trav.returncode == 0 else ""
         staged = tdp / prep_path if prep_path else tdp / "missing"
+        # prompt_path is anchored absolute now (crew_base()/.crew/reviews); the
+        # traversal id still COLLAPSES to a single child dir "x" under the base.
+        contained_prefix = str(tdp.resolve() / ".crew" / "reviews" / "x" / "run-")
         check("review-prep traversal session id is CONTAINED (sanitized under .crew/reviews/x/)",
               trav.returncode == 0 and staged.is_file()
-              and prep_path.startswith(".crew/reviews/x/run-")
+              and prep_path.startswith(contained_prefix)
               and prep_path.endswith("/prompt-seat.txt"),
               "contained sanitized run-dir path", f"rc={trav.returncode} path={prep_path!r} exists={staged.is_file()}")
 
@@ -4516,12 +4808,13 @@ def test_review_prep():
         _write_plan(Path(td))
         proc, obj = _prep(["--session-id", "bo"], td)
         staged = (Path(td) / obj["prompt_path"]) if obj and obj.get("prompt_path") else None
+        bo_prefix = str(Path(td).resolve() / ".crew" / "reviews" / "bo" / "run-")
         check("review-prep both --panel and --seats omitted + no config -> built-in 'full' (subprocess AND task seats)",
               proc.returncode == 0 and obj is not None
               and obj["subprocess_seats"] == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"]
               and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"}
-              and obj["prompt_path"].startswith(".crew/reviews/bo/run-")
+              and obj["prompt_path"].startswith(bo_prefix)
               and obj["prompt_path"].endswith("/prompt-seat.txt")
               and staged is not None and staged.exists(),
               "built-in full default both-omitted", str(obj))
@@ -5768,9 +6061,14 @@ def test_dispatch():
             check(f"{binname} workspace-write pins subprocess cwd to CLAUDE_WORKING_DIRECTORY",
                   Path(ww_cwd).resolve() == wdir.resolve(),
                   str(wdir.resolve()), ww_cwd)
-            check(f"{binname} read-only sets NO cwd override (inherits process cwd, review unchanged)",
-                  Path(ro_cwd).resolve() == Path(os.getcwd()).resolve(),
-                  str(Path(os.getcwd()).resolve()), ro_cwd)
+            # Read-only pins the subprocess cwd to crew_base() (here == process cwd,
+            # since CLAUDE_PROJECT_DIR is unset), NOT CLAUDE_WORKING_DIRECTORY. The
+            # divergent-cwd case (crew_base != process cwd) is test_provider_readonly_cwd.
+            from state_discovery import crew_base as _cb
+            check(f"{binname} read-only pins cwd to crew_base() (NOT CLAUDE_WORKING_DIRECTORY)",
+                  Path(ro_cwd).resolve() == Path(str(_cb())).resolve()
+                  and Path(ro_cwd).resolve() != wdir.resolve(),
+                  str(Path(str(_cb())).resolve()), ro_cwd)
 
     # --- Task 3: config.dispatch_seat validation ---
     log_section("dispatch — config.dispatch_seat() validation")
@@ -6095,10 +6393,14 @@ def test_dispatch():
         repo = Path(td) / "r"; repo.mkdir(); _init_repo(str(repo))
         saved_wd = os.environ.get("CLAUDE_WORKING_DIRECTORY")
         os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
-        # cmd_dispatch derives a RELATIVE -o path (.crew/reviews/<sid>/…) written
-        # by _emit relative to the process cwd — chdir into repo so it lands there
-        # (NOT in the real project repo running the test).
+        # cmd_dispatch derives its -o path under crew_base()/.crew/reviews/<sid>/,
+        # and crew_base() reads CLAUDE_PROJECT_DIR FIRST. PIN it to repo (not just
+        # chdir): an ambient CLAUDE_PROJECT_DIR from the developer's shell would
+        # otherwise route the write into the REAL project's .crew, not this tmpdir.
+        # chdir stays as the belt-and-braces fallback for the unset case.
         saved_cwd = os.getcwd()
+        saved_pd = os.environ.get("CLAUDE_PROJECT_DIR")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
         os.chdir(str(repo))
         try:
             # Unavailable-but-known-writable seat -> skipped ok=false envelope, exit 0, path printed.
@@ -6308,6 +6610,10 @@ def test_dispatch():
                   "exit1 + envelope file written", f"rc={rc} wrote={wrote} {envf}")
         finally:
             os.chdir(saved_cwd)
+            if saved_pd is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved_pd
             if saved_wd is None:
                 os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
             else:
@@ -6351,8 +6657,12 @@ def test_dispatch():
           "no index/commit/push/branch mutation in fences", joined)
     check("dispatch.md: --seat appears in NO executed command line (passed only when user names one)",
           "--seat" not in joined, "no --seat in fences", joined)
+    # The prefix is double-quoted so a spaced project root can't split the arg
+    # (`dispatch-"*.json`); the glob still expands. Strip quotes before the check so
+    # the quoted-prefix form reads as the same `dispatch-*.json` glob.
     check("dispatch.md: no executed line constructs a literal dispatch-<seat>.json (only the glob)",
-          all(("dispatch-" not in l) or ("dispatch-*.json" in l) for l in fence_lines),
+          all(("dispatch-" not in l) or ("dispatch-*.json" in l.replace('"', ""))
+              for l in fence_lines),
           "only dispatch-*.json glob, never dispatch-<seat>.json", joined)
     check("dispatch.md: engine reached via the bare crew dispatcher (dispatch subcommand)",
           '"${CLAUDE_PLUGIN_ROOT}/crew" dispatch' in joined,
@@ -7890,8 +8200,8 @@ def test_persist_seat():
         check("persist happy: output round-trips byte-identical",
               data.get("output") == text, repr(text[:20]), repr(str(data.get("output"))[:20]))
         check("persist happy: stdout.strip() == written path",
-              proc.stdout.strip() == str(Path(".crew") / "reviews" / "S" / "fable.json"),
-              ".crew/reviews/S/fable.json", proc.stdout.strip())
+              proc.stdout.strip() == str(out_path.resolve()),
+              str(out_path.resolve()), proc.stdout.strip())
 
     # 2. Dotted seat "x.9" -> file x9.json AND "name": "x9" (slug used for BOTH).
     with tempfile.TemporaryDirectory() as td:
@@ -8266,11 +8576,16 @@ def test_seat_roster_drift_guard():
 
         p = _isolated_capture(
             ["review-prep", "plan.md", "--session-id", _ROSTER_SESSION_ID], td)
+        # review-prep paths now anchor absolute under crew_base() (== the pinned
+        # CLAUDE_PROJECT_DIR == td here). Strip that random-temp prefix so the
+        # fixture stays a stable RELATIVE oracle; the run_id/target_sha256 are
+        # content-addressed and unaffected by the base dir, so they compare verbatim.
+        prep_out = p.stdout.replace(str(Path(td)) + os.sep, "")
         check("`crew review-prep` byte-identical to the pinned capture",
               p.returncode == 0
-              and p.stdout == (_ROSTER_FIXTURES / "review-prep.json").read_text(),
+              and prep_out == (_ROSTER_FIXTURES / "review-prep.json").read_text(),
               (_ROSTER_FIXTURES / "review-prep.json").read_text(),
-              f"rc={p.returncode} out={p.stdout!r}")
+              f"rc={p.returncode} out={prep_out!r}")
 
         # scaffold-config on all THREE surfaces: the bare call plus the two flag
         # paths that emit roster-derived lines a bare call never reaches
@@ -9597,9 +9912,10 @@ def test_run_scoped_reviews():
             ["review-prep", "plan.md", "--seats", "codex", "--task-seats", "opus",
              "--session-id", "../../esc"], cwd=td, timeout=30)
         hobj = json.loads(hostile_sid.stdout) if hostile_sid.returncode == 0 else {}
+        esc_prefix = str(tdp.resolve() / ".crew" / "reviews" / "esc" / "run-")
         check("hostile session id stays contained for the whole run-dir layout",
               hostile_sid.returncode == 0
-              and hobj.get("run_dir", "").startswith(".crew/reviews/esc/run-")
+              and hobj.get("run_dir", "").startswith(esc_prefix)
               and (tdp / hobj["run_dir"] / "run.json").is_file(),
               "contained under .crew/reviews/esc/", str(hobj.get("run_dir")))
 
@@ -9698,7 +10014,7 @@ def test_run_scoped_reviews():
         flat_prompt = tdp / ".crew" / "reviews" / "S" / "prompt-seat.txt"
         check("render --stage with a live pointer stages FLAT; the run dir's frozen prompt is untouched",
               st.returncode == 0
-              and st.stdout.strip() == ".crew/reviews/S/prompt-seat.txt"
+              and st.stdout.strip() == str(flat_prompt.resolve())
               and flat_prompt.is_file()
               and (run_d / "prompt-seat.txt").read_bytes() == frozen,
               "flat staged path + frozen bytes intact",
@@ -10822,7 +11138,7 @@ def test_signal():
         # 1. -f round-trip: the path is echoed, the fields are right, the
         #    report survives byte-for-byte.
         s1 = _signal(["exec-1", "--session-id", "S", "-f", "report.txt"], td)
-        want_path = str(Path(".crew") / "reviews" / "S" / "signals" / "exec-1.json")
+        want_path = str(Path(td).resolve() / ".crew" / "reviews" / "S" / "signals" / "exec-1.json")
         m1 = _marker(td, "S", "exec-1")
         check("signal -f: prints the marker path and writes the full record",
               s1.returncode == 0 and s1.stdout.strip() == want_path
@@ -10887,7 +11203,7 @@ def test_signal():
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         sh = _signal(["t", "--session-id", "../../evil"], td, stdin="x")
-        landed = str(Path(".crew") / "reviews" / "evil" / "signals" / "t.json")
+        landed = str(Path(td).resolve() / ".crew" / "reviews" / "evil" / "signals" / "t.json")
         escaped = list(tdp.parent.glob("signals")) + list(tdp.parent.glob("t.json"))
         check("a hostile --session-id is contained by sanitization",
               sh.returncode == 0 and sh.stdout.strip() == landed
@@ -10899,7 +11215,7 @@ def test_signal():
     #    path + status, so the caller reads the report at a known location.
     with tempfile.TemporaryDirectory() as td:
         _signal(["exec-1", "--session-id", "S"], td, stdin=REPORT)
-        want_path = str(Path(".crew") / "reviews" / "S" / "signals" / "exec-1.json")
+        want_path = str(Path(td).resolve() / ".crew" / "reviews" / "S" / "signals" / "exec-1.json")
         start = _time_now()
         w1 = _run_dispatcher(["wait", "--session-id", "S", "--signal", "exec-1",
                               "--timeout", "10"], cwd=td, timeout=30)
@@ -11374,6 +11690,8 @@ def main():
     test_render()
     test_prompts()
     test_targets()
+    test_provider_readonly_cwd()
+    test_recipe_metacharacter_root()
     test_production_invocation_and_fanout()
     test_run_subcommand()
     test_dispatch()
@@ -11417,6 +11735,8 @@ def main():
     test_signal()
     test_quorum_header()
     test_swab()
+    test_crew_base_phantom_prevention()
+    test_crew_base_spaced_root()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")
@@ -11432,11 +11752,11 @@ def _swab_run(project_dir, *, yes=False, as_json=False, cwd=None):
     """Invoke cmd_swab in-process against ``project_dir`` (env-isolated), returning
     ``(rc, stdout, stderr)``. HOME is neutralized so no real ~/.crew-config leaks.
 
-    ``cwd`` defaults to ``project_dir``: swab resolves ``.crew`` cwd-relatively
-    (IDENTICALLY to the review/debate writers), so the process must run IN the tree
-    the writers wrote. Passing a different ``cwd`` (while CLAUDE_PROJECT_DIR still
-    names ``project_dir``) is how the divergence test proves swab follows cwd, not
-    CLAUDE_PROJECT_DIR."""
+    ``cwd`` defaults to ``project_dir``: swab resolves ``.crew`` through the shared
+    ``crew_base()`` (CLAUDE_PROJECT_DIR or cwd), IDENTICALLY to the review/debate
+    writers, so it targets the anchored project tree. Passing a different ``cwd``
+    (while CLAUDE_PROJECT_DIR names ``project_dir``) is how the anchoring test proves
+    swab follows CLAUDE_PROJECT_DIR, not cwd."""
     import argparse as _argparse
     import contextlib as _contextlib
     import io as _io
@@ -11460,6 +11780,130 @@ def _swab_run(project_dir, *, yes=False, as_json=False, cwd=None):
             else:
                 os.environ[k] = v
     return rc, out.getvalue(), err.getvalue()
+
+
+def test_crew_base_phantom_prevention():
+    """The bug this whole change closes: run from a SUBDIR of the project with
+    CLAUDE_PROJECT_DIR naming the project root, and `.crew` must resolve under the
+    PROJECT root, never a phantom `<subdir>/.crew`. Proven non-vacuous by showing
+    the pre-fix cwd-relative base would have produced exactly that phantom."""
+    log_section("crew_base(): a subdir cwd resolves .crew under the project root")
+    from state_discovery import crew_base
+    from multiagent import cli as _cli
+    from multiagent import review_runs as _rr
+
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td).resolve()
+        subdir = project / "sub" / "deeper"
+        subdir.mkdir(parents=True)
+
+        saved_cwd = os.getcwd()
+        saved_proj = os.environ.get("CLAUDE_PROJECT_DIR")
+        os.chdir(str(subdir))
+        os.environ["CLAUDE_PROJECT_DIR"] = str(project)
+        try:
+            base = crew_base()
+            reviews = _cli._reviews_subdir("sessP")
+            # The pre-fix behavior, resolved against the subdir cwd: a RELATIVE
+            # ".crew/reviews" base. This is the phantom the anchor prevents.
+            old_relative = _rr.reviews_dir("sessP", base=".crew/reviews")
+            phantom = (subdir / old_relative).resolve()
+        finally:
+            os.chdir(saved_cwd)
+            if saved_proj is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved_proj
+
+        anchored = project / ".crew" / "reviews" / "sessP"
+        check("crew_base() resolves to the project root, not the cwd subdir",
+              base == project, str(project), str(base))
+        check("_reviews_subdir anchors .crew under the project root (no phantom nested .crew)",
+              reviews == anchored, str(anchored), str(reviews))
+        # Non-vacuity: the phantom is a DISTINCT path under the subdir, and the
+        # pre-fix cwd-relative base lands there. The anchored result must NOT.
+        check("phantom-prevention is non-vacuous (pre-fix cwd-relative base yields the nested .crew)",
+              phantom == (subdir / ".crew" / "reviews" / "sessP").resolve()
+              and reviews.resolve() != phantom,
+              f"phantom under subdir, distinct from anchored", f"phantom={phantom} reviews={reviews}")
+
+
+def test_crew_base_spaced_root():
+    """A project root path CONTAINING A SPACE. Proves the command recipes' shell
+    quoting: crew_base() carries the space intact, `.crew` anchors under the spaced
+    root, and a recipe-shaped shell command with the substituted absolute path
+    DOUBLE-QUOTED passes it as ONE argument. Non-vacuous: the same command UNQUOTED
+    splits on the space and the run fails, so the quotes the recipes add are
+    load-bearing, not decorative."""
+    log_section("crew_base(): a project root with a SPACE survives recipe shell quoting")
+    from state_discovery import crew_base
+    from multiagent import cli as _cli
+
+    with tempfile.TemporaryDirectory() as td:
+        # A project root whose ABSOLUTE path contains a space: exactly the case an
+        # unquoted substitution would word-split.
+        project = Path(td) / "pro ject root"
+        (project / ".crew").mkdir(parents=True)
+
+        saved_proj = os.environ.get("CLAUDE_PROJECT_DIR")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(project)
+        try:
+            base = crew_base()
+            reviews = _cli._reviews_subdir("sessSP")
+        finally:
+            if saved_proj is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved_proj
+
+        check("crew_base() preserves the space in the project root (one path, not split)",
+              base == project and " " in str(base),
+              str(project), str(base))
+        anchored = project / ".crew" / "reviews" / "sessSP"
+        check("_reviews_subdir anchors .crew under the SPACED project root",
+              reviews == anchored, str(anchored), str(reviews))
+
+        # Recipe-shaped shell run: substitute the spaced absolute path into a real
+        # `crew render -f <q> -o <out>` command (the debate.md recipe shape) and run
+        # it through a REAL shell (shell=True), reproducing exactly the word-splitting
+        # the command recipes face. The path args are DOUBLE-QUOTED, as the recipes now
+        # mandate.
+        cli = MULTIAGENT_DIR / "cli.py"
+        qpath = project / "question.md"
+        qpath.write_text("Redis or Postgres?\n")
+        opath = project / ".crew" / "reviews" / "sessSP" / ".prompt-opus.txt"
+        opath.parent.mkdir(parents=True, exist_ok=True)
+        py = sys.executable
+        env = _neutral_env()
+        env["CLAUDE_PROJECT_DIR"] = str(project)
+
+        quoted = (
+            f'"{py}" "{cli}" render --mode discuss --seat-role opus '
+            f'-f "{qpath}" -o "{opath}"'
+        )
+        proc_q = subprocess.run(quoted, shell=True, capture_output=True, text=True,
+                                env=env, timeout=60)
+        check("quoted spaced -f/-o args: recipe shell run succeeds + writes under the spaced .crew",
+              proc_q.returncode == 0 and opath.is_file()
+              and "Redis or Postgres?" in opath.read_text(),
+              "rc=0, prompt written under the spaced .crew",
+              f"rc={proc_q.returncode} exists={opath.is_file()} err={proc_q.stderr[:150]}")
+
+        # Non-vacuity: the SAME command with the SAME paths UNQUOTED. The shell splits
+        # each path on its space, so `-f` sees a truncated, nonexistent path plus stray
+        # args, so the run MUST fail and write nothing, proving the quotes are what make
+        # the spaced path work.
+        opath.unlink(missing_ok=True)
+        unquoted = (
+            f'"{py}" "{cli}" render --mode discuss --seat-role opus '
+            f'-f {qpath} -o {opath}'
+        )
+        proc_u = subprocess.run(unquoted, shell=True, capture_output=True, text=True,
+                                env=env, timeout=60)
+        check("non-vacuity: UNQUOTED spaced args word-split and the run fails (no output file)",
+              proc_u.returncode != 0 and not opath.is_file(),
+              "rc!=0 and no output file (the space split the arg)",
+              f"rc={proc_u.returncode} exists={opath.is_file()}")
 
 
 def _old_mtime(path):
@@ -11705,22 +12149,25 @@ def test_swab():
         check("flat pointer-named run survives --yes", pointed.exists(),
               "present", "deleted")
 
-    # --- root resolution: swab follows cwd (the writers' tree), not CLAUDE_PROJECT_DIR ---
-    # A destructive command MUST target the same .crew the review/debate writers
-    # resolved (cwd-relative _REVIEWS_BASE), even if CLAUDE_PROJECT_DIR diverges.
-    with tempfile.TemporaryDirectory() as writers_tree, \
-         tempfile.TemporaryDirectory() as other_dir:
-        writers_tree = Path(writers_tree)
-        wr = writers_tree / ".crew" / "reviews" / "sessW"
-        wr.mkdir(parents=True)
-        wrun = wr / "run-9f8e7d6c5b4a"
-        wrun.mkdir()
-        (wrun / "run.json").write_text('{"run_id":"run-9f8e7d6c5b4a"}')
-        # cwd = the writers' tree; CLAUDE_PROJECT_DIR points ELSEWHERE (empty).
-        rc, out, err = _swab_run(other_dir, as_json=True, cwd=writers_tree)
+    # --- root resolution: swab anchors to CLAUDE_PROJECT_DIR (crew_base), not cwd ---
+    # Every .crew path derives from the ONE crew_base() resolver now, so a
+    # destructive command targets the SAME anchored .crew the review/debate writers
+    # resolve, even when cwd diverges from CLAUDE_PROJECT_DIR.
+    with tempfile.TemporaryDirectory() as project_tree, \
+         tempfile.TemporaryDirectory() as other_cwd:
+        project_tree = Path(project_tree)
+        pr = project_tree / ".crew" / "reviews" / "sessW"
+        pr.mkdir(parents=True)
+        prun = pr / "run-9f8e7d6c5b4a"
+        prun.mkdir()
+        (prun / "run.json").write_text('{"run_id":"run-9f8e7d6c5b4a"}')
+        # CLAUDE_PROJECT_DIR = the project tree; cwd points ELSEWHERE (empty). If
+        # swab still followed cwd it would enumerate the empty other_cwd and find
+        # nothing, so this assertion is non-vacuous: it fails unless swab anchors.
+        rc, out, err = _swab_run(project_tree, as_json=True, cwd=other_cwd)
         names = {i["name"] for i in json.loads(out)["prunable"]}
-        check("swab enumerates the cwd tree the writers wrote (ignores divergent "
-              "CLAUDE_PROJECT_DIR)", names == {"run-9f8e7d6c5b4a"},
+        check("swab enumerates the CLAUDE_PROJECT_DIR tree (ignores divergent cwd)",
+              names == {"run-9f8e7d6c5b4a"},
               "run-9f8e7d6c5b4a", str(names))
 
     # --- --yes exits nonzero on a failed delete; --json lists it under failed ---

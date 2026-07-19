@@ -26,6 +26,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from state_discovery import crew_base  # the ONE `.crew`/project-root resolver
+
 
 class TargetError(Exception):
     """Raised with a clear, user-facing message (never a raw traceback)."""
@@ -242,14 +244,22 @@ def _merge_base(base: str, cwd: str | None = None) -> str | None:
 # plan target
 # =============================================================================
 
-def _resolve_plan(path: str) -> Target:
+def _resolve_plan(path: str, cwd: str) -> Target:
     p = Path(path)
-    if not p.exists():
+    # Anchor the filesystem read of a RELATIVE plan path to the same project root
+    # the git targets use (crew_base when the caller passed no cwd), so a legacy
+    # relative plan_file (`.crew/plans/x.md`) resolves under the project and the
+    # snapshot freezes the RIGHT bytes even when the process cwd is a subdir or a
+    # different repo. The emitted path fields keep the caller's original spec (a
+    # relative supplementary ref resolves against the seat's anchored cwd), so the
+    # normal-case prompt bytes are unchanged. An absolute plan path is untouched.
+    resolved = p if p.is_absolute() else Path(cwd) / p
+    if not resolved.exists():
         raise TargetError(f"plan file not found: {path}")
-    if not p.is_file():
+    if not resolved.is_file():
         raise TargetError(f"plan target is not a file: {path}")
     try:
-        content = p.read_text(encoding="utf-8", errors="replace")
+        content = resolved.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         raise TargetError(f"could not read plan file {path}: {exc}") from exc
     return Target(
@@ -511,9 +521,17 @@ def resolve(
     an ``A..B`` / ``A...B`` ref range, ``commit:<sha>`` (or a bare SHA), or
     ``auto``.
     """
-    # Plan target: an explicit .md path.
+    # Anchor git target resolution to the project root (crew_base: CLAUDE_PROJECT_DIR,
+    # else cwd) when the caller passes no cwd. The run dir and loop identity anchor
+    # there too, so a divergent process cwd must not resolve the diff against a
+    # different repo or miss untracked files outside a subtree. A caller with a real
+    # need (a test) still passes an explicit cwd; only the default changes.
+    if cwd is None:
+        cwd = str(crew_base())
+
+    # Plan target: an explicit .md path (relative paths anchor to cwd above).
     if spec.endswith(".md"):
-        return _resolve_plan(spec)
+        return _resolve_plan(spec, cwd)
 
     # Everything else is a code/diff target and requires a git repo.
     if not _in_git_repo(cwd):

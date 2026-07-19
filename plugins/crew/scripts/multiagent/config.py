@@ -7,10 +7,10 @@ tunes, and whole new seats: resolved in ``seats.py`` over ``raw_layers()``, not
 by a getter here), the global per-seat ``timeout``, and the persistence loops'
 wall clock (``[tuning].deadline_minutes``):
 
-  * per-repo  ``<project>/.crew/config.toml`` (resolved against
-    ``CLAUDE_PROJECT_DIR`` → cwd, the same resolution the STATE-layer ``.crew/``
-    paths use; the review-ENGINE dirs (``_REVIEWS_BASE``) resolve cwd-relative
-    instead, so the two roots agree only when cwd IS the project root), and
+  * per-repo  ``<project>/.crew/config.toml`` (resolved against the shared
+    ``crew_base()`` root, ``CLAUDE_PROJECT_DIR`` first then cwd: the ONE resolver
+    every ``.crew/`` path in the codebase now derives from, state layer and review
+    engine alike), and
   * global    ``~/.crew-config.toml`` (resolved against ``$HOME`` via
     ``Path.home()``).
 
@@ -50,12 +50,13 @@ per-repo value never swallows a legitimate global warning.
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from typing import Any
 
 import tomllib  # stdlib 3.11+; the dispatcher (plugins/crew/crew) enforces that floor
+
+from state_discovery import crew_base  # the ONE `.crew` root resolver (leaf, no cycle)
 
 
 # Sentinel distinguishing "never loaded" from a legitimately empty ({}) config.
@@ -68,10 +69,9 @@ _warned: set[str] = set()
 
 
 def _project_dir() -> Path:
-    """Project dir: ``CLAUDE_PROJECT_DIR`` → cwd (same as the STATE-layer .crew
-    paths; the review-engine dirs resolve cwd-relative, so the two agree only when
-    cwd IS the project root)."""
-    return Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()))
+    """Project dir: the shared ``crew_base()`` resolver (``CLAUDE_PROJECT_DIR`` →
+    cwd), the ONE source every ``.crew/`` path derives from."""
+    return crew_base()
 
 
 def _config_path() -> Path:

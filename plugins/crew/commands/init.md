@@ -24,10 +24,12 @@ $ARGUMENTS
 > different concerns.
 
 > **`allowed-tools` scopes THIS orchestrator only.** Every file write goes through the
-> engine: `doctor` writes `doctor.json`, `scaffold-config` OWNS the config write +
-> the no-clobber invariant. The short interview answers ride as CLI flags, so nothing
-> is spilled to a file — hence NO `Write` here. The diff in step 5 is produced by a
-> REAL `diff` command via Bash (already granted), never an LLM-generated diff.
+> engine: `doctor` writes the ANCHORED `doctor.json` (step 2) that `scaffold-config`
+> then consumes via `--detection`, and `scaffold-config` OWNS the config write + the
+> no-clobber invariant. The short interview answers ride as CLI flags and the detection
+> file is the engine's own anchored output, so nothing is spilled by this orchestrator:
+> hence NO `Write` here. The diff in step 5 is produced by a REAL `diff` command via
+> Bash (already granted), never an LLM-generated diff.
 
 > **Detection is honest, NOT auth.** `doctor` proves a CLI is on PATH (and, for Cursor,
 > that the `agent` binary is really Cursor) — it does NOT verify you are authenticated,
@@ -53,17 +55,24 @@ value, NEVER a `${CLAUDE_SESSION_ID}` shell expansion:
 "${CLAUDE_PLUGIN_ROOT}/crew" doctor --session-id <session-id>
 ```
 
-**Guard the result.** If the `doctor` invocation exits NONZERO, or
-`.crew/reviews/<session-id>/doctor.json` is missing / empty / not readable JSON
-(equivalently, stdout did not carry parseable JSON), SURFACE the error and STOP. Do
-**NOT** proceed to `scaffold-config --detection` with a missing/empty file — that would
-silently trip the engine's "detection omitted" fallback and emit a config with no honest
-`available` flags.
+`doctor` ALWAYS prints the detection JSON to **stdout** — that IS the machine payload,
+so consume it from there to build the table below. `doctor` ALSO writes that JSON to an
+ANCHORED file the engine resolves to the project root (`<project-root>/.crew/reviews/
+<session-id>/doctor.json`), which Step 4 feeds to `scaffold-config --detection` by its
+ABSOLUTE path. Never build a CWD-RELATIVE `.crew/reviews/<session-id>/doctor.json` to
+read or pass: the shell's cwd need not equal the project root, so a bare relative path
+can miss the file. For the table here, stdout is simplest and always correct; for Step
+4's `--detection`, use the absolute anchored path.
 
-On success, **Read** `.crew/reviews/<session-id>/doctor.json` (the same JSON is also on
-stdout) and SHOW the detection table to the user — label each present subprocess seat as
-"installed (auth unverified)", each absent one with its diag, and the task seats
-(`opus`/`sonnet`/`fable`) as "subscription-backed (in-session)".
+**Guard the result.** If the `doctor` invocation exits NONZERO, or its stdout did not
+carry parseable JSON, SURFACE the error and STOP. Do **NOT** proceed to
+`scaffold-config --detection` with a missing/empty payload — that would silently trip the
+engine's "detection omitted" fallback and emit a config with no honest `available` flags.
+
+On success, read the detection map from doctor's **stdout** and SHOW the detection table
+to the user — label each present subprocess seat as "installed (auth unverified)", each
+absent one with its diag, and the task seats (`opus`/`sonnet`/`fable`) as
+"subscription-backed (in-session)".
 
 - **Optional follow-up: `probe`.** `doctor` proved each seat's CLI is installed; it did
   NOT prove any seat actually answers. If the user wants that stronger guarantee, offer
@@ -104,18 +113,26 @@ Ask ONLY what detection can't infer. Keep it short:
 
 ## Step 4 — Scaffold the config
 
-Call `scaffold-config` through the dispatcher. Pass `--repo` ONLY if step 1 saw it. Pass
-the `doctor.json` you read as `--detection`, plus the interview answers as flags. Pass
+Call `scaffold-config` through the dispatcher. Pass `--repo` ONLY if step 1 saw it.
+`scaffold-config --detection` reads a FILE, and `doctor` (step 2) ALREADY wrote one:
+run with `--session-id`, it persists the detection JSON to an ANCHORED
+`<project-root>/.crew/reviews/<session-id>/doctor.json` (the engine resolves that root
+from `CLAUDE_PROJECT_DIR`, not the shell cwd). So pass THAT anchored file straight to
+`--detection`: no orchestrator spill, no cwd-relative reconstruct. The `--detection`
+path uses the SHELL EXPANSION `"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/..."` (the shell
+resolves it at runtime, so a project root containing `$(…)`, backticks, `$VAR`, or a
+quote cannot execute or mangle the command), plus the interview answers as flags. Pass
 **NO `--session-id`** (this writes the non-session-scoped config path) and **NO `--out`**
 on the first pass (so it writes the resolved target) and **NO `--force`** (so an existing
 target diverts to `<target>.new`):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" scaffold-config --detection .crew/reviews/<session-id>/doctor.json --default-panel <panel> --dispatch-seat <seat>
+"${CLAUDE_PLUGIN_ROOT}/crew" scaffold-config --detection "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session-id>/doctor.json" --default-panel <panel> --dispatch-seat <seat>
 ```
 
 (Add `--repo` first when the user asked for it; append each `--add-seat <name>` /
-`--disable-seat <name>` correction; the `--detection` path is the file `doctor` wrote.)
+`--disable-seat <name>` correction; the `--detection` path is the anchored `doctor.json`
+the engine wrote in step 2, passed as its absolute project-root path.)
 
 Read the JSON envelope `{target, wrote, diverted}` from stdout.
 
@@ -137,7 +154,7 @@ command -v diff && diff -u <target> <target>.new
   appended (the engine owns the write + the clobber — no shell `mv`):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" scaffold-config --force --detection .crew/reviews/<session-id>/doctor.json --default-panel <panel> --dispatch-seat <seat>
+"${CLAUDE_PLUGIN_ROOT}/crew" scaffold-config --force --detection "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session-id>/doctor.json" --default-panel <panel> --dispatch-seat <seat>
 ```
 
   (carry the same `--repo` / `--add-seat` / `--disable-seat` flags). If the user declines,

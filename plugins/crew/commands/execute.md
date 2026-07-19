@@ -15,8 +15,15 @@ For multi-file features or significant changes, consider working in an isolated 
 ### Step 1: Check for Plan File
 
 If `$ARGUMENTS` references a plan (e.g., "the plan", a plan name, or a path like `.crew/plans/something.md`):
-- Look in `.crew/plans/` for matching files
-- Read the plan content to include in the executor prompt
+- Look in `<project-root>/.crew/plans/` for matching files (substitute the
+  CLAUDE_PROJECT_DIR value for `<project-root>`, the same anchored dir the engine
+  and `/crew:plan` write plans to)
+- Read the plan content to include in the executor prompt. If the reference is a
+  RELATIVE path, resolve it against the project root before reading (the Read
+  tool takes a literal path with no shell, so read
+  `<project-root>/.crew/plans/something.md`, NOT a bare cwd-relative path a
+  divergent cwd would resolve against the wrong tree); an ABSOLUTE path is read
+  as-is.
 
 ### Step 2: Check for Model Override (optional)
 

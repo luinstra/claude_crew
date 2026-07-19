@@ -30,6 +30,8 @@ import re
 import shutil
 import time
 
+from state_discovery import crew_base  # the ONE `.crew`/project-root resolver
+
 from multiagent.providers import Provider, ProviderResult
 from multiagent.providers._proc import TIMEOUT, run_reaped
 
@@ -103,8 +105,10 @@ class CursorProvider(Provider):
     # EXPLICIT opt-in (fail-CLOSED ABC default is False): cursor honors
     # workspace-write by DROPPING --mode plan so edits apply (--sandbox enabled
     # still blocks network + out-of-workspace). A valid /crew:dispatch write seat.
-    # cursor already pins its own cwd + --workspace to CLAUDE_WORKING_DIRECTORY,
-    # so it needs no separate workspace-write cwd pin.
+    # A WORK seat pins its cwd + --workspace to CLAUDE_WORKING_DIRECTORY (the edit
+    # tree); a READ-ONLY review seat pins to crew_base() (the project root the run
+    # dir + snapshot anchor to) so a divergent process cwd cannot review the wrong
+    # repo (or lose sandbox access to the snapshot).
     supports_workspace_write = True
 
     def __init__(
@@ -172,7 +176,14 @@ class CursorProvider(Provider):
                        f"or ~/.crew-config.toml"),
                 elapsed=0.0,
             )
-        cwd = os.environ.get("CLAUDE_WORKING_DIRECTORY", os.getcwd())
+        # A WORK seat edits CLAUDE_WORKING_DIRECTORY (the guard's tree); a
+        # read-only review seat pins cwd + --workspace to crew_base() so a
+        # divergent process cwd reviews the project, not whatever tree cwd is in.
+        cwd = (
+            os.environ.get("CLAUDE_WORKING_DIRECTORY", os.getcwd())
+            if sandbox == "workspace-write"
+            else str(crew_base())
+        )
 
         prompt_bytes = len(prompt.encode("utf-8"))
         if prompt_bytes > _ARG_MAX_BYTES:

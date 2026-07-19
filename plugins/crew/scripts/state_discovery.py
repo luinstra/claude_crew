@@ -7,6 +7,19 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import os
+
+
+def crew_base() -> Path:
+    """THE one project-root resolver every `.crew` path derives from, so the
+    state layer and the review engine cannot resolve `.crew` to different trees.
+
+    Returns ``CLAUDE_PROJECT_DIR`` (the truth: the harness always sets it), else
+    the process cwd (a hook's cwd IS the project root). One identical fallback for
+    every caller: no hint, no override env var, because a second knob is a second
+    way for the two layers to disagree.
+    """
+    return Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
 
 
 def is_active_value(value: object) -> bool:

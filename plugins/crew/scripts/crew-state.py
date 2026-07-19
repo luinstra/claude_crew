@@ -31,6 +31,7 @@ from models import (
 )
 from multiagent import config, review_runs, targets
 from state_discovery import (
+    crew_base,
     find_adoptable_legacy,
     find_session_state_file,
     is_active_value,
@@ -157,18 +158,10 @@ def _reviews_dir(session_id: str) -> Path:
     """The session's review tree, resolved through the engine's own sanitizer so
     the gate reads exactly the dir review-prep wrote.
 
-    Two roots resolve this tree, and they agree only when cwd IS the project root.
-    This line roots it at `get_project_dir()` (CLAUDE_PROJECT_DIR or cwd), the
-    SAME resolver as the loop-STATE file; the review ENGINE
-    (review-prep/collect/run) writes these dirs cwd-relative. In normal use
-    (cwd == CLAUDE_PROJECT_DIR == repo root) the two land on one tree.
-
-    Running crew from a cwd that diverges from CLAUDE_PROJECT_DIR is UNSUPPORTED
-    and NOT guaranteed-loud: begin-review may fail loudly (no prepped panel under
-    this root), OR it may SILENTLY read a different, older run that exists under
-    CLAUDE_PROJECT_DIR whose target still hashes the same, freezing the wrong
-    tree's results. The mitigation is operational (keep cwd at the project root);
-    unifying both layers onto one shared resolver is deferred.
+    Roots at `get_project_dir()` (the shared `crew_base()` resolver), the SAME
+    single source the review ENGINE (review-prep/collect/run) now derives from,
+    so the state layer and the engine always land on one `.crew` tree even when
+    cwd differs from CLAUDE_PROJECT_DIR.
     """
     base = get_project_dir() / ".crew" / "reviews"
     return review_runs.reviews_dir(session_id, base=str(base))
@@ -195,9 +188,9 @@ def get_loop_filename(canonical: str, session_id: str = "") -> str:
 
 
 def get_project_dir() -> Path:
-    """Get project directory from CLAUDE_PROJECT_DIR or cwd."""
-    dir_str = os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())
-    return Path(dir_str)
+    """Get project directory: the shared ``crew_base()`` resolver
+    (CLAUDE_PROJECT_DIR or cwd)."""
+    return crew_base()
 
 
 def resolve_session_id(args) -> str:
@@ -618,10 +611,16 @@ def cmd_init(args):
         # Auto-derive plan file from task if --auto-plan is set
         if args.auto_plan:
             plan_name = slugify(task)
-            plan_file = f".crew/plans/{plan_name}.md"
-            # Ensure plans directory exists
+            # Ensure plans directory exists, anchored to the shared resolver.
             plans_dir = get_project_dir() / ".crew" / "plans"
             plans_dir.mkdir(parents=True, exist_ok=True)
+            # Store the ANCHORED absolute path, not a cwd-relative string: the
+            # value persists into loop state, and later plan writes / `review-prep`
+            # / the banner consume it AS-IS. A relative `.crew/plans/...` would
+            # re-resolve against whatever cwd the consumer runs in, splitting from
+            # the dir just created here; the absolute path resolves the same
+            # everywhere it is used.
+            plan_file = str(plans_dir / f"{plan_name}.md")
         elif args.plan_file:
             plan_file = args.plan_file
         else:
@@ -1038,10 +1037,12 @@ def cmd_record_verdict(args):
             # open loudly without writing, and it costs seconds at most. Resolving
             # outside the lock would trade it for a re-hash of bytes the gate never
             # judged, which is the drift this check exists to catch.
-            # Root assumption: this drift re-hash resolves the target relative to
-            # the process cwd, under the SAME cwd==project-root assumption as
-            # `_reviews_dir` (see there). A divergent cwd yields a spurious drift
-            # advisory (clearable with `--force`), never a false clean PASS.
+            # This drift re-hash resolves the target through `targets.resolve`,
+            # which anchors to `crew_base()` (the project root), the SAME source
+            # `_reviews_dir` roots at (see there), so the re-hash and the panel
+            # read one `.crew` tree even when the process cwd differs. A target
+            # that genuinely no longer resolves yields a drift advisory (clearable
+            # with `--force`), never a false clean PASS.
             try:
                 fresh = review_runs.sha256_text(
                     targets.resolve(spec, base=data.get("target_base") or "").content

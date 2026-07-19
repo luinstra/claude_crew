@@ -54,16 +54,27 @@ pre-run).
 
 **Pre-run hygiene.** Remove any stale dispatch envelope from an earlier run in the
 reused session dir so it can't be mistaken for this run's output (the engine
-re-announces the exact path it writes, so this is hygiene, not load-bearing):
+re-announces the exact path it writes, so this is hygiene, not load-bearing). The
+`rm` recipe uses the SHELL EXPANSION `"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/..."` (the
+shell resolves it at runtime, so a project root containing `$(…)`, backticks,
+`$VAR`, or a quote cannot execute or mangle the command): the engine writes
+`dispatch-<seat>.json` under its anchored `crew_base()/.crew/reviews/<session-id>/`,
+so a bare `.crew/...` `rm` run from a drifted cwd would miss it:
 
 ```bash
-rm -f .crew/reviews/<session-id>/dispatch-*.json
+rm -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session-id>/dispatch-"*.json
 ```
 
-**ALWAYS spill the task to a file and pass `-f` — NEVER positional.** Write the raw
-task text to `.crew/dispatch/<session-id>-task.txt` with the **Write tool** (which
-writes the exact bytes — no shell is involved — and creates the `.crew/dispatch/`
-parent dir automatically), then pass `-f <file>` to the engine. This is
+**ALWAYS spill the task to a file and pass `-f`, NEVER positional.** Write the raw
+task text to the ABSOLUTE anchored path
+`<project-root>/.crew/dispatch/<session-id>-task.txt` with the **Write tool** (which
+writes the exact bytes, no shell involved, and creates the `.crew/dispatch/` parent
+dir automatically; substitute your `CLAUDE_PROJECT_DIR` value for `<project-root>`
+in the WRITE-tool path, safe as a literal there), then pass `-f <file>` to the
+engine. The Bash recipe's `-f` uses the SHELL EXPANSION
+`"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/..."` (resolving to the SAME `.crew` at
+runtime): `dispatch` resolves an explicit `-f` against the shell cwd, which need
+not be the project root, so a bare `.crew/...` could split the tree. This is
 UNCONDITIONAL (not gated on a newline/byte-size trigger): a positional task
 containing `$(…)`, `$VAR`, backticks, or `"` would be expanded or mangled by the
 shell when the Bash tool runs the command, so the task NEVER goes on the command
@@ -78,7 +89,7 @@ when the user explicitly provided one** (omit it otherwise so the engine resolve
 the seat itself):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" dispatch -f .crew/dispatch/<session-id>-task.txt --session-id <session-id> --json
+"${CLAUDE_PLUGIN_ROOT}/crew" dispatch -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/dispatch/<session-id>-task.txt" --session-id <session-id> --json
 ```
 
 (When the user named a seat, add `--seat <seat>` to the command.)

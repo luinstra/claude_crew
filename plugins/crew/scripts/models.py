@@ -17,7 +17,7 @@ import sys
 import tempfile
 import time
 
-from state_discovery import is_active_value
+from state_discovery import is_active_value, crew_base
 
 try:
     import fcntl
@@ -65,14 +65,16 @@ class PreToolUseInput:
         return self.tool_input.get("url", "")
 
 
-def _get_project_dir(data: dict) -> str:
-    """Get project directory from hook input, preferring CLAUDE_PROJECT_DIR."""
-    # CLAUDE_PROJECT_DIR is the authoritative project root
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    if project_dir:
-        return project_dir
-    # Fall back to input fields, then cwd
-    return data.get("directory", data.get("cwd", os.getcwd()))
+def _get_project_dir() -> str:
+    """Get the project directory via the ONE shared resolver.
+
+    Delegates to ``crew_base`` so the state layer resolves `.crew` through the
+    SAME function the review engine and the session-start sweeps do (no
+    models-vs-crew_base pair that can pick different trees). A hook runs with
+    CLAUDE_PROJECT_DIR set and its cwd AT the project root, so the resolver never
+    needs the payload's `directory`/`cwd`.
+    """
+    return str(crew_base())
 
 
 @dataclass
@@ -84,7 +86,7 @@ class SessionStartInput:
     @classmethod
     def from_dict(cls, data: dict) -> "SessionStartInput":
         return cls(
-            directory=_get_project_dir(data),
+            directory=_get_project_dir(),
             session_id=data.get("session_id", data.get("sessionId", "")),
         )
 
@@ -135,7 +137,7 @@ class StopInput:
         tasks = data.get("background_tasks")
         crons = data.get("session_crons")
         return cls(
-            directory=_get_project_dir(data),
+            directory=_get_project_dir(),
             session_id=data.get("session_id", data.get("sessionId", "")),
             # A non-list (older or future harness) reads as "no signal" rather
             # than crashing the hook.

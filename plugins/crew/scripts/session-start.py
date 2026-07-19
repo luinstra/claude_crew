@@ -52,7 +52,7 @@ from models import (
     LOAD_FUTURE_SCHEMA,
     LOAD_OK,
 )
-from state_discovery import is_loop_state_file, is_active_state_file, is_active_value
+from state_discovery import crew_base, is_loop_state_file, is_active_state_file, is_active_value
 
 
 MAX_AGE_DAYS = 7
@@ -224,15 +224,14 @@ def sweep_signal_markers_all(crew_dir: Path | None = None) -> None:
     that destructive venue moved to the attended ``crew swab`` command, and
     ``report_stale_artifacts`` merely reports the orphans it would remove.
 
-    The `.crew` root defaults to CWD-RELATIVE (`Path(".crew")`), matching `crew
-    swab` and the engine's review/signal WRITERS (which resolve `_REVIEWS_BASE =
-    ".crew/reviews"` cwd-relative and never consult CLAUDE_PROJECT_DIR). A
-    CLAUDE_PROJECT_DIR root would make this sweep look where no markers were
-    written when cwd != CLAUDE_PROJECT_DIR. An explicit `crew_dir` is honored (the
+    The `.crew` root defaults to the shared `crew_base()` root (CLAUDE_PROJECT_DIR
+    or cwd), the SAME resolver `crew swab` and the engine's review/signal WRITERS
+    now derive from, so this sweep looks exactly where the markers were written
+    even when cwd != CLAUDE_PROJECT_DIR. An explicit `crew_dir` is honored (the
     tests pass one).
     """
     if crew_dir is None:
-        crew_dir = Path(".crew")
+        crew_dir = crew_base() / ".crew"
     # own_dir at EVERY directory segment, `.crew` root FIRST (then reviews root,
     # each session dir, and the signals dir inside _sweep_signal_markers): a
     # symlinked segment would redirect this unattended unlink() sweep to delete
@@ -273,15 +272,14 @@ def report_stale_artifacts(crew_dir: Path | None = None) -> str:
     where a big stale tree could slow the hook and suppress restored context. The
     count stays ACCURATE (every validation runs; only the sizing walk is skipped).
 
-    The `.crew` root defaults to CWD-RELATIVE (`Path(".crew")`), matching `crew
-    swab` and the engine writers (cwd-relative `_REVIEWS_BASE`, never
-    CLAUDE_PROJECT_DIR): the whole point of this report is to recommend `crew
-    swab`, so the two MUST enumerate the SAME tree, or a report naming artifacts
-    swab won't touch is worse than none. An explicit `crew_dir` is honored (the
-    tests pass one).
+    The `.crew` root defaults to the shared `crew_base()` root (CLAUDE_PROJECT_DIR
+    or cwd), the SAME resolver `crew swab` and the engine writers now derive from:
+    the whole point of this report is to recommend `crew swab`, so the two MUST
+    enumerate the SAME tree, and one anchored resolver guarantees it. An explicit
+    `crew_dir` is honored (the tests pass one).
     """
     if crew_dir is None:
-        crew_dir = Path(".crew")
+        crew_dir = crew_base() / ".crew"
     items = artifact_prune.collect_prunable(crew_dir, time.time(), with_sizes=False)
     if not items:
         return ""
@@ -668,7 +666,7 @@ def build_session_status(
         if age_days < 7:
             messages.append(
                 f"[Context Snapshot Available]\n"
-                f"`.crew/context-snapshot.md` ({age_days}d old) - read to restore context."
+                f"`{context_snapshot}` ({age_days}d old) - read to restore context."
             )
 
     # Check for incomplete todos (scoped to current session)
@@ -695,15 +693,15 @@ def main():
     # Run cleanup (silent, best-effort)
     cleanup_stale_todos(home / ".claude" / "todos")
     cleanup_stale_files(home / ".claude")
-    cleanup_stale_files(directory / ".crew")
-    # State-file/todo/snapshot sweeps stay on the CLAUDE_PROJECT_DIR root (state
-    # files really are resolved via CLAUDE_PROJECT_DIR by crew-state/models). The
-    # review-run/debate REPORT and the signal-marker sweep resolve `.crew`
-    # cwd-relative instead, to match `crew swab` and the cwd-relative engine
-    # writers (default arg = Path(".crew")); pinning them to CLAUDE_PROJECT_DIR
-    # would diverge from the command the report points the human at.
-    sweep_signal_markers_all()
-    swab_notice = report_stale_artifacts()
+    crew_dir = directory / ".crew"
+    cleanup_stale_files(crew_dir)
+    # Pass the SAME resolved `.crew` the state cleanup used to the artifact
+    # sweeps. `directory` came from the ONE resolver (models `_get_project_dir`
+    # delegates to crew_base), and the sweeps' own bare crew_base() default
+    # resolves IDENTICALLY, so passing crew_dir explicitly just avoids
+    # re-resolving the same root (it does not change which tree they act on).
+    sweep_signal_markers_all(crew_dir)
+    swab_notice = report_stale_artifacts(crew_dir)
 
     # Detect project stack
     stack_hints = detect_project_stack(directory)

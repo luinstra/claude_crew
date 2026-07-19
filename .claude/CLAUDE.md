@@ -314,11 +314,13 @@ Use `/crew:build` to start
 state_file = "/Users/me/project/.crew/state.json"
 ```
 
-✅ **Use working directory from environment**
+✅ **Use the one shared resolver (`crew_base()`)**
 ```python
-directory = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()))
-state_file = directory / ".crew" / "state.json"
+from state_discovery import crew_base
+state_file = crew_base() / ".crew" / "state.json"
 ```
+`crew_base()` resolves the project root once (`CLAUDE_PROJECT_DIR`, else cwd); every
+`.crew` path derives from it, so nothing drifts to a phantom tree when the cwd moves.
 
 ## Working Here Checklist
 
