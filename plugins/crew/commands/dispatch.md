@@ -131,25 +131,15 @@ the resolved seat). **Read** the envelope JSON from that path with the Read tool
 
 ## Step 5 — Surface the safety-guard warnings (LOUD)
 
-The engine's HEAD/staged/branch guard ran in the SAME tree the seat edited. For each
-that fired, surface a LOUD warning:
-
-- `envelope.head_moved` is true → "the dispatched seat committed against
-  instruction — inspect with `git log -1`; undo with `git reset --soft HEAD@{1}`"
-  (or, when `envelope.head_before` is `<unborn>`, the seat made the repo's FIRST
-  commit — "undo with `git update-ref -d HEAD`").
-- `envelope.staged_changed` is true → "staged/index content changed since before the
-  run — inspect with `git status`; unstage any unintended changes with `git reset`".
-  (Phrase it descriptively — do NOT assert `git reset` is THE fix: on a pure commit
-  the index is clean vs the new HEAD and `git reset` is a no-op, so the accurate
-  message is "inspect, then unstage anything unintended", not "this is staged dirt".)
-- `envelope.branch_changed` is true → "the dispatched seat changed branch against
-  instruction". For the recovery hint, branch on `envelope.branch_before`: when it
-  is a real branch name, "return with `git checkout <envelope.branch_before>`";
-  when it is the detached sentinel `<detached HEAD>` (dispatch STARTED on a detached
-  HEAD), `git checkout <sentinel>` is nonsense — instead return to the original
-  detached state with `git checkout --detach <envelope.head_before>` (the original
-  commit SHA).
+The engine's HEAD/staged/branch guard ran in the SAME tree the seat edited, and the
+result is ALREADY formatted in the envelope: `envelope.guard_warnings` is the list of
+warning strings (empty when no guard fired), the SAME strings the engine's human-mode
+output prints. Relay each one VERBATIM and LOUD. Do NOT reconstruct them from the raw
+`head_moved` / `staged_changed` / `branch_changed` booleans: the engine owns the exact
+recovery hints, including the first-commit (`<unborn>`) and detached-HEAD special
+cases, so re-deriving them here would duplicate that logic and risk missing an edge.
+If `guard_warnings` is empty, the seat honored the uncommitted-and-unstaged contract;
+say so plainly.
 
 ## Step 6 — Show the working-tree changes (READ-ONLY git only)
 

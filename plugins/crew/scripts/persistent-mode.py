@@ -484,6 +484,11 @@ Continue working. When complete, verify via the multi-model panel
 6. If that verdict completed the loop (APPROVED, or REVISE --minor-only), it printed phase=done: deactivate the loop and summarize
 7. If REVISE with [BLOCKING] issues, fix and re-verify from step 1
 
+When re-delegating the implement/revision step, route it through the CONFIGURED
+executor (re-resolve via `crew build-executor` / the shared executor-step block in
+/crew:build), NOT a bare `Task(crew:executor)`: substituting Claude for the seat the
+user configured defeats the never-silently-fall-back guarantee.
+
 If you are WAITING on seats that are still running, just wait. Do NOT re-run
 the panel and do NOT clear seat files that already landed.
 

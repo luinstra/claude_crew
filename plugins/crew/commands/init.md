@@ -11,7 +11,8 @@ $ARGUMENTS
 > **What this is.** The onboarding companion to crew's two tuning files: the global
 > `~/.crew-config.toml` and the per-repo `.crew/config.toml` that the engine's
 > `config.py` loader reads (`default_panel`, `[debate].panel`, `[dispatch].seat`,
-> per-seat `model`/`available`, `[tuning].timeout`, `[panels]`). It DETECTS which
+> per-seat `model`/`available`, `[tuning].timeout`, `[build].executor`,
+> `[build].executor_retries`, `[panels]`). It DETECTS which
 > provider CLIs are installed, then writes a **commented** starter config so you
 > discover the knobs without hand-authoring TOML. A fresh scaffold gets cost-safe
 > defaults; `--repo` with an existing global `~/.crew-config.toml` instead seeds the
@@ -164,7 +165,9 @@ command -v diff && diff -u <target> <target>.new
 
 Point the user at the knobs: the commented config file they just got is the reference —
 per-seat tuning (`model`, codex `reasoning_effort`, agy `print_timeout`, `[tuning].timeout`,
-`[tuning].deadline_minutes`, the persistence loops' wall clock, 1-1440, or 0 for no deadline in the global file only)
+`[tuning].deadline_minutes`, the persistence loops' wall clock, 1-1440, or 0 for no deadline in the global file only),
+the `[build].executor` / `executor_retries` knobs (route `/crew:build`'s implement step through a
+write-capable subprocess seat, with a bounded retry count),
 and `[panels]` rosters are documented inline. For the project
 operating-instructions doc (a different file), mention `/crew:crew-config`.
 

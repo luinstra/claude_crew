@@ -4,8 +4,9 @@ Two small, optional, PERSONAL config files tune the default panel choice (when
 the user names no panel), the panel ROSTER (``[panels]``: what's *in* a preset),
 the SEAT catalog (``[seats.<name>]`` for availability, model pins, per-provider
 tunes, and whole new seats: resolved in ``seats.py`` over ``raw_layers()``, not
-by a getter here), the global per-seat ``timeout``, and the persistence loops'
-wall clock (``[tuning].deadline_minutes``):
+by a getter here), the global per-seat ``timeout``, the persistence loops'
+wall clock (``[tuning].deadline_minutes``), and the ``/crew:build`` implement-step
+executor seat (``[build].executor`` + ``[build].executor_retries``):
 
   * per-repo  ``<project>/.crew/config.toml`` (resolved against the shared
     ``crew_base()`` root, ``CLAUDE_PROJECT_DIR`` first then cwd: the ONE resolver
@@ -301,6 +302,79 @@ def dispatch_seat() -> str | None:
     return _first(
         _extract_dispatch_seat(_load(), "repo"),
         _extract_dispatch_seat(_global_load(), "global"),
+    )
+
+
+# --- build executor -----------------------------------------------------------
+
+def _extract_build_executor(data: dict, layer: str) -> str | None:
+    """Validate one layer's ``[build].executor`` as a RAW string seat name.
+
+    Deliberately does NOT check known-ness or write-capability: the sentinel
+    ``crew:executor`` is a legitimate value that is NOT a registered subprocess
+    seat, so a ``known_seat_names()`` gate here would reject the default. The
+    loud exit-2 rejection of an unknown / Task / read-only seat belongs to the
+    ``build-executor`` command, which also applies the ``--executor`` flag
+    precedence a config getter never sees. Only the TYPE is checked here: a
+    non-string warns once + ``None``.
+    """
+    build_tbl = data.get("build")
+    if not isinstance(build_tbl, dict):
+        return None
+    val = build_tbl.get("executor")
+    if val is None:
+        return None
+    if not isinstance(val, str):
+        _warn_once(
+            f"build_executor:{layer}",
+            f"[build].executor must be a string seat name; ignoring {val!r}",
+        )
+        return None
+    return val
+
+
+def build_executor() -> str | None:
+    """The configured ``/crew:build`` implement-step executor (``[build].executor``),
+    a RAW string (per-repo wins). ``None`` when unset in BOTH layers so the caller
+    falls back to the built-in ``crew:executor`` sentinel. Known-ness and
+    write-capability are the command's to validate, not this getter's."""
+    return _first(
+        _extract_build_executor(_load(), "repo"),
+        _extract_build_executor(_global_load(), "global"),
+    )
+
+
+def _extract_build_executor_retries(data: dict, layer: str) -> int | None:
+    """Validate one layer's ``[build].executor_retries`` as an int in 0..2.
+
+    Mirrors ``_extract_default_timeout``'s posture: bool is an int subclass, so
+    reject it explicitly; out-of-range / non-int warns once + ``None`` (the command
+    treats ``None`` as the safe default 0, so ``= 3`` warns and falls to 0, never
+    silently clamps to 2). The cap is 2 because a retry stacks on the failed
+    attempt's partial edits (see the seam's failure policy)."""
+    build_tbl = data.get("build")
+    if not isinstance(build_tbl, dict):
+        return None
+    val = build_tbl.get("executor_retries")
+    if val is None:
+        return None
+    if isinstance(val, bool) or not isinstance(val, int) or val < 0 or val > 2:
+        _warn_once(
+            f"build_executor_retries:{layer}",
+            f"[build].executor_retries must be an integer between 0 and 2; "
+            f"ignoring {val!r}",
+        )
+        return None
+    return val
+
+
+def build_executor_retries() -> int | None:
+    """``[build].executor_retries``, the seam's bounded retry count (per-repo over
+    global), validated 0..2. ``None`` when unset/invalid so the command uses its
+    safe default 0."""
+    return _first(
+        _extract_build_executor_retries(_load(), "repo"),
+        _extract_build_executor_retries(_global_load(), "global"),
     )
 
 

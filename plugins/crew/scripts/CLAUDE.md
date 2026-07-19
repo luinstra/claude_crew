@@ -40,7 +40,7 @@ their results into the same six-field shape the engine returns.
 
 ```
 multiagent/
-├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher) — subcommands: review | council | debate | run | dispatch | render (incl. --stage-all) | seats (incl. --debate) | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | wait (incl. --signal) | signal | doctor | probe | scaffold-config | swab
+├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher); subcommands: review | council | debate | run | dispatch | build-executor | render (incl. --stage-all) | seats (incl. --debate) | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | wait (incl. --signal) | signal | doctor | probe | scaffold-config | swab
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
@@ -67,6 +67,11 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   case-folded) is rejected on EVERY derived destination, flat and run-scoped alike (an explicit
   `-o` keeps ad-hoc freedom).
 - `dispatch` — write-mode single-seat WORK delegation (see below).
+- `build-executor` (RESOLVE-ONLY): prints `{executor, retries, source}` JSON for
+  /crew:build's implement step (`--executor` flag > `[build].executor` config >
+  builtin `crew:executor`). Validates the resolved value is the `crew:executor`
+  sentinel OR a known write-capable subprocess seat; a Task seat, group token,
+  unknown, or read-only seat exits 2 naming the reason. Runs NOTHING.
 - `render` — build/stage a seat prompt; `--stage-all` collapses N stages into one call.
 - `seats` — resolve/print a panel; `--debate` prints the config-aware full debate panel.
 - `collect` — fold per-seat `<seat>.json` into a digest; `--group`/`--full`/`--report-unparsed`.
@@ -430,8 +435,11 @@ Key contracts (do NOT regress):
   cursor already pins its own). `_git_head` is TRI-STATE (sha / `"<unborn>"` /
   `None`) so an unborn-repo FIRST commit is caught; all three guards are NULL-SAFE
   typed booleans (`head_moved`/`staged_changed`/`branch_changed`, never `null`).
-  Dispatch emits its OWN 15-field JSON envelope (NOT a polluted `ProviderResult`),
-  DERIVES `dispatch-<seat>.json` from `--session-id` like `run`, AND prints the
+  Dispatch emits its OWN 16-field JSON envelope (NOT a polluted `ProviderResult`),
+  which adds a `guard_warnings` field (the formatted recovery strings for whichever
+  guards fired, empty when none did, from the same helper the human path prints) so
+  the seam relays precise recovery guidance instead of re-deriving prose from the
+  booleans. It DERIVES `dispatch-<seat>.json` from `--session-id` like `run`, AND prints the
   resolved path on stdout (`collect`-style) so the command markdown reads it back
   without constructing the filename. An unavailable-CLI seat writes a skipped
   `ok=false` envelope (exit 0) like `run`; unknown/Task/non-writable seats exit 2
@@ -472,7 +480,16 @@ Key contracts (do NOT regress):
   per-repo file sits in the tree the bounded agent writes to, so a repo 0 is
   dropped with a warn and cannot mask a global bound. The stop-fires cap still
   bounds an unclocked loop; a non-int, a negative value, or one past the
-  ceiling is dropped with a one-time warn, never clamped silently), and the
+  ceiling is dropped with a one-time warn, never clamped silently),
+  `[build].executor` (the `/crew:build` implement-step executor: a RAW string,
+  type-checked only; known-ness/write-capability is the `build-executor`
+  command's to validate, since the `crew:executor` sentinel is a legal value that
+  no registry knows), `[build].executor_retries` (int `0..2`; the seam's bounded
+  retry count, resolved per-repo THEN global before the built-in default `0`, like
+  `deadline_minutes`/`timeout`. An out-of-range/non-int value in ONE layer is
+  dropped with a warn and that layer is SKIPPED, so an invalid per-repo value can
+  still pick up a valid global value; only when every layer is unset/invalid does
+  the command fall to `0`. It is never clamped to `2`), and the
   global-tier `[panels]` roster.
   Resolution is PER-KEY (per-seat-per-key
   for `[seats.<name>]`): CLI flag > per-repo > global > builtin. The old tuning

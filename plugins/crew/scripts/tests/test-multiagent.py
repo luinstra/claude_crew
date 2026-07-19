@@ -6169,13 +6169,18 @@ def test_dispatch():
               and isinstance(env["head_moved"], bool) and isinstance(env["staged_changed"], bool)
               and isinstance(env["branch_changed"], bool),
               "exit0 ok=true all-false typed", f"{proc.returncode}: {env}")
-        check("dispatch envelope has the 15 fields",
+        check("dispatch envelope has the 16 fields (incl. guard_warnings)",
               env and set(env.keys()) == {
                   "seat", "model", "ok", "output", "error", "elapsed",
                   "head_before", "head_after", "head_moved",
                   "staged_before", "staged_after", "staged_changed",
-                  "branch_before", "branch_after", "branch_changed"},
-              "15 fields", str(sorted(env.keys()) if env else None))
+                  "branch_before", "branch_after", "branch_changed",
+                  "guard_warnings"},
+              "16 fields", str(sorted(env.keys()) if env else None))
+        # No guard fired on a clean noop -> guard_warnings is an EMPTY list.
+        check("dispatch noop: guard_warnings is an empty list (no guard fired)",
+              env and env["guard_warnings"] == [],
+              "guard_warnings == []", str(env.get("guard_warnings") if env else None))
 
         # (2) COMMIT -> head_moved=true with both shas, exit STILL 0 (advisory).
         # Staging-then-committing also changes the index TREE (it now reflects the
@@ -6192,6 +6197,14 @@ def test_dispatch():
               proc.returncode == 0 and env and env["head_moved"] is True
               and env["head_before"] != env["head_after"],
               "head_moved=true exit0", f"{proc.returncode}: {env}")
+        # When a guard fires the --json envelope carries the SAME formatted recovery
+        # strings the human path prints (the seam relays them verbatim), not just the
+        # booleans. A committed HEAD names the HEAD move + the reset remedy.
+        gw = env.get("guard_warnings") if env else None
+        check("dispatch COMMIT: guard_warnings carries the HEAD-move recovery string",
+              isinstance(gw, list) and any("moved HEAD" in w for w in gw)
+              and any("git reset --soft" in w for w in gw),
+              "guard_warnings names HEAD move + reset", str(gw))
 
         # (3) STAGE (git add, no commit) -> staged_changed=true, head_moved=false.
         make_fake_bin(bins, "codex", _fake_codex(
@@ -11707,6 +11720,170 @@ def test_quorum_header():
               f"out={cn.stdout[:80]!r} err={cn.stderr[:120]!r}")
 
 
+def test_build_executor():
+    """[build].executor / [build].executor_retries config getters + the
+    `crew build-executor` resolver command (resolve + validate + emit JSON)."""
+    log_section("build-executor: config getters + resolver command")
+    import io as _io
+    from contextlib import redirect_stdout, redirect_stderr
+    from multiagent import cli, config  # noqa: E402
+
+    # --- config.build_executor(): RAW string, type-checked (no known-ness here) ---
+    with project_config(""):
+        check("unset -> build_executor() is None",
+              config.build_executor() is None, "None", repr(config.build_executor()))
+    with project_config('[build]\nexecutor = "codex-luna"\n'):
+        check('[build].executor="codex-luna" -> "codex-luna"',
+              config.build_executor() == "codex-luna",
+              "codex-luna", repr(config.build_executor()))
+    with crew_config(project='[build]\nexecutor = "codex-luna"\n',
+                     glob='[build]\nexecutor = "codex"\n'):
+        check("[build].executor per-repo (codex-luna) beats global (codex)",
+              config.build_executor() == "codex-luna",
+              "codex-luna", repr(config.build_executor()))
+    with project_config('[build]\nexecutor = 5\n'):
+        buf = _io.StringIO()
+        with redirect_stderr(buf):
+            val = config.build_executor()
+        check("[build].executor non-string -> None + warn",
+              val is None and "executor" in buf.getvalue(),
+              "None+warn", f"{val!r} / {buf.getvalue()!r}")
+
+    # --- config.build_executor_retries(): int 0..2 (reject bool/out-of-range) ---
+    with project_config(""):
+        check("unset -> build_executor_retries() is None",
+              config.build_executor_retries() is None,
+              "None", repr(config.build_executor_retries()))
+    for n in (0, 1, 2):
+        with project_config(f'[build]\nexecutor_retries = {n}\n'):
+            check(f"executor_retries={n} -> {n}",
+                  config.build_executor_retries() == n,
+                  str(n), repr(config.build_executor_retries()))
+    for bad in ("3", "-1", "true"):
+        with project_config(f'[build]\nexecutor_retries = {bad}\n'):
+            buf = _io.StringIO()
+            with redirect_stderr(buf):
+                val = config.build_executor_retries()
+            check(f"executor_retries={bad} -> None + warn (not clamped)",
+                  val is None and "executor_retries" in buf.getvalue(),
+                  "None+warn", f"{val!r} / {buf.getvalue()!r}")
+    with project_config('[build]\nexecutor_retries = "x"\n'):
+        buf = _io.StringIO()
+        with redirect_stderr(buf):
+            val = config.build_executor_retries()
+        check("executor_retries=string -> None + warn",
+              val is None and "executor_retries" in buf.getvalue(),
+              "None+warn", f"{val!r}")
+    with crew_config(project='[build]\nexecutor_retries = 1\n',
+                     glob='[build]\nexecutor_retries = 2\n'):
+        check("executor_retries per-repo (1) beats global (2)",
+              config.build_executor_retries() == 1,
+              "1", repr(config.build_executor_retries()))
+
+    # --- cmd_build_executor: resolve + validate + print JSON, run NOTHING ---
+    def _run_be(executor_flag=None):
+        argv = ["build-executor"]
+        if executor_flag is not None:
+            argv += ["--executor", executor_flag]
+        args = cli.build_parser().parse_args(argv)
+        out, err = _io.StringIO(), _io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = args.func(args)
+        return rc, out.getvalue(), err.getvalue()
+
+    # Unset config resolves to the crew:executor sentinel (the default Task path).
+    with project_config(""):
+        rc, out, err = _run_be()
+        j = json.loads(out) if out.strip() else {}
+        check("unset config -> {executor:crew:executor, retries:0, source:builtin}, exit 0",
+              rc == 0 and j.get("executor") == "crew:executor"
+              and j.get("source") == "builtin" and j.get("retries") == 0,
+              "crew:executor/builtin/0", f"rc={rc} out={out!r}")
+
+    # A known write-capable subprocess seat in [build].executor routes through.
+    with project_config('[build]\nexecutor = "codex-luna"\n'):
+        rc, out, err = _run_be()
+        j = json.loads(out) if out.strip() else {}
+        check("[build].executor=codex-luna -> exit 0, source config",
+              rc == 0 and j.get("executor") == "codex-luna"
+              and j.get("source") == "config",
+              "codex-luna/config", f"rc={rc} out={out!r}")
+
+    # A Task seat (opus) and a group token (cursor) both fail the
+    # subprocess-registry gate -> exit 2, stderr-only, NO stdout JSON.
+    with project_config('[build]\nexecutor = "opus"\n'):
+        rc, out, err = _run_be()
+        check("executor=opus (Task seat) -> exit 2 naming Task-seat, no stdout",
+              rc == 2 and "opus" in err and "Task seat" in err and out.strip() == "",
+              "exit2 Task-seat", f"rc={rc} out={out!r} err={err!r}")
+    with project_config('[build]\nexecutor = "cursor"\n'):
+        rc, out, err = _run_be()
+        check("executor=cursor (group token) -> exit 2, no stdout",
+              rc == 2 and "cursor" in err and out.strip() == "",
+              "exit2", f"rc={rc} err={err!r}")
+
+    # Known-seat guard NON-VACUITY: an unknown seat exits 2; a KNOWN one (codex,
+    # exercised at exit 0 just below) passes, so the gate is not always-firing.
+    with project_config('[build]\nexecutor = "bogus-seat"\n'):
+        rc, out, err = _run_be()
+        check("known-seat guard: unknown seat -> exit 2, no stdout",
+              rc == 2 and "bogus-seat" in err and out.strip() == "",
+              "exit2", f"rc={rc} err={err!r}")
+
+    # Write-capable guard NON-VACUITY: all shipped subprocess providers ARE
+    # write-capable, so patch get_provider to make a KNOWN seat read-only and
+    # prove the gate fires; then the same seat with its real provider passes.
+    class _ReadOnly:
+        supports_workspace_write = False
+
+    with project_config('[build]\nexecutor = "codex"\n'):
+        saved_gp = cli.get_provider
+        cli.get_provider = lambda name: _ReadOnly()
+        try:
+            rc, out, err = _run_be()
+        finally:
+            cli.get_provider = saved_gp
+        check("write-capable guard: known read-only seat -> exit 2 naming read-only",
+              rc == 2 and "read-only" in err and out.strip() == "",
+              "exit2 read-only", f"rc={rc} err={err!r}")
+    with project_config('[build]\nexecutor = "codex"\n'):
+        rc, out, err = _run_be()
+        j = json.loads(out) if out.strip() else {}
+        check("write-capable guard non-vacuity: same seat, real provider -> exit 0",
+              rc == 0 and j.get("executor") == "codex",
+              "exit0 codex", f"rc={rc} out={out!r}")
+
+    # executor_retries surfaces in the JSON; an out-of-range 3 falls to 0 with the
+    # warn (NOT clamped to 2), proving None-means-safe-default-0.
+    with project_config('[build]\nexecutor = "codex-luna"\nexecutor_retries = 1\n'):
+        rc, out, err = _run_be()
+        j = json.loads(out) if out.strip() else {}
+        check("executor_retries=1 surfaced in JSON",
+              rc == 0 and j.get("retries") == 1, "retries=1", f"{out!r}")
+    with project_config('[build]\nexecutor = "codex-luna"\nexecutor_retries = 3\n'):
+        rc, out, err = _run_be()
+        j = json.loads(out) if out.strip() else {}
+        check("executor_retries=3 -> resolves to 0 with the warn (not clamped to 2)",
+              rc == 0 and j.get("retries") == 0 and "executor_retries" in err,
+              "retries=0+warn", f"rc={rc} out={out!r} err={err!r}")
+
+    # Flag precedence: --executor beats [build].executor; it can also name the
+    # sentinel explicitly to force the Task path back on.
+    with project_config('[build]\nexecutor = "codex-luna"\n'):
+        rc, out, err = _run_be("codex")
+        j = json.loads(out) if out.strip() else {}
+        check("--executor flag beats [build].executor config, source=flag",
+              rc == 0 and j.get("executor") == "codex" and j.get("source") == "flag",
+              "codex/flag", f"{out!r}")
+    with project_config('[build]\nexecutor = "codex-luna"\n'):
+        rc, out, err = _run_be("crew:executor")
+        j = json.loads(out) if out.strip() else {}
+        check("--executor crew:executor overrides config back to the Task path",
+              rc == 0 and j.get("executor") == "crew:executor"
+              and j.get("source") == "flag",
+              "crew:executor/flag", f"{out!r}")
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -11732,6 +11909,7 @@ def main():
     test_production_invocation_and_fanout()
     test_run_subcommand()
     test_dispatch()
+    test_build_executor()
     test_council_subcommand()
     test_debate_subcommand()
     test_rounds()

@@ -213,6 +213,11 @@ cross-model diversity). Debate precedence is **`--panel`/`--seats` (explicit) >
 `/crew:dispatch` picks its default seat from `[dispatch].seat` (validated
 against the known seats — a panel name or group token like `cursor` is
 rejected), falling back to the built-in `codex`; an explicit `--seat` overrides.
+`/crew:build`'s implement step normally runs the `crew:executor` Task agent
+(Claude); `[build].executor` can instead route each round through a write-capable
+subprocess seat (e.g. `codex-luna`), and `[build].executor_retries` (0..2, default
+0) caps how many times a FAILED external-executor round is retried. The
+`--executor <seat>` flag overrides the config per invocation.
 
 ```toml
 # .crew/config.toml
@@ -223,6 +228,10 @@ panel = "full"                    # /crew:debate-only default; falls back to def
 
 [dispatch]
 seat = "codex"                    # default seat for /crew:dispatch; validated vs known seats, falls back to built-in codex
+
+[build]
+executor = "crew:executor"        # /crew:build implement-step executor; a write-capable seat (e.g. codex-luna) routes each round through that model
+executor_retries = 0              # retries for a FAILED external-executor round (0..2); retries STACK on partial edits, so the cap is low
 
 [seats.codex]
 model = "gpt-5.5"

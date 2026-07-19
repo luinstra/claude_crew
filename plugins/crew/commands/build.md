@@ -33,11 +33,31 @@ default.
   or seats** (an explicit flag, or intent like "use the lite panel"); otherwise
   OMIT it and let `review-prep` apply the configured/built-in default.
 
-Below, **"the task"** means `$ARGUMENTS` with these panel flags removed — use it
-wherever a step references the task. The raw `$ARGUMENTS` (flags included) is
-preserved byte-for-byte via the `-f` spill file below so the panel survives across
-iterations. A one-seat panel is fine — synthesis / never-choke handle any count
-down to one.
+Below, **"the task"** means `$ARGUMENTS` with these panel flags AND the
+`--executor` flag (below) removed: use it wherever a step references the task.
+The raw `$ARGUMENTS` (flags included) is preserved byte-for-byte via the `-f`
+spill file below so the panel survives across iterations. A one-seat panel is fine
+(synthesis / never-choke handle any count down to one).
+
+## Executor option (optional)
+
+The IMPLEMENT step normally runs `Task(crew:executor)` (Claude). You can instead
+route it through an external write-capable seat (e.g. `codex-luna`), with the
+panel still gating completion exactly as today. Unset = byte-identical to today.
+
+- `--executor <seat>`: a start-of-`$ARGUMENTS` flag (alongside the panel flags):
+  the subprocess seat that implements each round (e.g. `--executor codex-luna`),
+  or the literal `crew:executor` to force the default Task path. Precedence: this
+  flag > `[build].executor` (per-repo `.crew/config.toml` > global
+  `~/.crew-config.toml`) > builtin `crew:executor`.
+- `[build].executor_retries`: optional config int `0..2` (default `0`), how many
+  times to retry a FAILED external-executor round before surfacing and stopping.
+  Retries STACK on the failed attempt's partial edits (there is no clean-tree
+  revert), so the cap is low.
+
+The engine (`crew build-executor`, resolved right after activation below) OWNS
+this resolution + validation (the orchestrator never hardcodes a seat or reads
+config). Pass `--executor <seat>` ONLY when the user named one; otherwise OMIT it.
 
 ## MANDATORY: Activate the Loop
 
@@ -72,33 +92,176 @@ this rm step is their sole owner:
 rm -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/task-bl-<session-id>.txt"
 ```
 
+## MANDATORY: Resolve the Executor
+
+Immediately after activation and **before Step 1**, resolve which executor
+implements each round. The engine owns the resolution + validation. Add
+`--executor <seat>` ONLY when the user passed one (extract it from `$ARGUMENTS`);
+otherwise OMIT it so the `[build].executor` config / builtin default applies:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/crew" build-executor
+```
+
+Read the one-line JSON it prints: `{"executor": "<crew:executor|seat>", "retries":
+<int>, "source": "<flag|config|builtin>"}`. Keep `executor` and `retries` for the
+executor step below.
+
+**If it exits 2, SURFACE the reason and STOP.** A misconfigured executor (an
+unknown seat, a Task seat like `opus`, a group token like `cursor`, or a
+read-only seat) exits 2 naming the reason: it must NOT silently run as Claude, so
+do not proceed to Step 1 until the executor resolves cleanly.
+
 ## How This Works
 
-1. Delegate the implementation to the **executor agent** (keeps main context clean)
-2. When executor reports complete, get multi-model verification
+1. Delegate the implementation via **the executor step**: `Task(crew:executor)`
+   by default, or a `crew dispatch --seat <seat>` external seat (keeps main
+   context clean)
+2. When the executor reports complete, get multi-model verification
 3. If the panel approves (APPROVED, with the digest's quorum met), complete the loop
-4. If the panel says REVISE with [BLOCKING] issues, re-delegate to executor with those issues, then re-verify
+4. If the panel says REVISE with [BLOCKING] issues, re-delegate via the executor step with those issues, then re-verify
 5. If the panel says REVISE with only [MINOR] issues (quorum met), accept and complete
 6. If you try to stop without completing, you'll be reminded to continue
 
-You orchestrate. You don't implement. All file edits, builds, and tests happen inside the executor agent.
+You orchestrate. You don't implement. All file edits, builds, and tests happen
+inside the executor (the `crew:executor` agent, or the dispatched seat).
 
-## Step 1: Delegate Work to Executor
+## The executor step (shared)
 
-Spawn the **executor agent** to implement the task:
+Both the initial implementation (Step 1) and the revision re-delegation (Step 3)
+run the IMPLEMENT step through this ONE block, given a task PROMPT the caller
+supplies. Do NOT duplicate the fork at the two sites; each just says "run the
+executor step with this PROMPT". The step yields the round's **summary**; nothing
+downstream (panel, verdict, quorum) changes.
+
+**If `executor == "crew:executor"`** (the default, unchanged, byte-identical to
+today): spawn the executor agent with the caller's PROMPT verbatim (INCLUDING its
+`Create todos to track progress.` sentence: `crew:executor` has `TodoWrite`), and
+the round's summary is the Task's returned text:
 
 ```
 Task(
   subagent_type="crew:executor",
-  prompt="Execute: <the task>
-
-Work through the task systematically. Create todos to track progress. Implement the changes, run builds/tests where applicable, and report back: what you changed, what you verified, and any blockers."
+  prompt=<the caller's PROMPT, verbatim>
 )
 ```
 
-(`<the task>` = `$ARGUMENTS` with any panel flags stripped — see Panel options.)
+**Else (an external subprocess seat `<executor>`):** a subprocess seat has no
+`TodoWrite`, so it runs via `crew dispatch`, not a Task.
 
-Capture the executor's summary — you'll pass it to the review panel in Step 2b.
+1. **Write the spill ONCE, before the attempt loop.** Write the PROMPT with the
+   sentence `Create todos to track progress.` omitted (leaving the rest of the
+   prompt intact) to `.crew/reviews/<session-id>/executor-task.txt` with the
+   **Write tool** (exact bytes, no shell). (A subprocess seat has no todo list to
+   create.) This ONE file feeds EVERY attempt below; do NOT rewrite or delete it
+   between attempts (each retry re-runs the SAME `-f` dispatch and needs it).
+2. **Attempt loop (1 initial run + up to `retries` retries, `retries` is `0..2`).**
+   Each attempt dispatches the seat at the working tree, reusing that same `-f`
+   spill: it edits files in place and leaves them uncommitted + unstaged, the dirty
+   tree the panel then reviews.
+
+   ```bash
+   "${CLAUDE_PLUGIN_ROOT}/crew" dispatch --seat <executor> --session-id <session-id> -f .crew/reviews/<session-id>/executor-task.txt --json
+   ```
+
+   **Check the PROCESS EXIT STATUS first, before reading any envelope.** The
+   envelope path is derived from the session id alone and PERSISTS across rounds,
+   so a prior round's `dispatch-<executor>.json` is sitting there before this
+   round runs. `dispatch` exits nonzero (exit 2) on a pre-run/misuse failure
+   WITHOUT writing or printing an envelope, so a nonzero exit means NO fresh
+   envelope was written THIS round:
+
+   - **Nonzero exit:** the configured executor did not run this round. Surface the
+     command's stderr, clean the spill (step 3), and **STOP this round**. Do NOT
+     read the envelope (it would consume a PRIOR round's result and send the panel
+     to review work the selected executor never produced this round), do NOT
+     retry, do NOT proceed to the panel. The loop stays ACTIVE; the human resolves
+     the misuse.
+   - **Exit 0:** the envelope was written fresh this round at the derived path.
+     Proceed to read it and branch on guards / ok as below.
+
+   `dispatch` DERIVES and PRINTS its envelope path
+   (`.crew/reviews/<session-id>/dispatch-<executor>.json`) as its last stdout line:
+   read it back from there, do not construct the name. **Read the envelope JSON**
+   at that path and branch on the envelope's guard fields FIRST, not `ok` alone (a
+   seat can return `ok=true` while having committed or switched branches, AND a
+   seat that FAILED can ALSO have committed/staged/switched, so a guard violation
+   must surface and stop the round no matter what `ok` says). Evaluate in THIS
+   order:
+
+   - **Any of `head_moved` / `staged_changed` / `branch_changed` is `true`**
+     (the envelope's guard booleans), REGARDLESS of `ok`: a GUARD VIOLATION,
+     checked FIRST and NOT retryable (the seat already committed, staged, or
+     switched branches; a retry would only stack on top of it, and a seat that
+     ALSO failed leaves hidden VCS mutations under any retry). Relay the
+     envelope's `guard_warnings` strings VERBATIM (the formatted recovery
+     guidance the engine put in the envelope), point the user at `git status` /
+     `git log`, and **STOP this round before any review** (do step 3 first). Do
+     NOT proceed to the panel: the panel reviews the WORKING TREE (`git diff`),
+     which cannot see committed or branch-switched work, so approving it would
+     sign off on an incomplete picture the panel never saw. Do NOT retry. The
+     loop stays ACTIVE; the human resolves the committed work.
+   - **Else `envelope.ok` is `false`** (timeout, CLI error, or a skipped-unavailable
+     seat) and NO guard fired: a clean failure, RETRYABLE. If attempts remain, emit
+     a LOUD visible note (`executor <executor> failed, retry N/<retries>`) and retry
+     the SAME dispatch. Honestly: a retry starts ON TOP of the failed attempt's
+     partial edits (there is no clean-tree snapshot to revert to), so retries STACK,
+     which is why the cap is `0..2`. After the attempts are exhausted, **SURFACE the
+     failure AND the partial-edits diff** (`git status` + `git diff`, read-only) and
+     **STOP this round** (do step 3 first), handing back to the user. `git diff`
+     shows tracked changes and untracked NAMES but not the CONTENTS of newly-created
+     files, so a seat that failed after creating new files leaves that work
+     invisible: also list the untracked files read-only (`git status --porcelain -z`
+     or `git ls-files --others --exclude-standard -z`, `-z` so odd filenames don't
+     break iteration) and Read the ones that matter to show their content (skip huge
+     or binary files). Read-only only: NEVER `git add` / `git add -N` (the seat's
+     edits stay unstaged for the human's triage). The loop stays
+     ACTIVE (the Stop hook holds), so nothing is lost. **NEVER fall back to
+     `crew:executor`:** substituting Claude's work into a round the user asked a
+     specific model to do is a lie about what produced the diff.
+   - **Else `envelope.ok` is `true` AND no guard fired:** SUCCESS. The round's summary
+     is `envelope.output`. Do step 3, then continue to review as normal.
+3. **`rm -f` the `executor-task.txt` spill AFTER the loop ends** (its own Bash
+   call), on EVERY exit path (success, guard-violation stop, or retries-exhausted
+   stop), so no transient task file lingers. Do this only after all attempts, never
+   between them.
+
+   ```bash
+   rm -f .crew/reviews/<session-id>/executor-task.txt
+   ```
+
+Whichever path ran, the round's summary (the Task's returned text, or the
+envelope's `output`) is what Step 2b writes to `<run_dir>/executor-summary.md`
+(that single write serves both paths, and the panel reads the summary from there).
+The run dir is minted later, by `review-prep` in Step 2a, so the summary is
+captured HERE and written THERE: do not write it in this step.
+
+> **Envelope overwrite across rounds (known, harmless).** `dispatch` derives its
+> envelope name `dispatch-<executor>.json` from the session id alone, so every
+> round of a multi-round build overwrites the previous round's envelope. Harmless,
+> because the executor step reads the envelope immediately after each round, before the
+> next round runs, but it means there is NO cross-round envelope audit trail.
+> Documented, not fixed.
+
+## Step 1: Delegate Work to Executor
+
+Run **the executor step** (the shared block above) with the task PROMPT below; do
+NOT inline a `Task(...)` here (the executor step owns the Task-vs-subprocess fork):
+
+PROMPT:
+
+```
+Execute: <the task>
+
+Work through the task systematically. Create todos to track progress. Implement the changes, run builds/tests where applicable, and report back: what you changed, what you verified, and any blockers.
+```
+
+(`<the task>` = `$ARGUMENTS` with any panel/executor flags stripped: see the
+options above. The `Create todos to track progress.` sentence STAYS in this PROMPT
+text; the executor step omits that sentence for the subprocess path.)
+
+Capture the round's summary the executor step yields; you'll pass it to the
+review panel in Step 2b.
 
 ## Step 2: Get Multi-Model Verification
 
@@ -549,10 +712,14 @@ underlying flaw), and the loop converges only when the structure changes. One
 sentence in the prompt naming the shared cause is enough; when the findings are
 genuinely independent, say that instead and fix them as listed.
 
+Run **the executor step** (the shared block) with this revision PROMPT; do NOT
+inline a `Task(...)` (the executor step owns the same Task-vs-subprocess fork Step
+1 uses), so the revision runs on whatever `executor` resolved to:
+
+PROMPT:
+
 ```
-Task(
-  subagent_type="crew:executor",
-  prompt="REVISION needed for previous task.
+REVISION needed for previous task.
 
 Original task: <the task>
 
@@ -562,8 +729,7 @@ The panel flagged these [BLOCKING] issues:
 [If several findings share one structural cause, name it here and instruct:
 fix that structure once, then re-check every listed finding against the fix.]
 
-Address each issue. Report what you changed and what you verified."
-)
+Address each issue. Report what you changed and what you verified.
 ```
 
 Then go back to Step 2 to verify the revised work.
@@ -613,4 +779,5 @@ The loop can end without the panel approving in these ways:
 
 ---
 
-First: run the activation command. Then proceed to Step 1 (delegate to executor).
+First: run the activation command, then resolve the executor (`crew
+build-executor`). Then proceed to Step 1 (run the executor step).

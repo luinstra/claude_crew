@@ -20,6 +20,17 @@ seat = "codex"
 # [panels]
 # nightly = ["codex", "opus"]
 
+# [build].executor: /crew:build's implement-step executor. Default is the
+#   crew:executor Task agent (Claude); set it to ONE write-capable subprocess
+#   seat (e.g. codex-luna) to route each round through that model instead. The
+#   --executor <seat> flag overrides this per invocation.
+# executor_retries: how many times to retry a FAILED external-executor round
+#   (int 0..2, default 0). Retries STACK on the failed attempt's partial edits
+#   (no clean-tree revert), so the cap is low.
+# [build]
+# executor = "crew:executor"
+# executor_retries = 0
+
 # ---- Per-seat tuning + availability -------------------------------------------------
 # available = false drops a seat from EVERY resolved panel. It is an opt-OUT: runtime
 # already skips a CLI that isn't installed, so these flags are mainly for DISCOVERABILITY,

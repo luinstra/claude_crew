@@ -1106,7 +1106,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 # (prompts.dispatch). A Python guard captures HEAD + staged-index + branch state
 # BEFORE and AFTER the seat runs — pinned to the SAME tree the seat edits — so a
 # commit / stage / branch-flip against instruction is LOUD and recoverable
-# (detect-not-prevent). dispatch emits its OWN 15-field JSON envelope (never a
+# (detect-not-prevent). dispatch emits its OWN 16-field JSON envelope (never a
 # polluted six-field ProviderResult).
 
 # A sentinel distinct from any 40-hex sha and from None: a valid git work tree
@@ -1304,7 +1304,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
 
     Steps run in the SAME canonical order as ``cmd_run`` (derive the session
     output path BEFORE the availability check), with the HEAD/staged/branch guard
-    wrapped around the seat run and a 15-field JSON envelope emitted.
+    wrapped around the seat run and a 16-field JSON envelope emitted.
     """
     # (a) Resolve the seat: --seat > [dispatch].seat > built-in codex. Compute the
     # pinned guard tree ONCE — every _git_* helper runs with cwd=repo_dir, the
@@ -1419,7 +1419,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         branch_after = _git_branch(repo_dir)
 
     # (h) Compute the three guards NULL-SAFE (typed booleans, never null) on the
-    # internal tri-state values, then build + emit the 15-field envelope.
+    # internal tri-state values, then build + emit the 16-field envelope.
     head_moved = (
         head_before is not None and head_after is not None
         and head_before != head_after
@@ -1431,6 +1431,15 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     branch_changed = (
         branch_before is not None and branch_after is not None
         and branch_before != branch_after
+    )
+
+    # Build the guard WARNING lines ONCE (single source), so the --json envelope
+    # carries the SAME recovery strings the human path prints. The seam that reads
+    # the envelope (build.md) relays these verbatim on a guard violation, rather
+    # than re-deriving prose from the booleans. Empty list when no guard fired.
+    guard_warnings = _dispatch_guard_warnings(
+        head_moved, head_before, head_after,
+        staged_changed, branch_changed, branch_before, branch_after,
     )
 
     envelope = {
@@ -1454,6 +1463,9 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         "branch_before": branch_before,
         "branch_after": branch_after,
         "branch_changed": branch_changed,
+        # The formatted recovery warnings for whichever guards fired (empty list
+        # when none did), from the SAME helper the human path renders.
+        "guard_warnings": guard_warnings,
     }
 
     if args.json:
@@ -1465,10 +1477,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         return 0
 
     # Human (non-JSON) output: header + seat output + warnings LAST in fixed order.
-    guard_warnings = _dispatch_guard_warnings(
-        head_moved, head_before, head_after,
-        staged_changed, branch_changed, branch_before, branch_after,
-    )
+    # (guard_warnings was built above, shared with the --json envelope.)
     if not result.ok:
         err = result.error or "unknown error"
         # When -o is set, still WRITE the envelope file on failure so the caller
@@ -1489,6 +1498,68 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     _emit("\n".join(lines), args.out)
     if args.out:
         print(args.out)
+    return 0
+
+
+def cmd_build_executor(args: argparse.Namespace) -> int:
+    """Resolve /crew:build's implement-step executor and PRINT a JSON contract;
+    it runs NOTHING (mirrors review-prep's resolve + validate + emit shape).
+
+    Precedence: ``--executor`` flag > ``config.build_executor()``
+    (``[build].executor``, per-repo > global) > the builtin ``crew:executor``
+    sentinel. The resolved value is either that sentinel (the Task path build.md
+    runs as today) OR a known subprocess seat that is write-capable; anything
+    else exits 2 naming the reason, never a silent fallback (a misconfigured
+    executor must not quietly run as Claude and produce a diff attributed to the
+    wrong model).
+    """
+    # 1. Resolve + track the source for the JSON.
+    if args.executor is not None:
+        executor = args.executor
+        source = "flag"
+    else:
+        configured = config.build_executor()
+        if configured is not None:
+            executor, source = configured, "config"
+        else:
+            executor, source = "crew:executor", "builtin"
+
+    # 2. Validate. The sentinel bypasses the seat checks: it IS the Task path,
+    #    which the engine never runs and which no registry knows.
+    if executor != "crew:executor":
+        if executor not in known_seat_names():
+            # A Task-seat name (opus/sonnet) and a group token (cursor) BOTH fail
+            # this subprocess-registry check, so one gate covers all three causes;
+            # name the likely one so a misconfig is self-diagnosing.
+            print(
+                f"error: build executor {executor!r} is not a known subprocess "
+                f"seat (a Task seat like opus/sonnet is orchestrator-owned and "
+                f"unrunnable by the engine; a group token like cursor names no "
+                f"single seat); valid subprocess seats: "
+                f"{', '.join(known_seat_names())}",
+                file=sys.stderr,
+            )
+            return 2
+        if not get_provider(executor).supports_workspace_write:
+            # SAME capability the dispatch write-gate uses: the seam dispatches the
+            # executor in workspace-write, so a read-only seat cannot implement.
+            print(
+                f"error: build executor {executor!r} is read-only (does not "
+                f"support workspace-write); the build seam dispatches it in write "
+                f"mode, so it cannot implement the task",
+                file=sys.stderr,
+            )
+            return 2
+
+    # 3. Retries: None (unset/invalid) falls to the safe default 0.
+    retries = config.build_executor_retries() or 0
+
+    # 4. One-line JSON to stdout (stdout carries ONLY the payload, like the other
+    #    machine-parsed commands), exit 0.
+    print(json.dumps(
+        {"executor": executor, "retries": retries, "source": source},
+        ensure_ascii=False,
+    ))
     return 0
 
 
@@ -3571,6 +3642,17 @@ def _render_config_template(
     L.append("# [panels]")
     L.append('# nightly = ["codex", "opus"]')
     L.append("")
+    L.append("# [build].executor: /crew:build's implement-step executor. Default is the")
+    L.append("#   crew:executor Task agent (Claude); set it to ONE write-capable subprocess")
+    L.append("#   seat (e.g. codex-luna) to route each round through that model instead. The")
+    L.append("#   --executor <seat> flag overrides this per invocation.")
+    L.append("# executor_retries: how many times to retry a FAILED external-executor round")
+    L.append("#   (int 0..2, default 0). Retries STACK on the failed attempt's partial edits")
+    L.append("#   (no clean-tree revert), so the cap is low.")
+    L.append("# [build]")
+    L.append('# executor = "crew:executor"')
+    L.append("# executor_retries = 0")
+    L.append("")
     L.append("# ---- Per-seat tuning + availability -------------------------------------------------")
     L.append("# available = false drops a seat from EVERY resolved panel. It is an opt-OUT: runtime")
     L.append("# already skips a CLI that isn't installed, so these flags are mainly for DISCOVERABILITY,")
@@ -4703,8 +4785,8 @@ def build_parser() -> argparse.ArgumentParser:
         "dispatch",
         help="Send ONE subprocess seat (default codex) at the working tree in "
              "WRITE mode (workspace-write): it edits files in place and leaves "
-             "changes UNCOMMITTED + UNSTAGED. Emits a 15-field JSON envelope "
-             "(seat output + HEAD/staged/branch guards) and prints the resolved "
+             "changes UNCOMMITTED + UNSTAGED. Emits a 16-field JSON envelope "
+             "(seat output + HEAD/staged/branch guards + guard_warnings) and prints the resolved "
              "envelope path.",
     )
     disp.add_argument(
@@ -4730,7 +4812,7 @@ def build_parser() -> argparse.ArgumentParser:
     disp.add_argument("--timeout", type=int, default=None, help="wall-clock timeout (s)")
     disp.add_argument(
         "--json", action="store_true",
-        help="emit the 15-field envelope as JSON (exit 0 even when ok=false)",
+        help="emit the 16-field envelope as JSON (exit 0 even when ok=false)",
     )
     disp.add_argument(
         "-o", "--out", default=None,
@@ -4743,6 +4825,23 @@ def build_parser() -> argparse.ArgumentParser:
              "-o is omitted. Pass the literal id; the engine resolves it.",
     )
     disp.set_defaults(func=cmd_dispatch)
+
+    be = sub.add_parser(
+        "build-executor",
+        help="Resolve /crew:build's implement-step executor (--executor flag > "
+             "[build].executor config > builtin crew:executor) and PRINT "
+             "{executor, retries, source} JSON. Validates: the crew:executor "
+             "sentinel (the Task path) OR a known write-capable subprocess seat; "
+             "a Task seat, group token, unknown, or read-only seat exits 2 naming "
+             "the reason (never a silent fallback). Runs NOTHING.",
+    )
+    be.add_argument(
+        "--executor", dest="executor", default=None,
+        help="explicit executor seat: a write-capable subprocess seat (e.g. "
+             "codex-luna) or the crew:executor sentinel for the default Task "
+             "path. Wins over [build].executor config.",
+    )
+    be.set_defaults(func=cmd_build_executor)
 
     rndr = sub.add_parser(
         "render",
