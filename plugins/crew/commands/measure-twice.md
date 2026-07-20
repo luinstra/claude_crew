@@ -8,62 +8,74 @@ allowed-tools: Bash, Task, Read, Write, Glob
 
 $ARGUMENTS
 
+## Conventions (stated once, apply to every step)
+
+- **Session id is a literal.** Substitute your actual session id (the
+  `[Session ID: …]` value) for `<session-id>` in every recipe; never the
+  placeholder, never a `${CLAUDE_SESSION_ID}` expansion.
+- **No shell expansions in recipes.** No `${…}`, `$(…)`, or backticks on any
+  Bash line (they defeat permission allowlisting); the `${CLAUDE_PLUGIN_ROOT}`
+  prefix is exempt (the harness substitutes it). The ENGINE anchors a relative
+  `.crew/...` path arg to the project root (`crew_base()`), never the shell
+  cwd, so recipes carry plain relative paths. Double quotes tame spaces and
+  globs in a substituted value; they do NOT neutralize `$(…)`/backticks, hence
+  the next rule.
+- **Spill task text, never inline it.** A `--task "$ARGUMENTS"` value with
+  `$(…)`, `$VAR`, backticks, or `"` would be expanded or mangled by the shell:
+  Write the exact bytes to a file and pass `-f`. Write-tool and Read-tool
+  paths are absolute literals (`<project-root>/...`, your `CLAUDE_PROJECT_DIR`
+  value substituted); those tools take no shell.
+- **`<session_segment>`, never the raw id, in reconstructed run-dir paths**:
+  it is the prep JSON's sanitized dir segment the engine actually built the
+  run dir from; a raw id can diverge from it.
+- **Reference, not payload.** Point a seat at a file to `Read`; never paste
+  file contents into a prompt.
+- The engine enforces and tests the mechanics these recipes rely on
+  (run-scoping, preserve-valid, anchoring, quorum recount): `scripts/CLAUDE.md`.
+
 ## Panel options (optional)
 
-Flags at the **start** of `$ARGUMENTS` choose which models review the plan; the
-rest is the task / design-doc path. Default (no flag) = **OMIT the
-`--panel`/`--seats` flag entirely** and let `review-prep` apply the configured
-default (precedence CLI flag > per-repo `.crew/config.toml` > global
-`~/.crew-config.toml` > built-in **full**; no env tier). Do NOT hardcode `--panel
-full` — it would override a user's configured default.
+Flags at the **start** of `$ARGUMENTS` choose which models review the plan;
+the rest is the task / design-doc path.
 
-- `--panel full|lite|solo|cursor|quick|<custom>` — a named preset (`quick` = the
-  cheapest cross-model pair; `<custom>` = any `[panels]` roster in per-repo/global
-  config). `--seats <comma-list>` — an explicit subset of any registered seat
-  (e.g. `--seats codex,opus`); `--seats` wins if both are given.
+- `--panel full|lite|solo|cursor|quick|<custom>` = a named preset (`<custom>`
+  = any `[panels]` roster in config). `--seats <comma-list>` = an explicit
+  subset of any registered seat (e.g. `--seats codex,opus`); it wins if both
+  are given.
   Some registered seats are opt-in and not in the built-in default panel
-  (premium cursor model-seats; the `fable` Claude voice): pass their exact names
-  via `--seats`. The full seat census is `crew doctor` / the README panel table.
-- **The engine resolves the preset — the orchestrator does NOT.** `review-prep`
-  (Phase 3 Step 3a) resolves `--panel`/`--seats` into `subprocess_seats` (the
-  external-CLI entries), `task_seats` (the Claude voices), and
-  `task_seat_models` (each Task seat's model pin). The orchestrator never defines
-  presets, classifies seat names, or hardcodes a model pin — pass the flag through
-  and read the JSON. **Pass `--panel`/`--seats` ONLY when the user named a panel
-  or seats** (an explicit flag, or intent like "use the lite panel"); otherwise
-  OMIT it and let `review-prep` apply the configured/built-in default.
+  (premium cursor model-seats; the `fable` Claude voice): pass their exact
+  names via `--seats`. Census: `crew doctor` / the README panel table.
+- **Pass `--panel`/`--seats` ONLY when the user named a panel or seats**;
+  otherwise OMIT the flag so `review-prep` applies the configured default (CLI
+  flag > per-repo `.crew/config.toml` > global `~/.crew-config.toml` >
+  built-in `full`). Never hardcode `--panel full`.
+- **The engine resolves the preset, the orchestrator does not**: `review-prep`
+  (Step 3a) splits the flags into `subprocess_seats`/`task_seats`/
+  `task_seat_models`; pass the flag through and read the JSON.
 
-Below, **"the task"** means `$ARGUMENTS` with these panel flags removed — use it as
-the requirements / design-doc path. The raw `$ARGUMENTS` (flags included) is
-preserved byte-for-byte via the `-f` spill file below (Phase 2 Step 1) so the panel
-survives across iterations. A one-seat panel is fine — synthesis / never-choke
-handle any count down to one.
+**"The task"** below = `$ARGUMENTS` minus these panel flags. The raw
+`$ARGUMENTS` is preserved byte-for-byte via the `-f` spill (Phase 2 Step 1) so
+the panel choice survives across iterations. A one-seat panel is fine.
 
 ## How This Works
 
-1. **Gather Requirements** - Interview user to understand the task (or skip if design doc provided)
-2. **Generate Plan** - Advisor creates the plan
-3. **Review** - The resolved multi-model panel evaluates (with BLOCKING/MINOR classification)
-4. **Iterate** - If BLOCKING issues: revise and re-review. If REJECT: rethink approach.
-5. **Complete** - When the panel's verdict is APPROVED (or only MINOR issues) and the digest's quorum is met, or when a human authorizes completion with `--force` over an advisory (a NOT MET quorum, plan drift)
+1. **Gather Requirements** - interview (skipped when a design doc is given)
+2. **Generate Plan** - advisor creates the plan
+3. **Review** - the resolved multi-model panel evaluates
+4. **Iterate** - BLOCKING issues: revise and re-review; REJECT: rethink
+5. **Complete** - on APPROVED / only-MINOR with quorum met, or a
+   human-authorized `--force` over an advisory
 
 ---
 
 ## Check: Is a Design Doc Referenced?
 
-**If `$ARGUMENTS` contains a file path** (e.g., `docs/plans/foo-design.md`, `.crew/plans/bar.md`, or any `.md` path):
-
-→ **Skip Phase 1** (requirements already captured in the document)
-→ **Go directly to Phase 2** using that document as the requirements source
-
-Read the referenced document and use it as the basis for plan generation. If
-the path is RELATIVE (e.g. `.crew/plans/bar.md`), resolve it against the project
-root before reading: the Read tool takes a literal path with no shell, so read
-`<project-root>/.crew/plans/bar.md` (substitute your `CLAUDE_PROJECT_DIR` value
-for `<project-root>`, the same absolute-literal convention the task-spill WRITE
-uses), NEVER a bare cwd-relative path a divergent cwd would resolve against the
-wrong tree. An ABSOLUTE path the user gives is read as-is. Do NOT re-interview
-the user; the design doc contains the requirements.
+**If `$ARGUMENTS` contains a file path** (e.g. `docs/plans/foo-design.md` or
+any `.md` path): skip Phase 1 and go directly to Phase 2 with that document as
+the requirements source. Read it first: resolve a RELATIVE path against the
+project root (`<project-root>/.crew/plans/bar.md`, per Conventions), never a
+bare cwd-relative path a divergent cwd would resolve against the wrong tree;
+an ABSOLUTE path is read as-is. Do NOT re-interview the user.
 
 ---
 
@@ -71,41 +83,24 @@ the user; the design doc contains the requirements.
 
 **Skip this phase if a design doc was referenced above.**
 
-Interview the user to understand:
-1. **Goal** — What are they trying to accomplish?
-2. **Constraints** — Timeline, tech stack, existing patterns to follow?
-3. **Scope** — What's in/out of scope?
-4. **Concerns** — Any risks or edge cases they're worried about?
-
-Ask 2-3 clarifying questions. Don't over-interview — get enough context to brief the advisor.
+Interview the user: 1. **Goal**, 2. **Constraints** (timeline, tech stack,
+patterns to follow), 3. **Scope** (in/out), 4. **Concerns** (risks, edge
+cases). Ask 2-3 clarifying questions; get just enough context to brief the
+advisor.
 
 ---
 
 ## Phase 2: Plan Generation
 
-When the user says "create the plan", "generate the plan", or "I'm ready" — **or if a design doc was referenced**:
+When the user says "create the plan" or equivalent, **or if a design doc was
+referenced**:
 
 ### Step 1: Activate the Loop
 
-**Spill the task to a file and pass `-f`, NEVER inline.** Write the raw
-`$ARGUMENTS` to the ABSOLUTE anchored path
-`<project-root>/.crew/task-mt-<session-id>.txt` with the **Write tool** (which
-writes the exact bytes, no shell involved, and creates the `.crew/` parent dir).
-Substitute your `CLAUDE_PROJECT_DIR` value for `<project-root>` in the WRITE-tool
-path (Write takes no shell, so a literal absolute path is safe there). A `--task
-"$ARGUMENTS"` value containing `$(…)`, `$VAR`, backticks, or `"`
-would be expanded or mangled by the shell when the Bash tool runs the command, so
-the task NEVER goes on the command line. Then init the loop, substituting your
-actual session id (the `[Session ID: …]` value) for `<session-id>` as a literal
-`--session-id` value, NEVER a `${CLAUDE_SESSION_ID}` shell expansion. The Bash
-recipe's `-f` is the plain RELATIVE path `.crew/...`, double-quoted: the ENGINE
-anchors a relative path arg to the project root (`crew_base()`, the same root the
-Write-tool literal named), never the shell cwd, and the quotes keep any odd
-character in a substituted value inert. `${…}` expansions are BANNED in
-these recipes: a command line carrying one defeats permission allowlisting (it
-fires a manual approval prompt even when the prefix rule matches). `--consume`
-makes the engine delete the spill file after a successful init (a failed init
-leaves it for retry), so no separate cleanup step exists to miss:
+Write the raw `$ARGUMENTS` to `<project-root>/.crew/task-mt-<session-id>.txt`
+with the **Write tool** (exact bytes; creates `.crew/`), then init the loop.
+`--consume` deletes the spill after a successful init (a failed init leaves it
+for retry):
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" state init mt -f ".crew/task-mt-<session-id>.txt" --session-id <session-id> --auto-plan --consume
@@ -119,7 +114,7 @@ Then get the state to find the plan file path:
 
 ### Step 2: Generate Initial Plan
 
-Summarize what you learned from the interview, then spawn the **advisor agent** to create the plan:
+Summarize what you learned, then spawn the **advisor agent**:
 
 ```
 Task(subagent_type="crew:advisor", prompt="Create an implementation plan for: [summary of task]
@@ -149,284 +144,179 @@ Focus on clarity and executability — this plan will be reviewed by a multi-mod
 
 ### Step 3: Get a Multi-Model Plan Review
 
-Review the plan with a multi-model panel and synthesize the results into the
-existing verdict. Two seat kinds:
+Review the plan with a multi-model panel. Two seat kinds: **subprocess seats**
+(external-CLI entries, via the engine) and **task seats** (Claude voices, each
+a `crew:reviewer` spawned via the Task tool, in-session on the subscription;
+no `claude -p`, no API key). `review-prep`'s JSON is the roster of record;
+only fan out those seats.
 
-- **subprocess seats** — the external-CLI entries of the resolved
-  panel, via the Python engine.
-- **task seats** — the Claude-voice entries (built-in `opus`/`sonnet`, plus any
-  config-declared claude-code seat), each a `crew:reviewer` spawned via
-  the Task tool (in-session, on the subscription — no `claude -p`, no API key).
-
-The panel is whatever the flags resolved to (the configured default panel:
-`review-prep`'s JSON is the roster of record for this run); only fan out the
-seats in that list. A failed/skipped seat NEVER aborts the review (see
-"Synthesize" below) — the verdict
-is synthesized from whichever seats succeed.
-
-> **`allowed-tools` scopes THIS orchestrator only.** It grants nothing to the seats
-> spawned below — seat tool access is governed per-seat by the reviewer agent
-> frontmatter (`Read, Grep, Glob, Bash`) and the engine's sandbox flags.
-> (`Write` stays in `allowed-tools` for the temp files that feed `persist-seat -f`
-> and `repair-seat -f` — do not drop it.)
+> **`allowed-tools` scopes THIS orchestrator only.** Seat tool access is
+> governed per-seat by the reviewer agent frontmatter and the engine's sandbox
+> flags. (`Write` stays here for the temp files feeding `persist-seat -f` and
+> `repair-seat -f`.)
 
 #### 3a — Fan out subprocess seats (one visible shell PER SEAT)
 
-**ALWAYS run `review-prep` (3a.0–3a.1) — it is the SOLE source of the
-`task_seats`/`task_seat_models` 3b needs.** Skip ONLY the per-seat subprocess fan-out
-(3a.2) when `subprocess_seats` is empty (e.g. `--panel lite`/`solo`) — go straight to
-3b; you STILL persist the Task seats (3c) and run the SAME grouped `collect` (3c.5)
-over the Task seats alone (there is no "synthesize from raw Task returns" path).
-Otherwise fan the subprocess seats out over the plan file (`[plan_file from state]`)
-**one `crew run` call per seat, in parallel** — each a separate, visible,
-individually-killable shell (not one opaque `review` call hiding them in a thread
-pool). Use the bare-script path (its `sys.path` guard resolves package imports).
+**ALWAYS run `review-prep`: it is the SOLE source of the
+`task_seats`/`task_seat_models` 3b needs.** When `subprocess_seats` is empty
+(e.g. `--panel lite`/`solo`; `prompt_path` prints `""`), skip ONLY the
+per-seat fan-out (3a.2): you STILL persist the Task seats (3c) and run the
+SAME grouped `collect` (3c.5) with `--seats <task_seats only>`; there is no
+"synthesize from raw Task returns" path.
 
-**3a.0–3a.1 — prep the fan-out in ONE call.** `review-prep` resolves the plan-file
-target, resolves `--panel`/`--seats` into the SUBPROCESS seat list (group tokens like
-`cursor` expanded via the registry) AND the Task-seat split, mints the RUN-SCOPED
-review dir (`run.json` + a frozen snapshot of the plan body), stages the shared
-subprocess prompt AND one prompt per Task seat against that snapshot, and PRINTS
-`{prompt_path, subprocess_seats, task_seats, task_seat_models, run_dir, run_id,
-target_sha256, task_prompt_paths, pending_subprocess_seats, pending_task_seats}`
-as one-line JSON. It runs NOTHING. **Quote `"[plan_file from state]"`** (a plan path
-can contain spaces). Substitute your real id for `<session-id>` (the `[Session ID: …]`
-value; never the literal placeholder or a `${…}` expansion):
+**3a.0-3a.1: prep the fan-out in ONE call.** `review-prep` resolves the
+plan-file target and the panel split (group tokens expanded via the registry),
+mints the RUN-SCOPED review dir (`run.json` + a frozen snapshot of the plan
+body), stages every seat prompt against that snapshot, and PRINTS
+`{prompt_path, subprocess_seats, task_seats, task_seat_models, run_dir,
+run_id, target_sha256, session_segment, task_prompt_paths,
+pending_subprocess_seats, pending_task_seats}` as one-line JSON. It runs
+NOTHING. **Quote `"[plan_file from state]"`** (a plan path can contain
+spaces). (`--inline-diff` embeds content; reference mode is the default. No
+`--base`: a plan-file target ignores it.)
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" review-prep "[plan_file from state]" --session-id <session-id>
 ```
 
-**OMIT `--panel`/`--seats` when the user named no panel** (as shown) — so
-`review-prep` applies the configured `default_panel` or built-in **full**. Pass
-`--panel <preset>` / `--seats <subset>` ONLY when the user chose one explicitly.
-(No `--base` here: a plan-file target reviews the plan body and ignores the base
-ref.) Reference mode (the default) makes each seat read the run dir's frozen
-snapshot of the plan; `--inline-diff` embeds the content instead (forwarded to the
-staged prompt).
+OMIT `--panel`/`--seats` unless the user chose one. **Parse the one-line JSON
+directly from stdout** (never a `$(…)` capture): `pending_subprocess_seats`
+drives the per-seat loop, `run_id` rides every engine call below, the FULL
+`subprocess_seats` joins `collect --seats` (3c.5). Use the printed `run_dir`
+VERBATIM only in **Write-tool** and **Task `Read`** references; a **Bash
+recipe** never pastes it and instead reconstructs the relative
+`.crew/reviews/<session_segment>/<run_id from the prep JSON>/...`.
 
-`review-prep` resolves BOTH seat kinds: 3b reads `task_seats` + `task_seat_models`
-+ `task_prompt_paths` from this same JSON; the engine EXECUTES only the subprocess
-seats. **Parse the one-line JSON** it prints (read it directly from stdout — it is
-NOT a shell `$(…)` capture): use `pending_subprocess_seats` to iterate the
-per-seat loop, `run_id`/`run_dir` on every engine call below, and the FULL
-`subprocess_seats` (JOINED comma-separated) as part of the `collect --seats` list
-in 3c.5. Use the printed `run_dir` VERBATIM only for **Write-tool** and
-**Task `Read`** references (a literal path, no shell). In a **Bash recipe** never
-paste `run_dir` verbatim: reconstruct it as the RELATIVE
-`.crew/reviews/<session_segment>/<run_id from the prep JSON>/...`, with no root
-prefix and no `${…}` expansion (which would defeat permission allowlisting); the
-ENGINE anchors a relative path arg to the project root (`crew_base()`), never the
-shell cwd. `<session_segment>` is the `session_segment` field from the prep JSON,
-the SANITIZED session dir segment the engine actually built the run dir from. Use
-THAT, never the raw `<session-id>`: the raw id can diverge from the engine's dir,
-or a crafted one traverse, so a reconstruction with the raw id could miss the real
-dir (`<session_segment>`/`run_id` are safe engine-controlled strings). The per-seat `run` DERIVES its `-f`/`-o` from `--session-id` + `--run-id`
-(the run dir's `prompt-seat.txt` / `<seat>.json`), so you do NOT pass
-`prompt_path` as `-f` yourself (see 3a.2). **If `subprocess_seats` is empty** (a
-Claude-only `--panel lite`/`solo` → `prompt_path` is `""`, no subprocess prompt
-staged), **SKIP only the 3a.2 per-seat loop** — go to 3b; you STILL persist the
-Task seats (3c) and run the SAME grouped `collect` (3c.5) with `--seats
-<task_seats only>`.
-
-**3a.1b: freeze the run identity into loop state.** Immediately after prep
-prints its JSON and BEFORE any seat runs:
+**3a.1b: freeze the run identity into loop state**, immediately after prep and
+BEFORE any seat runs (skip it and the verdict is unrecordable):
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" state begin-review mt --session-id <session-id>
 ```
 
-This reads the prepped run's own `run.json` and freezes the run id, the plan's
-hash + spec, and the seat roster into the loop's state (the identity Step 4's
-`record-verdict` judges the panel's results against). It prints `phase=reviewing
-run=<run_id> seats=<N>`. Re-running it after a re-prep is fine (it re-arms the
-freeze against the newest run); leave the plan file itself untouched until the
-verdict is recorded, since `record-verdict` re-hashes it and raises drift as a
-completion advisory (exit 3) when the panel never read the current content: the
-completion holds only once the user authorizes `--force` over it. Skip the freeze and the verdict is
-unrecordable, and a loop with no recorded verdict cannot be completed at all.
+It freezes the run id, the plan's hash + spec, and the roster (what
+`record-verdict` judges against) and prints `phase=reviewing run=<run_id>
+seats=<N>`. Re-running after a re-prep is fine. **Leave the plan file
+untouched until the verdict is recorded**: `record-verdict` re-hashes it, and
+drifted bytes raise a completion advisory (exit 3, Step 4) that only the
+user's `--force` overrides.
 
-**3a.2 — run EACH seat in its own parallel shell.** Do NOT delete seat files:
-results are RUN-SCOPED. Each `review-prep` mints a run identity from the reviewed
-content + panel, so a re-review of a REVISED plan lands in a NEW `<run_dir>` (an
-earlier round's stale results are unreachable, so successive review rounds in one
-session can never fold together), while an UNCHANGED plan RESUMES its dir: seats already
-landed there stay landed, are excluded from
-`pending_subprocess_seats`/`pending_task_seats`, and a valid landed result is
-never overwritten by a fresh failure (preserve-valid).
-
-For every seat in `pending_subprocess_seats` (NOT the full roster, landed seats
-resume), launch a SEPARATE `crew run <seat>` Bash call, all concurrently (e.g.
-background calls). `--session-id` + `--run-id` let `run` DERIVE both paths from
-the run dir: `-f` = `prompt-seat.txt`, `-o` = `<seat>.json`, stamped with the run
-identity:
+**3a.2: run EACH pending seat in its own parallel shell.** Do NOT delete seat
+files: results are RUN-SCOPED (a revised plan mints a NEW run dir, so review
+rounds never fold together; an unchanged plan RESUMES its dir, landed seats
+dropping out of the pending lists; a landed valid result is never overwritten
+by a fresh failure). For every seat in `pending_subprocess_seats` (NOT the
+full roster), launch a SEPARATE `crew run <seat>` Bash call, all concurrently
+(e.g. background calls); `run` DERIVES `-f`/`-o` from the run dir, so pass no
+paths:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> --session-id <session-id> --run-id <run_id from the prep JSON> --json
 ```
 
-- `run --json` ALWAYS exits 0 and writes the six-field result
-  (`name, model, ok, output, error, elapsed`) — a failed/skipped seat lands as
-  `ok=False` with a diagnostic. **Per-seat never-choke is automatic**: one seat
-  failing can't sink the others, and there's no all-failed abort to handle.
-  (Run-scoped results also carry the `run_id`/`target_sha256` stamps; a run-scoped
-  MISUSE, like a prompt/model/sandbox override or a non-member seat, exits 2
-  before any result is written. The templated call above never hits those paths.)
-- Same model / sandbox / auth-banner / ARG_MAX handling as the old single-call path
-  — `run` uses the identical provider machinery.
+`run --json` exits 0 for every result it WRITES, the six-field shape
+(`name, model, ok, output, error, elapsed`); a failed/skipped seat lands as
+`ok=False` with a diagnostic, so per-seat never-choke is automatic. Run-scoped
+MISUSE (non-member seat, prompt/model/sandbox override) exits 2 with nothing
+written; the templated call above never hits that path.
 
-**3a.3 — do NOT collect yet.** The WHOLE panel — subprocess AND Task seats — flows
-through ONE grouped `collect` in **Step 3c.5**, after the Task seats are persisted.
-Launch the 3a.2 shells (in parallel) and move to 3b; Step 3c.5 owns the wait-for-both
-barrier and the single collect.
+**3a.3: do NOT collect yet.** The WHOLE panel flows through ONE grouped
+`collect` in **3c.5**, after the Task seats are persisted. Launch the 3a.2
+shells and move to 3b.
 
 #### 3b — Fan out Task seats (parallel)
 
-Spawn a reviewer seat **in parallel for each entry in `pending_task_seats`** (from
-the `review-prep` JSON — skip if empty; a landed seat from an unchanged-plan
-resume is already in the run dir). Do NOT hand-write each seat's prompt, and do
-NOT run a separate `render` call: `review-prep` ALREADY STAGED one prompt per Task
-seat into the run dir (`task_prompt_paths` in the prep JSON,
-`<run_dir>/prompt-<seat>.txt`), each pointing the seat at the run's FROZEN
-snapshot of the plan (`<run_dir>/target.md`) as the content under review. A
-re-render here would re-resolve the LIVE plan file and reintroduce the drift the
-snapshot exists to close; every seat, subprocess AND Task, reviews the same
-frozen bytes.
-
-Dispatch each seat **by reference** — the SAME agent (`crew:reviewer`) with a
-per-spawn `model` override selecting the voice. **Iterate `pending_task_seats`
-from the prep JSON**; for each `<seat>` read its model from
-`task_seat_models[<seat>]` and its prompt path from `task_prompt_paths[<seat>]`.
-Do NOT hardcode seat names or model pins, and do NOT read + inline the staged
-prompt — point the seat at its staged file and let it `Read` it (reference, not
-payload; the reviewer has `Read`):
+Spawn a reviewer **in parallel for each entry in `pending_task_seats`** (skip
+if empty). Do NOT hand-write or re-render any prompt: `review-prep` ALREADY
+STAGED one per Task seat against the FROZEN snapshot of the plan
+(`task_prompt_paths`); a re-render would re-resolve the LIVE plan file and
+reopen the drift window. Dispatch **by reference** (the reviewer has `Read`),
+pinning `model` from `task_seat_models[<seat>]`; never hardcode seat names or
+model pins, never inline the staged prompt:
 
 ```
 # for each <seat> in pending_task_seats (path = task_prompt_paths[<seat>]):
 Task(subagent_type="crew:reviewer", model="<task_seat_models[<seat>]>", prompt="You are the <seat> seat. Read <run_dir>/prompt-<seat>.txt and follow it exactly.")
 ```
 
-The staged prompt already states this is a **plan review**, points the seat at the
-frozen snapshot as the review authority (the live plan path stays in the header as
-supplementary context), lists the criteria (clarity, testability, completeness,
-context), and asks for per-criterion PASS/FAIL + `[BLOCKING]`/`[MINOR]` findings +
-a one-line verdict. `crew:reviewer` has `Read, Grep, Glob, Bash` for exactly this.
-Because every seat's prompt comes from the one prep-staged source over one
-snapshot, the panel reviews a single identical plan. `.crew/` is gitignored.
-
-**Never choke on a Task-seat failure:** a `crew:reviewer` spawn that errors, times
-out, returns no usable block, or is reported missing/failed MUST NOT abort the review.
-Catch it, normalize it to the six-field `ok=False` shape (3c), and continue. A failed
-Task seat is treated identically to a failed subprocess seat.
+The staged prompt already frames the plan review (frozen snapshot as review
+authority, criteria, per-criterion PASS/FAIL + `[BLOCKING]`/`[MINOR]` findings
++ one-line verdict). `.crew/` is gitignored. **Never choke on a Task-seat
+failure:** a spawn that errors, times out, or returns no usable block MUST NOT
+abort the review; normalize it to `ok=False` (3c) and continue.
 
 #### 3c — Normalize Task-seat results to the six-field shape
 
-> **The Task RESULT is the only completion signal.** Each `Task(...)` RETURNS the
-> seat's final message as its tool result — that returned text IS the seat's review
-> *and* the proof it finished. Take `ok`/`output`
-> from that returned result. **NEVER judge a seat by a proxy** (output-file byte size,
-> transcript length, a missed notification, elapsed time): those race the transcript
-> flush and have falsely declared a finished seat "dead", discarding a good review. A
-> seat that has not returned is **still running, not failed** — wait for it.
+> **The Task RESULT is the only completion signal.** Each `Task(...)` RETURNS
+> the seat's final message as its tool result; that returned text IS the
+> seat's review *and* the proof it finished. Take `ok`/`output` from it.
+> **NEVER judge a seat by a proxy** (output-file byte size, transcript length,
+> a missed notification, elapsed time): those race the transcript flush and
+> have falsely declared a finished seat "dead", discarding a good review. A
+> seat that has not returned is **still running, not failed**: wait for it.
 
-For each Task seat **you spawned in 3b** (`pending_task_seats` from the
-`review-prep` JSON — NOT a hardcoded `opus`/`sonnet` pair), normalize its return
-into the SAME six fields as the subprocess results:
+Normalize each spawned seat's return into the SAME six fields as the
+subprocess results: `name` = the seat name (its own filename stem), `model` =
+`task_seat_models[<seat>]`, `ok` = True only if the returned result is a
+usable review block, `error` = a populated diagnostic when `ok=False` (never a
+fabricated `ok=True`), `elapsed` = best-effort, `output` = the review text. A
+failed Task seat renders exactly like a failed subprocess seat.
 
-- `name` = the seat's name (a registered seat name is already `[A-Za-z0-9_-]`-only
-  by the `name == slug(name)` invariant, so it doubles as its own filename stem).
-- `model` = the pinned model from `task_seat_models[<seat>]` (e.g. `opus`,
-  `sonnet`, `fable`).
-- `ok` = True if the seat's **returned result** is a usable review block; **False**
-  only if it is an error, has no usable block, or the harness reports the Task
-  failed/missing. (Judge from the returned result — never a proxy.)
-- `error` = a populated diagnostic when `ok=False` (never a fabricated empty
-  `ok=True` block).
-- `elapsed` = best-effort wall time (0.0 if unavailable — diagnostic only).
-- `output` = the seat's review text, from its returned Task result.
-
-A failed Task seat renders exactly like a failed subprocess seat. A skipped/unspawnable
-seat renders a clearly-marked skipped block and is excluded from the verdict math.
-
-**Persist each Task seat through the engine.** For EACH seat you spawned
-(`pending_task_seats` from the prep JSON — never a hardcoded list), write the
-seat's returned Task result to a temp file with the Write tool (a file
-under the ABSOLUTE anchored `<project-root>/.crew/reviews/<session_segment>/`,
-e.g. `tmp-seat-<seat>.md`; substitute your `CLAUDE_PROJECT_DIR` value for
-`<project-root>` and the prep JSON's `session_segment` for `<session_segment>` so
-the Write literal and the engine's `-f` read resolve to ONE file; NEVER a system
-temp or scratchpad dir, which sits outside the approved working
-dirs and fires a permission prompt on every write), then persist it
-with the SAME `--run-id` the prep printed (required: a late seat persisted
-without it exits 2 rather than risk landing in a newer run's dir). The Write-tool
-path above is literal (no shell); the Bash `-f` below reads the SAME file as the
-plain RELATIVE `.crew/...` path + the sanitized `<session_segment>`: the ENGINE
-anchors it to the project root, so no `${…}` expansion belongs on the line:
+**Persist each Task seat through the engine.** Write each returned result to
+`<project-root>/.crew/reviews/<session_segment>/tmp-seat-<seat>.md` (Write
+tool; NEVER a system temp or scratchpad dir, which sits outside the approved
+working dirs and fires a permission prompt), then persist with the prep's
+`--run-id` (required: without it a late seat exits 2 rather than risk landing
+in a newer run's dir):
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" persist-seat <seat> --session-id <session-id> --run-id <run_id from the prep JSON> --model "<task_seat_models[<seat>]>" -f ".crew/reviews/<session_segment>/tmp-seat-<seat>.md"
 ```
 
 For a seat whose Task errored / returned no usable block, persist the failure
-instead (never fabricate an ok result):
+(never fabricate an ok result); a skipped/unspawnable seat renders as a labeled
+SKIPPED block and is excluded from the verdict math:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" persist-seat <seat> --session-id <session-id> --run-id <run_id from the prep JSON> --model "<task_seat_models[<seat>]>" --failed --error "<one-line diagnostic>"
 ```
 
-The engine derives the filename and the six-field shape itself — the
-printed path is the `<seat>.json` the 3c.5 collect reads. The seat entry you pass to
-`collect --seats` is the seat name (the filename stem the engine
-printed).
+The engine derives the filename and shape; the printed path is the
+`<seat>.json` the 3c.5 collect reads.
 
 #### 3c.5 — Wait-for-both, repair non-compliant seats, then collect ONCE
 
-**Wait-for-BOTH barrier.** Before collecting, wait for BOTH (a) every Step 3a.2
-subprocess `crew run <seat>` shell to EXIT, AND (b) every Step 3b Task seat to return
-AND be persisted in 3c. A seat whose `<seat>.json` is not written yet is STILL
-RUNNING, not skipped — collecting early would silently drop it.
-
-For the subprocess half, use the engine's barrier primitive instead of
-improvised polling (it exits 0 once every subprocess seat file has landed, ok
-and failed alike, since a failed seat has FINISHED; on timeout it exits 1
-naming exactly the seats still missing, so you can report or relaunch them):
+**Wait-for-BOTH barrier.** Before collecting, wait for BOTH (a) every 3a.2
+shell to EXIT, AND (b) every Task seat to return AND be persisted. A seat
+whose `<seat>.json` is not written yet is STILL RUNNING, not skipped. For the
+subprocess half:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" wait --session-id <session-id> --run-id <run_id from the prep JSON> --timeout 550
 ```
 
-The snippet passes `--timeout 550` because `wait`'s 900s default exceeds the
-Bash tool's own timeout (120s default, 600s max): a foreground call left at
-the default gets killed by the harness before `wait` can name the missing
-seats. Keep the explicit `--timeout` under your Bash call's budget (550 fits
-a call with its timeout raised to 600000ms), or run the call in the
-background and check its result.
+`wait` exits 0 once every subprocess seat file has landed (ok and failed
+alike: failed = finished); on timeout it exits 1 naming the missing seats.
+`--timeout 550` stays under the Bash tool's own budget (fits a call raised to
+600000ms; `wait`'s 900s default would be harness-killed first). `wait` refuses
+a Task seat by name: you persist those yourself, so waiting on one would
+deadlock. Wait for your own Task returns, persist, THEN collect.
 
-`wait` covers ONLY the subprocess shells, and refuses a Task seat by name: the
-Task seats are persisted by YOU after their Task returns, so waiting on one
-would deadlock the only process that can write it. Wait for your own Task
-returns, persist them, THEN collect.
+`<ran_seats>` = comma-join of the FULL `subprocess_seats` (prep order) then
+the FULL `task_seats`: the whole roster, not only pending (a landed seat from
+a resumed run is part of this verdict). Claude-only branch: just `task_seats`.
 
-Define `<ran_seats>` = the comma-join of the FULL `subprocess_seats` (resolved
-prep order) **then** the FULL `task_seats`: the whole roster, not only the
-pending seats: a landed seat from a resumed run is part of this panel's verdict.
-In the Claude-only branch (`subprocess_seats` empty) `<ran_seats>` is just
-`task_seats`.
-
-**Repair non-compliant seats (per-seat haiku reformat).** A seat that ignored the
-structured `## FINDINGS` schema can't be grouped — give it ONE cheap repair pass. Ask
-the engine which seats did not parse:
+**Repair non-compliant seats (per-seat haiku reformat).** A seat that ignored
+the `## FINDINGS` schema can't be grouped; give it ONE cheap repair pass:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" collect --session-id <session-id> --run-id <run_id from the prep JSON> --seats <ran_seats> --report-unparsed
 ```
 
-This prints the seat names (one per line) whose output ran but did NOT parse into
-structured findings. For EACH such `<seat>`:
+For EACH seat name it prints:
 
-1. **Read** its raw `output` field — `<run_dir>/<seat>.json`.
-2. Spawn the cheap **formatter** agent to reformat that text into the schema (a
-   FAITHFUL transform — do NOT invent, drop, or re-judge findings):
+1. **Read** the raw `output` field of `<run_dir>/<seat>.json`.
+2. Spawn the formatter (a FAITHFUL transform; never invent, drop, or re-judge):
 
    ```
    Task(subagent_type="crew:formatter", model="haiku",
@@ -434,29 +324,20 @@ structured findings. For EACH such `<seat>`:
    invent or drop findings, only reformat:\n\n<the seat's raw output field>")
    ```
 
-3. Write the formatter's returned text into the seat file with the engine (it writes
-   to a SEPARATE `repaired_output` field, NEVER overwriting the original
-   `output`), via a temp file with `-f` (Write it literal, also under the ABSOLUTE
-   anchored `<project-root>/.crew/reviews/<session_segment>/`, e.g.
-   `tmp-repair-<seat>.md`; never a system temp or scratchpad dir). Pass the seat
-   NAME positionally: the engine derives `<run_dir>/<seat>.json` from
-   `--session-id`/`--run-id` itself, so no seat-file path is reconstructed at all;
-   the relative `-f` temp path is engine-anchored to the project root (the SAME
-   file the Write tool created; no `${…}` expansion belongs on the line):
+3. Write the formatter's return to
+   `<project-root>/.crew/reviews/<session_segment>/tmp-repair-<seat>.md`
+   (Write tool; never a system temp or scratchpad dir), then (seat NAME
+   positional; the engine derives the seat file from the run scope):
 
    ```bash
    "${CLAUDE_PLUGIN_ROOT}/crew" repair-seat <seat> --session-id <session-id> --run-id <run_id from the prep JSON> -f ".crew/reviews/<session_segment>/tmp-repair-<seat>.md"
    ```
 
-`repair-seat` is **non-destructive**: it populates `repaired_output` ONLY IF the
-reformatted text parses into the FINDINGS schema. If it STILL doesn't parse, the write
-is a **no-op** — `repaired_output` is left unset and the command exits 0 with a stderr
-kept-original note (a no-op is success; exit 2 = real usage/read error). Grouping uses
-`repaired_output` when present, while `--full` and the RAW section ALWAYS render the
-original `output`, so a degraded rewrite can never overwrite the seat's genuine review:
-`collect` renders the ORIGINAL text raw (never worse than the seat's real words).
-Continue — the file is correct either way. The formatter is an in-session `haiku` Task
-seat — no `claude -p`, no API key.
+`repair-seat` is **non-destructive**: it fills a SEPARATE `repaired_output`
+field ONLY IF the reformat parses; otherwise a kept-original no-op (exit 0,
+stderr note). `--full` and the RAW section always render the original
+`output`, so a degraded rewrite never replaces the seat's real words. Continue
+either way.
 
 **Collect ONCE — grouped + faithful:**
 
@@ -464,27 +345,18 @@ seat — no `claude -p`, no API key.
 "${CLAUDE_PLUGIN_ROOT}/crew" collect --session-id <session-id> --run-id <run_id from the prep JSON> --seats <ran_seats> --group -o ".crew/reviews/<session_segment>/<run_id from the prep JSON>/panel.md" --full ".crew/reviews/<session_segment>/<run_id from the prep JSON>/panel-full.md"
 ```
 
-(The relative `-o`/`--full` paths are anchored by the ENGINE to the project root;
-`collect` echoes the resolved absolute path it wrote.)
-
-`--group` writes the deduped digest to `panel.md`; `--full` writes the faithful
-per-seat concatenation to `panel-full.md` (the recovery artifact). **Read `panel.md`
-once** and carry that ONE digest into 3d — do NOT also carry the raw Task-seat blocks
-into context.
+`--group` writes the deduped digest (`panel.md`); `--full` the faithful
+per-seat concatenation (`panel-full.md`, the recovery artifact). **Read
+`panel.md` once** and carry that ONE digest into 3d; do NOT also carry raw
+Task-seat blocks into context.
 
 #### 3d — Synthesize the verdict
 
-Read the ONE grouped `panel.md` digest — it already folds the WHOLE panel — and emit
-the existing verdict format. Read all four sections: **VERDICTS** (roster of every
-seat that ran + tally — reference seats by LABEL, never positionally), **CRITERIA
-MATRIX** (per-criterion PASS/FAIL/`?`), **GROUPED FINDINGS** (each finding once with an
-`M/N` agreement count where N = findings-parsed seats; a **`⚠ SINGLETON`** lone dissent
-is weighed ON ITS MERITS, never dismissed for being one seat), and **RAW / UNPARSED
-SEATS** (any seat that didn't parse even after repair, verbatim — **still read
-these**). You MUST use one of these verdicts (emitting APPROVED expects the
-digest's quorum header to read MET, or to be absent; a NOT MET digest can still
-complete, but only on the user's explicit `--force` (see Step 4), and otherwise
-renders the could-not-verify-quorum outcome below):
+Read all four `panel.md` sections: **VERDICTS** (roster + tally; reference
+seats by LABEL, never positionally), **CRITERIA MATRIX**, **GROUPED FINDINGS**
+(each finding once, `M/N` agreement count; a **`⚠ SINGLETON`** lone dissent is
+weighed ON ITS MERITS, never dismissed for being one seat), and **RAW /
+UNPARSED SEATS** (**still read these**). You MUST use one of these verdicts:
 
 **APPROVED** - Plan is ready for execution. No blocking issues.
 
@@ -492,35 +364,22 @@ renders the could-not-verify-quorum outcome below):
 - [BLOCKING] - Must fix before execution (unclear steps, missing info, wrong approach)
 - [MINOR] - Nice to have but not required (style, small clarifications, suggestions)
 
-Example:
-> VERDICT: REVISE
-> - [BLOCKING] Step 3 doesn't specify which API endpoint to call
-> - [BLOCKING] Missing error handling for network failures
-> - [MINOR] Could add a diagram for clarity
-> - [MINOR] Consider mentioning rollback strategy
-
 **REJECT** - Fundamental problems requiring complete replanning.
 
-**The quorum header is advisory.** A run-scoped grouped digest opens with a
-`PANEL:` header. When it reads `NOT MET`, too few usable seats reviewed this
-content for a clean sign-off, and a completing `record-verdict` will exit 3
-rather than certify it (see Step 4). That is NOT a hard stop: it means the loop
-cannot certify WITHOUT the user's explicit `--force`. Report the outcome as
-`could not verify quorum without the user's explicit --force: <usable>/<N>
-usable (threshold from the header)`, name the seats that are pending or failed,
-and either relaunch the pending seats (same `--run-id`; a landed valid seat is
-never overwritten), surface the shortfall to the user, or complete with
-`--force` ONLY on the user's explicit say-so. This gates only how much SUCCESS
-certification requires: a failed seat still never aborts the review (never-choke
-below is unchanged), and the digest header is the authority on the count. Zero
-usable seats stays the all-failed branch below.
+**The quorum header is advisory.** The digest opens with a `PANEL:` header; a
+completing verdict expects MET or absent (a flat/legacy digest carries no
+quorum gate). On NOT MET a completing `record-verdict` exits 3 rather than
+certify: report `could not verify quorum without the user's explicit --force:
+<usable>/<N> usable (threshold from the header)`, name the pending/failed
+seats, and relaunch pending seats (same `--run-id`), surface the shortfall, or
+complete with `--force` ONLY on the user's explicit say-so. Never-choke is
+unchanged; zero usable seats is the all-failed branch below.
 
 **Never choke — synthesize from whatever succeeded.** A failed/skipped seat
-(subprocess OR Task) NEVER aborts the review and is NEVER silently dropped: synthesize
-the verdict from the seats that produced usable output, and render each failed/skipped
-seat's block with its diagnostic alongside the successful ones. ONLY when **zero**
-seats produced usable output do you skip the verdict and instead report: `could not
-review — all seats failed: <per-seat diagnostics>`.
+NEVER aborts the review and is NEVER silently dropped: render each failure's
+diagnostic alongside the successful seats. ONLY when **zero** seats produced
+usable output, skip the verdict and report: `could not review — all seats
+failed: <per-seat diagnostics>`.
 
 ### Step 4: Handle Verdict
 
@@ -528,119 +387,84 @@ review — all seats failed: <per-seat diagnostics>`.
 |---------|--------|
 | **APPROVED** (quorum MET) | `record-verdict mt APPROVED`, then complete the loop (see below) |
 | **REVISE with any [BLOCKING]** | `record-verdict mt REVISE`, then update the plan to address blocking issues, then re-review |
-| **REVISE with only [MINOR]** (quorum MET) | `record-verdict mt REVISE --minor-only`, then complete the loop (minor issues are acceptable) |
+| **REVISE with only [MINOR]** (quorum MET) | `record-verdict mt REVISE --minor-only`, then complete the loop |
 | **REJECT** | `record-verdict mt REJECT`, then fundamentally rethink approach, create new plan, re-review |
-| **Quorum NOT MET** (the digest's `PANEL:` header), or any completion advisory (plan drift, pointer divergence) | A completing `record-verdict` exits 3 and records NOTHING: the loop CANNOT certify WITHOUT the user's explicit `--force`. Surface the advisory to the user (below); relaunch the pending seats (same `--run-id`), or complete with `--force` ONLY on the user's say-so |
-| **Zero usable seats** (the all-failed branch of 3d) | `record-verdict mt FAILED`, then report the per-seat diagnostics |
+| **Quorum NOT MET**, or any completion advisory (plan drift, pointer divergence) | A completing `record-verdict` exits 3 and records NOTHING: the loop CANNOT certify WITHOUT the user's explicit `--force`. Surface the advisory; relaunch pending seats (same `--run-id`), or complete with `--force` ONLY on the user's say-so |
+| **Zero usable seats** (all-failed branch of 3d) | `record-verdict mt FAILED`, then report the per-seat diagnostics |
 
-The completing rows expect the digest's quorum header to read MET (or to be
-absent: a flat/legacy digest with no `PANEL:` header carries no quorum gate); a
-NOT MET header does not block completion outright, it routes through the exit-3
-advisory flow below (the user's `--force` decides).
-
-**Record the verdict through the engine before acting on it.** The loop's state
-is what completion checks, so an unrecorded verdict leaves the loop unfinishable:
+**Record the verdict through the engine before acting on it** (an unrecorded
+verdict leaves the loop unfinishable):
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" state record-verdict mt <APPROVED|REVISE|REJECT|FAILED> [--minor-only] --session-id <session-id>
 ```
 
-`--minor-only` is the REVISE-with-nothing-blocking row: it completes the loop, so
-it faces the same checks APPROVED does. The engine re-checks what this table
-already told you (at least one usable seat for any non-FAILED verdict, plus
-quorum, run-pointer agreement, and plan drift for a completing one). It exits
-one of three ways:
+`--minor-only` completes the loop, so it faces the same checks APPROVED does.
+The engine re-checks this table's conditions itself and exits:
 
-- **Exit 0**: recorded (a completing verdict printed `phase=done`): complete the loop.
-- **Exit 3**: a completion advisory tripped (quorum short, zero usable seats on
-  a plain REVISE/REJECT, the plan drifted
-  since the panel, the run pointer moved, the target no longer resolves): NOTHING
-  was recorded and the engine printed every tripped condition. **Do NOT re-run
-  with `--force` on your own.** Surface the advisory text to the user, state
-  plainly what tripped and that `--force` would record the completion over it,
-  and WAIT for the user's explicit decision. Only if the user says to proceed do
-  you re-run the SAME call with `--force` appended (it records and stamps
-  `last_verdict_overrides`). If the user says no, do not complete: re-run the
-  pending seats (same `--run-id`), re-prep, or stop, per what the user wants.
-  **`--force` is the HUMAN's authorization, carried out by you on their say-so;
-  you never originate it.** That is the whole reason the check is
-  advisory-with-a-human rather than a silent auto-pass.
+- **Exit 0**: recorded (a completing verdict printed `phase=done`): complete
+  the loop.
+- **Exit 3**: a completion advisory tripped; NOTHING recorded, every tripped
+  condition printed. **Do NOT re-run with `--force` on your own.** Surface the
+  advisory, state that `--force` would record over it, WAIT for the user. Only
+  on their say-so re-run the SAME call with `--force` (records and stamps
+  `last_verdict_overrides`). **`--force` is the HUMAN's authorization, carried
+  out by you; you never originate it.**
 - **Exit 2**: a hard error (wrong phase, no run identity, FAILED over a usable
   panel): a real contradiction to FIX, never forced.
 
-REVISE and REJECT also advance `revision_round`, which is the loop's only honest
-iteration count. FAILED is only for a panel that returned nothing usable; the
-SECOND consecutive FAILED ends the loop itself (it stamps the state inactive, so
-no deactivate follows) rather than re-prepping a panel that is not returning.
+REVISE and REJECT advance `revision_round`, the loop's only honest iteration
+count. FAILED is only for a panel that returned nothing usable; a SECOND
+consecutive FAILED ends the loop itself (stamps it inactive; no deactivate
+follows).
 
 **On REVISE, diagnose the CLASS before revising.** When several findings share
-one structural cause (the same property violated at different sites, a value
-judged in the wrong place, one invariant enforced by two mechanisms), the
-revision instruction must name that shared cause and change the STRUCTURE once,
-re-deriving the findings from it. Patching each finding where it was reported
-mints new findings every round: each patch adds reviewable surface carrying the
-same underlying flaw, so the round count climbs while the design stands still.
-Two other convergence signals worth acting on: a round whose finding count goes
-UP on a more-specified plan usually means the review is now polishing prose,
-not design. That is a signal to SURFACE TO THE USER, never a self-granted exit:
-report the trajectory and ask whether to cap the loop, and a cap still requires
-every open BLOCKING to be either fixed or moved to an explicit deferred list
-the user approved (the loop itself ends only on a completing verdict
-(APPROVED/minor-only), a second consecutive FAILED, a safety trip, or the user's
-cancellation, exactly as the verdict table says). And a
-lone dissenting BLOCKING is high-signal but must be VERIFIED against the code
-before it forces a revision.
+one structural cause, the revision must name it and change the STRUCTURE once,
+re-deriving the findings from it; patching each finding where it was reported
+mints new findings every round. A round whose finding count goes UP on a
+more-specified plan usually means the review is polishing prose, not design:
+SURFACE that trajectory to the user and ask whether to cap the loop (never a
+self-granted exit; a cap still requires every open BLOCKING fixed or moved to
+a user-approved deferred list). A lone dissenting BLOCKING is high-signal but
+must be VERIFIED before it forces a revision.
 
 ## Completing the Loop
 
-When the panel's verdict is **APPROVED** (or REVISE with only [MINOR] issues)
-AND `record-verdict` recorded it: exit 0 on a met/absent quorum header, or a
-`--force` the user explicitly authorized over a NOT MET header or another
-completion advisory (see Step 4):
+Step 4 already recorded the verdict (the ONLY place it is recorded;
+`record-verdict` refuses from `phase=done`), and `phase=done` is what the
+deactivate below requires: a loop with no completing verdict on record is
+refused there.
 
-Step 4 already recorded the verdict, and that is the ONLY place it is recorded:
-`record-verdict` refuses from `phase=done`, so a second call here would fail. Its
-success printed `phase=done`, which is the phase the deactivate below requires: a
-loop with no completing verdict on record is refused there, because a plain
-deactivate is otherwise indistinguishable from an unreviewed finish.
-
-1. **Deactivate the loop** — pass the SAME `--session-id` the init used (the
-   `[Session ID: …]` value, as a literal, NOT a `${CLAUDE_SESSION_ID}` shell
-   expansion), so deactivate targets the exact session-scoped state file that init
-   wrote (otherwise the scoped file stays active and keeps blocking Stop):
+1. **Deactivate the loop**, passing the SAME `--session-id` the init used
+   (otherwise the scoped state file stays active and keeps blocking Stop):
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" state deactivate mt --reason "Panel approved" --session-id <session-id>
 ```
-   When the completion required `--force` (a NOT MET panel the user authorized),
-   the `--reason` must name that instead: `--reason "Completion forced over
-   advisories"`, matching the reason the Stop-hook nudge already prints for a
-   forced completion; a clean completion keeps `"Panel approved"`.
+   When the completion required `--force`, the `--reason` must name that:
+   `--reason "Completion forced over advisories"` (matching the Stop-hook
+   nudge); a clean completion keeps `"Panel approved"`.
 
-2. **Present the final plan to the user:**
-   - Read the plan file
-   - Summarize what was planned
-   - Note what the loop cost against its budget (stop fires and elapsed vs the
-     deadline, as `crew state show mt` reports them). The only honest iteration
-     count is `revision_round`, which `crew state record-verdict` advances; do not
-     claim one from anywhere else.
-   - Ask if they want to proceed with `/crew:execute`
+2. **Present the final plan to the user:** read the plan file, summarize it,
+   note the loop's cost against its budget (stop fires and elapsed vs the
+   deadline, as `crew state show mt` reports; the only honest iteration count
+   is `revision_round`), and ask if they want to proceed with `/crew:execute`.
 
 ## Exit Conditions
 
-- Panel verdict is **APPROVED**, with the digest's quorum header MET or absent
-  (or, over a NOT MET header, recorded on the user's explicit `--force`)
-- Panel verdict is **REVISE** but ALL issues are marked [MINOR], with the
-  digest's quorum header MET or absent (over a NOT MET header the loop completes
-  only on the user's explicit `--force`; otherwise relaunch pending seats or
-  surface the shortfall instead)
-- A **SECOND consecutive `FAILED`** verdict: the loop deactivates terminally in
-  place (`exit_kind=review_failed`; a single FAILED does not end it)
-- A hook-owned safety limit trips: the stop-fire cap or the wall-clock deadline
-  (both force-exit the loop; see `scripts/CLAUDE.md`)
+- **APPROVED**, quorum MET or absent (or recorded on the user's explicit
+  `--force` over a NOT MET header)
+- **REVISE** with ALL issues [MINOR], same quorum rule
+- A **SECOND consecutive `FAILED`** verdict: terminal in-place deactivation
+  (`exit_kind=review_failed`); a single FAILED does not end it
+- A hook-owned safety limit trips (stop-fire cap or wall-clock deadline; see
+  `scripts/CLAUDE.md`)
 - User runs `/crew:cancel-measure-twice`
 
 ---
 
-**If you provided a design doc:** I'll read it and proceed directly to plan generation and the review loop — no interview needed.
+**If you provided a design doc:** I'll read it and proceed directly to plan
+generation and the review loop — no interview needed.
 
-**Otherwise:** Start with Phase 1 — I'll ask 2-3 clarifying questions about your task. When you're ready, proceed to Phase 2 (plan generation) and Phase 3 (review loop).
+**Otherwise:** Start with Phase 1 — I'll ask 2-3 clarifying questions about
+your task. When you're ready, proceed to Phase 2 (plan generation) and Phase 3
+(review loop).
