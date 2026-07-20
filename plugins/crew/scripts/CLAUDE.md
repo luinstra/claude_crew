@@ -506,13 +506,18 @@ Key contracts (do NOT regress):
   carries ONLY the machine payload; EVERY note/error goes to stderr** (init.md parses
   stdout).
   - **`doctor`** iterates `known_seat_names()` → `get_provider(n).is_available()` into a
-    `{subprocess, task}` JSON map (the `task` block in `sorted(seats.task_seats())` order →
-    deterministic). NON-billable: the PATH-check seats' `is_available()` are pure `shutil.which`;
+    `{session_segment, subprocess, task}` JSON map (the `task` block in
+    `sorted(seats.task_seats())` order → deterministic; `session_segment` is the top-level
+    sanitized segment for the given `--session-id`, else `""` (empty string, the
+    flat/sessionless layout, never JSON `null`)). NON-billable: the
+    PATH-check seats' `is_available()` are pure `shutil.which`;
     Cursor's local `agent --version` identity probe runs EXACTLY ONCE and is fanned to
     every `cursor-*` seat (not 6×). Takes `--session-id` (writes
-    `.crew/reviews/<id>/doctor.json`) and `-o` (override path; `-o` wins over the session
-    path); with NEITHER, no file is written. The JSON is ALWAYS printed to stdout (no
-    `--json` flag — output is always JSON).
+    `doctor.json` under the reviews dir) and `-o` (override path; `-o` wins over the session
+    path); with NEITHER, no file is written. The on-disk reviews dir uses the SANITIZED
+    segment (like the review-prep contract): for a real UUID it equals the id, a hostile id
+    collapses, so the written path is `.crew/reviews/<session_segment>/doctor.json`. The JSON
+    is ALWAYS printed to stdout (no `--json` flag — output is always JSON).
   - **`scaffold-config`** renders a COMMENTED starter config emitting ONLY loader-read
     keys (`reasoning_effort` under a per-codex-seat table, e.g. `[seats.codex]`, `print_timeout` under `[seats.agy]`,
     cost-safe defaults, premium seats `available=false`). It consumes `doctor`'s JSON via

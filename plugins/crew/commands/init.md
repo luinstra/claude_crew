@@ -57,13 +57,18 @@ value, NEVER a `${CLAUDE_SESSION_ID}` shell expansion:
 ```
 
 `doctor` ALWAYS prints the detection JSON to **stdout** — that IS the machine payload,
-so consume it from there to build the table below. `doctor` ALSO writes that JSON to an
-ANCHORED file the engine resolves to the project root (`<project-root>/.crew/reviews/
-<session-id>/doctor.json`), which Step 4 feeds to `scaffold-config --detection` by its
-ABSOLUTE path. Never build a CWD-RELATIVE `.crew/reviews/<session-id>/doctor.json` to
-read or pass: the shell's cwd need not equal the project root, so a bare relative path
-can miss the file. For the table here, stdout is simplest and always correct; for Step
-4's `--detection`, use the absolute anchored path.
+so consume it from there to build the table below. Its stdout JSON carries a
+`session_segment` field (the sanitized dir stem the engine built the write path from;
+for a real UUID it equals the raw id): read it and substitute it for the
+`<session_segment>` token in the `--detection` paths below (it is the dir the engine
+actually wrote to, so reconstruct from THAT, never the raw session id). `doctor` ALSO
+writes that JSON to an ANCHORED file the engine resolves to the project root
+(`<project-root>/.crew/reviews/<session_segment>/doctor.json`), which Step 4 feeds to
+`scaffold-config --detection` by its ABSOLUTE path. Never build a CWD-RELATIVE
+`.crew/reviews/<session_segment>/doctor.json` to read or pass: the shell's cwd need not
+equal the project root, so a bare relative path can miss the file. For the table here,
+stdout is simplest and always correct; for Step 4's `--detection`, use the absolute
+anchored path.
 
 **Guard the result.** If the `doctor` invocation exits NONZERO, or its stdout did not
 carry parseable JSON, SURFACE the error and STOP. Do **NOT** proceed to
@@ -117,8 +122,9 @@ Ask ONLY what detection can't infer. Keep it short:
 Call `scaffold-config` through the dispatcher. Pass `--repo` ONLY if step 1 saw it.
 `scaffold-config --detection` reads a FILE, and `doctor` (step 2) ALREADY wrote one:
 run with `--session-id`, it persists the detection JSON to an ANCHORED
-`<project-root>/.crew/reviews/<session-id>/doctor.json` (the engine resolves that root
-from `CLAUDE_PROJECT_DIR`, not the shell cwd). So pass THAT anchored file straight to
+`<project-root>/.crew/reviews/<session_segment>/doctor.json` (the engine resolves that
+root from `CLAUDE_PROJECT_DIR`, not the shell cwd; `<session_segment>` is the sanitized
+stem from doctor's stdout `session_segment`). So pass THAT anchored file straight to
 `--detection`: no orchestrator spill, no cwd-relative reconstruct. The `--detection`
 path uses the SHELL EXPANSION `"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/..."` (the shell
 resolves it at runtime, so a project root containing `$(…)`, backticks, `$VAR`, or a
@@ -128,7 +134,7 @@ on the first pass (so it writes the resolved target) and **NO `--force`** (so an
 target diverts to `<target>.new`):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" scaffold-config --detection "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session-id>/doctor.json" --default-panel <panel> --dispatch-seat <seat>
+"${CLAUDE_PLUGIN_ROOT}/crew" scaffold-config --detection "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session_segment>/doctor.json" --default-panel <panel> --dispatch-seat <seat>
 ```
 
 (Add `--repo` first when the user asked for it; append each `--add-seat <name>` /
@@ -155,7 +161,7 @@ command -v diff && diff -u <target> <target>.new
   appended (the engine owns the write + the clobber — no shell `mv`):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" scaffold-config --force --detection "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session-id>/doctor.json" --default-panel <panel> --dispatch-seat <seat>
+"${CLAUDE_PLUGIN_ROOT}/crew" scaffold-config --force --detection "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session_segment>/doctor.json" --default-panel <panel> --dispatch-seat <seat>
 ```
 
   (carry the same `--repo` / `--add-seat` / `--disable-seat` flags). If the user declines,

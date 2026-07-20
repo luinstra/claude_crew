@@ -151,8 +151,11 @@ Task(
 
 1. **Write the spill ONCE, before the attempt loop.** Write the PROMPT with the
    sentence `Create todos to track progress.` omitted (leaving the rest of the
-   prompt intact) to `.crew/reviews/<session-id>/executor-task.txt` with the
-   **Write tool** (exact bytes, no shell). (A subprocess seat has no todo list to
+   prompt intact) to the ABSOLUTE anchored path
+   `<project-root>/.crew/reviews/<session-id>/executor-task.txt` with the **Write
+   tool** (exact bytes, no shell; substitute your `CLAUDE_PROJECT_DIR` value for
+   `<project-root>` in the WRITE-tool path, safe as a literal there, and it creates
+   the parent dir). (A subprocess seat has no todo list to
    create.) This ONE file feeds EVERY attempt below; do NOT rewrite or delete it
    between attempts (each retry re-runs the SAME `-f` dispatch and needs it).
 2. **Attempt loop (1 initial run + up to `retries` retries, `retries` is `0..2`).**
@@ -161,7 +164,7 @@ Task(
    tree the panel then reviews.
 
    ```bash
-   "${CLAUDE_PLUGIN_ROOT}/crew" dispatch --seat <executor> --session-id <session-id> -f .crew/reviews/<session-id>/executor-task.txt --json
+   "${CLAUDE_PLUGIN_ROOT}/crew" dispatch --seat <executor> --session-id <session-id> -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session-id>/executor-task.txt" --json
    ```
 
    **Check the PROCESS EXIT STATUS first, before reading any envelope.** The
@@ -227,7 +230,7 @@ Task(
    between them.
 
    ```bash
-   rm -f .crew/reviews/<session-id>/executor-task.txt
+   rm -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session-id>/executor-task.txt"
    ```
 
 Whichever path ran, the round's summary (the Task's returned text, or the

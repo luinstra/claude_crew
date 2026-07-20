@@ -6707,13 +6707,19 @@ def test_dispatch():
           "no index/commit/push/branch mutation in fences", joined)
     check("dispatch.md: --seat appears in NO executed command line (passed only when user names one)",
           "--seat" not in joined, "no --seat in fences", joined)
-    # The prefix is double-quoted so a spaced project root can't split the arg
-    # (`dispatch-"*.json`); the glob still expands. Strip quotes before the check so
-    # the quoted-prefix form reads as the same `dispatch-*.json` glob.
-    check("dispatch.md: no executed line constructs a literal dispatch-<seat>.json (only the glob)",
-          all(("dispatch-" not in l) or ("dispatch-*.json" in l.replace('"', ""))
-              for l in fence_lines),
-          "only dispatch-*.json glob, never dispatch-<seat>.json", joined)
+    # The engine derives and re-announces the envelope path, so no executed fence
+    # constructs a dispatch-<seat>.json path at all (stronger than the old rm-only check).
+    rm_lines = [l for l in fence_lines if l.split()[:1] == ["rm"]]
+    check("dispatch.md: no executed fence references a dispatch-*.json envelope (engine derives + prints it)",
+          all("dispatch-" not in l for l in fence_lines),
+          "no dispatch-*.json in any executed fence", joined)
+    # The surviving spill `rm` (the task file) is ANCHORED to the project dir, never a
+    # bare `.crew/...` that a drifted cwd would miss.
+    spill_rm = [l for l in rm_lines if ".crew/dispatch/" in l]
+    check("dispatch.md: the task-spill rm is anchored to ${CLAUDE_PROJECT_DIR:-$PWD}",
+          bool(spill_rm)
+          and all('"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/dispatch/' in l for l in spill_rm),
+          "anchored task-spill rm", str(spill_rm))
     check("dispatch.md: engine reached via the bare crew dispatcher (dispatch subcommand)",
           '"${CLAUDE_PLUGIN_ROOT}/crew" dispatch' in joined,
           "bare crew dispatch invocation", joined)
@@ -6737,6 +6743,60 @@ def test_dispatch():
         r"(?<=[\s`])/(review|debate|dispatch|execute|build|measure-twice)\b", text)
     check("dispatch.md: all command references use the /crew: prefix",
           not bare and "/crew:" in text, "no bare /command refs", str(bare))
+
+
+def _fence_lines(md_name):
+    # Executed bash-fence lines only (between ```bash and the next ```), prose and
+    # comments dropped — the same extraction the dispatch.md fence check uses.
+    text = (SCRIPT_DIR.parent / "commands" / md_name).read_text(encoding="utf-8")
+    lines, collecting = [], False
+    for line in text.splitlines():
+        st = line.strip()
+        if st.startswith("```bash"):
+            collecting = True
+            continue
+        if st.startswith("```"):
+            collecting = False
+            continue
+        if collecting and st and not st.startswith("#"):
+            lines.append(st)
+    return lines
+
+
+def test_build_md_executor_task_anchoring():
+    log_section("build.md static fence check (executor-task.txt -f/rm anchored)")
+    fence_lines = _fence_lines("build.md")
+    task_lines = [l for l in fence_lines if "executor-task.txt" in l]
+    check("build.md: an executed fence references executor-task.txt (non-vacuous)",
+          bool(task_lines), "at least one executor-task.txt fence", str(fence_lines))
+    # A bare .crew/... spill would miss the tree once the shell cwd drifts, so the
+    # -f dispatch and the rm cleanup both anchor to the project dir.
+    check("build.md: every executor-task.txt fence anchors to ${CLAUDE_PROJECT_DIR:-$PWD}",
+          all('"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/' in l for l in task_lines),
+          "anchored executor-task.txt fences", str(task_lines))
+    # A `.crew/reviews` NOT preceded by the anchor's `}/` is an unanchored spill.
+    bare_spill = [l for l in task_lines
+                  if re.search(r'(?<!\}/)\.crew/reviews/[^"]*executor-task\.txt', l)]
+    check("build.md: no bare .crew/reviews/...executor-task.txt in an executed fence",
+          not bare_spill, "no bare .crew executor-task.txt", str(bare_spill))
+
+
+def test_init_md_detection_fence_anchoring():
+    log_section("init.md static fence check (scaffold-config --detection substitutes + anchors)")
+    fence_lines = _fence_lines("init.md")
+    det_lines = [l for l in fence_lines if "--detection" in l]
+    check("init.md: an executed fence passes scaffold-config --detection (non-vacuous)",
+          bool(det_lines), "at least one --detection fence", str(fence_lines))
+    # The reconstructed path is the whole point of this change: it must use the
+    # sanitized <session_segment> stem, never the raw <session-id> the harness gave.
+    check("init.md: every --detection fence reads reviews/<session_segment> (not raw <session-id>)",
+          all("reviews/<session_segment>" in l and "reviews/<session-id>" not in l
+              for l in det_lines),
+          "session_segment stem, no raw session-id", str(det_lines))
+    check("init.md: every --detection fence anchors to ${CLAUDE_PROJECT_DIR:-$PWD}",
+          all('"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session_segment>/' in l
+              for l in det_lines),
+          "anchored --detection path", str(det_lines))
 
 
 def test_doctor():
@@ -6805,6 +6865,10 @@ def test_doctor():
             check("doctor: task block in sorted task-seat order (deterministic)",
                   list(task.keys()) == sorted(_seats.task_seats()),
                   str(sorted(_seats.task_seats())), str(list(task.keys())))
+            from multiagent import review_runs as _rr  # noqa: E402
+            check("doctor: session_segment == session_segment('SES1') on the plain-id path",
+                  payload.get("session_segment") == _rr.session_segment("SES1"),
+                  _rr.session_segment("SES1"), str(payload.get("session_segment")))
         # stdout carries ONLY JSON (no stray non-JSON line).
         check("doctor stdout is JSON-only (no extra lines)",
               proc.stdout.strip().startswith("{") and proc.stdout.strip().endswith("}"),
@@ -6847,6 +6911,67 @@ def test_doctor():
               not (proj3 / ".crew").exists(), "no .crew dir", "created .crew")
         check("doctor (no session/-o) still prints JSON to stdout",
               proc.stdout.strip().startswith("{"), "JSON on stdout", proc.stdout[:120])
+
+
+def _doctor_isol_env(proj):
+    # Real isolation: PATH is ONLY an empty bin dir, so doctor's availability probes
+    # (all shutil.which on PATH) find NO seat CLI to leak in (session_segment is
+    # seat-independent; a probe result is irrelevant to these assertions). Dropping
+    # the interpreter dir matters: a Python install carrying a seat CLI would
+    # otherwise be visible. cli.py is invoked via sys.executable, not via PATH.
+    empty_bin = Path(proj).parent / "isol-empty-bin"
+    empty_bin.mkdir(exist_ok=True)
+    env = dict(os.environ)
+    env["PATH"] = str(empty_bin)
+    env["CLAUDE_PROJECT_DIR"] = str(proj)
+    env.pop("CLAUDE_SESSION_ID", None)
+    return env
+
+
+def test_doctor_session_segment_hostile_id():
+    log_section("crew doctor (session_segment for a HOSTILE id — the non-vacuous proof)")
+    from multiagent import review_runs as _rr  # noqa: E402
+    raw_id = "../../etc"
+    # Assert against the FUNCTION CALL, never a hardcoded 'etc' literal, so the test
+    # can't rot if the sanitizer's charset ever changes.
+    expected_seg = _rr.session_segment(raw_id)
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        proj = d / "proj"; proj.mkdir()
+        env = _doctor_isol_env(proj)
+        proc = _run_cli(["doctor", "--session-id", raw_id],
+                        env=env, cwd=str(proj), timeout=30)
+        check("doctor hostile id exits 0",
+              proc.returncode == 0, "0", f"{proc.returncode}: {proc.stderr[:200]}")
+        obj = json.loads(proc.stdout)
+        check("doctor session_segment == session_segment(raw id), and NOT the raw id (non-vacuous)",
+              obj.get("session_segment") == expected_seg and obj.get("session_segment") != raw_id,
+              f"{expected_seg!r} != raw id", f"seg={obj.get('session_segment')!r} raw={raw_id!r}")
+        sanitized_file = proj / ".crew" / "reviews" / expected_seg / "doctor.json"
+        check("doctor wrote under the sanitized reviews dir (.crew/reviews/etc/doctor.json)",
+              sanitized_file.is_file(), str(sanitized_file),
+              "present" if sanitized_file.is_file() else "missing")
+        # No traversal escape: an un-sanitized `../../etc` under `<proj>/.crew/reviews`
+        # would resolve to `<proj>/etc/doctor.json` (the .crew-parent's `etc`), so the
+        # negative check must point THERE to be able to fire.
+        check("doctor did NOT write a traversal path outside the project .crew",
+              not (proj / "etc" / "doctor.json").exists(),
+              "no traversal file", "traversal file present")
+
+
+def test_doctor_placeholder_session_exits_2():
+    log_section("crew doctor (placeholder session id exits 2 — the reorder's guard)")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        proj = d / "proj"; proj.mkdir()
+        env = _doctor_isol_env(proj)
+        # A <...>-looking session id must trip the placeholder guard even with no -o.
+        proc = _run_cli(["doctor", "--session-id", "<session-id>"],
+                        env=env, cwd=str(proj), timeout=30)
+        check("doctor placeholder session id exits 2",
+              proc.returncode == 2, "2", str(proc.returncode))
+        check("doctor placeholder prints NOTHING to stdout",
+              proc.stdout.strip() == "", "empty stdout", proc.stdout[:120])
 
 
 def test_probe():
@@ -11909,6 +12034,8 @@ def main():
     test_production_invocation_and_fanout()
     test_run_subcommand()
     test_dispatch()
+    test_build_md_executor_task_anchoring()
+    test_init_md_detection_fence_anchoring()
     test_build_executor()
     test_council_subcommand()
     test_debate_subcommand()
@@ -11939,6 +12066,8 @@ def main():
     test_persist_seat_doc_sync()
     test_roster_doc_sync()
     test_doctor()
+    test_doctor_session_segment_hostile_id()
+    test_doctor_placeholder_session_exits_2()
     test_probe()
     test_scaffold_config()
     test_persist_seat()

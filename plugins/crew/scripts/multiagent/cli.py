@@ -3365,7 +3365,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     Iterates ``known_seat_names()`` → ``get_provider(n).is_available()`` into a
     ``subprocess`` map, then adds a static ``task`` map (the subscription-backed
-    Claude seats, in ``sorted(task_seats())`` order for deterministic JSON).
+    Claude seats, in ``sorted(task_seats())`` order for deterministic JSON), plus a
+    top-level ``session_segment`` (the sanitized reviews-dir stem for the given
+    ``--session-id``, else ``""`` (empty string, the flat/sessionless layout)) so
+    the orchestrator can rebuild the written path.
 
     Availability is probed once per provider KIND, not once per seat: seats of one
     kind share a binary and answer identically, so the first seat's result is
@@ -3376,8 +3379,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     NON-BILLABLE: no metered/network call. stdout carries ONLY the JSON; every
     diagnostic/error goes to stderr. File-write destination follows the D1 matrix
-    (``-o`` wins; else the session path; else no file) — the JSON is ALWAYS
-    printed to stdout regardless.
+    (``-o`` wins; else the session path; else no file): the session path uses the
+    SANITIZED ``session_segment`` (``.crew/reviews/<session_segment>/doctor.json``),
+    and the JSON is ALWAYS printed to stdout regardless.
     """
     subprocess_map: dict[str, dict] = {}
     avail_by_kind: dict[str, tuple[bool, str]] = {}
@@ -3395,8 +3399,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "diag": _TASK_SEAT_DIAGS.get(name, "Claude subscription (in-session)"),
         }
 
+    # Resolved up front: feeds BOTH the emitted session_segment (the sanitized
+    # reviews-dir stem the orchestrator rebuilds paths from) and the session-file
+    # write path below. session_segment() SANITIZES, so an -o run with a placeholder
+    # id emits the sanitized placeholder here; harmless, -o never consumes the field.
+    session_id = _resolve_session_id(args.session_id)
     text = json.dumps(
-        {"subprocess": subprocess_map, "task": task_map},
+        {
+            "subprocess": subprocess_map,
+            "task": task_map,
+            "session_segment": review_runs.session_segment(session_id),
+        },
         ensure_ascii=False, indent=2,
     )
 
@@ -3405,7 +3418,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if out_path:
         out_path = os.path.expanduser(out_path)
     else:
-        session_id = _resolve_session_id(args.session_id)
         if "<" in session_id or ">" in session_id:
             print(
                 f"error: session id looks like an unsubstituted placeholder "
@@ -4926,8 +4938,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor.add_argument(
         "--session-id", dest="session_id", default=None,
-        help="write the JSON to .crew/reviews/<session-id>/doctor.json (default: "
-             "CLAUDE_SESSION_ID env). The JSON is ALWAYS also printed to stdout.",
+        help="write the JSON to .crew/reviews/<session_segment>/doctor.json using the "
+             "SANITIZED segment, and emit that segment as top-level session_segment "
+             "(with no session id the field is \"\" (empty string, the flat/sessionless "
+             "layout), not null; default: CLAUDE_SESSION_ID env). The JSON is ALWAYS "
+             "also printed to stdout.",
     )
     doctor.add_argument(
         "-o", "--out", default=None,

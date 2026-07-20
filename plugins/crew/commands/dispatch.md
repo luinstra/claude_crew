@@ -52,19 +52,6 @@ pre-run).
 
 ## Step 3 — Invoke the engine (write-mode dispatch)
 
-**Pre-run hygiene.** Remove any stale dispatch envelope from an earlier run in the
-reused session dir so it can't be mistaken for this run's output (the engine
-re-announces the exact path it writes, so this is hygiene, not load-bearing). The
-`rm` recipe uses the SHELL EXPANSION `"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/..."` (the
-shell resolves it at runtime, so a project root containing `$(…)`, backticks,
-`$VAR`, or a quote cannot execute or mangle the command): the engine writes
-`dispatch-<seat>.json` under its anchored `crew_base()/.crew/reviews/<session-id>/`,
-so a bare `.crew/...` `rm` run from a drifted cwd would miss it:
-
-```bash
-rm -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session-id>/dispatch-"*.json
-```
-
 **ALWAYS spill the task to a file and pass `-f`, NEVER positional.** Write the raw
 task text to the ABSOLUTE anchored path
 `<project-root>/.crew/dispatch/<session-id>-task.txt` with the **Write tool** (which
@@ -101,7 +88,7 @@ status. Doing it here (not at the end) means EVERY exit path
 sweeps it, including the exit-2 STOP in step 4 that returns before the report:
 
 ```bash
-rm -f .crew/dispatch/<session-id>-task.txt
+rm -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/dispatch/<session-id>-task.txt"
 ```
 
 ## Step 4 — Check exit status, then read the envelope
