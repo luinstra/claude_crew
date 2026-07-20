@@ -180,6 +180,12 @@ class AgyProvider(Provider):
     # only way it can. The cwd pin below still applies in write mode.
     supports_workspace_write = True
 
+    # The dispatch-options seam exists for agy with NO keys yet: an empty dict
+    # declared EXPLICITLY on this class (never inherited from the ABC's shared
+    # mutable default), so a configured [dispatch.agy] key warns at the config
+    # getter and run() ignores the arg.
+    DISPATCH_OPTIONS: dict = {}
+
     def __init__(
         self,
         name: str = "agy",
@@ -224,7 +230,11 @@ class AgyProvider(Provider):
         sandbox: str = "read-only",
         model: str | None = None,
         timeout: int = 300,
+        dispatch_options: dict | None = None,
     ) -> ProviderResult:
+        # dispatch_options: accepted for Provider-ABC parity and IGNORED: agy
+        # declares no dispatch options (a configured [dispatch.agy] key already
+        # warned at the config getter), so the argv below never varies with it.
         start = time.monotonic()
         resolved_model = self._resolved_model(model)
 

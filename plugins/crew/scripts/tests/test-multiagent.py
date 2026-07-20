@@ -5949,7 +5949,7 @@ def _run_dispatch(repo, bins, extra_args, *, session=None, project_dir=None,
 def _dispatch_ns(**kw):
     import argparse as _ap
     base = dict(seat=None, task=None, file=None, model=None, timeout=None,
-                json=False, out=None, session_id=None)
+                json=False, out=None, session_id=None, options=False)
     base.update(kw)
     return _ap.Namespace(**base)
 
@@ -6743,6 +6743,424 @@ def test_dispatch():
         r"(?<=[\s`])/(review|debate|dispatch|execute|build|measure-twice)\b", text)
     check("dispatch.md: all command references use the /crew: prefix",
           not bare and "/crew:" in text, "no bare /command refs", str(bare))
+
+
+def test_dispatch_options():
+    log_section("dispatch options — declarations (parity, explicitness, str/bool only)")
+    from multiagent import cli, config, seats as _seats
+    from multiagent.providers import Provider, _provider_classes, dispatch_options_by_kind
+    from multiagent.providers.cursor import CursorProvider
+    import io, contextlib
+    from io import StringIO
+
+    # --- declarations: registry parity + per-class explicitness + type set ----
+    by_kind = dispatch_options_by_kind()
+    exec_kinds = {k for k, v in _seats.PROVIDER_KINDS.items() if v.has_executor}
+    check("dispatch_options_by_kind() keys == executor-bearing PROVIDER_KINDS (parity)",
+          set(by_kind) == exec_kinds, str(sorted(exec_kinds)), str(sorted(by_kind)))
+    # Checked classes derive from the same registry pairing dispatch_options_by_kind
+    # reads (its parity with executor-bearing PROVIDER_KINDS is asserted above), so a
+    # future provider cannot dodge this check via a stale hardcoded class list and
+    # silently inherit the ABC's shared empty dict.
+    for _kind, (klass, _tunes) in sorted(_provider_classes().items()):
+        check(f"{klass.__name__} declares DISPATCH_OPTIONS on its OWN class (not the shared ABC default)",
+              "DISPATCH_OPTIONS" in klass.__dict__
+              and klass.__dict__["DISPATCH_OPTIONS"] is not Provider.DISPATCH_OPTIONS,
+              "own class declaration", str(klass.__dict__.get("DISPATCH_OPTIONS")))
+    check("agy declares an EMPTY dict (seam exists, no keys yet)",
+          by_kind["agy"] == {}, "{}", str(by_kind["agy"]))
+    bad_types = [(k, key, spec[0]) for k, opts in by_kind.items()
+                 for key, spec in opts.items() if spec[0] not in (str, bool)]
+    check("every declared DISPATCH_OPTIONS type is str or bool (the only supported types)",
+          not bad_types, "str/bool only", str(bad_types))
+    bad_help = [(k, key) for k, opts in by_kind.items() for key, spec in opts.items()
+                if not (isinstance(spec, tuple) and len(spec) == 2
+                        and isinstance(spec[1], str) and spec[1].strip())]
+    check("every DISPATCH_OPTIONS entry is a (type, non-empty help) pair",
+          not bad_help, "(type, help) pairs", str(bad_help))
+    check("codex declares 'profile'; cursor declares 'force' + 'approve_mcps'",
+          set(by_kind["codex"]) == {"profile"}
+          and set(by_kind["cursor"]) == {"force", "approve_mcps"},
+          "declared key sets", str({k: sorted(v) for k, v in by_kind.items()}))
+
+    # --- config getter: validation, warn grammars, per-key union merge --------
+    log_section("dispatch options — config getter (validation, warns, merge)")
+
+    def _opts(kind, *, project=None, glob=None):
+        """dispatch_provider_options(kind) under isolated config layers ->
+        (result, stderr_text, warned_keys)."""
+        with crew_config(project=project, glob=glob):
+            err = StringIO()
+            with contextlib.redirect_stderr(err):
+                res = config.dispatch_provider_options(kind)
+            warned = set(config._warned)
+        return res, err.getvalue(), warned
+
+    res, err, _ = _opts("codex", project='[dispatch.codex]\nprofile = "p1"\n')
+    check("repo [dispatch.codex] profile='p1' -> {'profile': 'p1'} (no warns)",
+          res == {"profile": "p1"} and not err, "{'profile': 'p1'}", f"{res} err={err!r}")
+
+    res, err, _ = _opts("codex",
+                        project='[dispatch.codex]\nprofile = "r"\n',
+                        glob='[dispatch.codex]\nprofile = "g"\n')
+    check("precedence: repo profile beats global", res == {"profile": "r"},
+          "{'profile': 'r'}", str(res))
+
+    res, err, _ = _opts("cursor",
+                        project='[dispatch.cursor]\nforce = true\n',
+                        glob='[dispatch.cursor]\napprove_mcps = true\n')
+    check("cross-key UNION: repo force + global approve_mcps -> BOTH present (not whole-table replace)",
+          res == {"force": True, "approve_mcps": True},
+          "{'force': True, 'approve_mcps': True}", str(res))
+
+    res, err, _ = _opts("cursor",
+                        project='[dispatch.cursor]\nforce = false\n',
+                        glob='[dispatch.cursor]\nforce = true\n')
+    check("valid-falsy precedence: repo force=false beats global true (presence-based, not truthiness)",
+          res == {"force": False}, "{'force': False}", str(res))
+
+    res, err, _ = _opts("codex",
+                        project='[dispatch.codex]\nprofile = 3\n',
+                        glob='[dispatch.codex]\nprofile = "g"\n')
+    check("layer fallback: wrong-typed repo profile drops THAT layer's key, global survives",
+          res == {"profile": "g"} and "non-empty string" in err,
+          "{'profile': 'g'} + 'non-empty string' warn", f"{res} err={err!r}")
+
+    res, err, _ = _opts("codex", project='[dispatch.codex]\nprofile = "   "\n')
+    check("whitespace-only profile dropped with a 'non-empty string' warn",
+          res == {} and "non-empty string" in err, "{} + warn", f"{res} err={err!r}")
+
+    res, err, _ = _opts("codex", project='[dispatch.codex]\nfrobnicate = 1\n')
+    check("unknown key dropped; warn names the valid key set ('profile')",
+          res == {} and "frobnicate" in err and "profile" in err,
+          "{} + warn naming profile", f"{res} err={err!r}")
+
+    res, err, _ = _opts("codex", project='[dispatch.codx]\nprofile = "x"\n')
+    check("unknown table [dispatch.codx] warns: keyed by provider kind, names the kinds",
+          res == {} and "provider kind" in err and "agy, codex, cursor" in err,
+          "kind-not-seat warn naming kinds", f"{res} err={err!r}")
+
+    res, err, _ = _opts("codex", project='[dispatch.codex-luna]\nprofile = "x"\n')
+    check("seat-name table [dispatch.codex-luna] warns: keyed by kind, NOT seat name",
+          res == {} and "not seat name" in err and "agy, codex, cursor" in err,
+          "kind-not-seat warn", f"{res} err={err!r}")
+
+    res, err, _ = _opts("cursor", project='[dispatch]\ncodex = "oops"\n')
+    check("scalar junk under [dispatch] (codex = 'oops') warns and is dropped",
+          res == {} and "[dispatch].codex" in err, "{} + warn", f"{res} err={err!r}")
+
+    # Non-table [dispatch] itself: root grammar, one owner, other layer applies,
+    # and dispatch_seat() stays silently None for that layer (no double warn).
+    with crew_config(project='dispatch = "oops"\n',
+                     glob='[dispatch.codex]\nprofile = "g"\n'):
+        err_io = StringIO()
+        with contextlib.redirect_stderr(err_io):
+            res = config.dispatch_provider_options("codex")
+            seat_res = config.dispatch_seat()
+        warned = set(config._warned)
+        err = err_io.getvalue()
+    check("non-table [dispatch] in repo: root warn, layer contributes nothing, global applies",
+          res == {"profile": "g"} and "dispatch_options_root:repo" in warned,
+          "{'profile': 'g'} + root warn key", f"{res} warned={warned}")
+    check("non-table [dispatch]: dispatch_seat() stays silently None (options getter owns the warn)",
+          seat_res is None and not any(k.startswith("dispatch_seat") for k in warned),
+          "None, no dispatch_seat warn", f"{seat_res} warned={warned}")
+
+    # Warn-key distinctness: a table-level and a key-level warn in ONE run both fire.
+    with crew_config(project='[dispatch.codx]\nx = 1\n\n[dispatch.codex]\nfrobnicate = 1\n'):
+        err_io = StringIO()
+        with contextlib.redirect_stderr(err_io):
+            config.dispatch_provider_options("codex")
+        warned = set(config._warned)
+    check("distinct grammars: table-level AND key-level warns both recorded in one run",
+          "dispatch_options_table:repo:codx" in warned
+          and "dispatch_options:repo:codex:frobnicate" in warned,
+          "both warn keys present", str(warned))
+
+    # Coexistence with [dispatch].seat: both getters read their own keys, no cross-warn.
+    with crew_config(project='[dispatch]\nseat = "codex"\n\n[dispatch.codex]\nprofile = "x"\n'):
+        err_io = StringIO()
+        with contextlib.redirect_stderr(err_io):
+            seat_res = config.dispatch_seat()
+            res = config.dispatch_provider_options("codex")
+        err = err_io.getvalue()
+    check("coexistence: [dispatch].seat AND [dispatch.codex] resolve side by side, no warns",
+          seat_res == "codex" and res == {"profile": "x"} and not err
+          and "seat" not in err,
+          "seat=codex + {'profile': 'x'}, silent", f"{seat_res} {res} err={err!r}")
+
+    res, err, _ = _opts("cursor", project='[dispatch.cursor]\nforce = true\n')
+    check("cursor force=true -> {'force': True}", res == {"force": True},
+          "{'force': True}", str(res))
+    res, err, _ = _opts("cursor", project='[dispatch.cursor]\nforce = "yes"\n')
+    check("cursor force='yes' dropped; warn names 'boolean'",
+          res == {} and "boolean" in err, "{} + boolean warn", f"{res} err={err!r}")
+
+    res, err, _ = _opts("agy", project='[dispatch.agy]\nanything = true\n')
+    check("agy: any [dispatch.agy] key warns 'no dispatch options' and returns {}",
+          res == {} and "no dispatch options" in err, "{} + warn", f"{res} err={err!r}")
+
+    res, err, warned = _opts("no-such-kind", project='[dispatch.codx]\nx = 1\n')
+    check("unknown kind -> {} SILENTLY: no warn, no hygiene scan (defensive contract)",
+          res == {} and not err
+          and not any(k.startswith("dispatch_options") for k in warned),
+          "{} silent", f"{res} err={err!r} warned={warned}")
+
+    res, err, _ = _opts("codex", project=None, glob=None)
+    check("nothing configured -> {}", res == {} and not err, "{}", f"{res} err={err!r}")
+
+    # --- provider argv gating --------------------------------------------------
+    log_section("dispatch options — provider argv gating (write-only, byte-identical read)")
+
+    def _mask_o(argv):
+        # codex's -o value is a fresh mkstemp path per run: mask it so two runs
+        # of the same shape compare list-equal.
+        out = list(argv)
+        for i, a in enumerate(out):
+            if a == "-o" and i + 1 < len(out):
+                out[i + 1] = "<TMP>"
+        return out
+
+    def _codex_cap_body(cap):
+        return (
+            "import sys, json\n"
+            "a = sys.argv[1:]\n"
+            "out = None\n"
+            "for i, x in enumerate(a):\n"
+            "    if x == '-o':\n"
+            "        out = a[i + 1]\n"
+            "sys.stdin.read()\n"
+            f"json.dump({{'args': a}}, open({str(cap)!r}, 'w'))\n"
+            "open(out, 'w').write('OK')\n"
+        )
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        cap = d / "cap.json"
+        make_fake_bin(d, "codex", _codex_cap_body(cap))
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = str(d) + os.pathsep + old_path
+        try:
+            prov = CodexProvider()
+            prov.run("p", sandbox="workspace-write", timeout=30,
+                     dispatch_options={"profile": "crew-dispatch"})
+            ww_opts = json.loads(cap.read_text())["args"]
+            prov.run("p", sandbox="workspace-write", timeout=30)
+            ww_plain = json.loads(cap.read_text())["args"]
+            prov.run("p", sandbox="read-only", timeout=30,
+                     dispatch_options={"profile": "crew-dispatch"})
+            ro_opts = json.loads(cap.read_text())["args"]
+            prov.run("p", sandbox="read-only", timeout=30)
+            ro_plain = json.loads(cap.read_text())["args"]
+        finally:
+            os.environ["PATH"] = old_path
+        pi = ww_opts.index("--profile") if "--profile" in ww_opts else -1
+        check("codex write-mode + profile -> consecutive '--profile crew-dispatch' pair",
+              pi >= 0 and ww_opts[pi + 1] == "crew-dispatch",
+              "--profile crew-dispatch", str(ww_opts))
+        stripped = list(ww_opts)
+        if pi >= 0:
+            del stripped[pi:pi + 2]
+        check("codex write-mode options add ONLY the profile pair (unconfigured shape preserved)",
+              _mask_o(stripped) == _mask_o(ww_plain) and "--profile" not in ww_plain,
+              "ww_opts minus pair == ww_plain", f"{ww_opts} vs {ww_plain}")
+        check("codex READ-ONLY with options passed -> argv list-equal to read-only without (structural gate)",
+              _mask_o(ro_opts) == _mask_o(ro_plain) and "--profile" not in ro_opts,
+              "identical read-only argv", f"{ro_opts} vs {ro_plain}")
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        cap = d / "cap.json"
+        make_fake_bin(d, "agent",
+                      "import sys, json\n"
+                      f"json.dump({{'args': sys.argv[1:]}}, open({str(cap)!r}, 'w'))\n"
+                      "print('CURSOR OK')\n")
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = str(d) + os.pathsep + old_path
+        try:
+            cp = CursorProvider("cursor-x", "m1")
+            cp.run("PROMPT", sandbox="workspace-write", timeout=30,
+                   dispatch_options={"force": True, "approve_mcps": True})
+            ww_both = json.loads(cap.read_text())["args"]
+            cp.run("PROMPT", sandbox="workspace-write", timeout=30,
+                   dispatch_options={"force": False})
+            ww_false = json.loads(cap.read_text())["args"]
+            cp.run("PROMPT", sandbox="workspace-write", timeout=30)
+            ww_plain = json.loads(cap.read_text())["args"]
+            cp.run("PROMPT", sandbox="read-only", timeout=30,
+                   dispatch_options={"force": True, "approve_mcps": True})
+            ro_opts = json.loads(cap.read_text())["args"]
+            cp.run("PROMPT", sandbox="read-only", timeout=30)
+            ro_plain = json.loads(cap.read_text())["args"]
+        finally:
+            os.environ["PATH"] = old_path
+        check("cursor write-mode force+approve_mcps -> both flags present AND prompt stays LAST",
+              "--force" in ww_both and "--approve-mcps" in ww_both
+              and ww_both[-1] == "PROMPT", "both flags + trailing prompt", str(ww_both))
+        check("cursor force=False emits NOTHING (byte-identical to unconfigured write argv)",
+              ww_false == ww_plain and "--force" not in ww_false,
+              "identical write argv", f"{ww_false} vs {ww_plain}")
+        check("cursor read-only with options -> argv unchanged (still --mode plan, no flags)",
+              ro_opts == ro_plain and "--mode" in ro_opts and "--force" not in ro_opts,
+              "identical read-only argv", f"{ro_opts} vs {ro_plain}")
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        cap = d / "cap.json"
+        make_fake_bin(d, "agy",
+                      "import sys, json\n"
+                      f"json.dump({{'args': sys.argv[1:]}}, open({str(cap)!r}, 'w'))\n"
+                      "print('AGY OK')\n")
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = str(d) + os.pathsep + old_path
+        try:
+            ap = AgyProvider()
+            ap.run("p", sandbox="workspace-write", timeout=30,
+                   dispatch_options={"anything": True})
+            with_opts = json.loads(cap.read_text())["args"]
+            ap.run("p", sandbox="workspace-write", timeout=30)
+            without = json.loads(cap.read_text())["args"]
+        finally:
+            os.environ["PATH"] = old_path
+        check("agy argv identical with and without options (param accepted, ignored)",
+              with_opts == without, "identical argv", f"{with_opts} vs {without}")
+
+    # --- cmd_dispatch wiring e2e: kind-keyed config reaches the argv -----------
+    log_section("dispatch options — cmd_dispatch wiring (kind-keyed, alias seat, envelope)")
+    _ENVELOPE_16 = {
+        "seat", "model", "ok", "output", "error", "elapsed",
+        "head_before", "head_after", "head_moved",
+        "staged_before", "staged_after", "staged_changed",
+        "branch_before", "branch_after", "branch_changed", "guard_warnings",
+    }
+    # codex-luna is the ALIAS-seat proof: a seat named codex-luna reads
+    # [dispatch.codex] via its provider KIND (seat_spec().provider).
+    for seat_name, prof in (("codex", "pp"), ("codex-luna", "pl")):
+        with crew_config(project=f'[dispatch.codex]\nprofile = "{prof}"\n') as proj:
+            d = proj / "bins"
+            d.mkdir()
+            cap = proj / "cap.json"
+            make_fake_bin(d, "codex", _codex_cap_body(cap))
+            old_path = os.environ["PATH"]
+            os.environ["PATH"] = str(d) + os.pathsep + old_path
+            saved_wd = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+            os.environ["CLAUDE_WORKING_DIRECTORY"] = str(proj)
+            try:
+                out_io = io.StringIO()
+                with contextlib.redirect_stdout(out_io):
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat=seat_name, task="t", json=True))
+            finally:
+                os.environ["PATH"] = old_path
+                if saved_wd is None:
+                    os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+                else:
+                    os.environ["CLAUDE_WORKING_DIRECTORY"] = saved_wd
+            envj = json.loads(out_io.getvalue())
+            args_cap = json.loads(cap.read_text())["args"]
+            pi = args_cap.index("--profile") if "--profile" in args_cap else -1
+            check(f"e2e {seat_name}: [dispatch.codex] profile reaches the write argv (kind-keyed)",
+                  rc == 0 and pi >= 0 and args_cap[pi + 1] == prof,
+                  f"--profile {prof}", str(args_cap))
+            check(f"e2e {seat_name}: envelope keeps the exact 16-field shape",
+                  set(envj) == _ENVELOPE_16, str(sorted(_ENVELOPE_16)), str(sorted(envj)))
+
+    # --- --options: non-billable early exit, sentinel-proof --------------------
+    log_section("dispatch --options — non-billable early exit (fail-if-invoked sentinels)")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        proj = d / "proj"
+        proj.mkdir()
+        sbin = d / "sentinel-bin"
+        sbin.mkdir()
+        marker = d / "invoked.marker"
+        for name in ("codex", "agent", "agy"):
+            p = sbin / name
+            # /bin/sh sentinels: the isolated PATH below holds ONLY this dir, so
+            # an env-shebang (#!/usr/bin/env python3) could not even resolve.
+            p.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 7\n')
+            p.chmod(0o755)
+        env = dict(os.environ)
+        env["PATH"] = str(sbin)
+        env["HOME"] = _NEUTRAL_HOME
+        env["CLAUDE_PROJECT_DIR"] = str(proj)
+        env.pop("CLAUDE_SESSION_ID", None)
+        proc = _run_cli(["dispatch", "--options", "--session-id", "OPTSESS"],
+                        env=env, cwd=str(proj), timeout=30)
+        check("--options exits 0", proc.returncode == 0, "0",
+              f"{proc.returncode}: {proc.stderr[:200]}")
+        outp = proc.stdout
+        ia, ic, iu = (outp.find("[dispatch.agy]"), outp.find("[dispatch.codex]"),
+                      outp.find("[dispatch.cursor]"))
+        check("--options lists every kind in sorted order (agy < codex < cursor)",
+              0 <= ia < ic < iu, "agy, codex, cursor in order", outp[:400])
+        check("--options: agy shows the no-options line; codex/cursor keys all present",
+              "(no dispatch options yet)" in outp[ia:ic]
+              and "profile" in outp and "force" in outp and "approve_mcps" in outp,
+              "keys + no-options line", outp)
+        check("--options spawned NO seat process (no sentinel marker)",
+              not marker.exists(), "no marker", "a sentinel was invoked")
+        env_files = (list((proj / ".crew").rglob("dispatch-*.json"))
+                     if (proj / ".crew").exists() else [])
+        check("--options wrote NO dispatch envelope under .crew/reviews",
+              not env_files, "no envelope", str(env_files))
+        # With a task argument (and --json) also present: still the listing only.
+        proc2 = _run_cli(["dispatch", "--options", "--json", "do the thing",
+                          "--session-id", "OPTSESS"],
+                         env=env, cwd=str(proj), timeout=30)
+        check("--options with a task + --json still prints the plain listing, runs nothing",
+              proc2.returncode == 0 and "[dispatch.codex]" in proc2.stdout
+              and not proc2.stdout.lstrip().startswith("{")
+              and not marker.exists(),
+              "listing, no JSON envelope, no seat",
+              f"{proc2.returncode} {proc2.stdout[:120]}")
+
+    # --- scaffold-config surfaces ----------------------------------------------
+    log_section("dispatch options — scaffold-config blocks + seeded --repo preservation")
+    import tomllib as _toml
+
+    def _run_parsed(argv):
+        args = cli.build_parser().parse_args(argv)
+        out_io, err_io = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out_io), contextlib.redirect_stderr(err_io):
+            rc = args.func(args)
+        return rc, out_io.getvalue(), err_io.getvalue()
+
+    with crew_config():
+        rc, out, err = _run_parsed(["scaffold-config", "--out", "-"])
+        check("scaffold emits the commented [dispatch.codex] block with profile",
+              rc == 0 and "# [dispatch.codex]" in out and "# profile = " in out,
+              "commented codex block", out[:400])
+        check("scaffold emits the commented [dispatch.cursor] block with force + approve_mcps",
+              "# [dispatch.cursor]" in out and "# force = true" in out
+              and "# approve_mcps = true" in out,
+              "commented cursor block", out[:400])
+        check("scaffold emits NO [dispatch.agy] block (no options declared)",
+              "[dispatch.agy]" not in out, "no agy block", "agy block present")
+
+    seeded_global = (
+        'default_panel = "full"\n'
+        "\n"
+        "[dispatch]\n"
+        'seat = "codex"\n'
+        "\n"
+        "[dispatch.codex]\n"
+        'profile = "p"\n'
+    )
+    with crew_config(glob=seeded_global):
+        rc, out, err = _run_parsed(["scaffold-config", "--repo", "--out", "-",
+                                    "--dispatch-seat", "agy"])
+        parsed = _toml.loads(out)
+        check("seeded --repo: --dispatch-seat edit lands under [dispatch] proper (section-distinct)",
+              rc == 0 and parsed.get("dispatch", {}).get("seat") == "agy",
+              "dispatch.seat == agy", str(parsed.get("dispatch")))
+        check("seeded --repo: the real [dispatch.codex] table survives byte-verbatim",
+              parsed["dispatch"]["codex"]["profile"] == "p"
+              and '[dispatch.codex]\nprofile = "p"' in out,
+              "verbatim codex table", out)
+        check("seeded --repo: no NEW [dispatch.*] lines injected (live or commented)",
+              out.count("[dispatch.codex]") == 1 and "[dispatch.cursor]" not in out
+              and "# [dispatch." not in out,
+              "no injected blocks", out)
 
 
 def _fence_lines(md_name):
@@ -12034,6 +12452,7 @@ def main():
     test_production_invocation_and_fanout()
     test_run_subcommand()
     test_dispatch()
+    test_dispatch_options()
     test_build_md_executor_task_anchoring()
     test_init_md_detection_fence_anchoring()
     test_build_executor()

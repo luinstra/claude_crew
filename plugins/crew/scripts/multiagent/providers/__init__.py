@@ -168,9 +168,22 @@ class Provider(ABC):
     # write-capable) is exactly the kind of silent behavior that bites later, so
     # the safe default is the conservative one. The three shipping providers
     # (codex/cursor/agy) each set it ``= True`` EXPLICITLY (decision visible per
-    # class). It does NOT change ``run()``'s signature — the actual read-only vs
-    # workspace-write split is the existing ``sandbox`` arg.
+    # class). The flag itself adds nothing to ``run()``: the read-only vs
+    # workspace-write split is the existing ``sandbox`` arg, and per-provider
+    # write-mode tuning arrives via ``run()``'s keyword-only ``dispatch_options``.
     supports_workspace_write: bool = False
+
+    # Per-provider /crew:dispatch write-mode tuning declaration:
+    # ``{key: (expected_type, help)}``. FAIL-CLOSED like supports_workspace_write:
+    # a new provider supports NO dispatch options until it deliberately declares
+    # some. The type rides in the one dict because the config getter validates
+    # per LAYER (a bad repo value must not shadow a good global one); a parallel
+    # types dict would drift. Declared types are restricted to str and bool (the
+    # validator + the --options/scaffold display define only those; the parity
+    # test rejects anything else). Every subclass declares its OWN dict, empty
+    # included: this ABC default is a shared mutable class attribute, so relying
+    # on it (or mutating it) from a subclass would leak keys across providers.
+    DISPATCH_OPTIONS: dict = {}
 
     @abstractmethod
     def is_available(self) -> tuple[bool, str]:
@@ -191,8 +204,16 @@ class Provider(ABC):
         sandbox: str = "read-only",
         model: str | None = None,
         timeout: int = 300,
+        dispatch_options: dict | None = None,
     ) -> ProviderResult:
-        """Run the provider against ``prompt`` and return a ProviderResult."""
+        """Run the provider against ``prompt`` and return a ProviderResult.
+
+        ``dispatch_options`` is workspace-write-only tuning (validated values
+        from ``config.dispatch_provider_options``): read-only callers
+        (review/debate/probe) never pass it, and each provider ADDITIONALLY
+        gates application on ``sandbox == "workspace-write"``, so a read-only
+        argv stays byte-identical even if a future caller misuses it.
+        """
         ...
 
 
@@ -200,25 +221,49 @@ class Provider(ABC):
 # Registry — every executor-bearing seat in the catalog, through ONE factory
 # =============================================================================
 
-def _build_registry() -> dict:
-    # Imported lazily to avoid a circular import (codex.py / agy.py import this
-    # module for ProviderResult / Provider). The catalog is the ONLY source of
-    # seats: a seat declared in a user's config registers exactly like a shipped
-    # one, and no name here is special-cased.
-    from multiagent import seats as catalog
+def _provider_classes() -> dict:
+    """The executor classes, keyed by the kind they implement, PAIRED with the
+    tunes each ctor binds: ``{kind: (provider_class, tunes_lambda)}``.
 
+    The pairing is load-bearing: class and tunes binding live in ONE structure
+    keyed once, so no parallel kind map can drift. Both consumers
+    (``_build_registry`` and ``dispatch_options_by_kind``) read this one dict.
+    Imported lazily to avoid a circular import (codex.py / agy.py import this
+    module for ProviderResult / Provider).
+    """
     from .agy import AgyProvider
     from .codex import CodexProvider
     from .cursor import CursorProvider
 
-    # The executor classes, keyed by the kind they implement. The ctor shapes
-    # differ (each takes the tunes its CLI actually has), so each kind also says
-    # which of the spec's tunes to bind.
-    classes = {
+    # The ctor shapes differ (each takes the tunes its CLI actually has), so
+    # each kind also says which of the spec's tunes to bind.
+    return {
         "codex": (CodexProvider, lambda spec: {"reasoning_effort": spec.reasoning_effort}),
         "cursor": (CursorProvider, lambda spec: {}),
         "agy": (AgyProvider, lambda spec: {"print_timeout": spec.print_timeout}),
     }
+
+
+def dispatch_options_by_kind() -> dict[str, dict]:
+    """kind -> its provider class's DISPATCH_OPTIONS (executor-bearing kinds only).
+
+    The ONE public map every options-consuming surface reads (the config getter,
+    the ``crew dispatch --options`` listing, the scaffold-config comment blocks),
+    derived from the same paired structure the registry builds from, so the two
+    surfaces cannot disagree about which kinds exist. Each kind's dict is a
+    shallow copy (the ``(type, help)`` values are immutable tuples), so a caller
+    mutating the returned map cannot alter a provider class's declaration.
+    """
+    return {kind: dict(entry[0].DISPATCH_OPTIONS) for kind, entry in _provider_classes().items()}
+
+
+def _build_registry() -> dict:
+    # Imported lazily to avoid a circular import (see _provider_classes). The
+    # catalog is the ONLY source of seats: a seat declared in a user's config
+    # registers exactly like a shipped one, and no name here is special-cased.
+    from multiagent import seats as catalog
+
+    classes = _provider_classes()
 
     def _factory(spec):
         # The registry maps name -> ZERO-ARG factory (get_provider calls

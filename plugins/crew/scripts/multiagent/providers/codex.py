@@ -54,6 +54,15 @@ class CodexProvider(Provider):
     # /crew:dispatch write seat.
     supports_workspace_write = True
 
+    # Write-mode dispatch tuning, declared on THIS class (never inherited from
+    # the ABC's shared default). Single source: the config validator, the
+    # `crew dispatch --options` listing, and the scaffold-config comments all
+    # read this dict. Value shape: (expected_type, help); str/bool only.
+    DISPATCH_OPTIONS = {
+        "profile": (str, "codex exec --profile <name>: layers "
+                         "$CODEX_HOME/<name>.config.toml over the base user config"),
+    }
+
     def __init__(
         self,
         name: str = "codex",
@@ -77,6 +86,7 @@ class CodexProvider(Provider):
         sandbox: str = "read-only",
         model: str | None = None,
         timeout: int = 300,
+        dispatch_options: dict | None = None,
     ) -> ProviderResult:
         start = time.monotonic()
 
@@ -113,6 +123,20 @@ class CodexProvider(Provider):
             "-c", f"model_reasoning_effort={effort}",
             "--sandbox", sandbox,
         ]
+        # Dispatch options apply in WRITE MODE ONLY (the structural gate that
+        # keeps every read-only review argv byte-identical even when a
+        # [dispatch.codex] table is configured). --profile is write-mode
+        # coherent: write mode loads the user config (--ignore-user-config
+        # omitted above), which is the base the profile file layers onto, and
+        # the explicit -c model_reasoning_effort pin still wins over
+        # profile-supplied config (codex precedence: -c > profile > base).
+        # Placement is free here (prompt travels via stdin, unlike cursor's
+        # trailing positional prompt), so the pair sits with the other -c/flag
+        # tuning. Values arrive pre-validated from the config getter.
+        if sandbox == "workspace-write" and dispatch_options:
+            profile = dispatch_options.get("profile")
+            if profile:
+                argv += ["--profile", profile]
         if chosen_model:
             argv += ["--model", chosen_model]
         argv += ["--skip-git-repo-check", "-o", out_path]

@@ -111,6 +111,17 @@ class CursorProvider(Provider):
     # repo (or lose sandbox access to the snapshot).
     supports_workspace_write = True
 
+    # Write-mode dispatch tuning, declared on THIS class (never inherited from
+    # the ABC's shared default). Single source: the config validator, the
+    # `crew dispatch --options` listing, and the scaffold-config comments all
+    # read this dict. Value shape: (expected_type, help); str/bool only.
+    DISPATCH_OPTIONS = {
+        "force": (bool, "pass --force: allow commands unless explicitly denied "
+                        "(headless-write approval)"),
+        "approve_mcps": (bool, "pass --approve-mcps: auto-approve every "
+                               "configured MCP server"),
+    }
+
     def __init__(
         self,
         name: str = "cursor",
@@ -152,6 +163,7 @@ class CursorProvider(Provider):
         sandbox: str = "read-only",
         model: str | None = None,
         timeout: int = 300,
+        dispatch_options: dict | None = None,
     ) -> ProviderResult:
         """Invoke Cursor Agent and return a normalized ProviderResult.
 
@@ -199,6 +211,18 @@ class CursorProvider(Provider):
         # still allowing read-only shell (git diff) + producing review output.
         if sandbox != "workspace-write":
             cmd += ["--mode", "plan"]
+        elif dispatch_options:
+            # Write-mode-only dispatch tuning (the structural gate keeping a
+            # read-only argv byte-identical even with a [dispatch.cursor] table
+            # configured). Inserted at THIS branch point, before the fixed tail
+            # block below, because the prompt must stay the LAST positional argv
+            # element (unlike codex, whose prompt travels via stdin). False
+            # emits nothing (byte-identical to unconfigured, never --force=false).
+            # Values arrive pre-validated from the config getter.
+            if dispatch_options.get("force") is True:
+                cmd += ["--force"]
+            if dispatch_options.get("approve_mcps") is True:
+                cmd += ["--approve-mcps"]
         cmd += [
             "--sandbox", "enabled", "--trust",
             "--workspace", cwd, "--model", chosen_model, prompt,

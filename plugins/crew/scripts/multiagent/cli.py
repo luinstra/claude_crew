@@ -79,6 +79,7 @@ from multiagent import (
 from multiagent.providers import (
     ProviderResult,
     available_seats,
+    dispatch_options_by_kind,
     get_provider,
     known_seat_names,
 )
@@ -1299,6 +1300,44 @@ def _dispatch_guard_warnings(
     return lines
 
 
+def _dispatch_option_fields(kind_opts: dict) -> list[tuple[str, str, str, str]]:
+    """``(key, example_value, type_label, help)`` per declared dispatch option,
+    in DISPATCH_OPTIONS declaration (insertion) order.
+
+    The ONE per-key derivation both rendering surfaces share (the
+    ``dispatch --options`` listing and the scaffold-config comment blocks), so
+    no third example/label field exists anywhere. The example comes from the
+    declared type (str -> ``"<name>"``, bool -> ``true``) and the type label
+    matches the config validator's warn wording ("non-empty string"/"boolean";
+    str and bool are the only supported declared types).
+    """
+    fields: list[tuple[str, str, str, str]] = []
+    for key, (expected, help_text) in kind_opts.items():
+        if expected is bool:
+            fields.append((key, "true", "boolean", help_text))
+        else:
+            fields.append((key, '"<name>"', "non-empty string", help_text))
+    return fields
+
+
+def _print_dispatch_options() -> None:
+    """The ``dispatch --options`` listing: every provider kind's declared
+    ``[dispatch.<kind>]`` keys, kinds sorted, keys in declaration order."""
+    print("dispatch options: set per provider KIND under [dispatch.<kind>] in")
+    print(".crew/config.toml (per-repo) or ~/.crew-config.toml (global); repo wins per key.")
+    print()
+    by_kind = dispatch_options_by_kind()
+    for kind in sorted(by_kind):
+        print(f"[dispatch.{kind}]")
+        fields = _dispatch_option_fields(by_kind[kind])
+        if not fields:
+            print("  (no dispatch options yet)")
+            continue
+        for key, example, label, help_text in fields:
+            lhs = f"{key} = {example}"
+            print(f"  {lhs:<22} ({label}) {help_text}")
+
+
 def cmd_dispatch(args: argparse.Namespace) -> int:
     """Send ONE subprocess seat at the working tree in WRITE mode (/crew:dispatch).
 
@@ -1306,6 +1345,14 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     output path BEFORE the availability check), with the HEAD/staged/branch guard
     wrapped around the seat run and a 16-field JSON envelope emitted.
     """
+    # --options: an early, NON-BILLABLE exit. It runs BEFORE seat resolution,
+    # the task-required check, and every git probe: no seat process is ever
+    # spawned, nothing is billed, no envelope is written, and every other
+    # dispatch arg is ignored (documented in the flag help).
+    if args.options:
+        _print_dispatch_options()
+        return 0
+
     # (a) Resolve the seat: --seat > [dispatch].seat > built-in codex. Compute the
     # pinned guard tree ONCE — every _git_* helper runs with cwd=repo_dir, the
     # SAME tree the codex/agy workspace-write cwd pin (and cursor's own pin) edit.
@@ -1344,6 +1391,14 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # (b2) Resolve the seat's provider KIND -> its validated [dispatch.<kind>]
+    # options. Keyed by KIND, not seat name (codex and codex-luna share
+    # invocation mechanics); safe because the seat passed known_seat_names()
+    # above, so it is a catalog row. The getter warns + drops anything invalid
+    # and returns {} when unconfigured (never-choke: dispatch always runs).
+    kind = seats.seat_spec(seat).provider
+    dispatch_opts = config.dispatch_provider_options(kind)
 
     # (c) Resolve the task source + derive the output path — BEFORE is_available()
     # (matching cmd_run). Deriving the path here is what lets the unavailable-seat
@@ -1409,9 +1464,12 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         head_after, staged_after, branch_after = head_before, staged_before, branch_before
     else:
         # (f) Run the seat in workspace-write. Model precedence mirrors cmd_run.
+        # This is the ONLY run() call site that passes dispatch_options (the
+        # read-only review/debate/probe paths never do).
         timeout = _resolve_timeout(args.timeout)
         result = provider.run(
             prompt, sandbox="workspace-write", model=args.model, timeout=timeout,
+            dispatch_options=dispatch_opts or None,
         )
         # (g) Capture git AFTER-state (all in repo_dir).
         head_after = _git_head(repo_dir)
@@ -3650,6 +3708,24 @@ def _render_config_template(
     L.append("[dispatch]")
     L.append(f"seat = {_toml_str(dispatch_seat)}")
     L.append("")
+    # Commented [dispatch.<kind>] blocks, sourced from the SAME provider
+    # declarations the `dispatch --options` listing renders (one public map,
+    # same pinned order: sorted kinds, declaration-order keys; per-key fields
+    # from the one _dispatch_option_fields helper). A kind with no declared
+    # options (agy) emits NO block.
+    _dopts_by_kind = dispatch_options_by_kind()
+    for _kind in sorted(_dopts_by_kind):
+        _fields = _dispatch_option_fields(_dopts_by_kind[_kind])
+        if not _fields:
+            continue
+        L.append(
+            f"# [dispatch.{_kind}]: write-mode tuning for /crew:dispatch "
+            f"(opt-in; unknown keys warn and drop)"
+        )
+        L.append(f"# [dispatch.{_kind}]")
+        for _key, _example, _label, _help in _fields:
+            L.append(f"# {_key} = {_example}   # {_help}")
+        L.append("")
     L.append("# [panels] — redefine a built-in preset or add a custom one (usable via --panel <name>).")
     L.append("# [panels]")
     L.append('# nightly = ["codex", "opus"]')
@@ -4835,6 +4911,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--session-id", dest="session_id", default=None,
         help="derive -o to .crew/reviews/<session-id>/dispatch-<seat>.json when "
              "-o is omitted. Pass the literal id; the engine resolves it.",
+    )
+    disp.add_argument(
+        "--options", action="store_true",
+        help="print every provider kind's supported [dispatch.<kind>] config "
+             "keys (from the provider declarations) and exit 0. Runs NO seat, "
+             "bills nothing, writes no envelope; every other dispatch arg is "
+             "ignored.",
     )
     disp.set_defaults(func=cmd_dispatch)
 

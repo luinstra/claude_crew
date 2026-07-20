@@ -5,8 +5,10 @@ the user names no panel), the panel ROSTER (``[panels]``: what's *in* a preset),
 the SEAT catalog (``[seats.<name>]`` for availability, model pins, per-provider
 tunes, and whole new seats: resolved in ``seats.py`` over ``raw_layers()``, not
 by a getter here), the global per-seat ``timeout``, the persistence loops'
-wall clock (``[tuning].deadline_minutes``), and the ``/crew:build`` implement-step
-executor seat (``[build].executor`` + ``[build].executor_retries``):
+wall clock (``[tuning].deadline_minutes``), the ``/crew:build`` implement-step
+executor seat (``[build].executor`` + ``[build].executor_retries``), and the
+per-provider ``/crew:dispatch`` write-mode tuning (``[dispatch.<kind>]``, keys
+declared by each provider class's ``DISPATCH_OPTIONS``):
 
   * per-repo  ``<project>/.crew/config.toml`` (resolved against the shared
     ``crew_base()`` root, ``CLAUDE_PROJECT_DIR`` first then cwd: the ONE resolver
@@ -303,6 +305,160 @@ def dispatch_seat() -> str | None:
         _extract_dispatch_seat(_load(), "repo"),
         _extract_dispatch_seat(_global_load(), "global"),
     )
+
+
+# --- dispatch provider options ([dispatch.<kind>]) -----------------------------
+
+def _extract_dispatch_options(
+    data: dict, layer: str, kind: str, specs: dict, exec_kinds: set,
+) -> dict:
+    """One layer's validated ``[dispatch.<kind>]`` partial dict (may be empty).
+
+    Two passes over the layer's ``[dispatch]`` table, warn-and-drop throughout
+    (dispatch never aborts on config), each warn one-time per process under a
+    DISTINCT ``_warn_once`` grammar so a table-level and a key-level warn can
+    never collide with or suppress each other:
+
+      * root grammar ``dispatch_options_root:{layer}`` — ``[dispatch]`` itself is
+        not a table (``dispatch = "oops"``): the layer contributes nothing (the
+        seat getter already returns None silently for this shape, so this warn
+        has exactly one owner).
+      * table grammar ``dispatch_options_table:{layer}:{name}`` — hygiene over
+        EVERY key of ``[dispatch]``: ``"seat"`` is reserved and skipped silently
+        (the other getter's key); a dict named after an executor-bearing kind is
+        a provider table; anything else (unknown table like ``[dispatch.codx]``,
+        a seat-name table like ``[dispatch.codex-luna]``, scalar junk like
+        ``codex = "oops"``) warns and is ignored.
+      * key grammar ``dispatch_options:{layer}:{kind}:{key}`` — per-key type
+        rules for the REQUESTED kind's table only (str: non-empty and
+        non-whitespace; bool: a literal TOML boolean; unknown key: warn naming
+        the valid key set, or the no-options-yet note for an empty declaration).
+    """
+    dispatch_tbl = data.get("dispatch")
+    if dispatch_tbl is None:
+        return {}
+    if not isinstance(dispatch_tbl, dict):
+        _warn_once(
+            f"dispatch_options_root:{layer}",
+            f"[dispatch] must be a table; ignoring {dispatch_tbl!r}",
+        )
+        return {}
+
+    # Table-level hygiene runs over the WHOLE [dispatch] table on every call
+    # (the _warn_once keys keep each note one-time per process).
+    kinds_list = ", ".join(sorted(exec_kinds))
+    for name, val in dispatch_tbl.items():
+        if name == "seat":
+            continue  # reserved: the dispatch-seat getter's key
+        if name in exec_kinds and isinstance(val, dict):
+            continue  # a provider table; key validation is lazy (requested kind only)
+        if name in exec_kinds:
+            _warn_once(
+                f"dispatch_options_table:{layer}:{name}",
+                f"[dispatch].{name} must be a table ([dispatch.{name}]); "
+                f"ignoring {val!r}",
+            )
+        else:
+            _warn_once(
+                f"dispatch_options_table:{layer}:{name}",
+                f"[dispatch.{name}] is not a provider options table: tables "
+                f"under [dispatch] are keyed by provider kind ({kinds_list}), "
+                f"not seat name; ignoring it",
+            )
+
+    tbl = dispatch_tbl.get(kind)
+    if not isinstance(tbl, dict):
+        # Absent, or scalar junk (which the hygiene pass above already warned on).
+        return {}
+    out: dict = {}
+    for key, val in tbl.items():
+        if key not in specs:
+            if not specs:
+                _warn_once(
+                    f"dispatch_options:{layer}:{kind}:{key}",
+                    f"provider {kind!r} supports no dispatch options yet; "
+                    f"ignoring [dispatch.{kind}].{key}",
+                )
+            else:
+                _warn_once(
+                    f"dispatch_options:{layer}:{kind}:{key}",
+                    f"[dispatch.{kind}].{key} is not a dispatch option; valid "
+                    f"keys for [dispatch.{kind}]: {', '.join(sorted(specs))}",
+                )
+            continue
+        expected = specs[key][0]
+        if expected is str:
+            # bool/int are not str, so one isinstance covers the wrong-type case;
+            # empty/whitespace is rejected too (an empty --profile is a typo).
+            if not isinstance(val, str) or not val.strip():
+                _warn_once(
+                    f"dispatch_options:{layer}:{kind}:{key}",
+                    f"[dispatch.{kind}].{key} must be a non-empty string; "
+                    f"ignoring {val!r}",
+                )
+                continue
+        elif expected is bool:
+            if not isinstance(val, bool):
+                _warn_once(
+                    f"dispatch_options:{layer}:{kind}:{key}",
+                    f"[dispatch.{kind}].{key} must be a boolean; ignoring {val!r}",
+                )
+                continue
+        else:
+            # DISPATCH_OPTIONS declares str/bool only (the parity test pins it);
+            # an undeclared type is dropped rather than half-validated.
+            _warn_once(
+                f"dispatch_options:{layer}:{kind}:{key}",
+                f"[dispatch.{kind}].{key} has an unsupported declared type; "
+                f"ignoring {val!r}",
+            )
+            continue
+        out[key] = val
+    return out
+
+
+def dispatch_provider_options(kind: str) -> dict:
+    """The validated ``[dispatch.<kind>]`` options for one provider KIND.
+
+    Tables are keyed by provider kind, not seat name (codex and codex-luna share
+    invocation mechanics), and the valid keys per kind come from each provider
+    class's ``DISPATCH_OPTIONS`` declaration (lazy call-time import,
+    ``from multiagent.providers import dispatch_options_by_kind``, the same
+    sanctioned pattern as ``_extract_dispatch_seat``).
+
+    Key-level validation is LAZY: it fires at consumption time, for the
+    REQUESTED kind's table only, so a wrong-typed key in another known kind's
+    table (say ``[dispatch.cursor] force = "yes"`` while dispatching codex)
+    warns only when THAT kind is dispatched. There is no whole-config lint pass;
+    what does run on every call is the table-level hygiene scan over the whole
+    ``[dispatch]`` table (unknown tables, scalar junk, a non-table
+    ``[dispatch]``).
+
+    Merge: each layer is validated into its own partial dict and the result is
+    the per-key UNION ``{**global_valid, **repo_valid}`` (repo wins per KEY,
+    presence-based, never truthiness-based: a valid ``false`` beats a global
+    ``true``, while an invalid repo value is dropped from the repo partial so
+    the global value survives). Returns ``{}`` when nothing valid is configured.
+
+    An unknown ``kind`` returns ``{}`` silently with NO hygiene scan and NO warn
+    (defensive: cmd_dispatch only passes catalog kinds; a future caller must not
+    assume hygiene ran).
+    """
+    from multiagent.providers import dispatch_options_by_kind
+
+    by_kind = dispatch_options_by_kind()
+    if kind not in by_kind:
+        return {}
+    specs = by_kind[kind]
+    # The executor-bearing kind set == the options map's keys (the registry
+    # parity test pins this against seats.PROVIDER_KINDS), so ONE lazy import
+    # serves both the specs and the hygiene scan's valid-kind set.
+    exec_kinds = set(by_kind)
+    repo_valid = _extract_dispatch_options(_load(), "repo", kind, specs, exec_kinds)
+    global_valid = _extract_dispatch_options(
+        _global_load(), "global", kind, specs, exec_kinds
+    )
+    return {**global_valid, **repo_valid}
 
 
 # --- build executor -----------------------------------------------------------

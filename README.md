@@ -127,7 +127,8 @@ repo-relative path.
 
 > **`/crew:init` vs `/crew:crew-config`** — different files, different concerns.
 > `/crew:init` scaffolds the **engine-tuning `.toml`** (`default_panel`, panels, seats,
-> `available`, `[dispatch].seat`) that the `config.py` loader reads. `/crew:crew-config`
+> `available`, `[dispatch].seat`, per-provider `[dispatch.<kind>]` dispatch tuning)
+> that the `config.py` loader reads. `/crew:crew-config`
 > copies the **`CLAUDE.md` operating-instructions doc** into `.claude/CLAUDE.md` (project)
 > or `~/.claude/CLAUDE.md` (global) — it touches no `.toml`.
 
@@ -213,6 +214,9 @@ cross-model diversity). Debate precedence is **`--panel`/`--seats` (explicit) >
 `/crew:dispatch` picks its default seat from `[dispatch].seat` (validated
 against the known seats — a panel name or group token like `cursor` is
 rejected), falling back to the built-in `codex`; an explicit `--seat` overrides.
+Per-provider write-mode dispatch tuning lives under `[dispatch.<kind>]` (keyed
+by provider kind, keys declared by each provider; `crew dispatch --options`
+lists them, non-billable).
 `/crew:build`'s implement step normally runs the `crew:executor` Task agent
 (Claude); `[build].executor` can instead route each round through a write-capable
 subprocess seat (e.g. `codex-luna`), and `[build].executor_retries` (0..2, default
@@ -228,6 +232,14 @@ panel = "full"                    # /crew:debate-only default; falls back to def
 
 [dispatch]
 seat = "codex"                    # default seat for /crew:dispatch; validated vs known seats, falls back to built-in codex
+
+# Per-provider write-mode tuning, keyed by provider KIND (opt-in; unknown keys warn
+# and drop; `crew dispatch --options` lists every declared key, non-billable):
+# [dispatch.codex]
+# profile = "<name>"   # codex exec --profile <name>: layers $CODEX_HOME/<name>.config.toml over the base user config
+# [dispatch.cursor]
+# force = true   # pass --force: allow commands unless explicitly denied (headless-write approval)
+# approve_mcps = true   # pass --approve-mcps: auto-approve every configured MCP server
 
 [build]
 executor = "crew:executor"        # /crew:build implement-step executor; a write-capable seat (e.g. codex-luna) routes each round through that model

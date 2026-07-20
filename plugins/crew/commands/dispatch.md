@@ -27,7 +27,9 @@ $ARGUMENTS
 > named one; otherwise the engine applies its own resolution (`[dispatch].seat`
 > config → a built-in default). So the command cannot honestly know the resolved
 > seat before the run — the authoritative resolved-seat line is read from the
-> returned envelope's `seat` field POST-run (step 4).
+> returned envelope's `seat` field POST-run (step 4). Per-provider write-mode
+> tuning lives under `[dispatch.<kind>]` in the same config files; run
+> `crew dispatch --options` (non-billable) to list each provider's supported keys.
 
 ## Step 1 — Parse an optional LEADING `--seat`
 

@@ -47,7 +47,7 @@ multiagent/
 ├── review_runs.py       # review-run lifecycle (pure leaf like rounds.py): run identity mint (content hash + review inputs), reviews-subdir session sanitizer (the ONE mechanism cli.py delegates to), write-once run.json + mint-conflict refusal, snapshot write/self-heal, the landed-and-valid seat predicate, preserve-valid seat writes (per-seat lock), pointer read/write. NO model calls.
 ├── seats.py             # The seat CATALOG loader: reads shipped `seats.toml`, merges the user's config layers per-seat-per-key, exposes merged_catalog()/merged_panels()/seat_spec()/task_seats()/group_tokens()/premium_off_seats() + PROVIDER_KINDS + the SeatSpec dataclass
 ├── seats.toml           # DATA — the shipped seat + panel catalog (`[seats.<name>]` rows, `[panels]` rosters); merged with per-repo/global config. The one place a built-in model seat is declared
-├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel, [debate].panel, [dispatch].seat validated vs known_seat_names(), [panels] roster) + `raw_layers()` feeding seats.py's per-seat resolution (per-seat tuning + `available` live on `SeatSpec`, not here); per-repo>global>builtin; pure leaf, no cli/providers import; parses with stdlib tomllib (the 3.11 floor the `crew` dispatcher asserts)
+├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel, [debate].panel, [dispatch].seat validated vs known_seat_names(), dispatch_provider_options for the per-provider `[dispatch.<kind>]` write-mode options validated per layer against each provider's DISPATCH_OPTIONS declaration, [panels] roster) + `raw_layers()` feeding seats.py's per-seat resolution (per-seat tuning + `available` live on `SeatSpec`, not here); per-repo>global>builtin; pure leaf, no cli/providers import; parses with stdlib tomllib (the 3.11 floor the `crew` dispatcher asserts)
 ├── render.py            # side-by-side panel + --json rendering (the faithful projection + raw-fallback)
 ├── findings.py          # PURE parser + complete-linkage grouping + grouped-digest renderer (no I/O, no model calls, never raises); powers `collect --group`
 └── providers/
@@ -426,7 +426,12 @@ Key contracts (do NOT regress):
   `config.dispatch_seat()` (`[dispatch].seat`) > builtin) at the working tree in
   `sandbox="workspace-write"` — it OPTS INTO the existing `run -s workspace-write`
   plumbing, so review/debate (which never pass `-s`) stay `read-only` and
-  byte-for-byte unchanged. `prompts.dispatch()` (mirrors `council`) frames the
+  byte-for-byte unchanged. Per-provider write-mode tuning lives under
+  `[dispatch.<kind>]` in config (keys declared by each provider class's
+  `DISPATCH_OPTIONS`): `config.dispatch_provider_options(kind)` validates it per
+  layer and the result rides into the seat's `run()` as the keyword-only
+  `dispatch_options` arg; `crew dispatch --options` lists every declared key
+  without running any seat (non-billable). `prompts.dispatch()` (mirrors `council`) frames the
   task between literal `BEGIN TASK`/`END TASK` markers and instructs the seat to
   leave changes UNCOMMITTED + UNSTAGED + on the same branch. `cmd_dispatch`
   captures a HEAD/staged/branch guard BEFORE and AFTER the run, PINNED to one
@@ -469,7 +474,11 @@ Key contracts (do NOT regress):
   `.crew/config.toml` and global `~/.crew-config.toml` (`config.py`, two memoized
   loaders). Knobs: `default_panel`, `[debate].panel`, `[dispatch].seat`
   (the `/crew:dispatch` default seat, validated against `known_seat_names()` —
-  a panel name / group token like `cursor` is rejected), `[seats.<name>]`
+  a panel name / group token like `cursor` is rejected), `[dispatch.<kind>]`
+  (per-provider write-mode dispatch tuning, keyed by provider KIND, not seat
+  name; the valid keys are declared by each provider class's `DISPATCH_OPTIONS`
+  and `crew dispatch --options` lists them; applied only in workspace-write, so
+  read-only review/debate argv is unchanged even when configured), `[seats.<name>]`
   (tunes an existing seat's `model`/`reasoning_effort`/`print_timeout`/`available`,
   OR declares a brand-new first-class seat by giving `provider` + `model`, plus
   optional `opt_in` to keep it out of the built-in panels), `[tuning].timeout`,

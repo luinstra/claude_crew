@@ -16,6 +16,15 @@ default_panel = "full"
 [dispatch]
 seat = "codex"
 
+# [dispatch.codex]: write-mode tuning for /crew:dispatch (opt-in; unknown keys warn and drop)
+# [dispatch.codex]
+# profile = "<name>"   # codex exec --profile <name>: layers $CODEX_HOME/<name>.config.toml over the base user config
+
+# [dispatch.cursor]: write-mode tuning for /crew:dispatch (opt-in; unknown keys warn and drop)
+# [dispatch.cursor]
+# force = true   # pass --force: allow commands unless explicitly denied (headless-write approval)
+# approve_mcps = true   # pass --approve-mcps: auto-approve every configured MCP server
+
 # [panels] — redefine a built-in preset or add a custom one (usable via --panel <name>).
 # [panels]
 # nightly = ["codex", "opus"]
