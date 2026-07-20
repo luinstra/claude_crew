@@ -541,18 +541,18 @@ inactive files after a day.
 
 **Build loop won't stop**
 - Run `/crew:cancel-build`
-- Or delete the session's `"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/build-state-<session-id>.json"`
+- Or delete the session's `<project-root>/.crew/build-state-<session-id>.json`
 
 **Measure-twice loop won't stop**
 - Run `/crew:cancel-measure-twice`
-- Or delete the session's `"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/measure-twice-state-<session-id>.json"`
+- Or delete the session's `<project-root>/.crew/measure-twice-state-<session-id>.json`
 
 **Skills not activating**
 - Check the skill's `description` matches conversation keywords
 - Skills auto-activate; no explicit invocation needed
 
 **Session state not restored**
-- Verify `"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/"` directory exists and is writable
+- Verify the project root's `.crew/` directory exists and is writable
 
 ## Uninstallation
 
@@ -560,10 +560,10 @@ inactive files after a day.
 # Remove the plugin
 claude plugins remove crew
 
-# Clean up project state (optional, per-project). Run this FROM the project root,
-# or anchor the path so it targets the intended tree (crew can run from a cwd that
-# is not the project root):
-rm -rf "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/"
+# Clean up project state (optional, per-project). Substitute the project's
+# absolute path for <project-root>, keeping it a double-quoted literal (the
+# command then works from any shell cwd):
+rm -rf "<project-root>/.crew"
 ```
 
 The `.crew/` directory contains project-specific state (build loop, context snapshots, plans). Remove it from any projects where you used the plugin.

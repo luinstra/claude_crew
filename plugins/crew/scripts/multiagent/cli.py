@@ -84,7 +84,10 @@ from multiagent.providers import (
     known_seat_names,
 )
 import artifact_prune
-from state_discovery import crew_base  # the ONE `.crew` root resolver (state layer shares it)
+from state_discovery import (  # the ONE `.crew` root resolver (state layer shares it)
+    anchor_path,
+    crew_base,
+)
 # One-time stderr notes for panel/availability resolution (mirrors config.py's
 # memoized-warn posture; keyed so each distinct note fires at most once/process).
 _warned: set[str] = set()
@@ -700,6 +703,12 @@ def cmd_debate(args: argparse.Namespace) -> int:
     # "../../etc/foo" can't escape --base-dir (path traversal) — the result is
     # always restricted to [a-z0-9-].
     slug = _slugify(args.slug) if args.slug else _slugify(question)
+
+    # anchor_path passes "" through as a sentinel; consumed here it would
+    # become Path(".") and silently scaffold into the shell cwd.
+    if not args.base_dir:
+        print("error: --base-dir cannot be empty", file=sys.stderr)
+        return 2
 
     # Unique dir: NEVER silently overwrite a same-second/same-slug debate
     # (exist_ok=True would merge two debates' question.txt/subprocess.json).
@@ -1638,6 +1647,10 @@ def _render_prior(args: argparse.Namespace) -> str | None:
     if has_id != has_round:
         raise rounds.RoundError("--run-id and --round must be given together")
     if has_id and has_round:
+        # anchor_path passes "" through as a sentinel; consumed here it would
+        # resolve the run dir against the shell cwd via Path(".").
+        if not args.base_dir:
+            raise rounds.RoundError("--base-dir cannot be empty")
         d = rounds.run_dir(args.run_id, base_dir=args.base_dir)
         return rounds.read_prior_rounds(d, args.round)
     return None
@@ -2259,8 +2272,9 @@ def cmd_collect(args: argparse.Namespace) -> int:
     _emit(text, args.out)
     # With -o the digest went to a file, so stdout carries ONLY the path
     # (mirrors --stage's path-only stdout contract; keeps the call allowlist-safe
-    # and the digest off stdout). Print args.out VERBATIM — the path the caller
-    # passed is the path to echo.
+    # and the digest off stdout). args.out is the ANCHORED path (a relative -o
+    # resolved against crew_base at parse time), so the echo names the file
+    # actually written, readable from any cwd.
     if args.out:
         print(args.out)
     return 0
@@ -2717,7 +2731,83 @@ def cmd_repair_seat(args: argparse.Namespace) -> int:
     orchestrator should react to. Exit 2 stays reserved for real usage/read
     errors. The seat falls back to its raw original in BOTH the grouped digest
     and ``--full``/RAW. ``collect``/``findings`` stay PURE — this helper only
-    validates + records a field; it spawns NO agent."""
+    validates + records a field; it spawns NO agent.
+
+    Two mutually exclusive addressing forms:
+      * a positional seat NAME + ``--session-id``/``--run-id``: the engine
+        derives ``<run_dir>/<seat>.json`` through the SAME requested-scope
+        helpers ``collect`` reads with, so the recipe reconstructs no run-dir
+        path at all (the recipes' form);
+      * ``--seat <path>``: the explicit ad-hoc form, kept for files outside
+        the reviews layout."""
+    seat_name = getattr(args, "seat_name", None)
+    if seat_name and args.seat:
+        print(
+            "error: pass either a positional seat NAME (engine-derived path) "
+            "OR --seat <path>, not both",
+            file=sys.stderr,
+        )
+        return 2
+    if not seat_name and not args.seat:
+        print(
+            "error: name the seat to repair: a positional seat NAME "
+            "(+ --session-id/--run-id) or an explicit --seat <path>",
+            file=sys.stderr,
+        )
+        return 2
+    if args.seat and (args.session_id is not None or args.run_id is not None):
+        # Mirrors run's --run-id + -o refusal: the scope flags route the NAME
+        # form's derivation, and silently ignoring them next to an explicit
+        # path would hide a caller's wrong mental model of which file is hit.
+        print(
+            "error: --seat <path> and --session-id/--run-id are contradictory "
+            "routing (the scope flags derive the NAME form's seat file; an "
+            "explicit --seat path is already fully addressed)",
+            file=sys.stderr,
+        )
+        return 2
+    if seat_name:
+        # Same guards as collect: the name supplies a FILENAME, so charset is
+        # containment; the placeholder check keeps a templating slip loud.
+        if re.sub(r"[^A-Za-z0-9_-]", "", seat_name) != seat_name:
+            print(
+                f"error: invalid seat name {seat_name!r}; seat names must match "
+                "[A-Za-z0-9_-] (pass an explicit --seat <path> for ad-hoc files)",
+                file=sys.stderr,
+            )
+            return 2
+        if review_runs.is_reserved_stem(seat_name):
+            # Same guard, same chokepoint as run/persist-seat's derived
+            # destinations (case-folded): the name supplies the filename stem,
+            # so `repair-seat run` would derive and REWRITE the run dir's
+            # immutable run.json (current-run/seat likewise shadow control
+            # files). Only review-prep may touch those.
+            print(
+                f"error: seat name {seat_name!r} collides with a reserved crew "
+                "control filename stem; its derived <seat>.json is refused "
+                "(pass an explicit --seat <path> for ad-hoc files)",
+                file=sys.stderr,
+            )
+            return 2
+        session_id = _resolve_session_id(args.session_id)
+        if "<" in session_id or ">" in session_id:
+            print(
+                f"error: session id looks like an unsubstituted placeholder "
+                f"({session_id!r}); pass your actual session id (the "
+                "[Session ID: …] value), not the literal template",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            # No --run-id falls back to the session pointer: safe here because
+            # a pointer misroute fails loudly on "no seat file" (a re-prep
+            # clears pending files), never silently repairing the wrong run.
+            results_dir, _scope_rid = _resolve_read_scope(session_id, args.run_id)
+        except review_runs.ReviewRunError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        args.seat = str(results_dir / f"{seat_name}.json")
+
     seat_path = Path(args.seat)
     if not seat_path.exists():
         print(f"error: no seat file at {args.seat!r}", file=sys.stderr)
@@ -4429,9 +4519,10 @@ def build_parser() -> argparse.ArgumentParser:
              "(seats fetch it themselves by default — smaller, no ARG_MAX cap)",
     )
     review.add_argument(
-        "-o", "--out", default=None,
+        "-o", "--out", default=None, type=anchor_path,
         help="write results to this file instead of stdout (keeps the call "
-             "shell-redirect-free and allowlistable)",
+             "shell-redirect-free and allowlistable). A relative path resolves "
+             "against the project root (crew_base), not the shell cwd.",
     )
     review.set_defaults(func=cmd_review)
 
@@ -4447,14 +4538,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     council.add_argument(
         "-f", "--file",
-        default=None,
-        help="read the question from this file instead of the positional string",
+        default=None, type=anchor_path,
+        help="read the question from this file instead of the positional string "
+             "(a relative path resolves against the project root, not the shell cwd)",
     )
     council.add_argument("--seats", default=None, help="comma-separated subprocess seats (e.g. codex,cursor-auto,cursor-composer)")
     council.add_argument("--json", action="store_true", help="emit a JSON array of results")
     council.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
     council.add_argument(
-        "-o", "--out", default=None,
+        "-o", "--out", default=None, type=anchor_path,
         help="write results to this file instead of stdout (keeps the call "
              "shell-redirect-free and allowlistable)",
     )
@@ -4474,8 +4566,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     debate.add_argument(
         "-f", "--file",
-        default=None,
-        help="read the question from this file instead of the positional string",
+        default=None, type=anchor_path,
+        help="read the question from this file instead of the positional string "
+             "(a relative path resolves against the project root, not the shell cwd)",
     )
     debate.add_argument(
         "--slug",
@@ -4484,9 +4577,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     debate.add_argument(
         "--base-dir",
-        default=str(crew_base() / ".crew" / "debates"),
+        default=str(crew_base() / ".crew" / "debates"), type=anchor_path,
         help="parent dir for debate logs (default: <project>/.crew/debates, "
-             "anchored to CLAUDE_PROJECT_DIR)",
+             "anchored to CLAUDE_PROJECT_DIR; an explicit relative path anchors "
+             "the same way)",
     )
     debate.add_argument(
         "--seats", default=None,
@@ -4567,8 +4661,11 @@ def build_parser() -> argparse.ArgumentParser:
              "(collect never globs.)",
     )
     coll.add_argument(
-        "-o", "--out", default=None,
-        help="write the digest to this file (keeps the call shell-redirect-free)",
+        "-o", "--out", default=None, type=anchor_path,
+        help="write the digest to this file (keeps the call shell-redirect-free). "
+             "A relative path resolves against the project root (crew_base), not "
+             "the shell cwd, so recipes pass plain .crew/... paths with no "
+             "${...} expansion.",
     )
     coll.add_argument(
         "--group", action="store_true",
@@ -4577,9 +4674,10 @@ def build_parser() -> argparse.ArgumentParser:
              "concatenation. No --group = byte-identical to today.",
     )
     coll.add_argument(
-        "--full", default=None, metavar="PATH",
+        "--full", default=None, metavar="PATH", type=anchor_path,
         help="with --group, ALSO write the byte-faithful render_panel concatenation "
-             "of all named seats to PATH (the recovery artifact / size denominator).",
+             "of all named seats to PATH (the recovery artifact / size denominator). "
+             "Relative PATH resolves against the project root like -o.",
     )
     coll.add_argument(
         "--report-unparsed", dest="report_unparsed", action="store_true",
@@ -4680,10 +4778,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="done (finished) or blocked (cannot finish; the "
                          "report says why). Default: done. Either status "
                          "releases the wait.")
-    sg.add_argument("-f", "--file", dest="file", default=None,
+    sg.add_argument("-f", "--file", dest="file", default=None, type=anchor_path,
                     help="read the report payload from this file (default: "
                          "stdin). An empty report is allowed: the arrival is "
-                         "the signal.")
+                         "the signal. A relative path resolves against the "
+                         "project root, not the shell cwd.")
     sg.set_defaults(func=cmd_signal)
 
     rs = sub.add_parser(
@@ -4697,12 +4796,34 @@ def build_parser() -> argparse.ArgumentParser:
              "render the original `output`.",
     )
     rs.add_argument(
-        "--seat", dest="seat", required=True, metavar="PATH",
-        help="path to the seat's <seat>.json file to rewrite in place",
+        "seat_name", nargs="?", default=None,
+        help="seat NAME (e.g. codex, sonnet): the engine derives the seat file "
+             "as <run_dir>/<seat>.json from --session-id/--run-id itself, so "
+             "the recipe reconstructs no run-dir path. Mutually exclusive with "
+             "the explicit --seat path form.",
     )
     rs.add_argument(
-        "-f", "--file", dest="file", default=None,
-        help="read the replacement output text from this file (default: stdin)",
+        "--seat", dest="seat", default=None, metavar="PATH", type=anchor_path,
+        help="explicit path to the seat's <seat>.json file to rewrite in place "
+             "(the ad-hoc form). A relative path now resolves against the "
+             "project root, not the shell cwd it previously resolved against. "
+             "Mutually exclusive with a positional seat NAME.",
+    )
+    rs.add_argument(
+        "--session-id", dest="session_id", default=None,
+        help="with a seat NAME: session id for .crew/reviews/<session-id>/ "
+             "(default: CLAUDE_SESSION_ID env)",
+    )
+    rs.add_argument(
+        "--run-id", dest="run_id", default=None,
+        help="with a seat NAME: derive the seat file inside this review run's "
+             "dir (from the review-prep JSON). Fallback: the session pointer; "
+             "with neither, the flat session dir.",
+    )
+    rs.add_argument(
+        "-f", "--file", dest="file", default=None, type=anchor_path,
+        help="read the replacement output text from this file (default: stdin; "
+             "a relative path resolves against the project root)",
     )
     rs.set_defaults(func=cmd_repair_seat)
 
@@ -4731,8 +4852,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "(default: CLAUDE_SESSION_ID env)")
     ps.add_argument("--model", dest="model", required=True,
                     help="the seat's model pin, written verbatim to `model`")
-    ps.add_argument("-f", "--file", dest="file", default=None,
-                    help="read the seat's output text from this file (default: stdin)")
+    ps.add_argument("-f", "--file", dest="file", default=None, type=anchor_path,
+                    help="read the seat's output text from this file (default: "
+                         "stdin). A relative path resolves against the project "
+                         "root, not the shell cwd.")
     ps.add_argument("--failed", dest="failed", action="store_true",
                     help="mark the seat failed: `ok` becomes false")
     ps.add_argument("--error", dest="error", default=None,
@@ -4829,8 +4952,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "-f", "--file",
-        default=None,
-        help="read the prompt from this file instead of the positional string",
+        default=None, type=anchor_path,
+        help="read the prompt from this file instead of the positional string "
+             "(a relative path resolves against the project root, not the shell cwd)",
     )
     run.add_argument("-m", "--model", default=None, help="override the seat's model")
     run.add_argument(
@@ -4845,9 +4969,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--json", action="store_true", help="emit the six-field result as JSON")
     run.add_argument("--timeout", type=int, default=None, help="wall-clock timeout (s)")
     run.add_argument(
-        "-o", "--out", default=None,
+        "-o", "--out", default=None, type=anchor_path,
         help="write output to this file instead of stdout (keeps the call "
-             "shell-redirect-free and allowlistable)",
+             "shell-redirect-free and allowlistable). A relative path resolves "
+             "against the project root, not the shell cwd.",
     )
     run.add_argument(
         "--session-id", dest="session_id", default=None,
@@ -4886,9 +5011,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     disp.add_argument(
         "-f", "--file",
-        default=None,
+        default=None, type=anchor_path,
         help="read the RAW task from this file instead of the positional string "
-             "(for multiline/large tasks; avoids ARG_MAX + quoting). XOR positional.",
+             "(for multiline/large tasks; avoids ARG_MAX + quoting). XOR positional. "
+             "A relative path resolves against the project root, not the shell cwd.",
     )
     disp.add_argument(
         "--seat", dest="seat", default=None,
@@ -4903,9 +5029,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="emit the 16-field envelope as JSON (exit 0 even when ok=false)",
     )
     disp.add_argument(
-        "-o", "--out", default=None,
+        "-o", "--out", default=None, type=anchor_path,
         help="write the envelope to this file (else derived from --session-id, "
-             "else stdout). Normally OMITTED — the engine derives + prints it.",
+             "else stdout). Normally OMITTED: the engine derives + prints it. "
+             "A relative path resolves against the project root.",
     )
     disp.add_argument(
         "--session-id", dest="session_id", default=None,
@@ -4952,8 +5079,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="free-form question for --mode discuss (instead of a target)",
     )
     rndr.add_argument(
-        "-f", "--file", default=None,
-        help="read a free-form discuss question from this file",
+        "-f", "--file", default=None, type=anchor_path,
+        help="read a free-form discuss question from this file (a relative "
+             "path resolves against the project root, not the shell cwd)",
     )
     rndr.add_argument(
         "--mode", choices=["review", "discuss"], default="review",
@@ -4972,14 +5100,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="round number (>=1); a round >1 folds in prior rounds 1..n-1",
     )
     rndr.add_argument(
-        "--prior-round", dest="prior_round", default=None,
-        help="explicit prior-round text file (alternative to --run-id/--round)",
+        "--prior-round", dest="prior_round", default=None, type=anchor_path,
+        help="explicit prior-round text file (alternative to --run-id/--round; "
+             "a relative path resolves against the project root)",
     )
     rndr.add_argument(
         "--base-dir", dest="base_dir",
-        default=str(crew_base() / ".crew" / "debates"),
+        default=str(crew_base() / ".crew" / "debates"), type=anchor_path,
         help="parent dir for debate runs (used to resolve --run-id); default "
-             "<project>/.crew/debates, anchored to CLAUDE_PROJECT_DIR",
+             "<project>/.crew/debates, anchored to CLAUDE_PROJECT_DIR (an "
+             "explicit relative path anchors the same way)",
     )
     rndr.add_argument("--base", default="main", help="base ref for branch/auto diffs")
     rndr.add_argument(
@@ -4987,9 +5117,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="embed the diff/plan content instead of referencing it",
     )
     rndr.add_argument(
-        "-o", "--out", default=None,
+        "-o", "--out", default=None, type=anchor_path,
         help="write the prompt to this file instead of stdout (keeps the call "
-             "shell-redirect-free and allowlistable)",
+             "shell-redirect-free and allowlistable). A relative path resolves "
+             "against the project root, not the shell cwd.",
     )
     rndr.add_argument(
         "--session-id", dest="session_id", default=None,
@@ -5028,8 +5159,9 @@ def build_parser() -> argparse.ArgumentParser:
              "also printed to stdout.",
     )
     doctor.add_argument(
-        "-o", "--out", default=None,
-        help="write the JSON to this path instead of the session path (~ expanded). "
+        "-o", "--out", default=None, type=anchor_path,
+        help="write the JSON to this path instead of the session path (~ expanded; "
+             "a relative path resolves against the project root). "
              "-o wins over the session path; the JSON is still printed to stdout.",
     )
     doctor.set_defaults(func=cmd_doctor)
@@ -5057,8 +5189,9 @@ def build_parser() -> argparse.ArgumentParser:
              "CLAUDE_SESSION_ID env). The JSON is ALWAYS also printed to stdout.",
     )
     probe.add_argument(
-        "-o", "--out", default=None,
-        help="write the JSON to this path instead of the session path (~ expanded). "
+        "-o", "--out", default=None, type=anchor_path,
+        help="write the JSON to this path instead of the session path (~ expanded; "
+             "a relative path resolves against the project root). "
              "-o wins over the session path; the JSON is still printed to stdout.",
     )
     probe.set_defaults(func=cmd_probe)
@@ -5081,8 +5214,9 @@ def build_parser() -> argparse.ArgumentParser:
              "without it, an existing target diverts to <target>.new",
     )
     sc.add_argument(
-        "-o", "--out", default=None,
-        help="write to this path instead of the resolved target (~ expanded); "
+        "-o", "--out", default=None, type=anchor_path,
+        help="write to this path instead of the resolved target (~ expanded; a "
+             "relative path resolves against the project root); "
              "'-' (a single dash) prints the rendered TOML to stdout (no file, no envelope)",
     )
     sc.add_argument(
@@ -5106,9 +5240,11 @@ def build_parser() -> argparse.ArgumentParser:
              "known_seat_names() ∪ the catalog Task seats.",
     )
     sc.add_argument(
-        "--detection", dest="detection", default=None,
-        help="a doctor.json detection file. ABSENT → omit per-seat available lines + a "
-             "stderr 'detection skipped' note; GIVEN-but-missing/empty/malformed → error.",
+        "--detection", dest="detection", default=None, type=anchor_path,
+        help="a doctor.json detection file (a relative path resolves against the "
+             "project root, not the shell cwd). ABSENT → omit per-seat available "
+             "lines + a stderr 'detection skipped' note; "
+             "GIVEN-but-missing/empty/malformed → error.",
     )
     sc.set_defaults(func=cmd_scaffold_config)
 

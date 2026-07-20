@@ -60,15 +60,17 @@ task text to the ABSOLUTE anchored path
 writes the exact bytes, no shell involved, and creates the `.crew/dispatch/` parent
 dir automatically; substitute your `CLAUDE_PROJECT_DIR` value for `<project-root>`
 in the WRITE-tool path, safe as a literal there), then pass `-f <file>` to the
-engine. The Bash recipe's `-f` uses the SHELL EXPANSION
-`"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/..."` (resolving to the SAME `.crew` at
-runtime): `dispatch` resolves an explicit `-f` against the shell cwd, which need
-not be the project root, so a bare `.crew/...` could split the tree. This is
-UNCONDITIONAL (not gated on a newline/byte-size trigger): a positional task
-containing `$(…)`, `$VAR`, backticks, or `"` would be expanded or mangled by the
-shell when the Bash tool runs the command, so the task NEVER goes on the command
-line. The `-f` file fully dodges shell quoting/expansion AND ARG_MAX. Exactly ONE
-task source (`-f`).
+engine. The Bash recipe's `-f` is the plain RELATIVE path `.crew/...`,
+double-quoted: the ENGINE anchors a relative path arg to the project root
+(`crew_base()`, the same root the Write-tool literal named), never the shell
+cwd, and the quotes keep any odd character in a substituted value inert. `${…}` expansions are
+BANNED in these recipes: a command line carrying one defeats permission
+allowlisting (it fires a manual approval prompt even when the prefix rule
+matches). The spill itself is UNCONDITIONAL (not gated on a newline/byte-size
+trigger): a positional task containing `$(…)`, `$VAR`, backticks, or `"` would be
+expanded or mangled by the shell when the Bash tool runs the command, so the task
+NEVER goes on the command line. The `-f` file fully dodges shell
+quoting/expansion AND ARG_MAX. Exactly ONE task source (`-f`).
 
 Then invoke the bare `crew` dispatcher. Substitute your actual session id (the
 `[Session ID: …]` value) for `<session-id>` — pass it as a literal `--session-id`
@@ -78,7 +80,7 @@ when the user explicitly provided one** (omit it otherwise so the engine resolve
 the seat itself):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" dispatch -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/dispatch/<session-id>-task.txt" --session-id <session-id> --json
+"${CLAUDE_PLUGIN_ROOT}/crew" dispatch -f ".crew/dispatch/<session-id>-task.txt" --session-id <session-id> --json
 ```
 
 (When the user named a seat, add `--seat <seat>` to the command.)
@@ -87,10 +89,16 @@ the seat itself):
 file by the time the call returns (it has either read the task or exited before
 doing so), so delete it NOW, right after the invocation and BEFORE checking exit
 status. Doing it here (not at the end) means EVERY exit path
-sweeps it, including the exit-2 STOP in step 4 that returns before the report:
+sweeps it, including the exit-2 STOP in step 4 that returns before the report.
+This `rm` is a plain shell command with no engine anchoring, so it takes the
+ABSOLUTE path: substitute your `CLAUDE_PROJECT_DIR` value for `<project-root>`
+(the same root the Write-tool literal named), keeping it a double-quoted LITERAL.
+The `${…}` ban is on expansions, not literals: a substituted literal stays
+allowlistable and deletes the right tree's file even when the shell cwd has
+drifted:
 
 ```bash
-rm -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/dispatch/<session-id>-task.txt"
+rm -f "<project-root>/.crew/dispatch/<session-id>-task.txt"
 ```
 
 ## Step 4 — Check exit status, then read the envelope

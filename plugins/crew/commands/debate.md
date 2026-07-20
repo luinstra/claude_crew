@@ -121,16 +121,16 @@ newlines) at an ABSOLUTE anchored path,
 `CLAUDE_PROJECT_DIR` value for `<project-root>` in the WRITE-tool path, safe as a
 literal there). Then run the engine `debate` subcommand with **`--seats none`** to
 scaffold the dir and copy the question into `question.md`, WITHOUT running any
-subprocess seats (the per-seat fan-out happens visibly in A2). The `-f` recipe uses
-the SHELL EXPANSION `"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/..."` (resolving to the SAME
-`.crew` at runtime, so a project root containing `$(…)`, backticks, `$VAR`, or a
-quote cannot execute or mangle the command): `debate` resolves an explicit `-f`
-against the shell cwd, which need not be the project root, so a bare
-`.crew/debates/...` could land in the wrong tree. One allowlistable call, no
+subprocess seats (the per-seat fan-out happens visibly in A2). The `-f` recipe is
+the plain RELATIVE path `.crew/debates/...`: the ENGINE anchors a relative path
+arg to the project root (`crew_base()`, the same root the Write-tool literal
+named), never the shell cwd. `${…}` expansions are BANNED in these recipes: a
+command line carrying one defeats permission allowlisting (it fires a manual
+approval prompt even when the prefix rule matches). One allowlistable call, no
 `mkdir`/heredoc/redirect:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" debate -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/staged-question-<slug>.txt" --slug <short-kebab-slug> --seats none --consume
+"${CLAUDE_PLUGIN_ROOT}/crew" debate -f ".crew/debates/staged-question-<slug>.txt" --slug <short-kebab-slug> --seats none --consume
 ```
 
 **Always `--seats none` here** — though `debate` is ALWAYS scaffold-only and
@@ -146,13 +146,13 @@ every per-seat result + the synthesis go. **`dir` is an ABSOLUTE path** (the eng
 anchors it to the project root, which need not equal the shell's cwd). Use that
 printed path VERBATIM as `<dir>` for the **Write-tool** and **Task `Read`**
 references below (they take a literal path, no shell). The **Bash recipes** below
-instead reconstruct it as `"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<dir-name>/..."`,
-where `<dir-name>` is the LAST path segment (basename) of the printed `dir` (a safe
-engine-minted `<timestamp>-<slug>`): the shell resolves the SAME dir the literal
-names, but a project root containing `$(…)`, backticks, `$VAR`, or a quote cannot
-execute or mangle the command. Do NOT paste the whole absolute `dir` into a Bash
-arg, and do NOT use a bare cwd-relative `.crew/debates/...` (that can miss the
-anchored tree the engine wrote to).
+instead reconstruct it as the RELATIVE `.crew/debates/<dir-name>/...`, where
+`<dir-name>` is the LAST path segment (basename) of the printed `dir` (a safe
+engine-minted `<timestamp>-<slug>`): the ENGINE anchors a relative path arg to
+the project root, the SAME dir the literal names, no matter where the shell cwd
+sits. No `${…}` expansion belongs on these lines (it would defeat permission
+allowlisting), and do NOT paste the whole absolute `dir` into a Bash arg (a
+project root can carry `$(…)`/backticks the shell would execute).
 
 ## A2 — Fan out subprocess seats (one visible shell PER SEAT)
 
@@ -180,7 +180,7 @@ shape Section B uses, minus the `--run-id`/`--round` round-threading — a singl
 round has no prior):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role <seat> -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<dir-name>/question.md" -o "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<dir-name>/.prompt-<seat>.txt"
+"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role <seat> -f ".crew/debates/<dir-name>/question.md" -o ".crew/debates/<dir-name>/.prompt-<seat>.txt"
 ```
 
 This labels each subprocess seat ("acting as the **<seat>** seat") — a deliberate
@@ -194,7 +194,7 @@ launch a SEPARATE `crew run <seat>` Bash call, all concurrently (e.g. background
 calls) so they are distinct shells you can watch and kill individually:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<dir-name>/.prompt-<seat>.txt" --json -o "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<dir-name>/<seat>.json"
+"${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f ".crew/debates/<dir-name>/.prompt-<seat>.txt" --json -o ".crew/debates/<dir-name>/<seat>.json"
 ```
 
 - `run --json` ALWAYS exits 0 and writes the six-field result
@@ -221,7 +221,7 @@ parallel:
 
 ```bash
 # for each <seat> in task_seats:
-"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role <seat> -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<dir-name>/question.md" -o "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<dir-name>/.prompt-<seat>.txt"
+"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role <seat> -f ".crew/debates/<dir-name>/question.md" -o ".crew/debates/<dir-name>/.prompt-<seat>.txt"
 ```
 
 Dispatch each seat **by reference** — point the panelist at its rendered file and
@@ -298,15 +298,14 @@ Task reference in this section.** Define:
 
 Substitute your absolute `CLAUDE_PROJECT_DIR` value for `<project-root>` (a literal
 absolute path, correct for the Write tool and the Task Read references below, which
-take no shell). The **Bash recipes** below instead spell out the SHELL EXPANSION
-`"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<run-id>/..."` in place of `<run-dir>`:
-the shell resolves it at runtime, so a project root containing `$(…)`, backticks,
-`$VAR`, or a quote cannot execute or mangle the command, and it resolves to the SAME
-dir the literal does. This is the SAME anchored root the engine's `render --run-id`
-resolves prior rounds from (its default `crew_base()/.crew/debates`, anchored to
-`CLAUDE_PROJECT_DIR`, not the shell cwd), so the orchestrator's writes and the
-engine's reads land in ONE tree. Do NOT use a bare cwd-relative `.crew/debates/...`
-anywhere below.
+take no shell). The **Bash recipes** below instead spell out the RELATIVE
+`.crew/debates/<run-id>/...` in place of `<run-dir>`: the ENGINE anchors a
+relative path arg to the project root (`crew_base()`), never the shell cwd, so it
+resolves to the SAME dir the literal does. No `${…}` expansion belongs on these
+lines (it would defeat permission allowlisting). This is the SAME anchored root
+the engine's `render --run-id` resolves prior rounds from (its default
+`crew_base()/.crew/debates`, anchored to `CLAUDE_PROJECT_DIR`, not the shell
+cwd), so the orchestrator's writes and the engine's reads land in ONE tree.
 
 Write the question once with the **Write tool** to `<run-dir>/question.md`
 (writing the file creates the run dir; this is the dir `render --run-id` reads
@@ -319,17 +318,17 @@ and folds them in as injection-guarded DATA — on round 1 there is no prior):
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role <seat> \
-  -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<run-id>/question.md" \
+  -f ".crew/debates/<run-id>/question.md" \
   --run-id <run-id> --round <n> \
-  -o "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<run-id>/.prompt-<seat>-r<n>.txt"
+  -o ".crew/debates/<run-id>/.prompt-<seat>-r<n>.txt"
 ```
 
 Do NOT pass `--base-dir` here: omitting it lets the engine resolve the run dir it
-reads prior rounds from through its ANCHORED default (the project-root `.crew/debates`,
-the same resolver every other `.crew` consumer uses). Passing a cwd-relative
-`--base-dir .crew/debates` instead would make the engine resolve it against its own
-cwd, which need not be the project root, splitting the prior-round read from the
-`round-NN.md` files the orchestrator writes at the project root.
+reads prior rounds from through its ANCHORED default (the project-root
+`.crew/debates`, the same resolver every other `.crew` consumer uses). A relative
+`--base-dir .crew/debates` would resolve to the SAME anchored dir now (every
+explicit path arg is engine-anchored), so passing it is merely redundant; omit it
+and let the default speak.
 
 Render EVERY seat in the panel — every `subprocess_seats` entry AND every
 `task_seats` entry from the split — exactly as A3 renders one prompt per seat;
@@ -340,7 +339,7 @@ Then run the round's seats (in parallel where possible):
 
 - **Subprocess seats** (the external-CLI entries): execute the rendered prompt via the engine —
   ```bash
-  "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<run-id>/.prompt-<seat>-r<n>.txt" --json -o "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/debates/<run-id>/<seat>-r<n>.json"
+  "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f ".crew/debates/<run-id>/.prompt-<seat>-r<n>.txt" --json -o ".crew/debates/<run-id>/<seat>-r<n>.json"
   ```
 - **Task seats** (`task_seats` from the split): dispatch one `crew:panelist` per
   Task seat in the panel, **pinning each seat's model from `task_seat_models[<seat>]`**

@@ -31,6 +31,7 @@ from models import (
 )
 from multiagent import config, review_runs, targets
 from state_discovery import (
+    anchor_path,
     crew_base,
     find_adoptable_legacy,
     find_session_state_file,
@@ -416,7 +417,15 @@ def cmd_set(args):
         )
         sys.exit(2)
 
-    _apply_field(cls, path, args.field, args.value)
+    value = args.value
+    if args.field == "plan_file":
+        # A path field persists into loop state and is consumed AS-IS by later
+        # readers (review-prep, the banner), each in its own cwd. Anchor a
+        # relative value to the project root at write time so the stored path
+        # resolves the same everywhere (mirrors init's --auto-plan absolute).
+        value = anchor_path(value)
+
+    _apply_field(cls, path, args.field, value)
 
 
 def check_for_conflicts(session_id: str = ""):
@@ -527,8 +536,34 @@ def _resolve_deadline(args) -> int:
     return configured if configured is not None else DEFAULT_DEADLINE_MINUTES
 
 
+def _same_file(a: Path, b: Path) -> bool:
+    """True when the two paths name the same file.
+
+    os.path.samefile when both exist (covers symlink aliases and hard links);
+    resolved-path equality when either is missing, so a comparand not on disk
+    yet still guards. Never raises: an unresolvable path is just "no match".
+    """
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        try:
+            return a.resolve() == b.resolve()
+        except OSError:
+            return False
+
+
 def cmd_init(args):
     """Initialize a loop with default state."""
+    # Validated BEFORE any state work: --consume names a file to delete, so
+    # without -f there is nothing it could mean and silence would hide the typo.
+    if getattr(args, "consume", False) and not getattr(args, "task_file", None):
+        print(
+            "Error: --consume requires -f (it deletes the spill file a "
+            "successful init just read; there is no file to consume without -f)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     session_id = resolve_session_id(args)
 
     # Check for conflicts (session-scoped)
@@ -651,6 +686,35 @@ def cmd_init(args):
     # force-exited. It still goes through the lock so it cannot interleave with a
     # Stop-hook write and leave a half-old, half-new file behind.
     _mutate_state(LoopState, path, lambda _data: fresh)
+
+    # Only after the state write landed: a failed init exits above and leaves
+    # the spill for retry. A failed unlink is a warning, never a failed init
+    # (the loop is live either way).
+    if getattr(args, "consume", False):
+        spill = Path(args.task_file)
+        # -f is caller-named: if it resolves to the state file just written,
+        # or to the mt plan file, the unlink would destroy live loop data.
+        # Skip the delete with a warning, never fail the init.
+        collision = ""
+        if _same_file(spill, path):
+            collision = f"the loop state file ({path})"
+        elif canonical == "mt" and _same_file(spill, Path(plan_file)):
+            collision = f"the plan file ({plan_file})"
+        if collision:
+            print(
+                f"Warning: --consume skipped: -f {args.task_file} resolves to "
+                f"{collision}; not deleting it.",
+                file=sys.stderr,
+            )
+        else:
+            try:
+                spill.unlink()
+            except OSError as exc:
+                print(
+                    f"Warning: init succeeded but could not delete the consumed "
+                    f"task file {args.task_file}: {exc}",
+                    file=sys.stderr,
+                )
 
 
 def deadline_minutes_arg(value: str) -> int:
@@ -1163,11 +1227,23 @@ def main():
     p_init.add_argument("--prompt", help="Task prompt (for build loop)")
     p_init.add_argument("--task", help="Task description (for measure-twice)")
     p_init.add_argument(
-        "-f", "--prompt-file", "--task-file", dest="task_file",
+        "-f", "--prompt-file", "--task-file", dest="task_file", type=anchor_path,
         help="Read the loop's task text from a UTF-8 file (keeps raw $ARGUMENTS "
-             "off the shell); mutually exclusive with --prompt/--task",
+             "off the shell); mutually exclusive with --prompt/--task. A "
+             "relative path resolves against the project root (crew_base), "
+             "never the shell cwd, so recipes pass a plain .crew/... path.",
     )
-    p_init.add_argument("--plan-file", help="Plan file path (for measure-twice)")
+    p_init.add_argument(
+        "--consume", action="store_true", default=False,
+        help="After a SUCCESSFUL init from -f, delete the spill file just read "
+             "(folds the recipes' separate rm step into the engine). A failed "
+             "init leaves the file for retry; requires -f (exit 2 without it).",
+    )
+    p_init.add_argument(
+        "--plan-file", type=anchor_path,
+        help="Plan file path (for measure-twice); a relative path resolves "
+             "against the project root before it is stored",
+    )
     p_init.add_argument("--auto-plan", action="store_true", help="Auto-derive plan file from task (for measure-twice)")
     p_init.add_argument(
         "--deadline-minutes", dest="deadline_minutes", type=deadline_minutes_arg,

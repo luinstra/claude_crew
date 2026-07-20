@@ -1629,10 +1629,15 @@ def test_provider_readonly_cwd():
 # =============================================================================
 
 def test_recipe_metacharacter_root():
-    """The shipped Bash recipes reference `.crew` via the SHELL EXPANSION
-    "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/...", not an orchestrator-pasted literal.
-    A project root containing `$(...)`/backticks then resolves as a plain string
-    at runtime instead of executing. This asserts the mechanism the fix adopts.
+    """WHY a root token never belongs on a recipe's shell line, in either form.
+
+    The shipped recipes now carry PLAIN RELATIVE `.crew/...` paths (the ENGINE
+    anchors them to crew_base, so no root token reaches the shell at all; the
+    fence lints pin that). This test keeps the two underlying shell facts on
+    record: the `${...}` expansion form resolves a metacharacter root safely but
+    defeats permission allowlisting (why it was retired from the recipes), and
+    the literal-substitution form EXECUTES an injected `$(...)`/backtick (why
+    pasting a root into a shell line stays banned everywhere, prose included).
     """
     log_section("Bash recipe metacharacter-root safety")
     with tempfile.TemporaryDirectory() as root:
@@ -2634,6 +2639,14 @@ def test_debate_subcommand():
               "no longer runs subprocess seats internally" in proc.stderr,
               "advisory PRESENT", repr(proc.stderr[:200]))
 
+    # anchor_path passes "" through as a sentinel; cmd_debate must reject it
+    # (consumed, it would become Path(".") and scaffold into the shell cwd).
+    proc = _run_cli(["debate", "Empty base?", "--base-dir", ""], timeout=30)
+    check("debate --base-dir '': exit 2 naming the flag (no cwd scaffold)",
+          proc.returncode == 2 and "--base-dir" in proc.stderr,
+          "exit 2 + '--base-dir' in stderr",
+          f"{proc.returncode}: {proc.stderr[:160]}")
+
     # GUARD: cmd_debate must NEVER reach _fan_out, even with `--seats codex`.
     # We monkeypatch cli._fan_out to RAISE and call cmd_debate IN-PROCESS — if it
     # still calls _fan_out the exception would surface (nonzero / traceback);
@@ -2851,6 +2864,18 @@ def test_render_subcommand():
     )
     check("render rejects a traversal --run-id", proc.returncode != 0,
           "nonzero", str(proc.returncode))
+
+    # Empty --base-dir at the prior-round consumer: rejected (exit 2 naming
+    # the flag) instead of resolving the run dir against the shell cwd.
+    proc = _run_cli(
+        ["render", "--mode", "discuss", "-q", "Q", "--run-id", "run-x",
+         "--round", "2", "--base-dir", ""],
+        timeout=30,
+    )
+    check("render empty --base-dir with --run-id/--round: exit 2 naming the flag",
+          proc.returncode == 2 and "--base-dir" in proc.stderr,
+          "exit 2 + '--base-dir' in stderr",
+          f"{proc.returncode}: {proc.stderr[:160]}")
 
     # PARITY GATE: render's emitted prompt == prompts.build_prompt(...) exactly —
     # the orchestrator's Task-seat prompt is the same single source as the engine's.
@@ -3564,7 +3589,10 @@ def test_collect():
               proc.returncode == 0 and content.strip() == "(no seats ran)",
               "(no seats ran)", f"rc={proc.returncode} got={content!r}")
 
-    # 10. path-only stdout with -o: stdout.strip() == args.out, digest to file.
+    # 10. path-only stdout with -o: stdout carries ONLY the out path, digest to
+    # file. A relative -o is ANCHORED to crew_base at parse (here: the cwd, no
+    # CLAUDE_PROJECT_DIR in the neutral env), so the echo names the resolved
+    # absolute file actually written, readable from any cwd.
     with tempfile.TemporaryDirectory() as td:
         rd = Path(td) / ".crew" / "reviews" / "sess5"
         rd.mkdir(parents=True)
@@ -3574,9 +3602,15 @@ def test_collect():
             ["collect", "--session-id", "sess5", "--seats", "seatA", "-o", outf],
             cwd=td, timeout=30)
         content = (Path(td) / outf).read_text() if (Path(td) / outf).exists() else ""
-        check("collect -o prints ONLY the out path to stdout (stdout.strip()==out)",
-              proc.returncode == 0 and proc.stdout.strip() == outf,
-              f"stdout=={outf}", repr(proc.stdout))
+        # Resolve both sides: crew_base falls back to the subprocess getcwd(),
+        # the PHYSICAL path (macOS /var -> /private/var), while td is the
+        # symlink form.
+        echoed = Path(proc.stdout.strip()) if proc.stdout.strip() else Path(".")
+        check("collect -o prints ONLY the anchored out path to stdout",
+              proc.returncode == 0
+              and echoed.is_absolute()
+              and echoed.resolve() == (Path(td) / outf).resolve(),
+              f"stdout resolves to {(Path(td) / outf).resolve()}", repr(proc.stdout))
         check("collect -o sends the digest to the file, not stdout",
               "seatA" in content and "seatA" not in proc.stdout,
               "digest in file only", repr(proc.stdout[:120]))
@@ -6713,13 +6747,16 @@ def test_dispatch():
     check("dispatch.md: no executed fence references a dispatch-*.json envelope (engine derives + prints it)",
           all("dispatch-" not in l for l in fence_lines),
           "no dispatch-*.json in any executed fence", joined)
-    # The surviving spill `rm` (the task file) is ANCHORED to the project dir, never a
-    # bare `.crew/...` that a drifted cwd would miss.
+    # A shell rm gets NO engine anchoring, so the spill rm targets the
+    # substituted-literal <project-root> absolute path (double-quoted; the ban
+    # is on ${…} EXPANSIONS, a literal stays allowlistable).
     spill_rm = [l for l in rm_lines if ".crew/dispatch/" in l]
-    check("dispatch.md: the task-spill rm is anchored to ${CLAUDE_PROJECT_DIR:-$PWD}",
+    check("dispatch.md: the task-spill rm uses the quoted <project-root> literal (no ${…})",
           bool(spill_rm)
-          and all('"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/dispatch/' in l for l in spill_rm),
-          "anchored task-spill rm", str(spill_rm))
+          and all('rm -f "<project-root>/.crew/dispatch/' in l
+                  and "${CLAUDE_PROJECT_DIR" not in l
+                  for l in spill_rm),
+          "<project-root>-anchored task-spill rm, no expansion", str(spill_rm))
     check("dispatch.md: engine reached via the bare crew dispatcher (dispatch subcommand)",
           '"${CLAUDE_PLUGIN_ROOT}/crew" dispatch' in joined,
           "bare crew dispatch invocation", joined)
@@ -7182,39 +7219,336 @@ def _fence_lines(md_name):
 
 
 def test_build_md_executor_task_anchoring():
-    log_section("build.md static fence check (executor-task.txt -f/rm anchored)")
+    log_section("build.md static fence check (executor-task.txt -f/rm relative, no ${…})")
     fence_lines = _fence_lines("build.md")
     task_lines = [l for l in fence_lines if "executor-task.txt" in l]
     check("build.md: an executed fence references executor-task.txt (non-vacuous)",
           bool(task_lines), "at least one executor-task.txt fence", str(fence_lines))
-    # A bare .crew/... spill would miss the tree once the shell cwd drifts, so the
-    # -f dispatch and the rm cleanup both anchor to the project dir.
-    check("build.md: every executor-task.txt fence anchors to ${CLAUDE_PROJECT_DIR:-$PWD}",
-          all('"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/' in l for l in task_lines),
-          "anchored executor-task.txt fences", str(task_lines))
-    # A `.crew/reviews` NOT preceded by the anchor's `}/` is an unanchored spill.
-    bare_spill = [l for l in task_lines
-                  if re.search(r'(?<!\}/)\.crew/reviews/[^"]*executor-task\.txt', l)]
-    check("build.md: no bare .crew/reviews/...executor-task.txt in an executed fence",
-          not bare_spill, "no bare .crew executor-task.txt", str(bare_spill))
+    # The ENGINE anchors its relative path args to crew_base, so the -f rides the
+    # quoted relative path; the shell rm gets no anchoring and takes the quoted
+    # <project-root> literal. A ${…} expansion is banned on both.
+    check("build.md: every executor-task.txt fence uses a quoted .crew/reviews/ path, no ${…}",
+          all(".crew/reviews/" in l and "${CLAUDE_PROJECT_DIR" not in l
+              for l in task_lines),
+          "quoted executor-task.txt fences, no expansion", str(task_lines))
+    rm_lines = [l for l in task_lines if l.split()[:2] == ["rm", "-f"]]
+    check("build.md: the executor-task.txt rm targets the quoted <project-root> literal",
+          bool(rm_lines)
+          and all('rm -f "<project-root>/.crew/reviews/' in l for l in rm_lines),
+          "<project-root>-anchored rm", str(rm_lines))
+    # Both halves of the lifecycle stay: the -f dispatch and the final rm.
+    check("build.md: the executor-task.txt lifecycle keeps its -f dispatch AND its rm",
+          any('-f ".crew/reviews/' in l and "executor-task.txt" in l for l in task_lines)
+          and bool(rm_lines),
+          "-f dispatch + rm present", str(task_lines))
 
 
 def test_init_md_detection_fence_anchoring():
-    log_section("init.md static fence check (scaffold-config --detection substitutes + anchors)")
+    log_section("init.md static fence check (scaffold-config --detection relative, no ${…})")
     fence_lines = _fence_lines("init.md")
     det_lines = [l for l in fence_lines if "--detection" in l]
     check("init.md: an executed fence passes scaffold-config --detection (non-vacuous)",
           bool(det_lines), "at least one --detection fence", str(fence_lines))
-    # The reconstructed path is the whole point of this change: it must use the
-    # sanitized <session_segment> stem, never the raw <session-id> the harness gave.
+    # The reconstructed path must use the sanitized <session_segment> stem, never
+    # the raw <session-id> the harness gave.
     check("init.md: every --detection fence reads reviews/<session_segment> (not raw <session-id>)",
           all("reviews/<session_segment>" in l and "reviews/<session-id>" not in l
               for l in det_lines),
           "session_segment stem, no raw session-id", str(det_lines))
-    check("init.md: every --detection fence anchors to ${CLAUDE_PROJECT_DIR:-$PWD}",
-          all('"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session_segment>/' in l
+    # Relative path, engine-anchored, double-quoted (metachar-inert).
+    check("init.md: every --detection fence passes the quoted relative .crew/reviews/<session_segment>/ path",
+          all('--detection ".crew/reviews/<session_segment>/' in l
+              and "${CLAUDE_PROJECT_DIR" not in l
               for l in det_lines),
-          "anchored --detection path", str(det_lines))
+          "quoted relative --detection path, no expansion", str(det_lines))
+
+
+def test_command_fences_no_expansions():
+    """The recipe convention this change lands: NO bash fence in ANY command
+    markdown carries a `${...}` expansion (a line with one defeats permission
+    allowlisting, firing a manual approval prompt even when the prefix rule
+    matches). The engine anchors relative path args to crew_base instead. ONE
+    exemption: the `${CLAUDE_PLUGIN_ROOT}` dispatcher prefix, which the harness
+    substitutes when the command content loads, so the shell never sees it."""
+    log_section("ALL command fences: no ${…} expansion (engine owns anchoring)")
+    cmd_dir = SCRIPT_DIR.parent / "commands"
+    mds = sorted(cmd_dir.glob("*.md"))
+    check("command markdown dir is non-empty (lint is non-vacuous)",
+          len(mds) > 5, "> 5 command files", str([m.name for m in mds]))
+    for md in mds:
+        fence_lines = _fence_lines(md.name)
+        bad = [l for l in fence_lines
+               if "${" in l.replace("${CLAUDE_PLUGIN_ROOT}", "")]
+        check(f"{md.name}: no ${{…}} expansion in any executed fence line "
+              "(CLAUDE_PLUGIN_ROOT exempt)",
+              not bad, "no expansions", str(bad))
+        # Same allowlisting rationale as ${…}: a $(…) or backtick on a fence
+        # line is a shell substitution the permission prefix rule cannot pin.
+        subst = [l for l in fence_lines if "$(" in l or "`" in l]
+        check(f"{md.name}: no $(…) or backtick substitution in any executed fence line",
+              not subst, "no command substitutions", str(subst))
+
+    # The surviving pure-shell file op: restore-context's mv gets NO engine
+    # anchoring, so it targets the quoted <project-root> substituted literal.
+    rc_mv = [l for l in _fence_lines("restore-context.md")
+             if l.split()[:1] == ["mv"]]
+    check("restore-context.md: the snapshot mv targets quoted <project-root> literals",
+          bool(rc_mv) and all(
+              l.count('"<project-root>/.crew/') == 2 for l in rc_mv),
+          "<project-root>-anchored mv, both paths", str(rc_mv))
+
+    # The previously expansion-pinned recipes, re-pinned in their RELATIVE
+    # form (double-quoted: the quotes keep a substituted id's chars inert).
+    build_lines = _fence_lines("build.md")
+    init_bl = [l for l in build_lines if "state init bl" in l]
+    check("build.md: state init bl uses the quoted relative -f spill + --consume",
+          len(init_bl) == 1
+          and '-f ".crew/task-bl-<session-id>.txt"' in init_bl[0]
+          and "--consume" in init_bl[0],
+          "quoted relative -f + --consume", str(init_bl))
+    check("build.md: no separate rm of the task-bl spill remains (--consume owns it)",
+          not any(l.split()[:1] == ["rm"] and "task-bl-" in l for l in build_lines),
+          "no task-bl rm fence", str([l for l in build_lines if "task-bl-" in l]))
+
+    mt_lines = _fence_lines("measure-twice.md")
+    init_mt = [l for l in mt_lines if "state init mt" in l]
+    check("measure-twice.md: state init mt uses the quoted relative -f spill + --auto-plan + --consume",
+          len(init_mt) == 1
+          and '-f ".crew/task-mt-<session-id>.txt"' in init_mt[0]
+          and "--auto-plan" in init_mt[0] and "--consume" in init_mt[0],
+          "quoted relative -f + --auto-plan + --consume", str(init_mt))
+    check("measure-twice.md: no separate rm of the task-mt spill remains (--consume owns it)",
+          not any(l.split()[:1] == ["rm"] and "task-mt-" in l for l in mt_lines),
+          "no task-mt rm fence", str([l for l in mt_lines if "task-mt-" in l]))
+
+    # The run-dir reconstructions keep the sanitized <session_segment> stem
+    # (never the raw <session-id>) and the relative .crew/reviews/ root.
+    for name in ("review.md", "build.md", "measure-twice.md"):
+        lines = _fence_lines(name)
+        persist = [l for l in lines if "persist-seat" in l and "-f" in l.split()]
+        check(f"{name}: persist-seat -f reads the quoted relative tmp-seat spill under <session_segment>",
+              bool(persist) and all(
+                  '-f ".crew/reviews/<session_segment>/tmp-seat-<seat>.md"' in l
+                  for l in persist),
+              "quoted relative tmp-seat -f", str(persist))
+        repair = [l for l in lines if "repair-seat" in l]
+        check(f"{name}: repair-seat uses the NAME form (engine derives the seat file; no --seat path)",
+              bool(repair) and all(
+                  "repair-seat <seat> --session-id" in l and "--run-id" in l
+                  and "--seat " not in l
+                  and '-f ".crew/reviews/<session_segment>/tmp-repair-<seat>.md"' in l
+                  for l in repair),
+              "positional repair-seat + quoted relative -f", str(repair))
+        coll = [l for l in lines if "collect" in l and "--group" in l]
+        check(f"{name}: grouped collect writes quoted relative run-dir -o/--full under <session_segment>",
+              bool(coll) and all(
+                  '-o ".crew/reviews/<session_segment>/' in l
+                  and '--full ".crew/reviews/<session_segment>/' in l
+                  and "reviews/<session-id>" not in l
+                  for l in coll),
+              "quoted relative -o/--full, session_segment stem", str(coll))
+
+
+def test_path_arg_anchoring():
+    """Relative path ARGS resolve against crew_base (CLAUDE_PROJECT_DIR), never
+    the shell cwd; absolute paths pass through byte-unchanged. This is the engine
+    half of the no-${…}-in-recipes convention."""
+    log_section("anchor_path + divergent-cwd relative -f/-o (engine-owned anchoring)")
+    from state_discovery import anchor_path
+
+    # --- unit: the shared helper itself -------------------------------------
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td) / "proj"
+        proj.mkdir()
+        saved = os.environ.get("CLAUDE_PROJECT_DIR")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(proj)
+        try:
+            check("anchor_path: relative resolves under crew_base",
+                  anchor_path(".crew/x.md") == str(proj / ".crew" / "x.md"),
+                  str(proj / ".crew" / "x.md"), anchor_path(".crew/x.md"))
+            absolute = str(Path(td) / "elsewhere" / "y.md")
+            check("anchor_path: absolute passes through unchanged",
+                  anchor_path(absolute) == absolute, absolute, anchor_path(absolute))
+            # BYTE-TRUE, not merely equivalent: no Path round-trip that would
+            # collapse a doubled slash or strip a trailing one.
+            oddball = str(Path(td)) + "//sub/dir/"
+            check("anchor_path: absolute is byte-true (doubled/trailing slashes kept)",
+                  anchor_path(oddball) == oddball, oddball, anchor_path(oddball))
+            check("anchor_path: '-' (stdout sentinel) passes through exactly",
+                  anchor_path("-") == "-", "-", anchor_path("-"))
+            check("anchor_path: empty string passes through exactly",
+                  anchor_path("") == "", "''", repr(anchor_path("")))
+            home = os.path.expanduser("~")
+            check("anchor_path: ~ expands first (counts as absolute)",
+                  anchor_path("~/z.txt") == os.path.join(home, "z.txt"),
+                  os.path.join(home, "z.txt"), anchor_path("~/z.txt"))
+        finally:
+            if saved is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved
+
+    # --- e2e: DIVERGENT cwd (cwd != CLAUDE_PROJECT_DIR) ---------------------
+    rA = ProviderResult(name="seatA", model="m-a", ok=True,
+                        output="A says APPROVED", error=None, elapsed=1.0)
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td) / "proj"
+        other = Path(td) / "other"
+        rd = proj / ".crew" / "reviews" / "S"
+        rd.mkdir(parents=True)
+        other.mkdir()
+        _write_seat_json(rd, "seatA", rA)
+        env = _neutral_env()
+        env["CLAUDE_PROJECT_DIR"] = str(proj)
+        env.pop("CLAUDE_SESSION_ID", None)
+
+        # collect -o relative: lands under the PROJECT'S .crew, cwd untouched.
+        proc = _run_cli(
+            ["collect", "--session-id", "S", "--seats", "seatA",
+             "-o", ".crew/reviews/S/panel.md"], env=env, cwd=str(other), timeout=30)
+        check("collect relative -o from divergent cwd lands under crew_base",
+              proc.returncode == 0 and (rd / "panel.md").is_file()
+              and not (other / ".crew").exists(),
+              "file under proj, no .crew at cwd",
+              f"rc={proc.returncode} proj={ (rd / 'panel.md').is_file() } "
+              f"cwdleak={(other / '.crew').exists()} err={proc.stderr[:150]}")
+        # The path-only stdout echo names the ANCHORED file it actually wrote.
+        check("collect relative -o echoes the anchored absolute path",
+              proc.stdout.strip() == str(rd / "panel.md"),
+              str(rd / "panel.md"), repr(proc.stdout))
+
+        # absolute -o: byte-identical caller experience (pin: no change).
+        abs_out = other / "abs-panel.md"
+        proc = _run_cli(
+            ["collect", "--session-id", "S", "--seats", "seatA",
+             "-o", str(abs_out)], env=env, cwd=str(other), timeout=30)
+        check("collect absolute -o is untouched (writes exactly there, echoes verbatim)",
+              proc.returncode == 0 and abs_out.is_file()
+              and proc.stdout.strip() == str(abs_out),
+              "absolute path written + echoed", repr(proc.stdout))
+
+        # persist-seat -f relative from divergent cwd reads the PROJECT's file.
+        (rd / "tmp-seat-sonnet.md").write_text("VERDICT: APPROVED",
+                                               encoding="utf-8")
+        proc = _run_cli(
+            ["persist-seat", "sonnet", "--session-id", "S", "--model", "sonnet",
+             "-f", ".crew/reviews/S/tmp-seat-sonnet.md"],
+            env=env, cwd=str(other), timeout=30)
+        landed = rd / "sonnet.json"
+        check("persist-seat relative -f from divergent cwd reads under crew_base",
+              proc.returncode == 0 and landed.is_file()
+              and json.loads(landed.read_text())["output"] == "VERDICT: APPROVED",
+              "sonnet.json under proj with the file's text",
+              f"rc={proc.returncode} err={proc.stderr[:150]}")
+
+
+def test_repair_seat_name_form():
+    """repair-seat's two addressing forms: a positional seat NAME derives
+    <run_dir>/<seat>.json from the requested scope (the recipes' form, no
+    run-dir path reconstructed), --seat <path> stays the ad-hoc form, and the
+    two are mutually exclusive."""
+    log_section("repair-seat name derivation (+ mutual exclusion)")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        plan = tdp / "plan.md"
+        plan.write_text("# Plan\n\nDo the thing.\n", encoding="utf-8")
+        env = _neutral_env()
+        env.pop("CLAUDE_SESSION_ID", None)
+
+        # Mint a real run (plan target needs no git repo), codex as the member.
+        prep = _run_cli(
+            ["review-prep", "plan.md", "--seats", "codex", "--task-seats", "",
+             "--session-id", "S"], env=env, cwd=td, timeout=30)
+        check("prep for repair-seat test exits 0", prep.returncode == 0,
+              "0", f"{prep.returncode}: {prep.stderr[:200]}")
+        obj = json.loads(prep.stdout)
+        run_id = obj["run_id"]
+        run_dir = Path(obj["run_dir"])
+
+        # A landed-but-non-parsing seat result in the run dir.
+        raw = ProviderResult(name="codex", model="m", ok=True,
+                             output="freeform prose, no schema",
+                             error=None, elapsed=1.0)
+        raw.run_id = run_id
+        raw.target_sha256 = obj["target_sha256"]
+        _write_seat_json(run_dir, "codex", raw)
+
+        # A reformat that parses (a committed compliant fixture's output).
+        fix = _fixture_result("compliant", "codex")
+        reform = tdp / "reform.txt"
+        reform.write_text(fix.output, encoding="utf-8")
+
+        # NAME form: engine derives <run_dir>/codex.json itself.
+        proc = _run_cli(
+            ["repair-seat", "codex", "--session-id", "S", "--run-id", run_id,
+             "-f", str(reform)], env=env, cwd=td, timeout=30)
+        seat_file = run_dir / "codex.json"
+        data = json.loads(seat_file.read_text()) if seat_file.is_file() else {}
+        check("repair-seat NAME form derives the run dir seat file and repairs it",
+              proc.returncode == 0
+              and proc.stdout.strip() == str(seat_file)
+              and data.get("repaired_output") == fix.output
+              and data.get("output") == "freeform prose, no schema",
+              "derived path echoed, repaired_output set, output untouched",
+              f"rc={proc.returncode} out={proc.stdout.strip()!r} err={proc.stderr[:150]}")
+
+        # Mutual exclusion: both forms -> exit 2, nothing changed.
+        before = seat_file.read_bytes()
+        proc = _run_cli(
+            ["repair-seat", "codex", "--seat", str(seat_file), "-f", str(reform)],
+            env=env, cwd=td, timeout=30)
+        check("repair-seat NAME + --seat together exits 2, bytes untouched",
+              proc.returncode == 2 and "not both" in proc.stderr
+              and seat_file.read_bytes() == before,
+              "exit 2 + not both", f"rc={proc.returncode} err={proc.stderr[:150]}")
+
+        # Neither form -> exit 2 naming the fix.
+        proc = _run_cli(["repair-seat"], env=env, cwd=td,
+                        input_text="", timeout=30)
+        check("repair-seat with NEITHER form exits 2 naming both options",
+              proc.returncode == 2 and "--seat" in proc.stderr
+              and "NAME" in proc.stderr,
+              "exit 2 naming the two forms", f"rc={proc.returncode} err={proc.stderr[:150]}")
+
+        # A path-charactered NAME is rejected (the name supplies a filename).
+        proc = _run_cli(
+            ["repair-seat", "../evil", "--session-id", "S", "--run-id", run_id,
+             "-f", str(reform)], env=env, cwd=td, timeout=30)
+        check("repair-seat rejects a path-traversal seat NAME (exit 2)",
+              proc.returncode == 2 and "invalid seat name" in proc.stderr,
+              "exit 2 + invalid seat name", f"rc={proc.returncode} err={proc.stderr[:150]}")
+
+        # Reserved control-file stems are refused BEFORE derivation, same
+        # case-folded guard as run/persist-seat: `repair-seat run` would
+        # otherwise derive and REWRITE the run dir's immutable run.json
+        # (current-run/seat likewise shadow control filenames).
+        run_json = run_dir / "run.json"
+        manifest_before = run_json.read_bytes()
+        for stem in ("run", "current-run", "seat", "Run", "CURRENT-RUN"):
+            proc = _run_cli(
+                ["repair-seat", stem, "--session-id", "S", "--run-id", run_id,
+                 "-f", str(reform)], env=env, cwd=td, timeout=30)
+            check(f"repair-seat rejects reserved seat NAME {stem!r} (exit 2, reason named)",
+                  proc.returncode == 2 and "reserved" in proc.stderr,
+                  "exit 2 + reserved-stem reason",
+                  f"rc={proc.returncode} err={proc.stderr[:150]}")
+        check("repair-seat reserved-stem refusals left run.json byte-untouched",
+              run_json.read_bytes() == manifest_before,
+              "run.json identical", "run.json changed")
+
+        # --seat <path> plus a scope flag is contradictory routing (mirrors
+        # run's --run-id + -o refusal): exit 2, bytes untouched, never a
+        # silently-ignored scope.
+        before = seat_file.read_bytes()
+        for scope in (["--run-id", run_id], ["--session-id", "S"]):
+            proc = _run_cli(
+                ["repair-seat", "--seat", str(seat_file), *scope,
+                 "-f", str(reform)], env=env, cwd=td, timeout=30)
+            check(f"repair-seat --seat + {scope[0]} exits 2 as contradictory routing",
+                  proc.returncode == 2 and "contradictory" in proc.stderr
+                  and seat_file.read_bytes() == before,
+                  "exit 2 + contradictory, bytes untouched",
+                  f"rc={proc.returncode} err={proc.stderr[:150]}")
 
 
 def test_doctor():
@@ -8379,9 +8713,16 @@ def test_collect_grouped():
         check("collect --group --full: stderr reports the digest-vs-full size stat",
               _re.search(r"digest \d+B vs full \d+B \(\d+%\)", proc.stderr) is not None,
               "digest NB vs full MB (K%) on stderr", proc.stderr)
-        check("collect --group --full: stdout is STILL only the -o path",
-              proc.stdout == ".crew/reviews/sess/panel.md\n",
-              "path-only stdout", repr(proc.stdout))
+        # A relative -o is anchored to crew_base at parse, so the path-only
+        # stdout names the resolved absolute file (compare resolved: crew_base
+        # falls back to the subprocess getcwd, the PHYSICAL macOS temp path).
+        _echoed = proc.stdout.strip()
+        check("collect --group --full: stdout is STILL only the (anchored) -o path",
+              proc.stdout.endswith("\n") and "\n" not in _echoed
+              and Path(_echoed).is_absolute()
+              and Path(_echoed).resolve()
+              == (Path(td) / ".crew/reviews/sess/panel.md").resolve(),
+              "path-only stdout (anchored)", repr(proc.stdout))
         check("grouped digest: shared finding present ONCE as 6/6 with all seats",
               grouped.count("6/6 [MINOR]") == 1
               and "codex, agy, cursor-auto, cursor-composer, opus, sonnet" in grouped,
@@ -12455,6 +12796,9 @@ def main():
     test_dispatch_options()
     test_build_md_executor_task_anchoring()
     test_init_md_detection_fence_anchoring()
+    test_command_fences_no_expansions()
+    test_path_arg_anchoring()
+    test_repair_seat_name_form()
     test_build_executor()
     test_council_subcommand()
     test_debate_subcommand()

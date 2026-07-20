@@ -65,11 +65,12 @@ for a real UUID it equals the raw id): read it and substitute it for the
 actually wrote to, so reconstruct from THAT, never the raw session id). `doctor` ALSO
 writes that JSON to an ANCHORED file the engine resolves to the project root
 (`<project-root>/.crew/reviews/<session_segment>/doctor.json`), which Step 4 feeds to
-`scaffold-config --detection` by its ABSOLUTE path. Never build a CWD-RELATIVE
-`.crew/reviews/<session_segment>/doctor.json` to read or pass: the shell's cwd need not
-equal the project root, so a bare relative path can miss the file. For the table here,
-stdout is simplest and always correct; for Step 4's `--detection`, use the absolute
-anchored path.
+`scaffold-config --detection` as the plain RELATIVE
+`.crew/reviews/<session_segment>/doctor.json`: the ENGINE anchors a relative path
+arg to the same project root it wrote the file under, never the shell cwd, so the
+relative form always names the file `doctor` wrote. Only a NON-engine read (the
+Read tool, a shell `cat`) needs the absolute anchored path, since nothing anchors
+those. For the table here, stdout is simplest and always correct.
 
 **Guard the result.** If the `doctor` invocation exits NONZERO, or its stdout did not
 carry parseable JSON, SURFACE the error and STOP. Do **NOT** proceed to
@@ -126,21 +127,22 @@ run with `--session-id`, it persists the detection JSON to an ANCHORED
 `<project-root>/.crew/reviews/<session_segment>/doctor.json` (the engine resolves that
 root from `CLAUDE_PROJECT_DIR`, not the shell cwd; `<session_segment>` is the sanitized
 stem from doctor's stdout `session_segment`). So pass THAT anchored file straight to
-`--detection`: no orchestrator spill, no cwd-relative reconstruct. The `--detection`
-path uses the SHELL EXPANSION `"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/..."` (the shell
-resolves it at runtime, so a project root containing `$(…)`, backticks, `$VAR`, or a
-quote cannot execute or mangle the command), plus the interview answers as flags. Pass
+`--detection`: no orchestrator spill. The `--detection` path is the plain RELATIVE
+`.crew/reviews/<session_segment>/doctor.json`: the ENGINE anchors a relative path
+arg to the same project root it wrote the file under, never the shell cwd; no
+`${…}` expansion belongs on the line (it would defeat permission allowlisting).
+Add the interview answers as flags. Pass
 **NO `--session-id`** (this writes the non-session-scoped config path) and **NO `--out`**
 on the first pass (so it writes the resolved target) and **NO `--force`** (so an existing
 target diverts to `<target>.new`):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" scaffold-config --detection "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session_segment>/doctor.json" --default-panel <panel> --dispatch-seat <seat>
+"${CLAUDE_PLUGIN_ROOT}/crew" scaffold-config --detection ".crew/reviews/<session_segment>/doctor.json" --default-panel <panel> --dispatch-seat <seat>
 ```
 
 (Add `--repo` first when the user asked for it; append each `--add-seat <name>` /
-`--disable-seat <name>` correction; the `--detection` path is the anchored `doctor.json`
-the engine wrote in step 2, passed as its absolute project-root path.)
+`--disable-seat <name>` correction; the `--detection` path is the `doctor.json`
+the engine wrote in step 2, named relative to the project root the engine anchors.)
 
 Read the JSON envelope `{target, wrote, diverted}` from stdout.
 
@@ -162,7 +164,7 @@ command -v diff && diff -u <target> <target>.new
   appended (the engine owns the write + the clobber — no shell `mv`):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" scaffold-config --force --detection "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session_segment>/doctor.json" --default-panel <panel> --dispatch-seat <seat>
+"${CLAUDE_PLUGIN_ROOT}/crew" scaffold-config --force --detection ".crew/reviews/<session_segment>/doctor.json" --default-panel <panel> --dispatch-seat <seat>
 ```
 
   (carry the same `--repo` / `--add-seat` / `--disable-seat` flags). If the user declines,

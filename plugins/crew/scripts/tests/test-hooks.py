@@ -1094,15 +1094,18 @@ def main():
                 log_fail("show bl -v - short flag works same as --verbose",
                          "JSON with active: true", stdout_sv)
 
-            # Test set bl on an allowlisted field (use --verbose for JSON assertion)
+            # Test set bl on an allowlisted field (use --verbose for JSON assertion).
+            # A relative value is ANCHORED to crew_base at write time, so the
+            # stored path is the absolute project-root form.
             stdout, stderr, code = run_crew_state(
                 ["set", "bl", "plan_file", "SHIPPED"], test_path)
             stdout2, _, _ = run_crew_state(["show", "bl", "--verbose"], test_path)
-            if code == 0 and '"plan_file": "SHIPPED"' in stdout2:
-                log_pass("set bl - changes an allowlisted field value")
+            anchored_shipped = str(test_path / "SHIPPED")
+            if code == 0 and f'"plan_file": "{anchored_shipped}"' in stdout2:
+                log_pass("set bl - changes an allowlisted field value (anchored)")
             else:
-                log_fail("set bl - changes an allowlisted field value",
-                         'plan_file: "SHIPPED"', f"exit {code}, {stdout2}")
+                log_fail("set bl - changes an allowlisted field value (anchored)",
+                         f'plan_file: "{anchored_shipped}"', f"exit {code}, {stdout2}")
 
             # The `increment` verb is GONE, and so is the counter it bumped:
             # argparse must reject the subcommand outright rather than the loop
@@ -1130,14 +1133,19 @@ def main():
             else:
                 log_fail("deactivate bl - sets active=false and adds metadata", "active=false, completed_at, reason", json.dumps(data))
 
-            # Test init mt (use --verbose for JSON assertion)
+            # Test init mt (use --verbose for JSON assertion). A relative
+            # --plan-file is ANCHORED to crew_base at init time, so the stored
+            # value is the absolute project-root form.
             stdout, stderr, code = run_crew_state(["init", "mt", "--task", "Build auth", "--plan-file", ".crew/plans/auth.md"], test_path)
             stdout2, _, _ = run_crew_state(["show", "mt", "--verbose"], test_path)
+            anchored_plan = str(test_path / ".crew" / "plans" / "auth.md")
             if (code == 0 and '"task": "Build auth"' in stdout2
-                    and '"loop": "mt"' in stdout2):
-                log_pass("init mt - creates measure-twice state")
+                    and '"loop": "mt"' in stdout2
+                    and f'"plan_file": "{anchored_plan}"' in stdout2):
+                log_pass("init mt - creates measure-twice state (plan_file anchored)")
             else:
-                log_fail("init mt - creates measure-twice state", "task field + loop stamp", stdout2)
+                log_fail("init mt - creates measure-twice state (plan_file anchored)",
+                         f'task field + loop stamp + plan_file "{anchored_plan}"', stdout2)
 
             # Test error: missing --prompt for bl (clean up first to avoid conflict error)
             for f in crew_dir.glob("*-state*.json"):
@@ -1556,7 +1564,8 @@ def main():
             legacy_after_set = json.loads(legacy.read_text())
             set_ok = (
                 set_code == 0
-                and legacy_after_set.get("plan_file") == "SHIPPED"
+                # relative value anchored to crew_base at write time
+                and legacy_after_set.get("plan_file") == str(test_path / "SHIPPED")
                 and not scoped_stray.exists()
             )
             if set_ok:
@@ -1564,7 +1573,7 @@ def main():
             else:
                 log_fail(
                     "set --session-id over adopted legacy file - mutates legacy in place, no stray scoped file",
-                    "legacy plan_file=SHIPPED, no build-state-legS.json",
+                    "legacy plan_file=<anchored SHIPPED>, no build-state-legS.json",
                     f"code={set_code} legacy_plan={legacy_after_set.get('plan_file')} "
                     f"stray={scoped_stray.exists()}")
 
@@ -2932,12 +2941,14 @@ def main():
                 raced, parseable = {}, False
             race_stray = list(crew_dir.glob(".build-state.json.*.tmp"))
             # Last writer wins (either value is fine); a torn/partial file is not.
-            if (parseable and raced.get("plan_file") in ("RACE_A", "RACE_B")
+            # The relative values land anchored to crew_base.
+            _race_vals = (str(test_path / "RACE_A"), str(test_path / "RACE_B"))
+            if (parseable and raced.get("plan_file") in _race_vals
                     and raced.get("task") == "race" and not race_stray):
                 log_pass("concurrent set: final JSON parseable, valid state, no temp collision")
             else:
                 log_fail("concurrent set: final JSON parseable, valid state, no temp collision",
-                         "parseable JSON, plan_file in {RACE_A,RACE_B}, task intact, no stray temp",
+                         "parseable JSON, plan_file in {anchored RACE_A,RACE_B}, task intact, no stray temp",
                          f"parseable={parseable}, plan={raced.get('plan_file')}, "
                          f"task={raced.get('task')!r}, stray={[s.name for s in race_stray]}")
 
@@ -3144,14 +3155,16 @@ def main():
                     log_fail(f"set {loop} active false - error points at `deactivate` instead",
                              "stderr names deactivate", err[:160])
 
-                # --- an allowlisted field still writes ---
+                # --- an allowlisted field still writes (a relative plan_file
+                # value lands ANCHORED to crew_base) ---
                 _, err, code = run_crew_state(["set", loop, ok_field, ok_value], test_path)
                 after = _read_state_json(state_path)
-                if code == 0 and after.get(ok_field) == ok_value:
+                anchored_ok = str(test_path / ok_value)
+                if code == 0 and after.get(ok_field) == anchored_ok:
                     log_pass(f"set {loop} {ok_field} - allowlisted field still writes")
                 else:
                     log_fail(f"set {loop} {ok_field} - allowlisted field still writes",
-                             f"exit 0, {ok_field}={ok_value}",
+                             f"exit 0, {ok_field}={anchored_ok}",
                              f"code={code} value={after.get(ok_field)!r} err={err[:120]}")
 
                 # --- stop_fires circuit breaker: force-exit, then RELEASE ---
@@ -3484,7 +3497,8 @@ def main():
                     reason="prior force-exit", future_field="from a newer crew")
                 _, err, code = run_crew_state(["set", loop, ok_field, ok_value], test_path)
                 after = _read_state_json(keep_path)
-                if (code == 0 and after.get(ok_field) == ok_value
+                # cmd_set anchors a relative plan_file value to crew_base.
+                if (code == 0 and after.get(ok_field) == str(test_path / ok_value)
                         and after.get("stop_fires") == 4
                         and after.get("future_field") == "from a newer crew"
                         and after.get("reason") == "prior force-exit"):
@@ -3614,14 +3628,15 @@ def main():
                 _t.join(timeout=120)
 
             after = _read_state_json(conc_path)
+            # relative plan_file values land anchored to crew_base
             if (not e2e_errors and after.get("stop_fires") == conc_rounds
-                    and after.get("plan_file") == f"v{conc_rounds - 1}"):
+                    and after.get("plan_file") == str(test_path / f"v{conc_rounds - 1}")):
                 log_pass(f"{conc_rounds} concurrent Stop fires + {conc_rounds} `set` calls: "
                          f"no counter bump lost, no agent field lost")
             else:
                 log_fail(f"{conc_rounds} concurrent Stop fires + {conc_rounds} `set` calls: "
                          f"no counter bump lost, no agent field lost",
-                         f"stop_fires={conc_rounds}, plan_file=v{conc_rounds - 1}",
+                         f"stop_fires={conc_rounds}, plan_file=anchored v{conc_rounds - 1}",
                          f"stop_fires={after.get('stop_fires')!r}, "
                          f"plan_file={after.get('plan_file')!r}, "
                          f"errors={e2e_errors}")
@@ -4684,6 +4699,171 @@ def main():
                 log_fail("init bl -f missing file: clean nonzero exit, no state file",
                          "nonzero, 'not found', no file",
                          f"exit {code}, stderr={stderr!r}, file={(crew_dir / 'build-state-p8x.json').exists()}")
+
+            # =================================================================
+            # Relative -f anchoring + the --consume matrix. A RELATIVE -f
+            # resolves against crew_base (CLAUDE_PROJECT_DIR), never the shell
+            # cwd (the engine-side half of the no-${…}-in-recipes convention).
+            # =================================================================
+            log_section("crew state init: relative -f anchoring + --consume")
+
+            for f in crew_dir.glob("*"):
+                if f.is_file():
+                    f.unlink()
+
+            divergent_cwd = test_path / "divergent-cwd"
+            divergent_cwd.mkdir(exist_ok=True)
+
+            def run_crew_state_divergent(args: list) -> tuple:
+                """crew-state with cwd != CLAUDE_PROJECT_DIR (the anchoring case)."""
+                result = subprocess.run(
+                    [sys.executable, str(crew_state)] + args,
+                    capture_output=True, text=True, cwd=divergent_cwd,
+                    env={**_neutral_env(), "CLAUDE_PROJECT_DIR": str(test_path)},
+                )
+                return result.stdout.strip(), result.stderr.strip(), result.returncode
+
+            # Relative -f from a DIVERGENT cwd reads under CLAUDE_PROJECT_DIR;
+            # --consume deletes the spill after the successful init.
+            spill = crew_dir / "task-bl-dv.txt"
+            spill.write_text("Anchored task text", encoding="utf-8")
+            _, stderr, code = run_crew_state_divergent(
+                ["init", "bl", "-f", ".crew/task-bl-dv.txt",
+                 "--session-id", "dv", "--consume"])
+            sj, _, _ = run_crew_state(
+                ["show", "bl", "--session-id", "dv", "--verbose"], test_path)
+            if (code == 0 and '"task": "Anchored task text"' in sj
+                    and not spill.exists()
+                    and not (divergent_cwd / ".crew").exists()):
+                log_pass("init bl relative -f (divergent cwd): reads under crew_base; --consume deletes the spill")
+            else:
+                log_fail("init bl relative -f (divergent cwd) + --consume",
+                         "task read from project spill, spill deleted, no cwd .crew",
+                         f"exit {code}, stderr={stderr!r}, spill={spill.exists()}, "
+                         f"cwdleak={(divergent_cwd / '.crew').exists()}, show={sj[:120]}")
+
+            # Absolute -f: byte-identical caller experience, and NO --consume
+            # never deletes.
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+            spill_abs = crew_dir / "task-bl-abs.txt"
+            spill_abs.write_text("Absolute spill", encoding="utf-8")
+            _, stderr, code = run_crew_state_divergent(
+                ["init", "bl", "-f", str(spill_abs), "--session-id", "ab"])
+            if code == 0 and spill_abs.exists():
+                log_pass("init bl absolute -f unchanged; absent --consume never deletes the spill")
+            else:
+                log_fail("init bl absolute -f / no --consume",
+                         "exit 0, spill preserved",
+                         f"exit {code}, stderr={stderr!r}, spill={spill_abs.exists()}")
+
+            # FAILED init preserves the spill even WITH --consume (here: the
+            # session already has an active loop, the conflict refusal).
+            _, stderr, code = run_crew_state(
+                ["init", "bl", "-f", str(spill_abs), "--session-id", "ab", "--consume"],
+                test_path)
+            if code != 0 and spill_abs.exists():
+                log_pass("init bl --consume on a FAILED init: spill preserved for retry")
+            else:
+                log_fail("init bl --consume on a FAILED init",
+                         "nonzero exit, spill preserved",
+                         f"exit {code}, stderr={stderr!r}, spill={spill_abs.exists()}")
+            spill_abs.unlink(missing_ok=True)
+
+            # --consume without -f: exit 2 naming why, nothing written.
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+            _, stderr, code = run_crew_state(
+                ["init", "bl", "--prompt", "inline", "--consume", "--session-id", "cx"],
+                test_path)
+            if (code == 2 and "--consume requires -f" in stderr
+                    and not (crew_dir / "build-state-cx.json").exists()):
+                log_pass("init bl --consume without -f: exit 2 naming the fix, no state file")
+            else:
+                log_fail("init bl --consume without -f",
+                         "exit 2 + '--consume requires -f', no file",
+                         f"exit {code}, stderr={stderr!r}, "
+                         f"file={(crew_dir / 'build-state-cx.json').exists()}")
+
+            # --consume collision guard: when -f resolves to the state file
+            # init just wrote, or to the mt plan file, the unlink is SKIPPED
+            # with a warning (init still succeeds; live loop data survives).
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+            cg_state = crew_dir / "build-state-cg.json"
+            cg_state.write_text(
+                json.dumps({"active": False, "loop": "bl", "task": "old",
+                            "session_id": "cg", "schema": 3}),
+                encoding="utf-8")
+            _, stderr, code = run_crew_state(
+                ["init", "bl", "-f", str(cg_state), "--session-id", "cg",
+                 "--consume"], test_path)
+            sj, _, _ = run_crew_state(
+                ["show", "bl", "--session-id", "cg", "--verbose"], test_path)
+            if (code == 0 and cg_state.exists()
+                    and "--consume skipped" in stderr
+                    and '"active": true' in sj):
+                log_pass("init bl --consume -f == state file: unlink skipped, state survives")
+            else:
+                log_fail("init bl --consume -f == state file",
+                         "exit 0, warning, state file survives active",
+                         f"exit {code}, stderr={stderr!r}, "
+                         f"exists={cg_state.exists()}, show={sj[:120]}")
+
+            # mt: -f resolving to the --plan-file target keeps the plan.
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+            cg_plans = crew_dir / "plans"
+            cg_plans.mkdir(exist_ok=True)
+            cg_plan = cg_plans / "cg-plan.md"
+            cg_plan.write_text("plan body", encoding="utf-8")
+            _, stderr, code = run_crew_state(
+                ["init", "mt", "-f", str(cg_plan), "--plan-file", str(cg_plan),
+                 "--session-id", "cg2", "--consume"], test_path)
+            if code == 0 and cg_plan.exists() and "--consume skipped" in stderr:
+                log_pass("init mt --consume -f == plan file: unlink skipped, plan survives")
+            else:
+                log_fail("init mt --consume -f == plan file",
+                         "exit 0, warning, plan survives",
+                         f"exit {code}, stderr={stderr!r}, plan={cg_plan.exists()}")
+
+            # Symlink alias: -f through a symlinked dir still names the plan
+            # file (samefile), so the guard must catch it too.
+            cg_alias_dir = crew_dir / "plans-alias"
+            if not cg_alias_dir.exists():
+                cg_alias_dir.symlink_to(cg_plans, target_is_directory=True)
+            _, stderr, code = run_crew_state(
+                ["init", "mt", "-f", str(cg_alias_dir / "cg-plan.md"),
+                 "--plan-file", str(cg_plan), "--session-id", "cg3",
+                 "--consume"], test_path)
+            if code == 0 and cg_plan.exists() and "--consume skipped" in stderr:
+                log_pass("init mt --consume -f symlink-alias of plan: unlink skipped")
+            else:
+                log_fail("init mt --consume -f symlink-alias of plan",
+                         "exit 0, warning, plan survives",
+                         f"exit {code}, stderr={stderr!r}, plan={cg_plan.exists()}")
+            cg_alias_dir.unlink(missing_ok=True)
+            cg_plan.unlink(missing_ok=True)
+
+            # `set plan_file` anchors a RELATIVE value at write time (the stored
+            # path is absolute under crew_base), from a divergent cwd too.
+            for f in crew_dir.glob("*-state*.json*"):
+                f.unlink()
+            _, stderr, code = run_crew_state(
+                ["init", "mt", "--task", "anchor plan", "--auto-plan",
+                 "--session-id", "pf"], test_path)
+            _, stderr, code = run_crew_state_divergent(
+                ["set", "mt", "plan_file", ".crew/plans/anchored.md",
+                 "--session-id", "pf"])
+            sj, _, _ = run_crew_state(
+                ["show", "mt", "--session-id", "pf", "--verbose"], test_path)
+            expected_plan = str(test_path / ".crew" / "plans" / "anchored.md")
+            if code == 0 and json.dumps(expected_plan)[1:-1] in sj:
+                log_pass("set mt plan_file: relative value stored anchored to crew_base")
+            else:
+                log_fail("set mt plan_file anchoring",
+                         f"stored {expected_plan}",
+                         f"exit {code}, stderr={stderr!r}, show={sj[:200]}")
 
             for f in crew_dir.glob("*"):
                 if f.is_file():

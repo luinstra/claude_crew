@@ -63,7 +63,7 @@ Task is NOT complete until:
 
 A prompt that names a tag names TWO things: the tag AND the orchestrator's session id. Pass both VERBATIM. The session id is not yours to guess or look up: the marker has to land in the session the orchestrator is watching, and your own session id would file it where nobody is waiting (`signal` requires the flag and exits 2 without it, rather than quietly using your session).
 
-Write your report to a file first (an ABSOLUTE path under `<project-root>/.crew/reviews/<session-id>/`, substituting your `CLAUDE_PROJECT_DIR` value for `<project-root>`; never a bare cwd-relative `.crew/...`, which can land in the wrong tree), then point `-f` at it. Piping it on stdin works too; what you must not do is try to pass a multi-line report as a shell argument.
+Write your report to a file first (with the Write tool, an ABSOLUTE path under `<project-root>/.crew/reviews/<session-id>/`, substituting your `CLAUDE_PROJECT_DIR` value for `<project-root>`), then point `-f` at it. The crew CLI anchors a relative `-f` to the project root itself, so a plain `.crew/...` `-f` is also safe; it is NON-crew shell commands (a `cat`, an `ls`) that resolve relative paths against the shell cwd and can miss the tree. Piping the report on stdin works too; what you must not do is try to pass a multi-line report as a shell argument.
 
 When a tag was named, `crew signal <tag>` is your LAST action, ALWAYS:
 

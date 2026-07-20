@@ -130,15 +130,15 @@ iterate the per-seat loop, `run_id`/`run_dir` on every engine call below, and th
 FULL `subprocess_seats` (JOINED comma-separated) as part of the `collect --seats`
 list in Step 5.5. Use the printed `run_dir` VERBATIM only for **Write-tool** and
 **Task `Read`** references (a literal path, no shell). In a **Bash recipe** never
-paste `run_dir` verbatim: reconstruct it as
-`"${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session_segment>/<run_id from the prep JSON>/..."`
-(the `${CLAUDE_PROJECT_DIR:-$PWD}` prefix mirrors the engine's anchored `crew_base()`,
-and `<session_segment>` is the `session_segment` field from the prep JSON — the
-SANITIZED session dir segment the engine actually built the run dir from. Use THAT,
-never the raw `<session-id>`: the raw id can diverge from the engine's dir, or a
-crafted one traverse, so a reconstruction with the raw id could miss the real dir.
-`<session_segment>`/`run_id` are safe engine-controlled strings, so a project root
-holding `$(…)`, backticks, `$VAR`, or a quote cannot reach the shell). The per-seat `run` DERIVES its `-f`/`-o` from
+paste `run_dir` verbatim: reconstruct it as the RELATIVE
+`.crew/reviews/<session_segment>/<run_id from the prep JSON>/...`, with no root
+prefix and no `${…}` expansion (which would defeat permission allowlisting); the
+ENGINE anchors a relative path arg to the project root (`crew_base()`), never the
+shell cwd. `<session_segment>` is the `session_segment` field from the prep JSON,
+the SANITIZED session dir segment the engine actually built the run dir from. Use
+THAT, never the raw `<session-id>`: the raw id can diverge from the engine's dir,
+or a crafted one traverse, so a reconstruction with the raw id could miss the real
+dir (`<session_segment>`/`run_id` are safe engine-controlled strings). The per-seat `run` DERIVES its `-f`/`-o` from
 `--session-id` + `--run-id` (the run dir's `prompt-seat.txt` / `<seat>.json`), so
 you do NOT pass `prompt_path` as `-f` yourself (see 3.2). **If
 `subprocess_seats` is empty** (a Claude-only `--panel lite`/`solo` →
@@ -265,12 +265,12 @@ temp or scratchpad dir, which sits outside the approved working
 dirs and fires a permission prompt on every write), then persist it
 with the SAME `--run-id` the prep printed (required: a late seat persisted
 without it exits 2 rather than risk landing in a newer run's dir). The Write-tool
-path above is literal (no shell); the Bash `-f` below reads the SAME file via the
-`${CLAUDE_PROJECT_DIR:-$PWD}` expansion + the sanitized `<session_segment>`, so a
-project root holding `$(…)`, backticks, `$VAR`, or a quote cannot reach the shell:
+path above is literal (no shell); the Bash `-f` below reads the SAME file as the
+plain RELATIVE `.crew/...` path + the sanitized `<session_segment>`: the ENGINE
+anchors it to the project root, so no `${…}` expansion belongs on the line:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" persist-seat <seat> --session-id <session-id> --run-id <run_id from the prep JSON> --model "<task_seat_models[<seat>]>" -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session_segment>/tmp-seat-<seat>.md"
+"${CLAUDE_PLUGIN_ROOT}/crew" persist-seat <seat> --session-id <session-id> --run-id <run_id from the prep JSON> --model "<task_seat_models[<seat>]>" -f ".crew/reviews/<session_segment>/tmp-seat-<seat>.md"
 ```
 
 For a seat whose Task errored / returned no usable block, persist the failure
@@ -345,14 +345,14 @@ structured findings. For EACH such `<seat>`:
    writes to a SEPARATE `repaired_output` field, NEVER overwriting the original
    `output`) via a temp file with `-f` (Write it literal, also under the ABSOLUTE
    anchored `<project-root>/.crew/reviews/<session_segment>/`, e.g.
-   `tmp-repair-<seat>.md`; never a system temp or scratchpad dir). The `--seat`
-   target and the `-f` temp both reconstruct with the prep JSON's `session_segment`
-   (the sanitized segment, never the raw `<session-id>`), read via the
-   `${CLAUDE_PROJECT_DIR:-$PWD}` expansion so the Bash `-f` names the SAME file the
-   Write tool created:
+   `tmp-repair-<seat>.md`; never a system temp or scratchpad dir). Pass the seat
+   NAME positionally: the engine derives `<run_dir>/<seat>.json` from
+   `--session-id`/`--run-id` itself, so no seat-file path is reconstructed at all;
+   the relative `-f` temp path is engine-anchored to the project root (the SAME
+   file the Write tool created; no `${…}` expansion belongs on the line):
 
    ```bash
-   "${CLAUDE_PLUGIN_ROOT}/crew" repair-seat --seat "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session_segment>/<run_id from the prep JSON>/<seat>.json" -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session_segment>/tmp-repair-<seat>.md"
+   "${CLAUDE_PLUGIN_ROOT}/crew" repair-seat <seat> --session-id <session-id> --run-id <run_id from the prep JSON> -f ".crew/reviews/<session_segment>/tmp-repair-<seat>.md"
    ```
 
 `repair-seat` is **non-destructive**: it populates `repaired_output` ONLY IF the
@@ -369,8 +369,11 @@ in-session `haiku` Task seat — no `claude -p`, no API key.
 **Collect ONCE — grouped + faithful:**
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" collect --session-id <session-id> --run-id <run_id from the prep JSON> --seats <ran_seats> --group -o "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session_segment>/<run_id from the prep JSON>/panel.md" --full "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/reviews/<session_segment>/<run_id from the prep JSON>/panel-full.md"
+"${CLAUDE_PLUGIN_ROOT}/crew" collect --session-id <session-id> --run-id <run_id from the prep JSON> --seats <ran_seats> --group -o ".crew/reviews/<session_segment>/<run_id from the prep JSON>/panel.md" --full ".crew/reviews/<session_segment>/<run_id from the prep JSON>/panel-full.md"
 ```
+
+(The relative `-o`/`--full` paths are anchored by the ENGINE to the project root;
+`collect` echoes the resolved absolute path it wrote.)
 
 `collect` reads EXACTLY the named seats (never globs — a stale/foreign file is never
 folded in). `--group` writes the deduped digest to `panel.md`; `--full` writes the

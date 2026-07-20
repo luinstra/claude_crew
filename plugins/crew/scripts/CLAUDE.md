@@ -127,7 +127,11 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   `agents/executor.md` (signal LAST, always, blocked included, iff the prompt named a tag). The
   review-bearing flows (`review`/`build`/`measure-twice`) do NOT use this: they delegate via one-shot
   Tasks whose returns already signal, so a signal step there would be pure ceremony.
-- `repair-seat` — write the haiku repair to a seat's SEPARATE `repaired_output` field, never overwriting `output`.
+- `repair-seat` — writes the haiku repair to a seat's SEPARATE `repaired_output` field, never
+  overwriting `output`. Two mutually exclusive addressing forms (both named → exit 2, neither →
+  exit 2): a positional seat NAME + `--session-id`/`--run-id` (the recipes' form: the engine
+  derives `<run_dir>/<seat>.json` through the same requested-scope helpers `collect` reads with,
+  so no run-dir path is reconstructed), or the explicit `--seat <path>` ad-hoc form.
 - `review-prep` — resolve target + split panel, mint the run-scoped review dir
   (`review_runs.py`: identity from content hash + review inputs, write-once
   `run.json`, frozen `target.md`/`target.diff` snapshot), stage EVERY seat prompt
@@ -160,6 +164,21 @@ via `get_project_dir()`), `config.py`, and the session-start sweeps all resolve
 no longer spawns a phantom nested `.crew`: the two layers land on the same tree.
 The earlier cwd-relative split (the engine resolved `.crew` cwd-relative while the
 state layer anchored to CLAUDE_PROJECT_DIR) is closed.
+
+**Explicit path ARGS anchor the same way (`state_discovery.anchor_path`).** Every
+explicit path argument the two CLIs take (`-f`/`-o`/`--out`/`--full`/`--seat`/
+`--detection`/`--prior-round`/`--base-dir`, `state init -f`/`--plan-file`, a
+`set plan_file` value) resolves a RELATIVE path against `crew_base()` at parse
+time (argparse `type=anchor_path`); an absolute path passes through unchanged,
+`~` expands first, and the special values `-` (stdout sentinel) and `""` pass
+through exactly. This is what lets the shipped command recipes pass plain
+`.crew/...` paths with NO `${…}` expansion: a Bash line carrying `${…}` defeats
+permission allowlisting (manual approval prompt every call), so `${…}` is BANNED
+in recipe fences (the `${CLAUDE_PLUGIN_ROOT}` dispatcher prefix is exempt: the
+harness substitutes it before the shell ever sees the line, enforced by the
+fence lints in `tests/test-multiagent.py`). Plan/diff TARGET specs are not path
+args; `targets.resolve` already anchors a relative plan `.md` to `crew_base()`
+itself.
 
 Key contracts (do NOT regress):
 - **Six-field `ProviderResult` core** (`name, model, ok, output, error, elapsed`) — the
@@ -397,7 +416,8 @@ Key contracts (do NOT regress):
   command markdown runs `collect --report-unparsed`, and for each non-compliant seat Reads its raw
   `output`, spawns a `crew:formatter` (haiku, read-only) Task to reformat it into the FINDINGS schema (a
   FAITHFUL transform — never invents/drops/re-judges), then writes the result back with `crew
-  repair-seat --seat <file> -f <text>` (writes the reformatted text to a SEPARATE `repaired_output`
+  repair-seat <seat> --session-id <id> --run-id <run_id> -f <text>` (the engine derives the seat
+  file from the run scope; writes the reformatted text to a SEPARATE `repaired_output`
   field, NEVER overwriting the seat's original `output`; round-trippable via `to_dict`/`from_dict`).
 - `repair-seat` is **non-destructive**: it populates `repaired_output` ONLY IF the reformat parses
   (`findings.parse_seat` → `findings_parsed=True`); if it STILL doesn't parse the write is a NO-OP that
@@ -672,12 +692,15 @@ crew state init mt --task "Add user profiles" --auto-plan --session-id abc123
 # may contain $(…)/backticks/quotes) OFF the shell line. -f maps to the loop's
 # text field and is mutually exclusive with --prompt/--task; a missing/unreadable
 # (incl. non-UTF-8) file exits nonzero with NO state file created. The loop
-# commands (build.md / measure-twice.md) Write the spill file then rm it after a
-# successful init (the session-start orphan-cleanup patterns do NOT cover these task files).
-# Anchor -f to the project root and double-quote it: `state init` resolves an
-# explicit -f against the shell cwd (which need not BE the project root), and the
-# path can contain spaces.
-crew state init bl -f "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/task-bl-abc123.txt" --session-id abc123
+# commands (build.md / measure-twice.md) Write the spill file and init with
+# --consume, which deletes it after a SUCCESSFUL init (a failed init leaves it
+# for retry; --consume without -f exits 2; the session-start orphan-cleanup
+# patterns do NOT cover these task files). A RELATIVE -f resolves against the
+# project root (crew_base, the shared anchor_path rule), never the shell cwd,
+# so the recipe carries a plain .crew/... path with NO ${…} expansion (an
+# expansion on the line defeats permission allowlisting). An absolute -f passes
+# through unchanged.
+crew state init bl -f .crew/task-bl-abc123.txt --session-id abc123 --consume
 
 # The loop's wall clock: --deadline-minutes (1..1440; the flag REJECTS 0, the
 # agent invokes init) > [tuning].deadline_minutes (per-repo, then global; 0 here
@@ -699,7 +722,9 @@ crew state check-conflicts --session-id abc123
 # write also restore this process's stale `stop_fires`/`parked_fires` snapshot,
 # reverting a bump the Stop hook landed in between: the counter-reset hole the
 # allowlist exists to close, reopened through a field the agent IS allowed to set.
-crew state set mt plan_file "${CLAUDE_PROJECT_DIR:-$PWD}/.crew/plans/auth-system.md" --session-id abc123
+# A RELATIVE plan_file value is anchored to the project root at write time (the
+# stored path is absolute), so every later reader resolves the same file.
+crew state set mt plan_file .crew/plans/auth-system.md --session-id abc123
 
 # Begin a review: run it right after `crew review-prep`, BEFORE any seat runs.
 # It reads the prepped run's OWN run.json (never the pointer: seat results are

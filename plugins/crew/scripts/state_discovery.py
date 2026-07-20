@@ -22,6 +22,32 @@ def crew_base() -> Path:
     return Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
 
 
+def anchor_path(value: str) -> str:
+    """Anchor a RELATIVE CLI path argument to ``crew_base()``; absolute unchanged.
+
+    THE one resolution rule for every explicit path arg the crew CLIs take
+    (``-f``/``-o``/``--full``/``--seat``/``--detection``/…), shared by cli.py and
+    crew-state.py so the two layers cannot resolve the same argument against
+    different trees. A relative path resolves against the project root, never the
+    shell cwd: that is what lets a shipped recipe pass a plain ``.crew/...`` path
+    with no ``${...}`` expansion (which would defeat permission allowlisting) and
+    still land in the right tree when the shell cwd has drifted.
+
+    Pass-throughs, exact: ``-`` (the stdout sentinel some verbs honor), empty
+    string, and None (an absent optional flag; argparse never converts None
+    defaults, this guard is for direct callers). ``~`` expands first, so a
+    ``~/...`` arg counts as absolute. An absolute path is returned BYTE-TRUE
+    (post-expansion): no Path round-trip that would collapse redundant
+    slashes or strip a trailing one.
+    """
+    if value is None or value in ("", "-"):
+        return value
+    expanded = os.path.expanduser(value)
+    if os.path.isabs(expanded):
+        return expanded
+    return str(crew_base() / Path(expanded))
+
+
 def is_active_value(value: object) -> bool:
     """THE rule for "is this loop on", shared by every reader of the field.
 
