@@ -327,9 +327,9 @@ Key contracts (do NOT regress):
   pending_subprocess_seats, pending_task_seats}` as JSON — it runs NOTHING. A re-prep of an identical spec RESUMES the same dir
   (`run.json` byte-untouched, landed-valid seats excluded from the pending lists); changed content or
   review inputs mint a DIFFERENT dir, so stale results are unreachable rather than merely inadvisable.
-  Before printing, prep CLEARS every pending seat's stale non-valid `<seat>.json` (a prior launch's
-  failure): this is the clear that keeps `wait`'s existence barrier honest, because at prep time no
-  launch exists to race it.
+  Before printing, prep CLEARS each pending SUBPROCESS seat's stale non-valid `<seat>.json` (a prior
+  launch's failure): this is the clear that keeps `wait`'s existence barrier honest. Task-seat files
+  remain in place because `wait` refuses Task seats; the next `persist-seat` overwrites a stale file.
 
 ### Subprocess fan-out
 
@@ -438,9 +438,10 @@ Key contracts (do NOT regress):
   orchestrator still awaits its own Task returns and persists them before collecting).
 - Seat results are RUN-SCOPED, so the orchestrator does no pre-launch `rm -f` clear anymore: a changed
   target mints a new run dir (an old panel's files are unreachable), and an unchanged target resumes
-  with landed seats excluded from the pending lists (`review-prep` clears each pending seat's stale
-  non-valid file before printing its JSON, and `run` repeats the clear at launch as the backstop for
-  a re-prep-free relaunch; one derived file per seat, no globs). `collect` gains `--run-id` (fallback: the session pointer; with
+  with landed seats excluded from the pending lists (`review-prep` clears each pending SUBPROCESS
+  seat's stale non-valid file before printing its JSON; Task-seat files are not cleared at prep, and
+  `run` repeats the subprocess clear at launch as the backstop for a re-prep-free relaunch; one derived
+  file per seat, no globs). `collect` gains `--run-id` (fallback: the session pointer; with
   neither, the flat dir, byte-identical no-flag behavior). The orchestrator WAITS
   for BOTH every subprocess run shell AND every Task-seat persist before collecting. The `review`
   subcommand still exists for ad-hoc one-shot fan-out; the commands just don't use it. (`/crew:debate`

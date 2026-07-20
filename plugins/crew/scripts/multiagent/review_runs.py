@@ -462,16 +462,17 @@ def clear_stale_result(d: Path, seat: str, run_id: str, target_sha256: str) -> N
     The barrier's existence check can only be correct if a pending seat's
     stale file is gone before its retry starts: a failed result left by a
     prior launch would otherwise release ``wait`` immediately and let collect
-    fold the old failure while the retry is still running. Two callers:
-    ``review-prep`` clears every seat it declares pending, and THAT clear
-    carries the guarantee (at prep no launch exists yet, so it cannot race a
-    concurrent ``wait``); a run-scoped ``run`` repeats it at launch only as
-    the backstop for a direct relaunch with no re-prep. A landed VALID result
-    is never cleared (it is not pending, and preserve-valid protects it from
-    the retry's write too). Scoped to exactly one seat's file: no globs, no
-    orchestrator involvement. The check and the unlink share the seat write
-    lock, so a valid success landing from a concurrent duplicate launch
-    cannot be deleted between them.
+    fold the old failure while the retry is still running. Both live callers
+    pass subprocess-only seat lists: ``review-prep`` clears pending
+    subprocess seats before launch, and a run-scoped ``run`` repeats the clear
+    at launch as the backstop for a direct relaunch with no re-prep. Task-seat
+    result files are never cleared by design because ``wait`` refuses task-kind
+    seats. This function remains generic and operates on the seat name it is
+    given. A landed VALID result is never cleared (it is not pending, and
+    preserve-valid protects it from the retry's write too). Scoped to exactly
+    one seat's file: no globs, no orchestrator involvement. The check and the
+    unlink share the seat write lock, so a valid success landing from a
+    concurrent duplicate launch cannot be deleted between them.
     """
     p = d / f"{seat}.json"
     with _seat_write_lock(p):

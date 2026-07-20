@@ -2800,8 +2800,9 @@ def cmd_repair_seat(args: argparse.Namespace) -> int:
             return 2
         try:
             # No --run-id falls back to the session pointer: safe here because
-            # a pointer misroute fails loudly on "no seat file" (a re-prep
-            # clears pending files), never silently repairing the wrong run.
+            # a pointer misroute fails loudly on "no seat file" (prep clears
+            # pending subprocess files, and a fresh run has no persisted result
+            # of either kind yet), never silently repairing the wrong run.
             results_dir, _scope_rid = _resolve_read_scope(session_id, args.run_id)
         except review_runs.ReviewRunError as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -3442,18 +3443,16 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
         if not review_runs.seat_landed_valid(run_d, s, run_id, target_sha)
     ]
 
-    # A pending seat with a stale non-valid file (a prior launch's failure)
-    # loses that file HERE, before the JSON reaches the orchestrator. This
-    # clear is what makes `wait`'s existence barrier correct: the orchestrator
-    # launches seats and calls `wait` immediately, and `run`'s own launch-time
-    # clear sits behind process start and every manifest gate, a window `wait`
-    # polls straight into. At prep no launch exists yet, so clearing here is
-    # race-free by construction; run's clear remains only as the backstop for
-    # a direct relaunch with no re-prep. Scoped to exactly the seats prep
-    # itself declares pending, inside the run dir, no globs. A landed VALID
-    # seat is not in these lists and is never touched.
+    # A pending SUBPROCESS seat with a stale non-valid file (a prior launch's
+    # failure) loses that file before the JSON reaches the orchestrator. This
+    # clear keeps `wait`'s existence barrier correct: the orchestrator launches
+    # seats and calls `wait` immediately, while `run`'s launch-time clear sits
+    # behind process start and every manifest gate. Task seats are not polled
+    # by `wait`, so prep leaves their files in place for `persist-seat` to
+    # overwrite. The clear remains scoped to pending subprocess seats in the
+    # run dir, with no globs. A landed VALID seat is never touched.
     try:
-        for s in pending_sub + pending_task:
+        for s in pending_sub:
             review_runs.clear_stale_result(run_d, s, run_id, target_sha)
     except review_runs.ReviewRunError as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -5408,6 +5408,70 @@ def test_no_dotkept_staged_filename():
           "; ".join(offenders) if offenders else "zero matches")
 
 
+def test_review_prep_never_clears_task_seat_file():
+    log_section("review-prep never clears Task-seat result files")
+
+    # This asserts the post-fix invariant: re-prep does NOT clear a stale
+    # Task-seat file. It uses a stale FAILURE as a deterministic proxy (the
+    # valid-file vanish race is not reproducible from the public dispatcher
+    # seam); pre-fix, the same clear path removed this file too.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        prep = ["review-prep", "plan.md", "--seats", "codex",
+                "--task-seats", "opus,sonnet", "--session-id", "S"]
+
+        first = _run_dispatcher(prep, cwd=td, timeout=30)
+        first_obj = json.loads(first.stdout)
+        run_d = tdp / first_obj["run_dir"]
+        opus_f = run_d / "opus.json"
+        sonnet_f = run_d / "sonnet.json"
+        codex_f = run_d / "codex.json"
+
+        failed = _run_dispatcher(
+            ["persist-seat", "opus", "--session-id", "S",
+             "--run-id", first_obj["run_id"], "--model", "opus",
+             "--failed", "--error", "spawn timeout"],
+            cwd=td, timeout=30)
+        check("Task-seat stale failure persists successfully",
+              first.returncode == 0 and failed.returncode == 0 and opus_f.exists(),
+              "opus.json exists", f"prep={first.returncode} persist={failed.returncode}")
+
+        second = _run_dispatcher(prep, cwd=td, timeout=30)
+        second_obj = json.loads(second.stdout)
+        check("re-prep leaves a stale Task-seat file in place",
+              second.returncode == 0 and opus_f.exists()
+              and second_obj["pending_task_seats"] == ["opus", "sonnet"],
+              "opus.json survives and remains pending",
+              f"rc={second.returncode} exists={opus_f.exists()} "
+              f"pending={second_obj.get('pending_task_seats')}")
+
+        review = tdp / "sonnet-review.txt"
+        review.write_text("## VERDICT\nAPPROVED\n", encoding="utf-8")
+        valid = _run_dispatcher(
+            ["persist-seat", "sonnet", "--session-id", "S",
+             "--run-id", first_obj["run_id"], "--model", "sonnet",
+             "-f", str(review)],
+            cwd=td, timeout=30)
+        third = _run_dispatcher(prep, cwd=td, timeout=30)
+        check("re-prep preserves a landed VALID Task-seat file",
+              valid.returncode == 0 and third.returncode == 0 and sonnet_f.exists()
+              and json.loads(sonnet_f.read_text(encoding="utf-8")).get("ok") is True,
+              "sonnet.json survives with ok=true",
+              f"persist={valid.returncode} prep={third.returncode} "
+              f"exists={sonnet_f.exists()}")
+
+        codex_f.write_text(json.dumps(
+            {"name": "codex", "model": "m", "ok": False, "output": "",
+             "error": "seat blew up", "elapsed": 1.0,
+             "run_id": first_obj["run_id"],
+             "target_sha256": first_obj["target_sha256"]}), encoding="utf-8")
+        fourth = _run_dispatcher(prep, cwd=td, timeout=30)
+        check("re-prep still clears a stale subprocess result",
+              fourth.returncode == 0 and not codex_f.exists(),
+              "codex.json is cleared", f"rc={fourth.returncode} exists={codex_f.exists()}")
+
+
 def test_persist_seat_doc_sync():
     log_section("persist-seat: the three review-bearing docs use the engine call")
     # DOC-SYNC guard: the review/build/measure-twice command markdown must route
@@ -12089,12 +12153,11 @@ def test_wait():
               wm.returncode == 2 and "error:" in wm.stderr,
               "exit 2", f"rc={wm.returncode} err={wm.stderr[:150]!r}")
 
-    # 6. Stale-clear on the resume path. The clear that carries the barrier
-    #    guarantee is PREP's: pending seats lose their stale non-valid files
-    #    before the prep JSON returns, so every launch the orchestrator makes
-    #    afterward happens in a world where no pending seat has a file and
-    #    `wait` cannot observe one however the timing falls. `run`'s
-    #    launch-time clear is only the backstop for a re-prep-free relaunch.
+    # 6. Stale-clear on the resume path. Prep clears pending subprocess files
+    #    before the prep JSON returns, so `wait` cannot observe a stale file
+    #    when the orchestrator launches a retry. Task files stay in place
+    #    because `wait` refuses Task seats. `run`'s launch-time clear remains
+    #    the backstop for a re-prep-free subprocess relaunch.
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         _write_plan(tdp)
@@ -12116,9 +12179,8 @@ def test_wait():
                  "run_id": o1["run_id"],
                  "target_sha256": o1["target_sha256"]}), encoding="utf-8")
 
-        # 6a. The files are gone the moment prep RETURNS, before any launch
-        #     exists: a stale subprocess failure and a stale Task-seat
-        #     failure both go; a landed VALID seat is kept and excluded.
+        # 6a. Prep clears the stale subprocess failure but preserves the stale
+        #     Task-seat failure; a landed VALID seat is kept and excluded.
         src = tdp / "r.txt"
         src.write_text("## VERDICT\nAPPROVED\n", encoding="utf-8")
         _run_dispatcher(["persist-seat", "opus", "--session-id", "S",
@@ -12128,12 +12190,12 @@ def test_wait():
         _stale_failed("sonnet")
         p2 = _run_dispatcher(PREP, cwd=td, env=env, timeout=30)
         o2 = json.loads(p2.stdout)
-        check("re-prep clears BOTH pending kinds' stale failures before its JSON returns",
+        check("re-prep clears subprocess failure and preserves Task failure",
               p2.returncode == 0 and not codex_f.exists()
-              and not (run_d / "sonnet.json").exists()
+              and (run_d / "sonnet.json").exists()
               and o2["pending_subprocess_seats"] == ["codex"]
               and o2["pending_task_seats"] == ["sonnet"],
-              "codex.json + sonnet.json gone, both still pending",
+              "codex.json gone, sonnet.json survives, both still pending",
               f"rc={p2.returncode} codex={codex_f.exists()} "
               f"sonnet={(run_d / 'sonnet.json').exists()} "
               f"pend={o2.get('pending_subprocess_seats')}/"
@@ -13069,6 +13131,7 @@ def main():
     test_global_roster_availability()
     test_panel_availability_consistency()
     test_review_prep()
+    test_review_prep_never_clears_task_seat_file()
     test_debate_panel_resolver()
     test_debate_oracle_removed()
     test_panel_catalog()
