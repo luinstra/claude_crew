@@ -116,12 +116,23 @@ gloss lives here.
   prompt's contents inline — reference-not-payload applied to Task seats (the
   reviewer has `Read`). build.md also passes the executor summary as a PATH
   (`<run_dir>/executor-summary.md`), not inline.
-- **Return side stays via the Task RESULT.** The seat returns its full review
-  block as the Task RESULT (the only completion signal); the orchestrator Writes
-  that returned text to a temp file and `persist-seat -f`s it with the prep
-  JSON's `--run-id` (run-scoped, stamped; see Decision-H). The reviewer is
-  read-only (no `Write` grant) — symmetric with `panelist.md`. (A reviewer-writes-
-  its-own-return-file variant was prototyped and reverted: an unvalidated
+- **Return side: scribe-mediated persist.** The seat still returns its full
+  review block as the Task RESULT (the only completion signal). On the success
+  path the orchestrator hands that returned text INLINE to a `crew:scribe`
+  sub-agent (Write-only), which Writes it to the tmp-seat file inside its OWN
+  transcript, so the persist-Write never renders back into orchestrator context.
+  The orchestrator keeps the landing authority: it `persist-seat -f`s that file
+  with the prep JSON's `--run-id` (run-scoped, stamped; see Decision-H) and gates
+  on its OWN `test -s` plus a grep of the printed `<seat>.json` path (the scribe's
+  self-reported line is never the gate). On any scribe failure it falls back to
+  Writing a DISTINCT `-fallback` path itself and persisting that, so a timed-out
+  scribe's late write to the original tmp cannot clobber the persisted bytes. The
+  reviewer and scribe are separate agents; the reviewer is read-only (no `Write`
+  grant) — symmetric with `panelist.md`. Caveats stated honestly in `scribe.md`:
+  the target path is PROMPT-pinned, not enforced, and verbatim fidelity is NOT
+  byte-guaranteed (byte-verifying against the return would pull the full text back
+  into context and defeat the terminal-hygiene purpose). (A reviewer-writes-its-
+  own-return-file variant was prototyped and reverted: an unvalidated
   model-returned path plus stale-file risk outweighed the token saving.)
 
 ## Reviewer / panelist seat — maintainer hardening note (moved from the agents)

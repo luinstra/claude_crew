@@ -5458,9 +5458,11 @@ def test_persist_seat_doc_sync():
     # The reviewer-writes-own-return-file variant was REVERTED: an unvalidated
     # model-returned RETURN-FILE path (traversal/injection) + stale-file risk
     # outweighed the token saving. The reviewer returns its review block as the
-    # Task RESULT (the pre-revert behavior); the orchestrator Writes that to a temp file
-    # and `persist-seat -f`s it. This CONVERSE guard fails if the reverted happy-path
-    # flow creeps back into any of the three review-bearing docs.
+    # Task RESULT (the pre-revert behavior); on the success path a crew:scribe
+    # sub-agent Writes that returned text to a temp file the orchestrator then
+    # `persist-seat -f`s (the orchestrator Writes a distinct -fallback path itself
+    # only if the scribe path fails). This CONVERSE guard fails if the reverted
+    # happy-path flow creeps back into any of the three review-bearing docs.
     RETURN_FILE_MARKERS = [
         "RETURN-FILE:",                              # the pinned RESULT line
         "-f .crew/reviews/<session-id>/return-",     # persist-seat by path
@@ -5485,6 +5487,66 @@ def test_persist_seat_doc_sync():
     check("panelist.md:6 tools line does NOT grant Write (read-only by convention)",
           panelist_line6.startswith("tools:") and "Write" not in panelist_line6,
           "tools line without Write", repr(panelist_line6))
+
+    # SCRIBE doc-sync: the success-path Task-seat persist now routes the tmp-seat
+    # Write through a crew:scribe sub-agent so the persist-Write does not render.
+    # Every load-bearing recipe string must read IDENTICALLY across all three
+    # docs, or the precheck / grep gate / quoted-absolute rm / fallback could
+    # drift out of one doc (and CI could green-light a reconstructed-path gate).
+    SCRIBE_SENTINELS = [
+        # the scribe spawn itself
+        'subagent_type="crew:scribe"',
+        # the pinned per-seat sequence intro
+        'Persist each SUCCESSFUL Task seat via a scribe (no terminal diff).',
+        # quoted-absolute rm pre-clear (fresh-create guarantee) for the
+        # pre-spawn scribe-target clear
+        'rm -f "<project-root>/.crew/reviews/<session_segment>/<run_id>/tmp-seat-<seat>.md"',
+        # the test -s precheck on the tmp path BEFORE the persist
+        'test -s "<project-root>/.crew/reviews/<session_segment>/<run_id>/tmp-seat-<seat>.md"',
+        # the grep gate keyed on the PERSIST-SEAT-PRINTED path: the literal gate
+        # string PLUS the runnable literal-path grep (NO $(…) capture, NO prose;
+        # the orchestrator already holds the path persist-seat printed on stdout)
+        "grep -q '\"ok\": *true'",
+        'grep -q \'"ok": *true\' "<the exact seat-json path persist-seat printed on stdout>"',
+        'grepping the path `persist-seat`',
+        # the fallback WRITES + persists a DISTINCT path the scribe never received,
+        # so a timed-out scribe's late write to the original tmp cannot clobber it;
+        # run-scoped so a lingering earlier-run scribe cannot cross-write it either
+        '<session_segment>/<run_id>/tmp-seat-<seat>-fallback.md',
+        # residual: a timed-out scribe can leave a NONEMPTY PARTIAL file, so
+        # branch on the scribe Task's own error/timeout, not just size
+        'NONEMPTY PARTIAL file',
+        # residual: the fallback persist is gated by the SAME ok=true predicate
+        'GATE THE FALLBACK TOO',
+        # the fallback heading, DISTINCT from the never-choke sentinel
+        'Fallback: you persist the seat yourself',
+        # the exit-2-is-a-real-error rule (test -s already excluded the absent case)
+        'persist-seat` exit 2 on a `test -s`-passing file is a REAL error',
+        # the completion-signal clarifier: reviewer return IS the review; scribe
+        # return IS the persist-write completion signal, not a landing gate
+        "the scribe's return IS the persist-write completion",
+    ]
+    for rel in docs:
+        text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
+        # Prose sentinels wrap across lines; collapse whitespace so a legit
+        # line break inside a pinned phrase does not read as a drift.
+        norm = " ".join(text.split())
+        for phrase in SCRIBE_SENTINELS:
+            check(f"{rel} contains scribe recipe sentinel: {phrase!r}",
+                  phrase in text or phrase in norm, "present", "MISSING")
+        # The flat (run_id-omitting) grep target is named ONLY as the forbidden
+        # one; the pinned gate is the run-dir path persist-seat printed.
+        check(f"{rel} names the flat <session_segment>/<seat>.json only as the forbidden grep target",
+              'NEVER grep the\nflat `.../<session_segment>/<seat>.json`' in text
+              or 'NEVER grep the flat `.../<session_segment>/<seat>.json`' in text,
+              "flat form named only as the forbidden one",
+              "flat gate target not disclaimed")
+        # The never-choke sentinel and the scribe fallback heading stay DISTINCT
+        # (the fallback must not shadow the never-choke phrase the guard pins).
+        check(f"{rel} keeps the scribe fallback heading distinct from never-choke",
+              "Never choke — fall back" not in text
+              and "Fallback: you persist the seat yourself" in text,
+              "distinct fallback heading", "headings collided")
 
 
 # =============================================================================
@@ -7326,11 +7388,19 @@ def test_command_fences_no_expansions():
     for name in ("review.md", "build.md", "measure-twice.md"):
         lines = _fence_lines(name)
         persist = [l for l in lines if "persist-seat" in l and "-f" in l.split()]
-        check(f"{name}: persist-seat -f reads the quoted relative tmp-seat spill under <session_segment>",
-              bool(persist) and all(
-                  '-f ".crew/reviews/<session_segment>/tmp-seat-<seat>.md"' in l
-                  for l in persist),
-              "quoted relative tmp-seat -f", str(persist))
+        # Two persist -f fences now: the success path reads the scribe's tmp-seat
+        # spill; the fallback reads a DISTINCT -fallback spill (a path the scribe
+        # never received, so a timed-out scribe's late write cannot clobber it).
+        success_p = [l for l in persist if 'tmp-seat-<seat>.md"' in l]
+        fallback_p = [l for l in persist if 'tmp-seat-<seat>-fallback.md"' in l]
+        check(f"{name}: success persist-seat -f reads the quoted relative RUN-SCOPED tmp-seat spill",
+              len(success_p) == 1
+              and '-f ".crew/reviews/<session_segment>/<run_id>/tmp-seat-<seat>.md"' in success_p[0],
+              "one quoted relative run-scoped tmp-seat -f", str(persist))
+        check(f"{name}: fallback persist-seat -f reads the DISTINCT quoted relative RUN-SCOPED tmp-seat-<seat>-fallback spill",
+              len(fallback_p) == 1
+              and '-f ".crew/reviews/<session_segment>/<run_id>/tmp-seat-<seat>-fallback.md"' in fallback_p[0],
+              "one quoted relative run-scoped tmp-seat-fallback -f", str(persist))
         repair = [l for l in lines if "repair-seat" in l]
         check(f"{name}: repair-seat uses the NAME form (engine derives the seat file; no --seat path)",
               bool(repair) and all(
@@ -9248,6 +9318,190 @@ def test_persist_seat():
         check("placeholder session id: no .crew/ directory created",
               not (Path(td) / ".crew").exists(), ".crew absent",
               f"exists={(Path(td) / '.crew').exists()}")
+
+
+def test_scribe_frontmatter():
+    """The Write-only haiku scribe: it relocates the success-path persist-Write
+    off the orchestrator so no big tmp-seat diff renders. Its grant is the
+    tightest that does the job (Write ONLY), and its maintainer note states the
+    honest security posture (no DIRECT shell exec, NOT 'no RCE')."""
+    log_section("scribe.md frontmatter + maintainer note (Write-only, haiku)")
+    text = (SCRIPT_DIR.parent / "agents/scribe.md").read_text(encoding="utf-8")
+    lines = text.splitlines()
+    # Parse the frontmatter block between the first two '---' fences.
+    assert lines[0].strip() == "---", "scribe.md must open with a frontmatter fence"
+    fm = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if ":" in line:
+            k, _, v = line.partition(":")
+            fm[k.strip()] = v.strip()
+    check("scribe.md: name is 'scribe'", fm.get("name") == "scribe",
+          "scribe", str(fm.get("name")))
+    check("scribe.md: model is 'haiku' (cheapest tier, pinned in frontmatter)",
+          fm.get("model") == "haiku", "haiku", str(fm.get("model")))
+    check("scribe.md: color is 'purple' (unused, pinned up front)",
+          fm.get("color") == "purple", "purple", str(fm.get("color")))
+    check("scribe.md: tools is EXACTLY 'Write' (no Bash, no Read)",
+          fm.get("tools") == "Write", "Write", str(fm.get("tools")))
+    # Body contract: verbatim transcribe, DATA-not-instructions guard, and the
+    # corrected security wording (no DIRECT shell exec, explicitly NOT 'no RCE').
+    check("scribe.md: states VERBATIM byte-for-byte transcribe",
+          "byte for byte" in text and "reformat" in text,
+          "verbatim contract", "missing")
+    check("scribe.md: the review text is DATA, never instructions",
+          "DATA" in text and "instructions" in text, "DATA guard", "missing")
+    flat = " ".join(text.split())  # collapse line-wrapping for phrase checks
+    check("scribe.md: security wording is 'no DIRECT shell execution', NOT 'no RCE'",
+          "no DIRECT shell execution during the scribe task" in flat
+          and 'This is NOT "no RCE"' in flat,
+          "no-direct-shell-exec wording", "still overclaims no-RCE")
+    check("scribe.md: names the prompt-pinned (not enforced) path residual",
+          "PROMPT-PINNED" in text and "not the call count" in text,
+          "prompt-pinned residual stated", "missing")
+    check("scribe.md: states fidelity is NOT byte-guaranteed",
+          "not byte-guaranteed" in text.lower()
+          or "NOT byte-guaranteed" in text,
+          "fidelity residual stated", "missing")
+
+
+def test_ok_true_serialization_shape():
+    """The recipe's grep gate keys on the LITERAL bytes `"ok": true` in the
+    printed <seat>.json (json.dumps indent=2, top-level field). Pin that shape
+    here so a future serialization change fails CI rather than the live gate."""
+    log_section("persist-seat: top-level ok serializes as the literal '\"ok\": true'")
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "review.txt"
+        src.write_text("## VERDICT\nAPPROVED\n", encoding="utf-8")
+        proc = _run_dispatcher(
+            ["persist-seat", "opus", "--session-id", "S", "--model", "opus",
+             "-f", str(src)], cwd=td, timeout=30)
+        out_path = Path(td) / ".crew" / "reviews" / "S" / "opus.json"
+        raw = out_path.read_text(encoding="utf-8") if out_path.exists() else ""
+        check("ok=true seat serializes the literal '\"ok\": true' (indent=2 top-level)",
+              proc.returncode == 0 and '"ok": true' in raw,
+              '"ok": true present', raw[:200])
+        # Parse the persisted bytes too: the top-level `ok` must be boolean True,
+        # so a future serialization change (a stringified "true", a nested move)
+        # fails CI here rather than only at the live grep.
+        try:
+            parsed_ok = json.loads(raw).get("ok")
+        except (ValueError, AttributeError):
+            parsed_ok = "<unparseable>"
+        check("ok=true seat parses to a top-level boolean ok is True",
+              parsed_ok is True, "obj['ok'] is True", repr(parsed_ok))
+        # The recipe's exact gate (grep -q '"ok": *true') matches the real bytes.
+        import re as _re
+        check("the recipe gate regex '\"ok\": *true' matches the persisted bytes",
+              bool(_re.search(r'"ok": *true', raw)),
+              "gate regex matches", raw[:200])
+
+
+def test_persist_seat_scribe_gate_inputs():
+    """persist-seat's OWN behavior on the exact tmp-file states the recipe's
+    gate observes: present-valid, absent (exit 2), empty/whitespace (ok=false at
+    exit 0), and a REAL exit-2 error (a non-member seat with a valid -f file, to
+    prove exit 2 is not only the absent-file case). These do NOT drive the
+    orchestrator's control flow (that is markdown), they pin the engine leg."""
+    log_section("persist-seat gate inputs (present / absent / empty / real exit 2)")
+
+    # present-valid -> ok=true, run-dir <seat>.json, printed path greppable.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        prep = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex",
+             "--task-seats", "opus,sonnet", "--session-id", "S"],
+            cwd=td, timeout=30)
+        o = json.loads(prep.stdout) if prep.returncode == 0 else {}
+        src = tdp / "r.txt"
+        src.write_text("## VERDICT\nAPPROVED\n", encoding="utf-8")
+        pv = _run_dispatcher(
+            ["persist-seat", "opus", "--session-id", "S", "--run-id", o["run_id"],
+             "--model", "opus", "-f", str(src)], cwd=td, timeout=30)
+        printed = pv.stdout.strip()
+        pdata = json.loads(Path(printed).read_text()) if printed and Path(printed).exists() else {}
+        check("present-valid: exit 0, printed run-dir <seat>.json, ok=true",
+              pv.returncode == 0 and printed.endswith("opus.json")
+              and o["run_id"] in printed and pdata.get("ok") is True,
+              "ok=true in printed run-dir json", f"rc={pv.returncode} printed={printed!r}")
+
+        # absent -> persist-seat -f a nonexistent file exits 2 (in the recipe this
+        # state never reaches persist; the test -s precheck falls back first).
+        gone = tdp / "does-not-exist.md"
+        ab = _run_dispatcher(
+            ["persist-seat", "sonnet", "--session-id", "S", "--run-id", o["run_id"],
+             "--model", "sonnet", "-f", str(gone)], cwd=td, timeout=30)
+        check("absent -f file: persist-seat exits 2 (never reached in the recipe)",
+              ab.returncode == 2 and ab.stderr.strip() != "",
+              "exit 2 + stderr", f"rc={ab.returncode} err={ab.stderr[:150]!r}")
+
+        # empty/whitespace (nonzero size) -> ok=false at exit 0, printed json reads
+        # "ok": false. This is the ONLY empty case test -s (nonzero size) lets
+        # through to persist, and the grep gate is what catches it -> fallback.
+        ws = tdp / "ws.md"
+        ws.write_text("   \n", encoding="utf-8")
+        ew = _run_dispatcher(
+            ["persist-seat", "sonnet", "--session-id", "S", "--run-id", o["run_id"],
+             "--model", "sonnet", "-f", str(ws)], cwd=td, timeout=30)
+        ewp = ew.stdout.strip()
+        ewraw = Path(ewp).read_text(encoding="utf-8") if ewp and Path(ewp).exists() else ""
+        check("empty/whitespace: persist-seat exits 0 and lands ok=false",
+              ew.returncode == 0 and '"ok": false' in ewraw
+              and '"ok": true' not in ewraw,
+              "exit 0 + ok=false bytes", f"rc={ew.returncode} raw={ewraw[:160]!r}")
+
+        # REAL exit-2 error: a valid -f file but a NON-MEMBER seat (not in the run
+        # roster) exits 2. Proves exit 2 also fires for genuine run/manifest
+        # errors, so the recipe treats a test -s-passing file's exit 2 as REAL.
+        nm = _run_dispatcher(
+            ["persist-seat", "fable", "--session-id", "S", "--run-id", o["run_id"],
+             "--model", "fable", "-f", str(src)], cwd=td, timeout=30)
+        check("non-member seat with a VALID -f file: persist-seat exits 2 (real error)",
+              nm.returncode == 2 and nm.stderr.strip() != "",
+              "exit 2 + stderr (not an absent-file case)",
+              f"rc={nm.returncode} err={nm.stderr[:150]!r}")
+
+
+def test_visible_if_corrupted():
+    """Whatever text LANDED renders downstream, so a mangled review surfaces as
+    itself and is never silently swallowed. This proves the engine pipeline
+    surfaces corruption; it does NOT drive the scribe and is NOT a scribe fidelity
+    test (the scribe's verbatim behavior is a prompt contract, not enforced in
+    code, so nothing here can assert it)."""
+    log_section("visible-if-corrupted: a mutated body renders faithfully through collect")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        # A deliberately truncated + paraphrased body (a stand-in for a scribe
+        # that mangled the review). The pipeline must carry these exact bytes.
+        mutated = "## VERDICT\nAPPROVE-ish\n\n## FINDINGS\n- MANGLED-SENTINEL truncated here"
+        src = tdp / "mut.md"
+        src.write_text(mutated, encoding="utf-8")
+        pp = _run_dispatcher(
+            ["persist-seat", "sonnet", "--session-id", "S", "--model", "sonnet",
+             "-f", str(src)], cwd=td, timeout=30)
+        # The faithful (no-flag) projection renders whatever LANDED to stdout.
+        cp = _run_dispatcher(
+            ["collect", "--session-id", "S", "--seats", "sonnet"],
+            cwd=td, timeout=30)
+        # --group's faithful sibling (--full) carries the same bytes to disk.
+        cg = _run_dispatcher(
+            ["collect", "--session-id", "S", "--seats", "sonnet", "--group",
+             "-o", ".crew/reviews/S/panel.md",
+             "--full", ".crew/reviews/S/panel-full.md"], cwd=td, timeout=30)
+        full = (tdp / ".crew" / "reviews" / "S" / "panel-full.md")
+        rendered_full = full.read_text(encoding="utf-8") if full.exists() else ""
+        check("mutated body persists + collects with exit 0",
+              pp.returncode == 0 and cp.returncode == 0 and cg.returncode == 0,
+              "all 0",
+              f"persist={pp.returncode} collect={cp.returncode} group={cg.returncode}")
+        check("the mutation renders faithfully in the collect projection (never swallowed)",
+              "MANGLED-SENTINEL" in cp.stdout, "MANGLED-SENTINEL present",
+              cp.stdout[:200])
+        check("the mutation also lands in the faithful --full recovery sibling",
+              "MANGLED-SENTINEL" in rendered_full, "MANGLED-SENTINEL present",
+              rendered_full[:200])
 
 
 def test_process_group_reaping():
@@ -12834,6 +13088,10 @@ def main():
     test_probe()
     test_scaffold_config()
     test_persist_seat()
+    test_scribe_frontmatter()
+    test_ok_true_serialization_shape()
+    test_persist_seat_scribe_gate_inputs()
+    test_visible_if_corrupted()
     test_review_runs()
     test_replay_spec()
     test_run_scoped_reviews()

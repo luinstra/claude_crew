@@ -133,8 +133,8 @@ plugins/
    tools: Read, Grep, Glob, Bash, Edit, Write
    ---
    ```
-   - `model:` — use `inherit` for varied work; pin `sonnet` for cost-optimized agents whose work is consistently simple (search, doc writing).
-   - `color:` — pick an unused one (blue, green, cyan, yellow).
+   - `model:` — use `inherit` for varied work; pin `sonnet` for cost-optimized agents whose work is consistently simple (search, doc writing); pin `haiku` for the cheapest tier of trivial mechanical agents (the scribe verbatim-Write seat is the precedent).
+   - `color:` — pick an unused one (blue, green, cyan, yellow, purple).
    - Don't put `#` comment lines inside frontmatter — document optional MCP tools in the agent body instead.
 3. Write system prompt instructions below frontmatter
 4. Reference with `Task(subagent_type="crew:my-agent", ...)`

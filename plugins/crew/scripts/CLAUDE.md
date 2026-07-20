@@ -367,6 +367,11 @@ Key contracts (do NOT regress):
   preserve-valid write, so the command markdown no longer hand-assembles the `<seat>.json` with the
   Write tool. Without `--run-id` while the session pointer exists, `persist-seat` exits 2 naming the
   fix (completion-time attribution by mutable pointer is the TOCTOU bug this closes).
+  On the SUCCESS path a `crew:scribe` sub-agent does the tmp-seat `Write` (so the persist-Write does
+  not render into orchestrator context); the orchestrator still owns the landing gate — its OWN `test
+  -s` plus a grep of the printed `<seat>.json` path, never the scribe's self-reported line — and falls
+  back to Writing a DISTINCT `tmp-seat-<seat>-fallback.md` path itself if the scribe path fails (a
+  timed-out scribe's late write to the original tmp cannot clobber the fallback bytes).
 
 ### Repair & collect
 
@@ -424,9 +429,11 @@ Key contracts (do NOT regress):
   leaves `repaired_output` unset and exits 0 with a stderr kept-original note (a no-op is successful
   graceful degradation, not an error — exit 2 stays reserved for real usage/read errors).
   Grouping/`--group` uses `repaired_output` when present, while `--full` and the RAW section ALWAYS
-  render the original `output` — so a degraded haiku rewrite can never overwrite the seat's genuine
-  review, and a seat still non-compliant after repair renders its ORIGINAL text raw (graceful
-  degradation, never worse than the original).
+  render the original `output` — so a degraded haiku FORMATTER rewrite can never overwrite the seat's
+  persisted `output`, and a seat still non-compliant after repair renders its ORIGINAL text raw (graceful
+  degradation, never worse than the persisted text). (For a Task seat that `output` is whatever the
+  persist step received, which on the scribe success path is the scribe-written bytes, not a separately
+  retained pre-scribe copy: this non-destructiveness is about the FORMATTER repair, not scribe fidelity.)
 - The wait-for-both barrier's subprocess half is `crew wait --session-id <id> --run-id <rid>` (the
   orchestrator still awaits its own Task returns and persists them before collecting).
 - Seat results are RUN-SCOPED, so the orchestrator does no pre-launch `rm -f` clear anymore: a changed

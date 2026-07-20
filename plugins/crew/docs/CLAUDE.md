@@ -48,6 +48,7 @@ Use the Task tool to delegate to specialized agents:
 | `reviewer` | Review-panel seat — rubric + APPROVED/REVISE (read-only by convention; not sandbox-enforced) | Driven by `/crew:review` (spawned at `model: opus` / `model: sonnet`) |
 | `panelist` | Discuss-panel seat — direct take / objection / tradeoffs, no verdict (read-only by convention) | Driven by `/crew:debate` discuss mode (spawned at `model: opus` / `model: sonnet`) |
 | `formatter` | Cheap faithful reformatter — reshapes a seat's review into the FINDINGS schema verbatim (no inventing/dropping/re-judging) | Per-seat repair pass in `/crew:review`, `/crew:build`, `/crew:measure-twice` (spawned at `model: haiku`) |
+| `scribe` | Cheap verbatim persist-Writer — writes one review seat's text to disk on the orchestrator's behalf so the persist-Write does not render (Write-only, no reformat/judge) | Success-path Task-seat persist in `/crew:review`, `/crew:build`, `/crew:measure-twice` (spawned at `model: haiku`) |
 
 ## Skills
 

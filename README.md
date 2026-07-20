@@ -384,6 +384,7 @@ Specialized agents for different tasks. Use via `Task(subagent_type="crew:agent-
 | **reviewer** | Panel seat for `/crew:review` (read-only by convention — has `Bash` for git inspection, not sandbox-enforced; spawned at `model: opus` / `model: sonnet`) | (driven by `/crew:review`) |
 | **panelist** | Discuss-mode council seat for `/crew:debate` (independent critical take — direct take, strongest objection, risks/tradeoffs; no verdict; read-only by convention) | (driven by `/crew:debate`) |
 | **formatter** | Reformats one review seat's raw output into the structured FINDINGS schema (faithful transform, read-only, `model: haiku`) for the per-seat repair fallback | (driven by the review/build/measure-twice repair step) |
+| **scribe** | Persists one review seat's text to disk on the orchestrator's behalf so the persist-Write does not render in the terminal (verbatim transcribe, `Write`-only, `model: haiku`) | (driven by the review/build/measure-twice success-path persist step) |
 
 ### Quick Reference
 
