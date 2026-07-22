@@ -151,12 +151,17 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   stale debate dirs). DRY-RUN BY DEFAULT (lists only, like `git clean -n`);
   `--yes` is the DESTRUCTIVE step (rmtree), scoped to enumerated candidates from
   `artifact_prune.collect_prunable` and exiting nonzero if any delete failed. A
-  review run is protected while an active loop OR a current-run pointer names it
-  (no age threshold); debates prune by the existing staleness rule.
+  `--yes` from a terminal `.crew` cwd with no `CLAUDE_PROJECT_DIR` is refused
+  because the resolver's re-anchored artifact root is only a guess; dry-run still
+  lists the candidates. A review run is protected while an active loop OR a
+  current-run pointer names it (no age threshold); debates prune by the existing
+  staleness rule.
 
 **RESOLVED: all `.crew` paths anchor to CLAUDE_PROJECT_DIR via one resolver.**
 Every `.crew` root in the codebase now derives from the single `crew_base()`
-resolver (`state_discovery.py`: `CLAUDE_PROJECT_DIR or cwd`). The engine
+resolver (`state_discovery.py`: `CLAUDE_PROJECT_DIR or cwd`, except a fallback cwd
+that is itself a terminal `.crew` artifact dir re-anchors to its parent with a
+one-time stderr advisory). The engine
 (review-prep/collect/run/swab, via `_reviews_base()` and the anchored
 `review_runs`/`rounds` defaults), the state layer (`crew state` verbs + `models`,
 via `get_project_dir()`), `config.py`, and the session-start sweeps all resolve
@@ -615,7 +620,9 @@ from pathlib import Path
 from models import LoopState
 from state_discovery import crew_base
 
-# Project root via the ONE resolver (CLAUDE_PROJECT_DIR, else cwd); every `.crew`
+# Project root via the ONE resolver (CLAUDE_PROJECT_DIR, else cwd, except a
+# fallback cwd that is itself a terminal `.crew` artifact dir re-anchors to its
+# parent with a one-time stderr advisory); every `.crew`
 # path in the codebase derives from crew_base(), so the state layer and the review
 # engine can never resolve `.crew` to different trees.
 directory = crew_base()
@@ -1034,7 +1041,9 @@ state_file = Path("/Users/me/project/.crew/state.json")
 ✅ **Resolve via the one `crew_base()` root**
 ```python
 from state_discovery import crew_base
-directory = crew_base()            # CLAUDE_PROJECT_DIR, else cwd (the ONE resolver)
+directory = crew_base()            # CLAUDE_PROJECT_DIR, else cwd, except a terminal
+                                   # `.crew` fallback cwd re-anchors to its parent
+                                   # with a one-time stderr advisory (the ONE resolver)
 state_file = directory / ".crew" / "state.json"
 ```
 
@@ -1133,7 +1142,7 @@ Tests cover:
 ## Working Here Checklist
 
 - [ ] Import models from `models.py`, don't duplicate dataclasses
-- [ ] Resolve the project root via `crew_base()` (the ONE resolver: CLAUDE_PROJECT_DIR, else cwd), never a hand-rolled `os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())`
+- [ ] Resolve the project root via `crew_base()` (the ONE resolver: CLAUDE_PROJECT_DIR, else cwd, except a terminal `.crew` fallback cwd re-anchors to its parent with a one-time stderr advisory), never a hand-rolled `os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())`
 - [ ] Handle missing state files gracefully (return defaults)
 - [ ] Mutate a live loop's state ONLY via `update_state_json` (locked read-modify-write, own keys only); `state.save` is a whole-state REPLACE, never an edit
 - [ ] Never hand-roll a write + chmod (`atomic_write_json` is 0600-from-birth, atomic)

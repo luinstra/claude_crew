@@ -190,7 +190,8 @@ def get_loop_filename(canonical: str, session_id: str = "") -> str:
 
 def get_project_dir() -> Path:
     """Get project directory: the shared ``crew_base()`` resolver
-    (CLAUDE_PROJECT_DIR or cwd)."""
+    (CLAUDE_PROJECT_DIR or cwd, except a terminal `.crew` fallback cwd re-anchors
+    to its parent with a one-time stderr advisory)."""
     return crew_base()
 
 

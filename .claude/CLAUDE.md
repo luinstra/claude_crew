@@ -319,8 +319,10 @@ state_file = "/Users/me/project/.crew/state.json"
 from state_discovery import crew_base
 state_file = crew_base() / ".crew" / "state.json"
 ```
-`crew_base()` resolves the project root once (`CLAUDE_PROJECT_DIR`, else cwd); every
-`.crew` path derives from it, so nothing drifts to a phantom tree when the cwd moves.
+`crew_base()` resolves the project root once (`CLAUDE_PROJECT_DIR`, else cwd, except
+a fallback cwd that is itself a terminal `.crew` artifact dir re-anchors to its
+parent with a one-time stderr advisory); every `.crew` path derives from it, so
+nothing drifts to a phantom tree when the cwd moves.
 
 ## Working Here Checklist
 

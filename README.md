@@ -365,9 +365,12 @@ reading the list is the safety step.
 "${CLAUDE_PLUGIN_ROOT}/crew" swab --yes
 ```
 
-`--yes` is the only destructive mode (it exits nonzero if any delete failed). A
-review run is protected while an active loop or a current-run pointer names it,
-and plans and loop state are never in scope, so swab only ever removes stale
+`--yes` is the only destructive mode (it exits nonzero if any delete failed). It
+also REFUSES (exit 2, deletes nothing) when run from a terminal `.crew` cwd with
+`CLAUDE_PROJECT_DIR` unset: the project root is only a guess there, so cd back to
+the project root or set the env var (the dry-run listing still works). A review
+run is protected while an active loop or a current-run pointer names it, and
+plans and loop state are never in scope, so swab only ever removes stale
 review/debate debris. `--json` emits the machine payload (`prunable`, `removed`,
 `failed`, `total_bytes`).
 

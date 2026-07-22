@@ -116,9 +116,10 @@ def _neutral_env() -> dict:
     env = dict(os.environ)
     env["HOME"] = _NEUTRAL_HOME
     # Drop CLAUDE_PROJECT_DIR so the shared crew_base() resolver falls back to the
-    # subprocess cwd (the temp dir each e2e test passes). An ambient value from the
-    # surrounding session/CI would otherwise anchor `.crew` OUTSIDE the temp tree,
-    # so every e2e path assertion below is denominated against cwd, not the ambient.
+    # subprocess cwd, except a terminal `.crew` fallback cwd re-anchors to its
+    # parent with a one-time stderr advisory. An ambient value from the surrounding
+    # session/CI would otherwise anchor `.crew` OUTSIDE the temp tree, so every e2e
+    # path assertion below is denominated against cwd, not the ambient.
     env.pop("CLAUDE_PROJECT_DIR", None)
     return env
 
@@ -700,7 +701,9 @@ def test_stage():
 
     # _stage_path: derives <crew_base>/.crew/reviews/<session>/prompt-<role>.txt
     # from seat-role + session; flat when no session; charset-guards the segment.
-    # The `.crew` root is ANCHORED to crew_base() (CLAUDE_PROJECT_DIR or cwd), so
+    # The `.crew` root is ANCHORED to crew_base() (CLAUDE_PROJECT_DIR or cwd, except
+    # a terminal `.crew` fallback cwd re-anchors to its parent with a one-time stderr
+    # advisory), so
     # the tail below is joined under the resolved base, not a bare relative string.
     _sb = cli._reviews_base()  # <crew_base>/.crew/reviews (absolute)
     check("stage path derives from session id + seat-role",
@@ -13163,8 +13166,10 @@ def main():
     test_signal()
     test_quorum_header()
     test_swab()
+    test_swab_reanchor_guard()
     test_crew_base_phantom_prevention()
     test_crew_base_spaced_root()
+    test_crew_base_dot_crew_reanchor()
 
     print()
     print(f"{YELLOW}=== Results ==={NC}")
@@ -13176,22 +13181,26 @@ def main():
     sys.exit(0)
 
 
-def _swab_run(project_dir, *, yes=False, as_json=False, cwd=None):
+def _swab_run(project_dir, *, yes=False, as_json=False, cwd=None, project_env=True):
     """Invoke cmd_swab in-process against ``project_dir`` (env-isolated), returning
     ``(rc, stdout, stderr)``. HOME is neutralized so no real ~/.crew-config leaks.
 
     ``cwd`` defaults to ``project_dir``: swab resolves ``.crew`` through the shared
-    ``crew_base()`` (CLAUDE_PROJECT_DIR or cwd), IDENTICALLY to the review/debate
-    writers, so it targets the anchored project tree. Passing a different ``cwd``
-    (while CLAUDE_PROJECT_DIR names ``project_dir``) is how the anchoring test proves
-    swab follows CLAUDE_PROJECT_DIR, not cwd."""
+    ``crew_base()`` (CLAUDE_PROJECT_DIR or cwd, except a terminal `.crew` fallback
+    cwd re-anchors to its parent with a one-time stderr advisory), IDENTICALLY to
+    the review/debate writers, so it targets the anchored project tree. Passing a different ``cwd``
+    (while ``project_env`` controls whether CLAUDE_PROJECT_DIR names ``project_dir``)
+    is how the anchoring and fallback tests prove swab follows the shared resolver."""
     import argparse as _argparse
     import contextlib as _contextlib
     import io as _io
     from multiagent import cli as _cli
 
     saved = {k: os.environ.get(k) for k in ("CLAUDE_PROJECT_DIR", "HOME")}
-    os.environ["CLAUDE_PROJECT_DIR"] = str(project_dir)
+    if project_env:
+        os.environ["CLAUDE_PROJECT_DIR"] = str(project_dir)
+    else:
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
     os.environ["HOME"] = _NEUTRAL_HOME
     saved_cwd = os.getcwd()
     os.chdir(str(cwd if cwd is not None else project_dir))
@@ -13332,6 +13341,207 @@ def test_crew_base_spaced_root():
               proc_u.returncode != 0 and not opath.is_file(),
               "rc!=0 and no output file (the space split the arg)",
               f"rc={proc_u.returncode} exists={opath.is_file()}")
+
+
+def test_crew_base_dot_crew_reanchor():
+    """Re-anchor fallback cwd values ending in one or more terminal `.crew` segments."""
+    log_section("crew_base(): terminal .crew cwd re-anchors to the project root")
+    import contextlib
+    import io
+    import state_discovery as sd
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td).resolve()
+        dotcrew = root / ".crew"
+        dotcrew.mkdir()
+        nested_dotcrew = dotcrew / ".crew"
+        # Both terminal directories must exist before their chdir scenarios.
+        nested_dotcrew.mkdir()
+
+        saved_cwd = os.getcwd()
+        saved_proj = os.environ.get("CLAUDE_PROJECT_DIR")
+        try:
+            # This reset is guarded because the pre-fix module has no _warned global.
+            warned = getattr(sd, "_warned", None)
+            if warned is not None:
+                warned.clear()
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            os.chdir(str(dotcrew))
+            check("cwd_reanchored detects an unset env plus terminal .crew cwd",
+                  sd.cwd_reanchored(), "True", "False")
+            err = io.StringIO()
+            out = io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+                base = sd.crew_base()
+                second_base = sd.crew_base()
+                anchored = sd.anchor_path(".crew/plans/x.md")
+            drift_err = err.getvalue()
+            drift_out = out.getvalue()
+            pre_fix_base = Path(os.getcwd())
+            doubled = (pre_fix_base / ".crew" / "plans" / "x.md").resolve()
+            expected_anchor = root / ".crew" / "plans" / "x.md"
+
+            check("unset env plus .crew cwd re-anchors to the project root",
+                  base == root and second_base == root,
+                  str(root), f"first={base} second={second_base}")
+            check("terminal .crew fallback warns exactly once",
+                  drift_err.count("ends in .crew") == 1,
+                  "one advisory line", repr(drift_err))
+            check("terminal .crew advisory names the fallback and re-anchor",
+                  ".crew" in drift_err
+                  and "CLAUDE_PROJECT_DIR" in drift_err
+                  and str(root) in drift_err,
+                  "cwd, env name, and project root", repr(drift_err))
+            check("terminal .crew advisory stays off stdout",
+                  drift_out == "", "empty stdout", repr(drift_out))
+            check("terminal .crew anchor_path avoids the doubled .crew",
+                  anchored == str(expected_anchor) and anchored != str(doubled),
+                  str(expected_anchor), anchored)
+            check("terminal .crew regression is non-vacuous before the fix",
+                  pre_fix_base == dotcrew
+                  and doubled == root / ".crew" / ".crew" / "plans" / "x.md"
+                  and anchored != str(doubled),
+                  "pre-fix cwd produces a distinct doubled path",
+                  f"cwd={pre_fix_base} doubled={doubled} anchored={anchored}")
+
+            os.chdir(str(nested_dotcrew))
+            check("cwd_reanchored stays true for a nested terminal .crew cwd",
+                  sd.cwd_reanchored(), "True", "False")
+            nested_err = io.StringIO()
+            nested_out = io.StringIO()
+            with contextlib.redirect_stderr(nested_err), contextlib.redirect_stdout(nested_out):
+                nested_base = sd.crew_base()
+                nested_second_base = sd.crew_base()
+                nested_anchor = sd.anchor_path(".crew/plans/x.md")
+            nested_warning = nested_err.getvalue()
+            nested_pre_fix_base = Path(os.getcwd())
+            check("nested terminal .crew cwd strips both segments",
+                  nested_base == root
+                  and nested_second_base == root
+                  and nested_pre_fix_base == nested_dotcrew,
+                  str(root),
+                  f"first={nested_base} second={nested_second_base} cwd={nested_pre_fix_base}")
+            check("nested terminal .crew fallback warns once and stays off stdout",
+                  nested_warning.count("ends in .crew") == 1 and nested_out.getvalue() == "",
+                  "one stderr advisory and empty stdout", repr(nested_warning))
+            check("nested terminal .crew anchor reaches the real .crew tree",
+                  nested_anchor == str(expected_anchor), str(expected_anchor), nested_anchor)
+
+            warned = getattr(sd, "_warned", None)
+            if warned is not None:
+                warned.clear()
+            os.environ["CLAUDE_PROJECT_DIR"] = str(root)
+            os.chdir(str(dotcrew))
+            check("cwd_reanchored is false when CLAUDE_PROJECT_DIR is set",
+                  not sd.cwd_reanchored(), "False", "True")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                env_base = sd.crew_base()
+            check("set env wins over a terminal .crew cwd without warning",
+                  env_base == root and err.getvalue() == "",
+                  str(root) + " and empty stderr", f"base={env_base} err={err.getvalue()!r}")
+
+            warned = getattr(sd, "_warned", None)
+            if warned is not None:
+                warned.clear()
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            os.chdir(str(root))
+            check("cwd_reanchored is false for a non-.crew cwd",
+                  not sd.cwd_reanchored(), "False", "True")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                normal_base = sd.crew_base()
+            check("unset env plus normal cwd preserves the current value without warning",
+                  normal_base == root and err.getvalue() == "",
+                  str(root) + " and empty stderr", f"base={normal_base} err={err.getvalue()!r}")
+
+            warned = getattr(sd, "_warned", None)
+            if warned is not None:
+                warned.clear()
+            os.environ["CLAUDE_PROJECT_DIR"] = ""
+            os.chdir(str(root))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                empty_normal_base = sd.crew_base()
+            check("empty env plus normal cwd follows the unchanged cwd branch",
+                  empty_normal_base == root and err.getvalue() == "",
+                  str(root) + " and empty stderr",
+                  f"base={empty_normal_base} err={err.getvalue()!r}")
+
+            warned = getattr(sd, "_warned", None)
+            if warned is not None:
+                warned.clear()
+            os.chdir(str(dotcrew))
+            check("cwd_reanchored treats an empty env as unset",
+                  sd.cwd_reanchored(), "True", "False")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                empty_dotcrew_base = sd.crew_base()
+            check("empty env plus terminal .crew cwd re-anchors like unset env",
+                  empty_dotcrew_base == root and err.getvalue().count("ends in .crew") == 1,
+                  str(root) + " and one advisory", f"base={empty_dotcrew_base} err={err.getvalue()!r}")
+        finally:
+            os.chdir(saved_cwd)
+            if saved_proj is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved_proj
+
+
+def test_swab_reanchor_guard():
+    """Refuse destructive pruning from a guessed terminal `.crew` cwd only."""
+    log_section("swab: refuse --yes from a re-anchored .crew cwd")
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td).resolve()
+        orphan = root / ".crew" / "reviews" / "sess-guard" / "run-abcdef123456"
+        orphan.mkdir(parents=True)
+        (orphan / "run.json").write_text('{"run_id":"run-abcdef123456"}')
+        dotcrew = root / ".crew"
+
+        rc, out, err = _swab_run(
+            root,
+            yes=True,
+            as_json=True,
+            cwd=dotcrew,
+            project_env=False,
+        )
+        check("swab --yes refuses a guessed artifact root", rc != 0,
+              "nonzero", str(rc))
+        check("swab refusal deletes nothing", orphan.exists(),
+              "orphan present", "orphan deleted")
+        check("swab refusal explains re-anchor and recovery",
+              "re-anchored off a .crew cwd" in err
+              and "artifact root is only a guess" in err
+              and "cd to the project root" in err
+              and "CLAUDE_PROJECT_DIR" in err,
+              "stderr guidance", repr(err))
+
+        rc, out, err = _swab_run(
+            root,
+            as_json=True,
+            cwd=dotcrew,
+            project_env=False,
+        )
+        payload = json.loads(out)
+        check("swab dry-run still lists from a re-anchored cwd",
+              rc == 0 and [item["name"] for item in payload["prunable"]]
+              == ["run-abcdef123456"],
+              "run-abcdef123456 listed", str(payload))
+        check("swab dry-run does not use the destructive refusal",
+              "refusing" not in err.lower(), "no refusal", repr(err))
+
+        rc, out, err = _swab_run(
+            root,
+            yes=True,
+            as_json=True,
+            cwd=dotcrew,
+        )
+        payload = json.loads(out)
+        check("swab --yes still deletes with CLAUDE_PROJECT_DIR set",
+              rc == 0 and not orphan.exists() and
+              [item["name"] for item in payload["removed"]] == ["run-abcdef123456"],
+              "run removed", str(payload))
 
 
 def _old_mtime(path):

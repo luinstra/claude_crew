@@ -522,10 +522,12 @@ def resolve(
     ``auto``.
     """
     # Anchor git target resolution to the project root (crew_base: CLAUDE_PROJECT_DIR,
-    # else cwd) when the caller passes no cwd. The run dir and loop identity anchor
-    # there too, so a divergent process cwd must not resolve the diff against a
-    # different repo or miss untracked files outside a subtree. A caller with a real
-    # need (a test) still passes an explicit cwd; only the default changes.
+    # else cwd, except a terminal `.crew` fallback cwd re-anchors to its parent with
+    # a one-time stderr advisory) when the caller passes no cwd. The run dir and
+    # loop identity anchor there too, so a divergent process cwd must not resolve
+    # the diff against a different repo or miss untracked files outside a subtree.
+    # A caller with a real need (a test) still passes an explicit cwd; only the
+    # default changes.
     if cwd is None:
         cwd = str(crew_base())
 

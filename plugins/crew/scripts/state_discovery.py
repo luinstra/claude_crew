@@ -8,18 +8,68 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import os
+import sys
+
+
+_warned: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """One-time stderr note keyed by ``key`` (never stdout: doctor/scaffold-config
+    emit machine JSON there)."""
+    if key in _warned:
+        return
+    _warned.add(key)
+    print(f"crew: {message}", file=sys.stderr)
+
+
+def _should_reanchor(explicit: str | None, cwd: Path) -> bool:
+    """Return whether the fallback cwd should be treated as artifact drift."""
+    return not explicit and cwd.name == ".crew"
+
+
+def cwd_reanchored() -> bool:
+    """Return whether ``crew_base()`` would re-anchor the current cwd right now."""
+    return _should_reanchor(
+        os.environ.get("CLAUDE_PROJECT_DIR"),
+        Path(os.getcwd()),
+    )
 
 
 def crew_base() -> Path:
     """THE one project-root resolver every `.crew` path derives from, so the
     state layer and the review engine cannot resolve `.crew` to different trees.
 
-    Returns ``CLAUDE_PROJECT_DIR`` (the truth: the harness always sets it), else
-    the process cwd (a hook's cwd IS the project root). One identical fallback for
-    every caller: no hint, no override env var, because a second knob is a second
-    way for the two layers to disagree.
+    Returns ``CLAUDE_PROJECT_DIR`` when set (hooks get it), else the process cwd.
+    The env var is NOT set in the Bash-tool subprocess, so cwd is the real
+    fallback for every crew CLI call. On that fallback ONLY, a cwd that is itself
+    a terminal `.crew` artifact dir re-anchors to its parent (warn once): crew
+    never roots a project inside its own `.crew`. One identical fallback for every
+    caller: no hint, no override env var, because a second knob is a second way for
+    the two layers to disagree.
     """
-    return Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
+    # EMPTY string is treated as UNSET (falls to the cwd branch), preserving the
+    # old `... or os.getcwd()` truthiness exactly; only a truthy value short-circuits.
+    explicit = os.environ.get("CLAUDE_PROJECT_DIR")
+    if explicit:
+        return Path(explicit)
+    cwd = Path(os.getcwd())
+    # Drift signature: the Bash-tool cwd PERSISTS across calls, so an earlier
+    # `cd <root>/.crew` (or the `.crew/.crew` this bug mints) leaves cwd terminal-
+    # `.crew`, which would double every `.crew/...` path. Strip the WHOLE terminal
+    # `.crew` run to the first non-`.crew` parent (crew never roots inside its own
+    # artifact dir); the `parent == self` guard terminates at the filesystem root.
+    if _should_reanchor(explicit, cwd):
+        drifted = cwd
+        while cwd.name == ".crew" and cwd.parent != cwd:
+            cwd = cwd.parent
+        _warn_once(
+            str(drifted),
+            f"cwd {drifted} ends in .crew and CLAUDE_PROJECT_DIR is unset or empty; using "
+            f"{cwd} as the project root. cd back to the project root or set "
+            f"CLAUDE_PROJECT_DIR to silence this.",
+        )
+    return cwd
 
 
 def anchor_path(value: str) -> str:

@@ -332,10 +332,12 @@ def normalize_path(raw: str | None, repo_root: str | None = None) -> list[str] |
     """Repo-relative, lowercased SEGMENT LIST (or None when no path).
 
     Strips a known absolute repo-root prefix (``repo_root``, default
-    ``CLAUDE_PROJECT_DIR``/cwd) to make the path repo-relative, lowercases, and
-    splits on ``/`` dropping empty/``.`` segments. A bare basename -> a 1-segment
-    list. The eventual ``path_compatible`` suffix test makes stripping optional
-    for correctness, but it keeps the matrix/digest paths tidy."""
+    ``CLAUDE_PROJECT_DIR``/cwd, except a fallback cwd that is itself a terminal
+    ``.crew`` artifact dir re-anchors to its parent with a one-time stderr
+    advisory) to make the path repo-relative, lowercases, and splits on ``/``
+    dropping empty/``.`` segments. A bare basename -> a 1-segment list. The
+    eventual ``path_compatible`` suffix test makes stripping optional for
+    correctness, but it keeps the matrix/digest paths tidy."""
     if raw is None:
         return None
     p = raw.strip().replace("\\", "/")

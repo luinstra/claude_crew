@@ -74,9 +74,10 @@ def run_script(script: Path, input_data: str, extra_env: dict = None) -> str:
     if extra_env:
         env.update(extra_env)
     # These subprocesses run with cwd=SCRIPT_DIR, but a hook resolves its `.crew`
-    # via crew_base() (CLAUDE_PROJECT_DIR, else cwd) and the payload no longer
-    # carries a directory hint. So mimic the harness: derive CLAUDE_PROJECT_DIR
-    # from the stdin payload's `directory`/`cwd` when a test did not pin it. The
+    # via crew_base() (CLAUDE_PROJECT_DIR, else cwd, except a terminal `.crew`
+    # fallback cwd re-anchors to its parent with a one-time stderr advisory) and
+    # the payload no longer carries a directory hint. So mimic the harness: derive
+    # CLAUDE_PROJECT_DIR from the stdin payload's `directory`/`cwd` when a test did not pin it. The
     # parse is defensive (some tests feed malformed/non-JSON stdin on purpose)
     # and only a non-empty STRING sets it, so `{"directory": 123}` does not.
     if "CLAUDE_PROJECT_DIR" not in env:
@@ -2669,8 +2670,9 @@ def main():
                 _ap.own_dir = _saved_own_dir
 
             # --- Anchoring: both resolve `.crew` through the shared crew_base()
-            # (CLAUDE_PROJECT_DIR or cwd), never cwd-relative. The default-arg
-            # calls (as `main()` makes them) act on the CLAUDE_PROJECT_DIR tree the
+            # (CLAUDE_PROJECT_DIR or cwd, except a terminal `.crew` fallback cwd
+            # re-anchors to its parent with a one-time stderr advisory), never
+            # cwd-relative. The default-arg calls (as `main()` makes them) act on the CLAUDE_PROJECT_DIR tree the
             # WRITERS/swab now also resolve, so with cwd and CLAUDE_PROJECT_DIR
             # pointing at DIFFERENT trees the report/sweep name the
             # CLAUDE_PROJECT_DIR tree's artifacts, not the cwd tree's. Mirrors the
@@ -6171,7 +6173,7 @@ def main():
             # resolves the project root through crew_base().)
             for hook_path in (persistent_mode, session_start_path):
                 crash_env = _neutral_env()
-                crash_env.pop("CLAUDE_PROJECT_DIR", None)  # resolver falls back to cwd
+                crash_env.pop("CLAUDE_PROJECT_DIR", None)  # fallback cwd, except terminal `.crew` re-anchors
                 proc = subprocess.run(
                     [sys.executable, str(hook_path)],
                     input='[1, 2]',

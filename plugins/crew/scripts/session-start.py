@@ -225,10 +225,11 @@ def sweep_signal_markers_all(crew_dir: Path | None = None) -> None:
     ``report_stale_artifacts`` merely reports the orphans it would remove.
 
     The `.crew` root defaults to the shared `crew_base()` root (CLAUDE_PROJECT_DIR
-    or cwd), the SAME resolver `crew swab` and the engine's review/signal WRITERS
-    now derive from, so this sweep looks exactly where the markers were written
-    even when cwd != CLAUDE_PROJECT_DIR. An explicit `crew_dir` is honored (the
-    tests pass one).
+    or cwd, except a terminal `.crew` fallback cwd re-anchors to its parent with a
+    one-time stderr advisory), the SAME resolver `crew swab` and the engine's
+    review/signal WRITERS now derive from, so this sweep looks exactly where the
+    markers were written even when cwd != CLAUDE_PROJECT_DIR. An explicit
+    `crew_dir` is honored (the tests pass one).
     """
     if crew_dir is None:
         crew_dir = crew_base() / ".crew"
@@ -273,10 +274,11 @@ def report_stale_artifacts(crew_dir: Path | None = None) -> str:
     count stays ACCURATE (every validation runs; only the sizing walk is skipped).
 
     The `.crew` root defaults to the shared `crew_base()` root (CLAUDE_PROJECT_DIR
-    or cwd), the SAME resolver `crew swab` and the engine writers now derive from:
-    the whole point of this report is to recommend `crew swab`, so the two MUST
-    enumerate the SAME tree, and one anchored resolver guarantees it. An explicit
-    `crew_dir` is honored (the tests pass one).
+    or cwd, except a terminal `.crew` fallback cwd re-anchors to its parent with a
+    one-time stderr advisory), the SAME resolver `crew swab` and the engine
+    writers now derive from: the whole point of this report is to recommend `crew
+    swab`, so the two MUST enumerate the SAME tree, and one anchored resolver
+    guarantees it. An explicit `crew_dir` is honored (the tests pass one).
     """
     if crew_dir is None:
         crew_dir = crew_base() / ".crew"

@@ -87,6 +87,7 @@ import artifact_prune
 from state_discovery import (  # the ONE `.crew` root resolver (state layer shares it)
     anchor_path,
     crew_base,
+    cwd_reanchored,
 )
 # One-time stderr notes for panel/availability resolution (mirrors config.py's
 # memoized-warn posture; keyed so each distinct note fires at most once/process).
@@ -4414,8 +4415,19 @@ def cmd_swab(args: argparse.Namespace) -> int:
     ``crew_base()`` root, IDENTICALLY to how ``review-prep`` / ``collect`` / ``run``
     resolve them (they derive from the same resolver): a destructive command and the
     writers must never target different trees when ``CLAUDE_PROJECT_DIR`` and cwd
-    diverge.
+    diverge. If ``--yes`` is run from a terminal ``.crew`` cwd without the env var,
+    it refuses because the resolver's artifact-root re-anchor is only a guess; the
+    dry-run listing remains available.
     """
+    if args.yes and cwd_reanchored():
+        print(
+            "Error: refusing crew swab --yes because crew_base() was re-anchored "
+            "off a .crew cwd, so the artifact root is only a guess. cd to the "
+            "project root or set CLAUDE_PROJECT_DIR, then re-run.",
+            file=sys.stderr,
+        )
+        return 2
+
     # The same anchored `.crew` root the review/debate writers resolve (every
     # `.crew` path derives from crew_base now), so swab enumerates exactly where
     # they wrote even when CLAUDE_PROJECT_DIR != cwd.
@@ -5257,7 +5269,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true",
         help="actually delete the listed artifacts (default: dry-run, lists only, "
              "deletes nothing; read the list first, like `git clean -n`). Exits "
-             "nonzero if any delete failed.",
+             "nonzero if any delete failed, and REFUSES (exit 2, deletes nothing) "
+             "when run from a terminal .crew cwd with CLAUDE_PROJECT_DIR unset (the "
+             "artifact root is only a guess then; cd to the project root or set the "
+             "env var). Dry-run still lists.",
     )
     swab.add_argument(
         "--json", action="store_true",
