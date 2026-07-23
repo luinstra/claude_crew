@@ -25,19 +25,43 @@ inherited. (Lower it via this same flag if a faster/cheaper review is wanted.)
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
 import time
 
+from multiagent.continuation_ids import valid_conversation_id
 from state_discovery import crew_base  # the ONE `.crew`/project-root resolver
 
-from . import Provider, ProviderResult
+from . import (
+    ContinuationOutcome,
+    Provider,
+    ProviderContinuation,
+    ProviderResult,
+)
 from ._proc import TIMEOUT, run_reaped
 
 # Re-pinned in code because --ignore-user-config drops the config's own value;
 # the seat's [seats.<name>].reasoning_effort overrides it through the catalog.
 DEFAULT_REASONING_EFFORT = "xhigh"
+
+# Per-process continuation-capability memo, keyed by the RESOLVED codex binary
+# path. A dispatch process probes a given binary at most once; a binary upgrade
+# is re-probed by the NEXT process, so there is no on-disk cache to stale and no
+# invalidation key to maintain.
+_CONTINUATION_PROBE_CACHE: dict[str, bool] = {}
+# Non-billable probe deadline: `--help` returns immediately, so this only bounds
+# a hung/broken binary and never a real turn.
+PROBE_TIMEOUT = 10
+
+
+def _reset_probe_cache_for_tests() -> None:
+    """Clear the per-process continuation-probe memo (test-only)."""
+    _CONTINUATION_PROBE_CACHE.clear()
+
+
+_valid_resume_id = valid_conversation_id
 
 
 class CodexProvider(Provider):
@@ -53,6 +77,11 @@ class CodexProvider(Provider):
     # workspace-write natively via its --sandbox arg, so it is a valid
     # /crew:dispatch write seat.
     supports_workspace_write = True
+    # Opt-in: this adapter HAS an exact-ID resume path. It is a COARSE gate only
+    # (Agy never sets it); the real per-run decision is the cached runtime probe
+    # (_supports_continuation_runtime), which downgrades a binary that lacks the
+    # `--json` + `exec resume` surface to a truthfully-reported fresh run.
+    supports_continuation = True
 
     # Write-mode dispatch tuning, declared on THIS class (never inherited from
     # the ABC's shared default). Single source: the config validator, the
@@ -79,6 +108,70 @@ class CodexProvider(Provider):
             return (True, "")
         return (False, "codex not found on PATH")
 
+    def _supports_continuation_runtime(self) -> bool:
+        """Cached, NON-BILLABLE check that the installed codex exposes the exact
+        continuation surface: ``--json`` event output AND an ``exec resume``
+        subcommand. Only ``--help`` is spawned (no model turn, no network), and
+        the answer is memoized per resolved binary path for this process. An
+        opted-in provider whose binary fails the probe runs FRESH and reports
+        ``capability="unsupported"`` rather than silently attempting a resume the
+        binary can't honor."""
+        path = shutil.which("codex")
+        if not path:
+            return False
+        cached = _CONTINUATION_PROBE_CACHE.get(path)
+        if cached is not None:
+            return cached
+        supported = self._probe_continuation(path)
+        _CONTINUATION_PROBE_CACHE[path] = supported
+        return supported
+
+    @staticmethod
+    def _probe_continuation(path: str) -> bool:
+        try:
+            # `codex exec --help` must advertise --json (the JSONL event stream we
+            # parse for the exact thread id).
+            help_res = run_reaped([path, "exec", "--help"], timeout=PROBE_TIMEOUT)
+            if help_res is TIMEOUT:
+                return False
+            rc, out, err = help_res
+            if rc != 0 or "--json" not in ((out or "") + (err or "")):
+                return False
+            # `codex exec resume --help` must exit 0: the exact-ID resume subcommand
+            # this adapter drives has to exist. `--last` is deliberately NOT used.
+            resume_res = run_reaped(
+                [path, "exec", "resume", "--help"], timeout=PROBE_TIMEOUT
+            )
+            if resume_res is TIMEOUT:
+                return False
+            return resume_res[0] == 0
+        except OSError:
+            # A binary can disappear between which() and spawn. Treat that as an
+            # unsupported capability so the provider can make a fresh attempt.
+            return False
+
+    @staticmethod
+    def _first_thread_id(stdout: str) -> str | None:
+        """Return the FIRST valid ``thread.started`` thread_id in a JSONL stream,
+        else None. Defensive by contract: a malformed line, a non-object line, an
+        unknown event type, or an id-less/duplicate event is a diagnostic, never a
+        traceback; only the first well-formed event with a non-empty string
+        thread_id wins."""
+        for line in (stdout or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(event, dict) or event.get("type") != "thread.started":
+                continue
+            tid = event.get("thread_id")
+            if _valid_resume_id(tid):
+                return tid
+        return None
+
     def run(
         self,
         prompt: str,
@@ -87,6 +180,7 @@ class CodexProvider(Provider):
         model: str | None = None,
         timeout: int = 300,
         dispatch_options: dict | None = None,
+        continuation: ProviderContinuation | None = None,
     ) -> ProviderResult:
         start = time.monotonic()
 
@@ -96,10 +190,6 @@ class CodexProvider(Provider):
         # own CLI default when --model is omitted.
         chosen_model = model or self._default_model
 
-        # The -o temp file receives the clean final message.
-        fd, out_path = tempfile.mkstemp(prefix="crew_codex_", suffix=".txt")
-        os.close(fd)
-
         # --ignore-user-config: hermetic review seat — skip the user's
         # ~/.codex/config.toml (MCP servers, skills, RTK, AGENTS.md preamble).
         # Cuts ~40k startup tokens and keeps the seat reproducible. Because that
@@ -108,7 +198,39 @@ class CodexProvider(Provider):
         # reasoning_effort: the seat's own tune (the catalog resolved the config
         # layers), else the built-in default.
         effort = self._reasoning_effort or DEFAULT_REASONING_EFFORT
-        argv = ["codex", "exec", "-"]
+
+        # Continuation is workspace-write-only and additive: read-only review and
+        # unchained write keep their exact argv and six-field result. `capable`
+        # is the cached RUNTIME probe, not supports_continuation; an opted-in
+        # provider whose installed binary lacks the surface runs FRESH and reports
+        # capability="unsupported". A continuation passed to a read-only call is
+        # defensively ignored so a misuse can't perturb the review argv.
+        want_continuation = continuation is not None and sandbox == "workspace-write"
+        requested_resume_id = continuation.conversation_id if want_continuation else None
+        if requested_resume_id is not None and not _valid_resume_id(requested_resume_id):
+            return ProviderResult(
+                name=self.name,
+                model=chosen_model,
+                ok=False,
+                output="",
+                error="codex resume ID is invalid",
+                elapsed=time.monotonic() - start,
+                continuation=ContinuationOutcome(
+                    capability="supported",
+                    phase="resume",
+                    conversation_id=None,
+                    failure="error",
+                ),
+                continuation_id=None,
+            )
+        capable = want_continuation and self._supports_continuation_runtime()
+        resume_id = requested_resume_id if capable else None
+        phase = "resume" if resume_id is not None else "fresh"
+        capability = "supported" if capable else "unsupported"
+
+        # Shared exec options, order-stable. Assembled once, then framed either as
+        # a fresh `exec - <options>` or a resume `exec <options> resume <id> -`.
+        options: list[str] = []
         # --ignore-user-config makes a READ-ONLY review seat hermetic (skips
         # ~/.codex/config.toml + AGENTS.md + project conventions/skills, ~40k
         # startup tokens, reproducible). A WORK seat (/crew:dispatch,
@@ -118,11 +240,8 @@ class CodexProvider(Provider):
         # dispatch keeps a deterministic effort even with user config loaded
         # (explicit -c wins). Read-only review/debate is byte-for-byte unchanged.
         if sandbox != "workspace-write":
-            argv += ["--ignore-user-config"]
-        argv += [
-            "-c", f"model_reasoning_effort={effort}",
-            "--sandbox", sandbox,
-        ]
+            options += ["--ignore-user-config"]
+        options += ["-c", f"model_reasoning_effort={effort}", "--sandbox", sandbox]
         # Dispatch options apply in WRITE MODE ONLY (the structural gate that
         # keeps every read-only review argv byte-identical even when a
         # [dispatch.codex] table is configured). --profile is write-mode
@@ -130,16 +249,34 @@ class CodexProvider(Provider):
         # omitted above), which is the base the profile file layers onto, and
         # the explicit -c model_reasoning_effort pin still wins over
         # profile-supplied config (codex precedence: -c > profile > base).
-        # Placement is free here (prompt travels via stdin, unlike cursor's
-        # trailing positional prompt), so the pair sits with the other -c/flag
-        # tuning. Values arrive pre-validated from the config getter.
+        # Values arrive pre-validated from the config getter.
         if sandbox == "workspace-write" and dispatch_options:
             profile = dispatch_options.get("profile")
             if profile:
-                argv += ["--profile", profile]
+                options += ["--profile", profile]
         if chosen_model:
-            argv += ["--model", chosen_model]
-        argv += ["--skip-git-repo-check", "-o", out_path]
+            options += ["--model", chosen_model]
+        options += ["--skip-git-repo-check"]
+        # --json turns stdout into a JSONL event stream we parse for the exact
+        # thread id. It rides ONLY on a capable continuation run, so every other
+        # path keeps byte-identical argv; the clean final message still comes from
+        # -o, so events never leak into ProviderResult.output.
+        if capable:
+            options += ["--json"]
+        # The -o temp file receives the clean final message. Capability probing
+        # happens before this allocation so a failed probe cannot leak it.
+        fd, out_path = tempfile.mkstemp(prefix="crew_codex_", suffix=".txt")
+        os.close(fd)
+        options += ["-o", out_path]
+
+        if resume_id:
+            # Resume: parent exec options first, then `resume <exact-id> -` with
+            # the prompt still on stdin (the trailing `-`). Never `--last`.
+            argv = ["codex", "exec"] + options + ["resume", resume_id, "-"]
+        else:
+            # Fresh (chained or not): the `-` stdin positional leads, exactly as
+            # the unchained/read-only argv always has.
+            argv = ["codex", "exec", "-"] + options
 
         # Workspace-write cwd pin: codex inherits the engine process
         # cwd by default, which can diverge from the guard's repo_dir. In write
@@ -154,34 +291,59 @@ class CodexProvider(Provider):
             else str(crew_base())
         )
 
+        def make_result(
+            *,
+            ok: bool,
+            output: str,
+            error: str | None,
+            failure: str = "none",
+            conversation_id: str | None = None,
+            continuation_id: str | None = None,
+        ) -> ProviderResult:
+            values = {
+                "name": self.name,
+                "model": chosen_model,
+                "ok": ok,
+                "output": output,
+                "error": error,
+                "elapsed": time.monotonic() - start,
+            }
+            if want_continuation:
+                values["continuation"] = ContinuationOutcome(
+                    capability=capability,
+                    phase=phase,
+                    conversation_id=conversation_id,
+                    failure=failure,
+                )
+                values["continuation_id"] = continuation_id
+            return ProviderResult(**values)
+
         try:
             # Shared reaped runner: start_new_session + SIGTERM→SIGKILL
             # killpg teardown on timeout so a hung codex can't orphan billable
             # grandchildren. Prompt via stdin (input_text), cwd preserved.
             result = run_reaped(argv, input_text=prompt, timeout=timeout, cwd=run_cwd)
             if result is TIMEOUT:
-                elapsed = time.monotonic() - start
-                return ProviderResult(
-                    name=self.name,
-                    model=chosen_model,
+                return make_result(
                     ok=False,
                     output="",
                     error=f"codex timed out after {timeout}s",
-                    elapsed=elapsed,
+                    failure="timeout",
                 )
             returncode, proc_stdout, proc_stderr = result
-
-            elapsed = time.monotonic() - start
+            captured_id = self._first_thread_id(proc_stdout) if capable else None
 
             if returncode != 0:
-                err = (proc_stderr or proc_stdout or "").strip()
-                return ProviderResult(
-                    name=self.name,
-                    model=chosen_model,
+                if capable:
+                    err = (proc_stderr or "").strip()
+                else:
+                    err = (proc_stderr or proc_stdout or "").strip()
+                return make_result(
                     ok=False,
                     output="",
                     error=err or f"codex exited with status {returncode}",
-                    elapsed=elapsed,
+                    failure="error",
+                    conversation_id=captured_id,
                 )
 
             # Read the clean final message from the -o file.
@@ -190,28 +352,32 @@ class CodexProvider(Provider):
                 with open(out_path, "r", encoding="utf-8", errors="replace") as f:
                     output = f.read().strip()
             except OSError:
-                output = (proc_stdout or "").strip()
+                if not capable:
+                    output = (proc_stdout or "").strip()
 
-            if not output:
+            if not output and not capable:
                 # Fall back to stdout, else report empty as a failure.
                 output = (proc_stdout or "").strip()
             if not output:
-                return ProviderResult(
-                    name=self.name,
-                    model=chosen_model,
+                return make_result(
                     ok=False,
                     output="",
                     error="codex returned no output",
-                    elapsed=elapsed,
+                    failure="error",
+                    conversation_id=captured_id,
                 )
 
-            return ProviderResult(
-                name=self.name,
-                model=chosen_model,
+            failure = "none"
+            if capable and phase == "resume" and captured_id != resume_id:
+                failure = "error"
+            persisted_id = captured_id if failure == "none" else None
+            return make_result(
                 ok=True,
                 output=output,
                 error=None,
-                elapsed=elapsed,
+                failure=failure,
+                conversation_id=captured_id,
+                continuation_id=persisted_id,
             )
         finally:
             try:

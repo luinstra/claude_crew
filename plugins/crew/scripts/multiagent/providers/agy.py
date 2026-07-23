@@ -48,7 +48,7 @@ import time
 
 from state_discovery import crew_base  # the ONE `.crew`/project-root resolver
 
-from . import Provider, ProviderResult
+from . import Provider, ProviderContinuation, ProviderResult
 from ._proc import TIMEOUT, run_reaped
 
 
@@ -231,6 +231,7 @@ class AgyProvider(Provider):
         model: str | None = None,
         timeout: int = 300,
         dispatch_options: dict | None = None,
+        continuation: ProviderContinuation | None = None,
     ) -> ProviderResult:
         # dispatch_options: accepted for Provider-ABC parity and IGNORED: agy
         # declares no dispatch options (a configured [dispatch.agy] key already

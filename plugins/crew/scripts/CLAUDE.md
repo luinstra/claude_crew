@@ -45,13 +45,14 @@ multiagent/
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
 ├── review_runs.py       # review-run lifecycle (pure leaf like rounds.py): run identity mint (content hash + review inputs), reviews-subdir session sanitizer (the ONE mechanism cli.py delegates to), write-once run.json + mint-conflict refusal, snapshot write/self-heal, the landed-and-valid seat predicate, preserve-valid seat writes (per-seat lock), pointer read/write. NO model calls.
+├── continuations.py     # exact provider conversation chain records: safe paths, binding validation, atomic 0600 writes, sibling locks, invalidation, and ordered classification. NO provider/CLI imports.
 ├── seats.py             # The seat CATALOG loader: reads shipped `seats.toml`, merges the user's config layers per-seat-per-key, exposes merged_catalog()/merged_panels()/seat_spec()/task_seats()/group_tokens()/premium_off_seats() + PROVIDER_KINDS + the SeatSpec dataclass
 ├── seats.toml           # DATA — the shipped seat + panel catalog (`[seats.<name>]` rows, `[panels]` rosters); merged with per-repo/global config. The one place a built-in model seat is declared
 ├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel, [debate].panel, [dispatch].seat validated vs known_seat_names(), dispatch_provider_options for the per-provider `[dispatch.<kind>]` write-mode options validated per layer against each provider's DISPATCH_OPTIONS declaration, [panels] roster) + `raw_layers()` feeding seats.py's per-seat resolution (per-seat tuning + `available` live on `SeatSpec`, not here); per-repo>global>builtin; pure leaf, no cli/providers import; parses with stdlib tomllib (the 3.11 floor the `crew` dispatcher asserts)
 ├── render.py            # side-by-side panel + --json rendering (the faithful projection + raw-fallback)
 ├── findings.py          # PURE parser + complete-linkage grouping + grouped-digest renderer (no I/O, no model calls, never raises); powers `collect --group`
 └── providers/
-    ├── __init__.py      # ProviderResult (the six-field contract), Provider ABC (executor: run() + supports_workspace_write capability, fail-CLOSED/opt-in for /crew:dispatch), registry + known_seat_names()
+    ├── __init__.py      # ProviderResult (six-field core plus additive continuation/continuation_id), Provider ABC (executor: run() + supports_workspace_write + supports_continuation, fail-CLOSED/opt-in for /crew:dispatch), registry + known_seat_names()
     ├── codex.py         # CodexProvider — the live codex model-seats (`codex exec - --sandbox read-only -o <tmp>`, prompt via stdin); each seat's name/model/reasoning_effort arrives from its SeatSpec, so a `[seats.<name>]` codex row in config is a first-class seat
     ├── cursor.py        # CursorProvider — the live cursor model-seats; each seat is driven by its SeatSpec, so a `[seats.<name>]` cursor row in config is a first-class seat
     └── agy.py           # AgyProvider (default panel) — `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions)
@@ -928,6 +929,9 @@ class LoopState:
     parked_fires: int = 0          # hook-owned CONSECUTIVE wait counter (parked OR awaiting_input)
     max_parked_fires: int = 20
     awaiting_input: bool = False   # human-wait pause; hook allows the stop (bounded by the cap). Set via `crew state await`, cleared by the review verbs. NOT in AGENT_SETTABLE
+    loop_instance_id: str = ""     # immutable identity for one build-loop lifetime
+    executor: str = ""             # resolved build executor; additive, lifecycle-owned
+    resume_executor: bool | None = None  # resolved continuation toggle; additive
 
     AGENT_SETTABLE = frozenset({"plan_file"})
 ```
@@ -935,6 +939,14 @@ class LoopState:
 The two on-disk file prefixes (`build-state-*` / `measure-twice-state-*`) and
 the `bl`/`mt` aliases stay: they are load-bearing across the hook, state
 discovery, and the session-start cleanup globs. What unified is the SHAPE.
+`loop_instance_id`, `executor`, and `resume_executor` are additive fields: legacy
+state loads empty/non-reusable values. Initialization currently stamps only
+`loop_instance_id`; a later build-loop integration will stamp the resolved
+executor settings. `ProviderResult.continuation` carries
+the structured continuation outcome and `continuation_id` carries the exact ID
+used by the chain store; both are optional. Providers remain
+`supports_continuation = False` unless their adapters implement exact-ID probing
+and resume; Codex is the current opt-in provider.
 `revision_round` is written by the review verbs, never the hook: the Stop hook
 still counts nothing but its own fires. A Stop hook cannot observe a revision
 round, and a round field with no honest writer would be a frozen `Round 1/N`

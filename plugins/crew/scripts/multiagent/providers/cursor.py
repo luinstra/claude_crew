@@ -32,7 +32,7 @@ import time
 
 from state_discovery import crew_base  # the ONE `.crew`/project-root resolver
 
-from multiagent.providers import Provider, ProviderResult
+from multiagent.providers import Provider, ProviderContinuation, ProviderResult
 from multiagent.providers._proc import TIMEOUT, run_reaped
 
 # ANSI escape code pattern for stripping terminal colour sequences.
@@ -110,6 +110,8 @@ class CursorProvider(Provider):
     # dir + snapshot anchor to) so a divergent process cwd cannot review the wrong
     # repo (or lose sandbox access to the snapshot).
     supports_workspace_write = True
+    # Cursor remains fresh-only until exact-ID probing and resume are implemented.
+    supports_continuation = False
 
     # Write-mode dispatch tuning, declared on THIS class (never inherited from
     # the ABC's shared default). Single source: the config validator, the
@@ -164,6 +166,7 @@ class CursorProvider(Provider):
         model: str | None = None,
         timeout: int = 300,
         dispatch_options: dict | None = None,
+        continuation: ProviderContinuation | None = None,
     ) -> ProviderResult:
         """Invoke Cursor Agent and return a normalized ProviderResult.
 

@@ -269,6 +269,12 @@ class SessionStartResult:
 # `completion_promise` is gone. The bump is what makes an OLDER install refuse
 # to touch a live schema-3 loop instead of silently dropping those fields on a
 # whole-state write.
+#
+# Continuation identity is intentionally additive without a schema bump.  The
+# new fields are inert to existing readers and load to empty defaults, unlike
+# the hook-owned bounds that motivated the historical schema-2 bump.  Only the
+# continuation-aware reader consults them, and an empty loop_instance_id is
+# explicitly non-reusable.
 SCHEMA_VERSION = 3
 
 # Termination bounds, both hook-owned. They are deliberately generous: a bound
@@ -680,6 +686,15 @@ class LoopState:
     # widening the allowlist the safety bounds depend on.
     awaiting_input: bool = False
 
+    # Continuation lifetime and resolved build-executor settings. These are
+    # additive optional fields: legacy state files load with empty defaults and
+    # cannot reuse a continuation until a newer lifecycle stamps them.
+    # The build-loop integration writer owns executor/resume_executor; lifecycle
+    # initialization stamps loop_instance_id.
+    loop_instance_id: str = ""
+    executor: str = ""
+    resume_executor: bool | None = None
+
     # The ONLY fields `crew state set` will write. Everything the termination
     # predicate reads is refused because a safety limit the agent can rewrite is
     # not a safety limit (a live loop once reset its own counter 30 times), and
@@ -726,11 +741,31 @@ class LoopState:
             no_deadline=data.get("no_deadline", False) is True,
             parked_fires=data.get("parked_fires", 0),
             max_parked_fires=data.get("max_parked_fires", DEFAULT_MAX_PARKED_FIRES),
+            loop_instance_id=(
+                data.get("loop_instance_id")
+                if isinstance(data.get("loop_instance_id"), str)
+                else ""
+            ),
+            executor=(
+                data.get("executor")
+                if isinstance(data.get("executor"), str)
+                else ""
+            ),
+            resume_executor=(
+                data.get("resume_executor")
+                if isinstance(data.get("resume_executor"), bool)
+                else None
+            ),
             # Additive-optional: a legacy file (no key) loads False, so the hook's
             # park path is inert until the orchestrator sets it. Only an exact True
             # counts, so a truthy-but-wrong on-disk value never suppresses a nudge.
             awaiting_input=data.get("awaiting_input", False) is True,
         ), LOAD_OK
+
+    @property
+    def continuation_reusable(self) -> bool:
+        """Whether this state has the immutable identity needed for reuse."""
+        return bool(self.loop_instance_id)
 
     @classmethod
     def load(cls, path: Path) -> "LoopState":
@@ -819,5 +854,3 @@ def get_file_age_days(path: Path) -> int:
         return int(age_seconds / 86400)
     except OSError:
         return 999
-
-

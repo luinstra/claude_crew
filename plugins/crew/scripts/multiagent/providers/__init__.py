@@ -12,6 +12,23 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 
+@dataclass(frozen=True)
+class ProviderContinuation:
+    """Opaque provider conversation input at the provider seam."""
+
+    conversation_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ContinuationOutcome:
+    """Structured continuation result consumed by the pure chain classifier."""
+
+    capability: str
+    phase: str
+    conversation_id: str | None = None
+    failure: str = "none"
+
+
 # =============================================================================
 # Normalized result shape (Step 1.0 / 1.1) — the ONE shape both seat kinds use
 # =============================================================================
@@ -54,11 +71,19 @@ class ProviderResult:
     run_id: str | None = None
     target_sha256: str | None = None
 
+    # OPTIONAL continuation fields.  The structured outcome is the classifier's
+    # input; the flat ID is the value a chain-store write persists.  Both are
+    # omitted when unset so every review/unchained result retains the exact
+    # legacy six-field JSON shape.
+    continuation: ContinuationOutcome | None = None
+    continuation_id: str | None = None
+
     def to_dict(self) -> dict:
         """Return the seat's fields as a plain dict.
 
         Mirrors the ``models.py`` convention (``asdict(self)``) BUT drops each
-        optional field (``repaired_output``, ``run_id``, ``target_sha256``) when
+        optional field (``repaired_output``, ``run_id``, ``target_sha256``,
+        ``continuation``, ``continuation_id``) when
         it is None, so an un-repaired/un-stamped seat's JSON keeps the
         byte-identical SIX-field shape existing consumers expect. The CLI/render
         layer batches a list of these and calls ``json.dumps`` ONCE over the
@@ -67,7 +92,10 @@ class ProviderResult:
         array-level serialization.
         """
         d = dataclasses.asdict(self)
-        for opt in ("repaired_output", "run_id", "target_sha256"):
+        for opt in (
+            "repaired_output", "run_id", "target_sha256",
+            "continuation", "continuation_id",
+        ):
             if getattr(self, opt) is None:
                 d.pop(opt, None)
         return d
@@ -137,9 +165,30 @@ class ProviderResult:
         run_id = None if rid is None else str(rid)
         tsha = d.get("target_sha256")
         target_sha256 = None if tsha is None else str(tsha)
+
+        continuation_data = d.get("continuation")
+        continuation = None
+        if isinstance(continuation_data, ContinuationOutcome):
+            continuation = continuation_data
+        elif isinstance(continuation_data, dict):
+            conversation_id = continuation_data.get("conversation_id")
+            continuation = ContinuationOutcome(
+                capability=str(continuation_data.get("capability", "unsupported")),
+                phase=str(continuation_data.get("phase", "fresh")),
+                conversation_id=(
+                    None if conversation_id is None else str(conversation_id)
+                ),
+                failure=str(continuation_data.get("failure", "none")),
+            )
+
+        continuation_id_value = d.get("continuation_id")
+        continuation_id = (
+            None if continuation_id_value is None else str(continuation_id_value)
+        )
         return cls(name=name, model=model, ok=ok, output=output,
                    error=error, elapsed=elapsed, repaired_output=repaired_output,
-                   run_id=run_id, target_sha256=target_sha256)
+                   run_id=run_id, target_sha256=target_sha256,
+                   continuation=continuation, continuation_id=continuation_id)
 
 
 # =============================================================================
@@ -173,6 +222,11 @@ class Provider(ABC):
     # write-mode tuning arrives via ``run()``'s keyword-only ``dispatch_options``.
     supports_workspace_write: bool = False
 
+    # Continuation is independently fail-closed.  A provider must opt in only
+    # after its adapter has an exact-ID capability probe and resume path; this
+    # coarse flag never replaces the runtime probe's structured outcome.
+    supports_continuation: bool = False
+
     # Per-provider /crew:dispatch write-mode tuning declaration:
     # ``{key: (expected_type, help)}``. FAIL-CLOSED like supports_workspace_write:
     # a new provider supports NO dispatch options until it deliberately declares
@@ -205,8 +259,13 @@ class Provider(ABC):
         model: str | None = None,
         timeout: int = 300,
         dispatch_options: dict | None = None,
+        continuation: ProviderContinuation | None = None,
     ) -> ProviderResult:
         """Run the provider against ``prompt`` and return a ProviderResult.
+
+        ``continuation`` is an optional opaque exact-conversation request.  The
+        default is disabled so review/debate and ordinary dispatch behavior do
+        not change.
 
         ``dispatch_options`` is workspace-write-only tuning (validated values
         from ``config.dispatch_provider_options``): read-only callers

@@ -29,6 +29,7 @@ import tempfile
 import textwrap
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 # Colors
 GREEN = "\033[0;32m"
@@ -50,13 +51,16 @@ FIXTURES_DIR = TESTS_DIR / "fixtures" / "review-panel"
 # Make `import multiagent...` resolve (the package parent is SCRIPT_DIR).
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from multiagent import findings, prompts, render, rounds, targets  # noqa: E402
+from multiagent import findings, prompts, render, rounds, targets, continuations  # noqa: E402
 from multiagent.providers import (  # noqa: E402
+    ContinuationOutcome,
+    ProviderContinuation,
     ProviderResult,
     get_provider,
     available_seats,
 )
 from multiagent.providers.codex import CodexProvider  # noqa: E402
+from multiagent.providers.cursor import CursorProvider  # noqa: E402
 from multiagent.providers.agy import (  # noqa: E402
     AgyProvider,
     strip_ansi,
@@ -297,6 +301,396 @@ def test_codex():
         check("codex timeout -> ok=False with timeout error",
               res.ok is False and res.error and "timed out" in res.error,
               "ok=False timed out", f"ok={res.ok} error={res.error!r}")
+
+
+# =============================================================================
+# CodexProvider continuation tests (fake `codex` with a capability probe +
+# JSONL thread-id stream). The fake distinguishes the non-billable --help probe
+# from a real run, and every stream/exit knob rides an env var so one fake
+# covers fresh capture, exact resume, mismatch, and every degraded path.
+# =============================================================================
+
+_CODEX_CONTINUATION_FAKE = '''
+import sys, json, os
+
+args = sys.argv[1:]
+
+# Probe path: EVERY --help invocation is the non-billable capability probe. It
+# runs no model turn; a test proves that by asserting the probe log holds only
+# --help argv while the real-run capture is written exactly once.
+if "--help" in args:
+    probe_log = os.environ.get("FAKE_PROBE_LOG")
+    if probe_log:
+        with open(probe_log, "a") as f:
+            f.write(" ".join(args) + "\\n")
+    if args[:2] == ["exec", "resume"]:
+        # `codex exec resume --help`: the resume subcommand's own help. A binary
+        # without the subcommand exits nonzero (FAKE_NO_RESUME models that).
+        sys.exit(2 if os.environ.get("FAKE_NO_RESUME") else 0)
+    # `codex exec --help`: lists --json unless FAKE_NO_JSON suppresses it.
+    text = "usage: codex exec\\n"
+    if not os.environ.get("FAKE_NO_JSON"):
+        text += "  --json  emit JSONL events\\n"
+    sys.stdout.write(text)
+    sys.exit(0)
+
+# Real run: capture argv + stdin for assertions.
+stdin = sys.stdin.read()
+with open(CAPTURE, "w") as f:
+    json.dump({"args": args, "stdin": stdin}, f)
+
+if os.environ.get("FAKE_SLEEP"):
+    import time
+    time.sleep(float(os.environ["FAKE_SLEEP"]))
+
+# Clean final agent message goes to the -o file (never stdout), unless empty.
+out = None
+for i, a in enumerate(args):
+    if a == "-o":
+        out = args[i + 1]
+if out and not os.environ.get("FAKE_EMPTY_OUTPUT"):
+    with open(out, "w") as f:
+        f.write(os.environ.get("FAKE_FINAL", "CODEX EDIT DONE"))
+
+# JSONL event stream on stdout (parsed for the first thread.started thread_id).
+if "FAKE_STDOUT" in os.environ:
+    sys.stdout.write(os.environ["FAKE_STDOUT"])
+else:
+    tid = os.environ.get("FAKE_THREAD_ID", "thread-xyz")
+    sys.stdout.write(json.dumps({"type": "thread.started", "thread_id": tid}) + "\\n")
+    sys.stdout.write(json.dumps({"type": "item.completed", "text": "done"}) + "\\n")
+
+if os.environ.get("FAKE_STDERR"):
+    sys.stderr.write(os.environ["FAKE_STDERR"])
+
+sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
+'''
+
+
+def _run_codex_with_fake(*, continuation, sandbox="workspace-write", model="o3",
+                         dispatch_options=None, timeout=10, env_extra=None,
+                         prompt="PROMPT-BODY"):
+    """Drive CodexProvider.run() against the continuation fake; return (res, cap).
+
+    ``cap`` is the decoded {args, stdin} the real run captured, or None if the
+    seat never reached a real invocation (e.g. it was killed on timeout)."""
+    from multiagent.providers import codex as codex_mod
+    codex_mod._reset_probe_cache_for_tests()
+    prov = codex_mod.CodexProvider(name="codex", default_model=model,
+                                   reasoning_effort="xhigh")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        capture = d / "capture.json"
+        full = f"CAPTURE = {str(capture)!r}\n" + _CODEX_CONTINUATION_FAKE
+        make_fake_bin(d, "codex", full)
+        env_path = os.environ["PATH"]
+        os.environ["PATH"] = str(d) + os.pathsep + env_path
+        saved = {}
+        if env_extra:
+            for k, v in env_extra.items():
+                saved[k] = os.environ.get(k)
+                os.environ[k] = v
+        try:
+            res = prov.run(prompt, sandbox=sandbox, model=model, timeout=timeout,
+                           dispatch_options=dispatch_options, continuation=continuation)
+        finally:
+            os.environ["PATH"] = env_path
+            for k, v in (saved or {}).items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        cap = json.loads(capture.read_text()) if capture.exists() else None
+        return res, cap
+
+
+def test_codex_continuation():
+    log_section("CodexProvider continuation (fake codex + capability probe)")
+
+    # Fresh chained supported run: parse thread.started.thread_id, use -o.
+    res, cap = _run_codex_with_fake(
+        continuation=ProviderContinuation(), env_extra={"FAKE_THREAD_ID": "thread-xyz"})
+    check("fresh chained run: ok + output from -o (not stdout JSONL)",
+          res.ok and res.output == "CODEX EDIT DONE",
+          "ok=True 'CODEX EDIT DONE'", f"ok={res.ok} {res.output!r}")
+    check("fresh chained run: argv carries --json, no resume, never --last",
+          "--json" in cap["args"] and "resume" not in cap["args"]
+          and "--last" not in cap["args"],
+          "--json, no resume/--last", str(cap["args"]))
+    check("fresh chained run: prompt still delivered via stdin (- positional)",
+          cap["stdin"] == "PROMPT-BODY" and cap["args"][1] == "-",
+          "stdin prompt, leading -", f"{cap['stdin']!r} {cap['args'][:2]}")
+    o = res.continuation
+    check("fresh chained run: capability=supported phase=fresh id captured failure=none",
+          o is not None and o.capability == "supported" and o.phase == "fresh"
+          and o.conversation_id == "thread-xyz" and o.failure == "none",
+          "supported/fresh/thread-xyz/none",
+          repr(o))
+    check("fresh chained run: flat continuation_id set for persist",
+          res.continuation_id == "thread-xyz", "thread-xyz", repr(res.continuation_id))
+
+    # Resume supported run with the EXACT supplied id (never --last).
+    res, cap = _run_codex_with_fake(
+        continuation=ProviderContinuation("thread-abc"),
+        dispatch_options={"profile": "myprof"},
+        env_extra={"FAKE_THREAD_ID": "thread-abc"})
+    args = cap["args"]
+    check("resume run: argv uses `resume <exact-id>`, prompt `-` last, never --last",
+          "resume" in args and "thread-abc" in args
+          and args[args.index("resume") + 1] == "thread-abc"
+          and args[-1] == "-" and "--last" not in args,
+          "resume thread-abc ... -", str(args))
+    check("resume run: outer sandbox/model/reasoning/profile present BEFORE resume",
+          args.index("--sandbox") < args.index("resume")
+          and args.index("--model") < args.index("resume")
+          and "workspace-write" in args and "o3" in args
+          and "model_reasoning_effort=xhigh" in args
+          and args.index("--profile") < args.index("resume") and "myprof" in args,
+          "outer options before resume", str(args))
+    o = res.continuation
+    check("resume run: confirmed id -> phase=resume failure=none, persisted",
+          res.ok and o.phase == "resume" and o.conversation_id == "thread-abc"
+          and o.failure == "none" and res.continuation_id == "thread-abc",
+          "resume/thread-abc/none persisted", f"{repr(o)} id={res.continuation_id!r}")
+
+    # Option-like resume IDs fail before any resume subprocess is invoked.
+    res, cap = _run_codex_with_fake(continuation=ProviderContinuation("--last"))
+    resume_args = cap["args"] if cap else []
+    o = res.continuation
+    check("option-like resume ID: no bare --last argv and resume fails closed",
+          res.ok is False and not cap and "--last" not in resume_args
+          and o is not None and o.phase == "resume"
+          and o.failure == "error" and o.conversation_id is None
+          and res.continuation_id is None,
+          "no run, resume/error/None", f"ok={res.ok} cap={cap!r} outcome={o!r}")
+
+    res, cap = _run_codex_with_fake(continuation=ProviderContinuation("   "))
+    o = res.continuation
+    check("whitespace-only resume ID: rejected before subprocess invocation",
+          res.ok is False and not cap
+          and o is not None and o.phase == "resume"
+          and o.failure == "error" and o.conversation_id is None
+          and res.continuation_id is None,
+          "no run, resume/error/None", f"ok={res.ok} cap={cap!r} outcome={o!r}")
+
+    for captured_id in ("   ", "--captured"):
+        res, cap = _run_codex_with_fake(
+            continuation=ProviderContinuation(),
+            env_extra={"FAKE_THREAD_ID": captured_id},
+        )
+        o = res.continuation
+        status = continuations.classify_continuation(None, True, True, o)
+        check(
+            "invalid captured thread ID is unavailable and not persisted",
+            res.ok and cap is not None and o is not None
+            and o.conversation_id is None and res.continuation_id is None
+            and status == ("unavailable", "keep"),
+            "unavailable/keep with no conversation ID",
+            f"captured={captured_id!r} outcome={o!r} status={status!r}",
+        )
+
+    # Resume id MISMATCH: hard continuation failure, id never persisted.
+    res, cap = _run_codex_with_fake(
+        continuation=ProviderContinuation("thread-abc"),
+        env_extra={"FAKE_THREAD_ID": "thread-DIFFERENT"})
+    o = res.continuation
+    check("resume mismatch: ok stays True (edits kept) but failure=error, id NOT persisted",
+          res.ok and o.phase == "resume" and o.failure == "error"
+          and o.conversation_id == "thread-DIFFERENT" and res.continuation_id is None,
+          "ok/resume/error/mismatched, no persist",
+          f"{repr(o)} id={res.continuation_id!r}")
+
+    # JSONL robustness: malformed + unknown + duplicate -> first valid wins.
+    noisy = (
+        "this is not json\n"
+        + json.dumps({"type": "session.meta"}) + "\n"
+        + json.dumps({"type": "thread.started"}) + "\n"          # no thread_id
+        + json.dumps({"type": "thread.started", "thread_id": "first"}) + "\n"
+        + json.dumps({"type": "thread.started", "thread_id": "second"}) + "\n"
+    )
+    res, cap = _run_codex_with_fake(
+        continuation=ProviderContinuation(), env_extra={"FAKE_STDOUT": noisy})
+    check("noisy JSONL: malformed/unknown/id-less skipped, FIRST valid id wins",
+          res.continuation.conversation_id == "first", "first", repr(res.continuation))
+
+    # Fresh run that emits NO thread id: capability supported, id None.
+    res, cap = _run_codex_with_fake(
+        continuation=ProviderContinuation(),
+        env_extra={"FAKE_STDOUT": json.dumps({"type": "item.completed"}) + "\n"})
+    o = res.continuation
+    check("fresh, no id emitted: supported/fresh, conversation_id None, not persisted",
+          res.ok and o.capability == "supported" and o.conversation_id is None
+          and o.failure == "none" and res.continuation_id is None,
+          "supported/fresh/None", f"{repr(o)} id={res.continuation_id!r}")
+
+    # Nonzero exit: diagnostic preserved, failure=error.
+    res, cap = _run_codex_with_fake(
+        continuation=ProviderContinuation(),
+        env_extra={"FAKE_EXIT": "1", "FAKE_STDERR": "not authenticated"})
+    o = res.continuation
+    check("nonzero exit: ok=False, stderr in error, failure=error, not persisted",
+          res.ok is False and res.error and "not authenticated" in res.error
+          and o.failure == "error" and res.continuation_id is None,
+          "ok=False/error/no persist", f"ok={res.ok} err={res.error!r} {repr(o)}")
+
+    res, cap = _run_codex_with_fake(
+        continuation=ProviderContinuation(), env_extra={"FAKE_EXIT": "1"})
+    check(
+        "capable nonzero exit with empty stderr: JSONL is not used as the error",
+        res.error == "codex exited with status 1"
+        and "thread-xyz" not in res.error
+        and "thread.started" not in res.error,
+        "status-only diagnostic without raw JSONL or thread ID",
+        repr(res.error),
+    )
+
+    # Timeout: failure=timeout (distinguished at the reaper, not string-parsed).
+    res, cap = _run_codex_with_fake(
+        continuation=ProviderContinuation(), timeout=1,
+        env_extra={"FAKE_SLEEP": "10"})
+    o = res.continuation
+    check("timeout: ok=False, timeout error, continuation failure=timeout",
+          res.ok is False and res.error and "timed out" in res.error
+          and o is not None and o.failure == "timeout" and o.conversation_id is None,
+          "ok=False/timeout", f"ok={res.ok} {repr(o)}")
+
+    # Empty final output at exit 0: failure=error (not a delta fallback).
+    res, cap = _run_codex_with_fake(
+        continuation=ProviderContinuation(), env_extra={"FAKE_EMPTY_OUTPUT": "1"})
+    o = res.continuation
+    check("empty -o output at exit 0: ok=False, no-output error, failure=error",
+          res.ok is False and res.error and "no output" in res.error
+          and o.failure == "error", "ok=False/error", f"ok={res.ok} {repr(o)}")
+
+    # Unsupported binary (probe fails) -> runs FRESH, reports unsupported.
+    for knob, label in (({"FAKE_NO_RESUME": "1"}, "no exec resume"),
+                        ({"FAKE_NO_JSON": "1"}, "no --json in help")):
+        res, cap = _run_codex_with_fake(
+            continuation=ProviderContinuation("thread-abc"), env_extra=knob)
+        o = res.continuation
+        check(f"unsupported ({label}): fresh argv (no --json/resume), capability=unsupported",
+              res.ok and "--json" not in cap["args"] and "resume" not in cap["args"]
+              and o.capability == "unsupported" and o.phase == "fresh"
+              and o.conversation_id is None and res.continuation_id is None,
+              "fresh/unsupported", f"{repr(o)} args={cap['args']}")
+
+    # An OSError during probing falls back to a fresh run and cleans -o.
+    from multiagent.providers import codex as codex_mod
+    codex_mod._reset_probe_cache_for_tests()
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        capture = d / "capture.json"
+        full = f"CAPTURE = {str(capture)!r}\n" + _CODEX_CONTINUATION_FAKE
+        make_fake_bin(d, "codex", full)
+        env_path = os.environ["PATH"]
+        os.environ["PATH"] = str(d) + os.pathsep + env_path
+        created_paths = []
+        run_calls = 0
+        original_mkstemp = codex_mod.tempfile.mkstemp
+        original_run_reaped = codex_mod.run_reaped
+
+        def tracking_mkstemp(*args, **kwargs):
+            result = original_mkstemp(*args, **kwargs)
+            created_paths.append(result[1])
+            return result
+
+        def probe_oserror_then_run(*args, **kwargs):
+            nonlocal run_calls
+            run_calls += 1
+            if run_calls == 1:
+                raise OSError("codex vanished after which")
+            return original_run_reaped(*args, **kwargs)
+
+        codex_mod.tempfile.mkstemp = tracking_mkstemp
+        codex_mod.run_reaped = probe_oserror_then_run
+        try:
+            prov = codex_mod.CodexProvider(name="codex", default_model="o3")
+            res = prov.run(
+                "P", sandbox="workspace-write", timeout=10,
+                continuation=ProviderContinuation("thread-abc"),
+            )
+        finally:
+            codex_mod.tempfile.mkstemp = original_mkstemp
+            codex_mod.run_reaped = original_run_reaped
+            os.environ["PATH"] = env_path
+        o = res.continuation
+        real_cap = json.loads(capture.read_text()) if capture.exists() else {}
+        check("probe OSError: fresh unsupported run completes without resume",
+              run_calls == 2 and res.ok and o is not None
+              and o.capability == "unsupported" and o.phase == "fresh"
+              and "resume" not in real_cap.get("args", []),
+              "fresh unsupported run", f"calls={run_calls} outcome={o!r} cap={real_cap}")
+        check("probe OSError: output temp file is cleaned up",
+              bool(created_paths) and all(not Path(path).exists() for path in created_paths),
+              "no created temp path remains", repr(created_paths))
+
+    # Probe is NON-BILLABLE: only --help argv reaches it, real run once.
+    codex_mod._reset_probe_cache_for_tests()
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        capture = d / "capture.json"
+        probe_log = d / "probe.log"
+        full = f"CAPTURE = {str(capture)!r}\n" + _CODEX_CONTINUATION_FAKE
+        make_fake_bin(d, "codex", full)
+        env_path = os.environ["PATH"]
+        os.environ["PATH"] = str(d) + os.pathsep + env_path
+        os.environ["FAKE_PROBE_LOG"] = str(probe_log)
+        try:
+            prov = codex_mod.CodexProvider(name="codex", default_model="o3",
+                                           reasoning_effort="xhigh")
+            prov.run("P", sandbox="workspace-write", model="o3", timeout=10,
+                     continuation=ProviderContinuation())
+        finally:
+            os.environ["PATH"] = env_path
+            os.environ.pop("FAKE_PROBE_LOG", None)
+        probe_lines = probe_log.read_text().splitlines() if probe_log.exists() else []
+        check("probe is non-billable: every probe invocation is a --help call",
+              probe_lines and all("--help" in ln for ln in probe_lines),
+              "all --help", str(probe_lines))
+
+    # Per-process probe memo: a second run on the same binary re-uses it.
+    codex_mod._reset_probe_cache_for_tests()
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        capture = d / "capture.json"
+        probe_log = d / "probe.log"
+        full = f"CAPTURE = {str(capture)!r}\n" + _CODEX_CONTINUATION_FAKE
+        make_fake_bin(d, "codex", full)
+        env_path = os.environ["PATH"]
+        os.environ["PATH"] = str(d) + os.pathsep + env_path
+        os.environ["FAKE_PROBE_LOG"] = str(probe_log)
+        try:
+            prov = codex_mod.CodexProvider(name="codex", default_model="o3")
+            prov.run("P", sandbox="workspace-write", timeout=10,
+                     continuation=ProviderContinuation())
+            first = probe_log.read_text().count("\n") if probe_log.exists() else 0
+            prov.run("P", sandbox="workspace-write", timeout=10,
+                     continuation=ProviderContinuation())
+            second = probe_log.read_text().count("\n") if probe_log.exists() else 0
+        finally:
+            os.environ["PATH"] = env_path
+            os.environ.pop("FAKE_PROBE_LOG", None)
+        check("probe memoized per binary path: second run adds NO probe calls",
+              first > 0 and second == first, f"{first}=={second}",
+              f"first={first} second={second}")
+
+    # Read-only + continuation passed (defensive): argv unchanged, no outcome.
+    res, cap = _run_codex_with_fake(
+        continuation=ProviderContinuation("thread-abc"), sandbox="read-only")
+    check("read-only ignores continuation: --ignore-user-config kept, no --json/resume, no outcome",
+          "--ignore-user-config" in cap["args"] and "--json" not in cap["args"]
+          and "resume" not in cap["args"] and res.continuation is None
+          and res.continuation_id is None,
+          "read-only argv unchanged, no outcome", f"{cap['args']} cont={res.continuation!r}")
+
+    # Unchained workspace-write argv stays byte-for-byte the legacy shape.
+    res, cap = _run_codex_with_fake(continuation=None, sandbox="workspace-write")
+    expected = ["exec", "-", "-c", "model_reasoning_effort=xhigh", "--sandbox",
+                "workspace-write", "--model", "o3", "--skip-git-repo-check", "-o"]
+    check("unchained workspace-write: argv byte-identical to legacy, no outcome",
+          cap["args"][:-1] == expected and res.continuation is None
+          and res.continuation_id is None,
+          "legacy write argv + no outcome", str(cap["args"]))
 
 
 # =============================================================================
@@ -845,7 +1239,10 @@ def test_result_contract():
           set(d.keys()) == {"name", "model", "ok", "output", "error", "elapsed"},
           "six fields", str(set(d.keys())))
     import dataclasses
-    _OPTIONAL = {"repaired_output", "run_id", "target_sha256"}
+    _OPTIONAL = {
+        "repaired_output", "run_id", "target_sha256",
+        "continuation", "continuation_id",
+    }
     check("to_dict equals asdict MINUS the None optional fields",
           d == {k: v for k, v in dataclasses.asdict(r).items() if k not in _OPTIONAL},
           "equal (sans optional fields)", "differ")
@@ -886,6 +1283,451 @@ def test_result_contract():
     check("from_dict defaults repaired_output to None when absent",
           ProviderResult.from_dict({"name": "x", "ok": True}).repaired_output is None,
           "None default", "?")
+
+
+def test_continuations():
+    """Continuation value types, store, classifier, and legacy state."""
+    log_section("continuation types and chain store")
+
+    legacy = ProviderResult(
+        name="codex", model="o3", ok=True, output="x", error=None, elapsed=1.0,
+    )
+    check(
+        "unchained ProviderResult keeps the exact six-field shape",
+        list(legacy.to_dict()) == ["name", "model", "ok", "output", "error", "elapsed"],
+        "six legacy fields",
+        repr(legacy.to_dict()),
+    )
+    outcome = ContinuationOutcome(
+        capability="supported", phase="fresh", conversation_id="thread-1",
+    )
+    chained = ProviderResult(
+        name="codex", model="o3", ok=True, output="x", error=None, elapsed=1.0,
+        continuation=outcome, continuation_id="thread-1",
+    )
+    round_tripped = ProviderResult.from_dict(chained.to_dict())
+    check(
+        "continuation outcome and flat ID round-trip",
+        round_tripped == chained
+        and round_tripped.continuation == outcome
+        and round_tripped.continuation_id == "thread-1",
+        "equal chained result",
+        repr(round_tripped),
+    )
+    check(
+        "ProviderContinuation is an opaque fresh/resume request",
+        ProviderContinuation().conversation_id is None
+        and ProviderContinuation("thread-1").conversation_id == "thread-1",
+        "None and exact ID",
+        repr(ProviderContinuation("thread-1")),
+    )
+    agy = get_provider("agy")
+    check(
+          "continuation gate: Agy/Cursor fail-closed, Codex opted in",
+        not getattr(agy, "supports_continuation")
+        and CodexProvider.supports_continuation
+        and not CursorProvider.supports_continuation,
+        "agy/cursor False, codex True",
+        f"agy={getattr(agy, 'supports_continuation', None)} "
+        f"codex={CodexProvider.supports_continuation} "
+        f"cursor={CursorProvider.supports_continuation}",
+    )
+
+    binding = continuations.ContinuationBinding(
+        chain="build-executor", loop_instance_id="loop-1", seat="codex",
+        provider="codex", model="o3", workspace=".", head="HEAD",
+        branch="main", index_tree="tree-1",
+    )
+    with tempfile.TemporaryDirectory() as td:
+        saved_project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+        os.environ["CLAUDE_PROJECT_DIR"] = td
+        base = Path(td) / "reviews"
+        record = continuations.new_record(
+            binding=binding, conversation_id="thread-1",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        path = continuations.save_record("sid/../safe", "build-executor", record, base=base)
+        mode = path.stat().st_mode & 0o777
+        loaded = continuations.load_record("sid/../safe", "build-executor", base=base)
+        check(
+            "chain store uses a sanitized session path and atomic 0600 record",
+            loaded == record and mode == 0o600
+            and path == base / "sidsafe" / "continuations" / "build-executor" / "record.json",
+            "sanitized path, mode 0600, round-trip",
+            f"path={path} mode={oct(mode)} loaded={loaded!r}",
+        )
+        lock = continuations.lock_path("sid/../safe", "build-executor", base=base)
+        check(
+            "chain lock is a sibling of the prunable record directory",
+            lock == path.parent.parent / "build-executor.lock",
+            str(path.parent.parent / "build-executor.lock"),
+            str(lock),
+        )
+        invalid_names = ("", ".", "..", "-bad", "UPPER", "a/b", "a.", "a" * 65)
+        rejected = 0
+        for bad in invalid_names:
+            try:
+                continuations.chain_dir("sid", bad, base=base)
+            except continuations.ContinuationError:
+                rejected += 1
+        check(
+            "chain-name grammar rejects traversal, separators, and unsafe names",
+            rejected == len(invalid_names),
+            str(len(invalid_names)),
+            str(rejected),
+        )
+        alias_target = Path(td) / "workspace"
+        alias_target.mkdir()
+        check(
+            "workspace binding canonicalizes realpath aliases",
+            continuations.canonical_workspace(alias_target / ".." / "workspace")
+            == continuations.canonical_workspace(alias_target),
+            "equal canonical paths",
+            "paths differed",
+        )
+        different_binding = {
+            dimension: getattr(binding, dimension)
+            for dimension in continuations.BINDING_DIMENSIONS
+        }
+        different_binding["model"] = "different"
+        mismatch_error = _binding_error(record, different_binding)
+        check(
+            "binding mismatch is fail-closed and names the changed dimension",
+            not continuations.binding_matches(record, different_binding)
+            and mismatch_error is not None and "model" in str(mismatch_error),
+            "model mismatch",
+            repr(mismatch_error),
+        )
+        incomplete_error = _binding_error(record, {})
+        check(
+            "incomplete binding is rejected instead of matching vacuously",
+            not continuations.binding_matches(record, {})
+            and incomplete_error is not None
+            and "incomplete" in str(incomplete_error),
+            "incomplete binding rejection",
+            repr(incomplete_error),
+        )
+        unknown_binding_error = None
+        try:
+            continuations.new_record(
+                binding={**different_binding, "unexpected": "x"},
+                conversation_id="thread-2",
+            )
+        except continuations.ContinuationError as exc:
+            unknown_binding_error = exc
+        check(
+            "unknown new-record binding fields raise ContinuationError",
+            unknown_binding_error is not None,
+            "ContinuationError",
+            repr(unknown_binding_error),
+        )
+        invalid_id_errors = 0
+        for invalid_id in ("", None, 42, "   ", "--bad"):
+            try:
+                continuations.new_record(binding=binding, conversation_id=invalid_id)
+            except continuations.ContinuationError:
+                invalid_id_errors += 1
+        check(
+            "new_record rejects blank, option-like, and non-string conversation IDs",
+            invalid_id_errors == 5,
+            "five ContinuationErrors",
+            str(invalid_id_errors),
+        )
+        record_validation_errors = 0
+        for invalid_id in ("   ", "--bad"):
+            try:
+                continuations.ContinuationRecord.from_dict(
+                    {**record.to_dict(), "conversation_id": invalid_id}
+                )
+            except continuations.ContinuationRecordError:
+                record_validation_errors += 1
+        check(
+            "record validation rejects blank and option-like conversation IDs",
+            record_validation_errors == 2,
+            "two ContinuationRecordErrors",
+            str(record_validation_errors),
+        )
+
+        corrupt_record = continuations.chain_dir("sid", "corrupt", base=base)
+        corrupt_record.mkdir(parents=True)
+        (corrupt_record / "record.json").write_text("not json")
+        future_record = continuations.chain_dir("sid", "future", base=base)
+        future_record.mkdir(parents=True)
+        (future_record / "record.json").write_text(json.dumps({"schema": 2}))
+        check(
+            "corrupt and future records fail safely",
+            continuations.load_record("sid", "corrupt", base=base) is None
+            and continuations.load_record("sid", "future", base=base) is None,
+            "None for unusable records",
+            "usable record returned",
+        )
+        with continuations.continuation_lock(
+            "sid/../safe", "build-executor", base=base,
+        ):
+            pass
+        continuations.invalidate("sid/../safe", "build-executor", base=base)
+        check(
+            "invalidation removes only the record directory and keeps the sibling lock",
+            not path.parent.exists() and lock.exists(),
+            "record directory absent, lock present",
+            f"record={path.parent.exists()} lock={lock.exists()}",
+        )
+        if saved_project_dir is None:
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        else:
+            os.environ["CLAUDE_PROJECT_DIR"] = saved_project_dir
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        saved_project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(root)
+        reviews = root / "reviews"
+        reviews.mkdir()
+        outside_session = root / "outside-session"
+        outside_chain = outside_session / "continuations" / "build-executor"
+        outside_chain.mkdir(parents=True)
+        marker = outside_chain / "marker.txt"
+        marker.write_text("must survive")
+        (reviews / "sid").symlink_to(outside_session, target_is_directory=True)
+
+        invalidate_refused = False
+        try:
+            continuations.invalidate("sid", "build-executor", base=reviews)
+        except continuations.ContinuationError:
+            invalidate_refused = True
+        save_refused = False
+        try:
+            continuations.save_record("sid", "build-executor", record, base=reviews)
+        except continuations.ContinuationError:
+            save_refused = True
+        lock_refused = False
+        try:
+            with continuations.continuation_lock(
+                "sid", "build-executor", base=reviews,
+            ):
+                pass
+        except continuations.ContinuationError:
+            lock_refused = True
+        check(
+            "symlinked continuation parent refuses invalidation and preserves outside data",
+            invalidate_refused and save_refused and lock_refused
+            and marker.exists() and outside_chain.exists(),
+            "all unsafe operations refused, outside chain intact",
+            f"invalidate={invalidate_refused} save={save_refused} "
+            f"lock={lock_refused} marker={marker.exists()}",
+        )
+        if saved_project_dir is None:
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        else:
+            os.environ["CLAUDE_PROJECT_DIR"] = saved_project_dir
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        project = root / "project"
+        project.mkdir()
+        external_reviews = root / "external-reviews"
+        external_chain = external_reviews / "sid" / "continuations" / "build-executor"
+        external_chain.mkdir(parents=True)
+        marker = external_chain / "marker.txt"
+        marker.write_text("must survive")
+        crew_dir = project / ".crew"
+        crew_dir.mkdir()
+        symlinked_reviews = crew_dir / "reviews"
+        symlinked_reviews.symlink_to(external_reviews, target_is_directory=True)
+
+        saved_project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(project)
+        invalidate_refused = False
+        try:
+            continuations.invalidate(
+                "sid", "build-executor", base=symlinked_reviews,
+            )
+        except continuations.ContinuationError:
+            invalidate_refused = True
+        finally:
+            if saved_project_dir is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved_project_dir
+        check(
+            "symlinked storage anchor refuses invalidation and preserves external data",
+            invalidate_refused and marker.exists() and external_chain.exists(),
+            "ContinuationError with external chain intact",
+            f"refused={invalidate_refused} marker={marker.exists()}",
+        )
+
+    clean = True
+    fresh = ContinuationOutcome("supported", "fresh", "new-id")
+    resume = ContinuationOutcome("supported", "resume", "thread-1")
+    check("classifier: fresh capture -> created/persist", continuations.classify_continuation(None, clean, True, fresh) == ("created", "persist"), "created/persist", "")
+    for captured_id in ("   ", "--captured"):
+        fresh_status = continuations.classify_continuation(
+            None, clean, True,
+            ContinuationOutcome("supported", "fresh", captured_id),
+        )
+        stale_status = continuations.classify_continuation(
+            record, clean, True,
+            ContinuationOutcome("supported", "fresh", captured_id),
+        )
+        check(
+            f"classifier: invalid fresh ID {captured_id!r} is unavailable, never persisted",
+            fresh_status == ("unavailable", "keep")
+            and stale_status == ("unavailable", "clear"),
+            "unavailable/keep without stale record, unavailable/clear with stale record",
+            f"fresh={fresh_status!r} stale={stale_status!r}",
+        )
+    check("classifier: valid resume -> resumed/update", continuations.classify_continuation(record, clean, True, resume) == ("resumed", "update"), "resumed/update", "")
+    check(
+        "classifier: resume ID mismatch -> resume_failed/clear",
+        continuations.classify_continuation(
+            record, clean, True,
+            ContinuationOutcome("supported", "resume", "different-id"),
+        ) == ("resume_failed", "clear"),
+        "resume_failed/clear",
+        "",
+    )
+    check("classifier: unsupported -> unsupported/clear", continuations.classify_continuation(record, clean, True, ContinuationOutcome("unsupported", "fresh")) == ("unsupported", "clear"), "unsupported/clear", "")
+    check("classifier: missing fresh ID -> unavailable/keep", continuations.classify_continuation(None, clean, True, ContinuationOutcome("supported", "fresh")) == ("unavailable", "keep"), "unavailable/keep", "")
+    check("classifier: fresh error -> capture_failed/keep", continuations.classify_continuation(None, clean, True, ContinuationOutcome("supported", "fresh", failure="error")) == ("capture_failed", "keep"), "capture_failed/keep", "")
+    check("classifier: resume error -> resume_failed/clear", continuations.classify_continuation(record, clean, True, ContinuationOutcome("supported", "resume", failure="error")) == ("resume_failed", "clear"), "resume_failed/clear", "")
+    check("classifier: timeout outranks resume failure", continuations.classify_continuation(record, clean, True, ContinuationOutcome("supported", "resume", failure="timeout")) == ("invalidated", "clear"), "invalidated/clear", "")
+    check("classifier: guard violation outranks phase", continuations.classify_continuation(record, {"head_moved": True}, True, resume) == ("invalidated", "clear"), "invalidated/clear", "")
+    guard_polarities = all(
+        continuations._guard_violation(guard) is expected
+        for guard, expected in (
+            ({"guard_violation": True}, True),
+            ({"guard_violation": False}, False),
+            (SimpleNamespace(guard_violation=True), True),
+            (SimpleNamespace(guard_violation=False), False),
+            ({"ok": False, "head_moved": False, "staged_changed": False,
+              "branch_changed": False}, False),
+            (SimpleNamespace(ok=False, head_moved=False, staged_changed=False,
+                             branch_changed=False), False),
+        )
+    )
+    classifier_guard_polarities = all(
+        continuations.classify_continuation(
+            record, guard, True, fresh,
+        ) == expected
+        for guard, expected in (
+            ({"guard_violation": True}, ("invalidated", "clear")),
+            ({"guard_violation": False}, ("created", "persist")),
+            (SimpleNamespace(guard_violation=True), ("invalidated", "clear")),
+            (SimpleNamespace(guard_violation=False), ("created", "persist")),
+        )
+    )
+    check(
+        "guard_violation polarity is correct for mappings and objects",
+        guard_polarities and classifier_guard_polarities,
+        "True means violation and False means clean in both branches",
+        f"direct={guard_polarities} classifier={classifier_guard_polarities}",
+    )
+    check("classifier: binding mismatch falls through to fresh capture", continuations.classify_continuation(record, {"binding_mismatch": "model"}, True, fresh) == ("created", "persist"), "created/persist", "")
+    check(
+        "classifier: binding mismatch + fresh success without ID clears stale record",
+        continuations.classify_continuation(
+            record, {"binding_mismatch": "model"}, True,
+            ContinuationOutcome("supported", "fresh"),
+        ) == ("unavailable", "clear"),
+        "unavailable/clear",
+        "",
+    )
+    check(
+        "classifier: binding change + resume clears stale ID without re-homing",
+        continuations.classify_continuation(
+            record, {"binding_changed": True}, True, resume,
+        ) == ("resume_failed", "clear"),
+        "resume_failed/clear",
+        "",
+    )
+    check(
+        "classifier: malformed prior record cannot be replaced fail-open",
+        continuations.classify_continuation({}, clean, True, fresh)
+        == ("invalidated", "clear"),
+        "invalidated/clear",
+        "",
+    )
+    unknown_vocab = (
+        continuations.classify_continuation(
+            None, clean, True,
+            {"capability": "mystery", "phase": "fresh", "failure": "none", "conversation_id": "id"},
+        ) == ("unsupported", "clear")
+        and continuations.classify_continuation(
+            None, clean, True,
+            {"capability": "supported", "phase": "mystery", "failure": "none", "conversation_id": "id"},
+        ) == ("unavailable", "clear")
+        and continuations.classify_continuation(
+            None, clean, True,
+            {"capability": "supported", "phase": "fresh", "failure": "mystery", "conversation_id": "id"},
+        ) == ("capture_failed", "clear")
+    )
+    check(
+        "classifier: unknown vocabulary fails closed without resume or persist",
+        unknown_vocab,
+        "unsupported/unavailable/capture_failed, all clear",
+        "",
+    )
+    check("classifier: unavailable provider with no outcome is skipped", continuations.classify_continuation(record, clean, False, None) == ("skipped", "keep"), "skipped/keep", "")
+
+    import models as models_module
+    with tempfile.TemporaryDirectory() as td:
+        state_path = Path(td) / "build-state-legacy.json"
+        state_path.write_text(json.dumps({"schema": models_module.SCHEMA_VERSION, "active": True, "loop": "bl"}))
+        state = models_module.LoopState.load(state_path)
+        check(
+            "legacy LoopState loads empty continuation identity and is non-reusable",
+            state.loop_instance_id == ""
+            and state.executor == ""
+            and state.resume_executor is None
+            and not state.continuation_reusable,
+            "empty defaults and non-reusable",
+            repr(state),
+        )
+
+    with tempfile.TemporaryDirectory() as td:
+        saved_project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+        os.environ["CLAUDE_PROJECT_DIR"] = td
+        reviews = Path(td) / ".crew" / "reviews"
+        continuations.save_record(
+            "testsess",
+            "build-executor",
+            record,
+            base=reviews,
+        )
+        env = dict(os.environ)
+        env["CLAUDE_PROJECT_DIR"] = td
+        proc = _run_dispatcher(
+            ["state", "init", "bl", "--prompt", "replacement", "--session-id", "testsess"],
+            env=env,
+            cwd=td,
+            timeout=30,
+        )
+        state_file = Path(td) / ".crew" / "build-state-testsess.json"
+        state_data = json.loads(state_file.read_text()) if state_file.is_file() else {}
+        check(
+            "build-loop init clears the prior build-executor continuation",
+            proc.returncode == 0
+            and not continuations.chain_dir(
+                "testsess", "build-executor", base=reviews,
+            ).exists()
+            and state_data.get("active") is True
+            and bool(state_data.get("loop_instance_id")),
+            "init succeeds, chain removed, new loop identity stamped",
+            f"rc={proc.returncode} state={state_data} stderr={proc.stderr[:160]}",
+        )
+        if saved_project_dir is None:
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        else:
+            os.environ["CLAUDE_PROJECT_DIR"] = saved_project_dir
+
+
+def _binding_error(record, expected):
+    try:
+        continuations.validate_binding(record, expected)
+    except continuations.ContinuationBindingError as exc:
+        return exc
+    return None
 
 
 # =============================================================================
@@ -13090,6 +13932,7 @@ def test_build_executor():
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
+    test_continuations()
     test_default_seats()
     test_resolve_timeout()
     test_deadline_minutes()
@@ -13098,6 +13941,7 @@ def main():
     test_dispatcher()
     test_registry()
     test_codex()
+    test_codex_continuation()
     test_agy_helpers()
     test_agy_timeout_floor()
     test_agy_oversized()

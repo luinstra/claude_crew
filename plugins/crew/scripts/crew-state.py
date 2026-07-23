@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 
@@ -29,7 +30,7 @@ from models import (
     LOAD_FUTURE_SCHEMA,
     LOAD_OK,
 )
-from multiagent import config, review_runs, targets
+from multiagent import config, continuations, review_runs, targets
 from state_discovery import (
     anchor_path,
     crew_base,
@@ -684,6 +685,7 @@ def cmd_init(args):
             loop=canonical,
             task=prompt,
             session_id=session_id,
+            loop_instance_id=str(uuid.uuid4()),
             started_at=utc_now_iso(),
             deadline_minutes=deadline,
             no_deadline=deadline == NO_DEADLINE,
@@ -720,6 +722,7 @@ def cmd_init(args):
             task=task,
             plan_file=plan_file,
             session_id=session_id,
+            loop_instance_id=str(uuid.uuid4()),
             started_at=utc_now_iso(),
             deadline_minutes=deadline,
             no_deadline=deadline == NO_DEADLINE,
@@ -727,6 +730,20 @@ def cmd_init(args):
         # Output the plan file path so caller can use it
         if args.auto_plan:
             print(plan_file)
+
+    if canonical == "bl":
+        # A new build loop gets a new immutable identity. Remove the prior
+        # build-executor conversation before activating this replacement so no
+        # dispatch can carry the old loop's provider ID into the new loop.
+        try:
+            with continuations.continuation_lock(session_id, "build-executor"):
+                continuations.invalidate(session_id, "build-executor")
+        except (continuations.ContinuationError, OSError) as exc:
+            print(
+                f"Error: could not clear the prior build-executor continuation: {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
     fresh = asdict(state)
     fresh["schema"] = SCHEMA_VERSION
