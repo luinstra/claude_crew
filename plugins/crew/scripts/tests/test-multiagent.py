@@ -7385,9 +7385,1646 @@ def _run_dispatch(repo, bins, extra_args, *, session=None, project_dir=None,
 def _dispatch_ns(**kw):
     import argparse as _ap
     base = dict(seat=None, task=None, file=None, model=None, timeout=None,
-                json=False, out=None, session_id=None, options=False)
+                json=False, out=None, session_id=None, chain=None, options=False)
     base.update(kw)
     return _ap.Namespace(**base)
+
+
+def _write_build_state_for_dispatch(
+    repo: Path,
+    session_id: str,
+    *,
+    loop_instance_id: str = "loop-1",
+    active: bool = True,
+    phase: str = "drafting",
+) -> None:
+    crew_dir = repo / ".crew"
+    crew_dir.mkdir(parents=True, exist_ok=True)
+    (crew_dir / f"build-state-{session_id}.json").write_text(
+        json.dumps({
+            "schema": 3,
+            "active": active,
+            "loop": "bl",
+            "phase": phase,
+            "session_id": session_id,
+            "loop_instance_id": loop_instance_id,
+        }),
+        encoding="utf-8",
+    )
+
+
+def _seed_dispatch_record(
+    repo: Path,
+    *,
+    session_id: str = "S",
+    chain: str = "build-executor",
+    conversation_id: str = "existing-thread",
+    seat: str = "codex",
+    provider: str = "codex",
+    model: str | None = None,
+) -> object:
+    from multiagent import cli
+
+    if model is None:
+        model = cli.seats.seat_spec(seat).model
+
+    binding = continuations.ContinuationBinding(
+        chain=chain,
+        loop_instance_id="loop-1",
+        seat=seat,
+        provider=provider,
+        model=model,
+        workspace=continuations.canonical_workspace(repo),
+        head=cli._git_head(str(repo)),
+        branch=cli._git_branch(str(repo)),
+        index_tree=cli._git_staged(str(repo)),
+    ).normalized()
+    record = continuations.new_record(
+        binding=binding,
+        conversation_id=conversation_id,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    continuations.save_record(session_id, chain, record)
+    return record
+
+
+def _dispatch_guard(**changes: object) -> dict:
+    guard = {
+        "head_moved": False,
+        "staged_changed": False,
+        "branch_changed": False,
+        "post_run_state_mismatch": False,
+        "binding_mismatches": (),
+    }
+    guard.update(changes)
+    return guard
+
+
+def test_dispatch_chain():
+    log_section("dispatch --chain lifecycle and guard seam")
+    from multiagent import cli
+    from multiagent.providers import Provider
+    import contextlib
+    import io
+    import unittest.mock as mock
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        _init_repo(str(repo))
+        _write_build_state_for_dispatch(repo, "S")
+        saved_project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+        saved_working_dir = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
+        os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+        try:
+            calls = []
+            seen_guards = []
+            real_classify = continuations.classify_continuation
+
+            class _ChainProvider(Provider):
+                name = "codex"
+                supports_workspace_write = True
+                supports_continuation = True
+
+                def is_available(self):
+                    return True, ""
+
+                def run(self, prompt, *, continuation=None, **kwargs):
+                    calls.append(continuation)
+                    conversation_id = (
+                        continuation.conversation_id
+                        if continuation is not None and continuation.conversation_id
+                        else "thread-1"
+                    )
+                    phase = "resume" if continuation and continuation.conversation_id else "fresh"
+                    return ProviderResult(
+                        name="codex",
+                        model="o3",
+                        ok=True,
+                        output="BODY",
+                        error=None,
+                        elapsed=0.1,
+                        continuation=ContinuationOutcome(
+                            capability="supported",
+                            phase=phase,
+                            conversation_id=conversation_id,
+                        ),
+                        continuation_id="flat-id",
+                    )
+
+            def classify(record, guard, availability, outcome):
+                seen_guards.append(guard)
+                return real_classify(
+                    record, guard, availability, outcome,
+                )
+
+            out_path = repo / "first.json"
+            with mock.patch("multiagent.cli.get_provider", return_value=_ChainProvider()), \
+                 mock.patch.object(continuations, "classify_continuation", side_effect=classify):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc1 = cli.cmd_dispatch(_dispatch_ns(
+                        seat="codex", task="x", json=True, out=str(out_path),
+                        session_id="S", chain="build-executor",
+                    ))
+                first = json.loads(out_path.read_text())
+                first_record = continuations.load_record("S", "build-executor")
+
+                with contextlib.redirect_stdout(out):
+                    rc2 = cli.cmd_dispatch(_dispatch_ns(
+                        seat="codex", task="x", json=True, out=str(out_path),
+                        session_id="S", chain="build-executor",
+                    ))
+                second = json.loads(out_path.read_text())
+
+                store_err = io.StringIO()
+                with mock.patch.object(
+                    continuations, "save_record", side_effect=OSError("write failed"),
+                ):
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(store_err):
+                        rc3 = cli.cmd_dispatch(_dispatch_ns(
+                            seat="codex", task="x", json=True, out=str(out_path),
+                            session_id="S", chain="build-executor",
+                        ))
+                failed_store = json.loads(out_path.read_text())
+                no_resumable_record = (
+                    continuations.load_record("S", "build-executor") is None
+                )
+        finally:
+            if saved_project_dir is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved_project_dir
+            if saved_working_dir is None:
+                os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+            else:
+                os.environ["CLAUDE_WORKING_DIRECTORY"] = saved_working_dir
+
+        check(
+            "chained dispatch creates then resumes from the exact in-memory ID",
+            rc1 == 0 and rc2 == 0
+            and calls[0] is not None and calls[0].conversation_id is None
+            and calls[1] is not None and calls[1].conversation_id == "thread-1"
+            and first_record is not None
+            and first_record.conversation_id == "thread-1"
+            and first["continuation"]["status"] == "created"
+            and second["continuation"] == {
+                "chain": "build-executor", "status": "resumed",
+                "resumed": True, "reset_reason": None,
+            },
+            "fresh created, then exact resume",
+            f"rc1={rc1} rc2={rc2} calls={calls} first={first} second={second}",
+        )
+        check(
+            "post-billing store failure preserves the envelope and clears the chain",
+            rc3 == 0
+            and set(failed_store) == {
+                "seat", "model", "ok", "output", "error", "elapsed",
+                "head_before", "head_after", "head_moved",
+                "staged_before", "staged_after", "staged_changed",
+                "branch_before", "branch_after", "branch_changed",
+                "guard_warnings", "continuation",
+            }
+            and failed_store["output"] == "BODY"
+            and failed_store["ok"] is True
+            and failed_store["guard_warnings"] == []
+            and failed_store["continuation"] == {
+                "chain": "build-executor", "status": "store_failed",
+                "resumed": False, "reset_reason": "chain store write failed",
+            }
+            and "note: chain store write failed: write failed" in store_err.getvalue()
+            and no_resumable_record,
+            "store_failed with intact envelope and load_record None",
+            f"rc3={rc3} envelope={failed_store} none={no_resumable_record}",
+        )
+        check(
+            "chained dispatch passes exactly the five-key guard shape",
+            seen_guards and set(seen_guards[0]) == {
+                "head_moved", "staged_changed", "branch_changed",
+                "post_run_state_mismatch", "binding_mismatches",
+            } and all("ok" not in guard for guard in seen_guards),
+            "five keys and no ok",
+            repr(seen_guards),
+        )
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        _init_repo(str(repo))
+        env_saved = os.environ.get("CLAUDE_SESSION_ID")
+        os.environ["CLAUDE_SESSION_ID"] = "environment-session"
+        try:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = cli.cmd_dispatch(_dispatch_ns(
+                    seat="codex", task="x", json=True, chain="build-executor",
+                ))
+        finally:
+            if env_saved is None:
+                os.environ.pop("CLAUDE_SESSION_ID", None)
+            else:
+                os.environ["CLAUDE_SESSION_ID"] = env_saved
+        check(
+            "--chain requires the explicit session-id flag despite the environment",
+            rc == 2 and "explicit --session-id" in err.getvalue(),
+            "exit 2 with explicit-session diagnostic",
+            f"rc={rc} stderr={err.getvalue()!r}",
+        )
+
+
+def test_dispatch_chain_failure_invariants():
+    log_section("dispatch --chain failure invariants")
+    from multiagent import cli
+    from multiagent.providers import Provider
+    import contextlib
+    import io
+    import unittest.mock as mock
+
+    def with_project(repo: Path) -> tuple[object, object]:
+        old_project = os.environ.get("CLAUDE_PROJECT_DIR")
+        old_working = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
+        os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+        return old_project, old_working
+
+    def restore_project(old: tuple[object, object]) -> None:
+        old_project, old_working = old
+        if old_project is None:
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        else:
+            os.environ["CLAUDE_PROJECT_DIR"] = str(old_project)
+        if old_working is None:
+            os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+        else:
+            os.environ["CLAUDE_WORKING_DIRECTORY"] = str(old_working)
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        _init_repo(str(repo))
+        _write_build_state_for_dispatch(repo, "S")
+        old_env = with_project(repo)
+        prior = _seed_dispatch_record(repo)
+        calls = []
+
+        class _TombstoneFailure(Provider):
+            name = "codex"
+            supports_workspace_write = True
+            supports_continuation = True
+
+            def is_available(self):
+                return True, ""
+
+            def run(self, *args, **kwargs):
+                calls.append(kwargs)
+                raise AssertionError("provider run reached after tombstone failure")
+
+        err = io.StringIO()
+        try:
+            with mock.patch("multiagent.cli.get_provider", return_value=_TombstoneFailure()), \
+                 mock.patch.object(
+                     continuations, "invalidate", side_effect=OSError("locked"),
+                 ), contextlib.redirect_stderr(err):
+                rc = cli.cmd_dispatch(_dispatch_ns(
+                    seat="codex", task="x", json=True, out=str(repo / "out.json"),
+                    session_id="S", chain="build-executor",
+                ))
+            after = continuations.load_record("S", "build-executor")
+        finally:
+            restore_project(old_env)
+        check(
+            "pre-billing tombstone failure aborts and preserves the prior record",
+            rc == 2 and not calls and after == prior and "locked" in err.getvalue(),
+            "exit 2, zero provider calls, same record",
+            f"rc={rc} calls={calls} after={after!r} stderr={err.getvalue()!r}",
+        )
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        _init_repo(str(repo))
+        _write_build_state_for_dispatch(repo, "S")
+        old_env = with_project(repo)
+        observed = []
+
+        class _Unsupported(Provider):
+            name = "agy"
+            supports_workspace_write = True
+            supports_continuation = False
+
+            def is_available(self):
+                return True, ""
+
+            def run(self, *args, **kwargs):
+                observed.append({
+                    "continuation": kwargs.get("continuation"),
+                    "tombstoned": continuations.load_record(
+                        "S", "build-executor",
+                    ) is None,
+                })
+                return ProviderResult(
+                    name="agy", model=None, ok=True, output="AGY BODY",
+                    error=None, elapsed=0.1,
+                )
+
+        prior = _seed_dispatch_record(repo, seat="agy", provider="agy")
+        out_path = repo / "out.json"
+        try:
+            with mock.patch("multiagent.cli.get_provider", return_value=_Unsupported()):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = cli.cmd_dispatch(_dispatch_ns(
+                        seat="agy", task="x", json=True, out=str(out_path),
+                        session_id="S", chain="build-executor",
+                    ))
+            envelope = json.loads(out_path.read_text())
+            no_record = continuations.load_record("S", "build-executor") is None
+        finally:
+            restore_project(old_env)
+        check(
+            "unsupported provider runs fresh with None continuation after tombstone",
+            rc == 0 and prior is not None and observed == [
+                {"continuation": None, "tombstoned": True},
+            ] and envelope["continuation"]["status"] == "unsupported"
+            and no_record,
+            "unsupported status, None continuation, tombstoned before run",
+            f"rc={rc} observed={observed} envelope={envelope} none={no_record}",
+        )
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        _init_repo(str(repo))
+        _write_build_state_for_dispatch(repo, "S")
+        old_env = with_project(repo)
+        prior = _seed_dispatch_record(repo)
+
+        class _Unavailable(Provider):
+            name = "codex"
+            supports_workspace_write = True
+            supports_continuation = True
+
+            def is_available(self):
+                return False, "missing"
+
+            def run(self, *args, **kwargs):
+                raise AssertionError("unavailable provider ran")
+
+        try:
+            out_path = repo / "out.json"
+            with mock.patch("multiagent.cli.get_provider", return_value=_Unavailable()):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = cli.cmd_dispatch(_dispatch_ns(
+                        seat="codex", task="x", json=True, out=str(out_path),
+                        session_id="S", chain="build-executor",
+                    ))
+            envelope = json.loads(out_path.read_text())
+            after = continuations.load_record("S", "build-executor")
+        finally:
+            restore_project(old_env)
+        check(
+            "unavailable provider keeps the existing chain untouched",
+            rc == 0 and envelope["continuation"]["status"] == "skipped"
+            and envelope["continuation"]["reset_reason"] is None
+            and after == prior,
+            "skipped status, null reset reason, and same record",
+            f"rc={rc} envelope={envelope} after={after!r}",
+        )
+
+
+def test_dispatch_chain_e2e_fake_clis():
+    log_section("dispatch --chain fake CLI create and exact resume")
+
+    def read_capture(label: str, capture: Path, proc: object) -> dict:
+        if not capture.is_file():
+            raise AssertionError(
+                f"{label} fake CLI was not invoked: "
+                f"returncode={proc.returncode!r} "
+                f"stdout={proc.stdout!r} stderr={proc.stderr!r} "
+                f"capture={str(capture)!r}"
+            )
+        return json.loads(capture.read_text())
+
+    def read_record(repo: Path, base: Path) -> object:
+        saved_project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
+        try:
+            return continuations.load_record("S", "build-executor", base=base)
+        finally:
+            if saved_project_dir is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved_project_dir
+
+    def run_codex_case() -> tuple[object, object, list[dict], object, object]:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            repo.mkdir()
+            _init_repo(str(repo))
+            _write_build_state_for_dispatch(repo, "S")
+            bins = root / "bin"
+            bins.mkdir()
+            capture = root / "codex-capture.json"
+            fake = f"CAPTURE = {str(capture)!r}\n" + _CODEX_CONTINUATION_FAKE
+            make_fake_bin(bins, "codex", fake)
+            first, first_env = _run_dispatch(
+                repo, bins, ["--seat", "codex", "--chain", "build-executor", "task"],
+                session="S",
+            )
+            first_call = read_capture("codex", capture, first)
+            second, second_env = _run_dispatch(
+                repo, bins, ["--seat", "codex", "--chain", "build-executor", "task"],
+                session="S",
+            )
+            second_call = read_capture("codex", capture, second)
+            base = repo / ".crew" / "reviews"
+            record_path = continuations.chain_dir(
+                "S", "build-executor", base=base,
+            ) / "record.json"
+            record = read_record(repo, base)
+            mode = record_path.stat().st_mode & 0o777 if record_path.exists() else None
+            return first, second, [first_call, second_call], record, (mode, first_env, second_env)
+
+    first, second, codex_calls, codex_record, codex_meta = run_codex_case()
+    codex_real = [call["args"] for call in codex_calls]
+    codex_first, codex_second = codex_real[-2:]
+    check(
+        "Codex fake CLI creates a 0600 record with the captured thread ID",
+        first.returncode == 0 and second.returncode == 0
+        and codex_meta[0] == 0o600
+        and codex_record is not None
+        and codex_record.conversation_id == "thread-xyz"
+        and codex_meta[1]["continuation"]["status"] == "created"
+        and codex_meta[2]["continuation"] == {
+            "chain": "build-executor", "status": "resumed",
+            "resumed": True, "reset_reason": None,
+        },
+        "created/resumed envelopes and mode 0600 record",
+        f"first={first.returncode} second={second.returncode} calls={codex_calls} "
+        f"record={codex_record!r} meta={codex_meta}",
+    )
+    check(
+        "Codex fake CLI resumes with the exact ID and never --last",
+        "resume" in codex_second
+        and codex_second[codex_second.index("resume") + 1] == "thread-xyz"
+        and "--last" not in codex_second
+        and "resume" not in codex_first,
+        "fresh argv then resume codex-chain-id, no --last",
+        repr(codex_real),
+    )
+
+    def run_cursor_case() -> tuple[object, object, list[dict], object, object]:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            repo.mkdir()
+            _init_repo(str(repo))
+            _write_build_state_for_dispatch(repo, "S")
+            bins = root / "bin"
+            bins.mkdir()
+            capture = root / "cursor-capture.json"
+            fake = f"CAPTURE = {str(capture)!r}\n" + _CURSOR_CONTINUATION_FAKE
+            make_fake_bin(bins, "agent", fake)
+            first, first_env = _run_dispatch(
+                repo, bins, ["--seat", "cursor-auto", "--chain", "build-executor", "task"],
+                session="S",
+            )
+            first_call = read_capture("cursor", capture, first)
+            second, second_env = _run_dispatch(
+                repo, bins, ["--seat", "cursor-auto", "--chain", "build-executor", "task"],
+                session="S",
+            )
+            second_call = read_capture("cursor", capture, second)
+            base = repo / ".crew" / "reviews"
+            record = read_record(repo, base)
+            return first, second, [first_call, second_call], record, (first_env, second_env)
+
+    first, second, cursor_calls, cursor_record, cursor_meta = run_cursor_case()
+    cursor_real = [call["args"] for call in cursor_calls]
+    cursor_first, cursor_second = cursor_real[-2:]
+    check(
+        "Cursor fake CLI captures its init session ID and resumes",
+        first.returncode == 0 and second.returncode == 0
+        and cursor_record is not None
+        and cursor_record.conversation_id == "cursor-session-xyz"
+        and cursor_meta[0]["continuation"]["status"] == "created"
+        and cursor_meta[1]["continuation"]["status"] == "resumed"
+        and cursor_meta[1]["continuation"]["resumed"] is True,
+        "created/resumed envelopes and captured session ID",
+        f"first={first.returncode} second={second.returncode} calls={cursor_calls} "
+        f"record={cursor_record!r} meta={cursor_meta}",
+    )
+    check(
+        "Cursor fake CLI uses exact --resume ID and never --continue",
+        "--resume" in cursor_second
+        and cursor_second[cursor_second.index("--resume") + 1] == "cursor-session-xyz"
+        and "--continue" not in cursor_second
+        and "--resume" not in cursor_first,
+        "fresh argv then --resume cursor-chain-id, no --continue",
+        repr(cursor_real),
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        repo = root / "repo"
+        repo.mkdir()
+        _init_repo(str(repo))
+        _write_build_state_for_dispatch(repo, "S")
+        bins = root / "bin"
+        bins.mkdir()
+        codex_capture = root / "codex-after-agy.json"
+        make_fake_bin(bins, "agy", """
+        import sys
+        sys.stdout.write("[BLOCKING] agy round")
+        sys.exit(0)
+        """)
+        make_fake_bin(
+            bins, "codex",
+            f"CAPTURE = {str(codex_capture)!r}\n" + _CODEX_CONTINUATION_FAKE,
+        )
+        saved_project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+        saved_working_dir = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
+        os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+        try:
+            prior = _seed_dispatch_record(
+                repo, conversation_id="pre-agy-thread",
+            )
+            agy_proc, agy_env = _run_dispatch(
+                repo, bins,
+                ["--seat", "agy", "--chain", "build-executor", "task"],
+                session="S",
+            )
+            codex_proc, codex_env = _run_dispatch(
+                repo, bins,
+                ["--seat", "codex", "--chain", "build-executor", "task"],
+                session="S",
+            )
+            codex_call = json.loads(codex_capture.read_text())
+            record = continuations.load_record("S", "build-executor")
+        finally:
+            if saved_project_dir is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved_project_dir
+            if saved_working_dir is None:
+                os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+            else:
+                os.environ["CLAUDE_WORKING_DIRECTORY"] = saved_working_dir
+        check(
+            "Agy invalidates the old chain and the follow-up Codex starts fresh",
+            prior is not None
+            and agy_proc.returncode == 0
+            and agy_env["continuation"]["status"] == "unsupported"
+            and codex_proc.returncode == 0
+            and codex_env["continuation"]["status"] == "created"
+            and "resume" not in codex_call["args"]
+            and "pre-agy-thread" not in codex_call["args"]
+            and record is not None
+            and record.conversation_id == "thread-xyz",
+            "agy unsupported, then fresh Codex capture without the old ID",
+            f"agy={agy_proc.returncode}/{agy_env} codex={codex_proc.returncode}/"
+            f"{codex_env} call={codex_call} record={record!r}",
+        )
+
+
+def test_dispatch_chain_classifier_precedence():
+    log_section("dispatch --chain classifier precedence and guard shape")
+    from multiagent import cli
+    from multiagent.providers import Provider
+    import contextlib
+    import io
+    import unittest.mock as mock
+
+    record = continuations.ContinuationRecord(
+        chain="build-executor", loop_instance_id="loop-1", seat="codex",
+        provider="codex", model="o3", workspace="/repo", head="head",
+        branch="main", index_tree="tree", conversation_id="thread-1",
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+
+    def outcome(
+        *, capability: str = "supported", phase: str = "fresh",
+        conversation_id: str | None = "thread-new", failure: str = "none",
+    ) -> ContinuationOutcome:
+        return ContinuationOutcome(
+            capability=capability, phase=phase,
+            conversation_id=conversation_id, failure=failure,
+        )
+
+    def classify(
+        prior: object | None = None,
+        *, guard: dict | None = None, availability: bool = True,
+        result: ContinuationOutcome | None = None,
+    ) -> tuple[str, str]:
+        return continuations.classify_continuation(
+            prior, guard if guard is not None else _dispatch_guard(),
+            availability, result,
+        )
+
+    expected_keys = {
+        "head_moved", "staged_changed", "branch_changed",
+        "post_run_state_mismatch", "binding_mismatches",
+    }
+    real_shape = _dispatch_guard()
+    check(
+        "classifier tests use the exact five-key dispatch guard shape",
+        set(real_shape) == expected_keys and "ok" not in real_shape
+        and "clean" not in real_shape and "guard_violation" not in real_shape,
+        "five guard keys, no envelope fields",
+        repr(real_shape),
+    )
+    check(
+        "classifier availability false keeps the chain",
+        classify(availability=False, result=None) == ("skipped", "keep"),
+        "('skipped', 'keep')",
+        repr(classify(availability=False, result=None)),
+    )
+    check(
+        "classifier missing outcome invalidates",
+        classify(result=None) == ("invalidated", "clear"),
+        "('invalidated', 'clear')",
+        repr(classify(result=None)),
+    )
+    for phase in ("fresh", "resume"):
+        got = classify(
+            record if phase == "resume" else None,
+            result=outcome(phase=phase, conversation_id="thread-1", failure="timeout"),
+        )
+        check(
+            f"classifier timeout outranks {phase} failure",
+            got == ("invalidated", "clear"),
+            "('invalidated', 'clear')", repr(got),
+        )
+    for flag in ("head_moved", "staged_changed", "branch_changed"):
+        got = classify(result=outcome(phase="resume", conversation_id="thread-1"),
+                       guard=_dispatch_guard(**{flag: True}))
+        check(
+            f"classifier {flag} is a guard violation",
+            got == ("invalidated", "clear"),
+            "('invalidated', 'clear')", repr(got),
+        )
+    got = classify(result=outcome(), guard=_dispatch_guard(post_run_state_mismatch=True))
+    check(
+        "classifier post-run state mismatch invalidates",
+        got == ("invalidated", "clear"), "('invalidated', 'clear')", repr(got),
+    )
+    for prior in (None, record):
+        got = classify(
+            prior,
+            result=outcome(capability="unsupported"),
+        )
+        check(
+            f"classifier unsupported clears with prior={prior is not None}",
+            got == ("unsupported", "clear"), "('unsupported', 'clear')", repr(got),
+        )
+    cases = (
+        (record, ("model",), outcome(phase="resume", conversation_id="thread-1"),
+         ("resume_failed", "clear"), "resume binding mismatch"),
+        (record, ("model",), outcome(phase="fresh", conversation_id="thread-new"),
+         ("created", "persist"), "fresh binding mismatch with ID"),
+        (record, ("workspace",), outcome(phase="fresh", conversation_id=None, failure="error"),
+         ("capture_failed", "clear"), "fresh binding mismatch with error"),
+    )
+    for prior, binding_dims, result, expected, label in cases:
+        got = classify(
+            prior, guard=_dispatch_guard(binding_mismatches=binding_dims), result=result,
+        )
+        check(f"classifier {label}", got == expected, repr(expected), repr(got))
+    got = classify(
+        record,
+        result=outcome(phase="resume", conversation_id="thread-1"),
+    )
+    check(
+        "classifier exact resume updates the existing record",
+        got == ("resumed", "update"), "('resumed', 'update')", repr(got),
+    )
+    got = classify(
+        record,
+        result=outcome(phase="resume", conversation_id="different-thread"),
+    )
+    check(
+        "classifier resume ID mismatch clears without re-homing",
+        got == ("resume_failed", "clear"), "('resume_failed', 'clear')", repr(got),
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        _init_repo(str(repo))
+        _write_build_state_for_dispatch(repo, "S")
+        saved_project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+        saved_working_dir = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
+        os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+        try:
+            _seed_dispatch_record(
+                repo, conversation_id="thread-1",
+            )
+
+            class _MismatchedProvider(Provider):
+                name = "codex"
+                supports_workspace_write = True
+                supports_continuation = True
+
+                def is_available(self):
+                    return True, ""
+
+                def run(self, *args, **kwargs):
+                    return ProviderResult(
+                        name="codex", model="o3", ok=True, output="BODY",
+                        error=None, elapsed=0.1,
+                        continuation=ContinuationOutcome(
+                            capability="supported", phase="resume",
+                            conversation_id="different-thread",
+                        ),
+                        continuation_id="different-thread",
+                    )
+
+            out_path = repo / "mismatched.json"
+            with mock.patch.object(
+                cli, "get_provider", return_value=_MismatchedProvider(),
+            ), contextlib.redirect_stdout(io.StringIO()):
+                rc = cli.cmd_dispatch(_dispatch_ns(
+                    seat="codex", task="x", json=True, out=str(out_path),
+                    session_id="S", chain="build-executor",
+                ))
+            envelope = json.loads(out_path.read_text())
+            check(
+                "cmd_dispatch emits resume_failed for a mismatched continuation ID",
+                rc == 0
+                and envelope["continuation"]["status"] == "resume_failed"
+                and envelope["continuation"].get("continuation_id") is None
+                and envelope.get("continuation_id") is None
+                and envelope["continuation"]["reset_reason"] == "resume_failed",
+                "resume_failed, no continuation ID, reset_reason explains reset",
+                f"rc={rc} envelope={envelope}",
+            )
+        finally:
+            if saved_project_dir is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved_project_dir
+            if saved_working_dir is None:
+                os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+            else:
+                os.environ["CLAUDE_WORKING_DIRECTORY"] = saved_working_dir
+
+    got = classify(result=outcome(phase="fresh", conversation_id="thread-new"))
+    check(
+        "classifier clean fresh capture persists",
+        got == ("created", "persist"), "('created', 'persist')", repr(got),
+    )
+    for status, result in (
+        ("unavailable", outcome(conversation_id=None)),
+        ("capture_failed", outcome(conversation_id=None, failure="error")),
+    ):
+        for prior in (None, record):
+            got = classify(prior, result=result)
+            expected = (status, "clear" if prior is not None else "keep")
+            check(
+                f"classifier {status} clear_stale follows prior presence={prior is not None}",
+                got == expected, repr(expected), repr(got),
+            )
+
+
+def test_dispatch_chain_snapshot_probes():
+    log_section("dispatch --chain buildable snapshot probes")
+    from multiagent import cli
+    from multiagent.providers import Provider
+    import contextlib
+    import io
+    import unittest.mock as mock
+
+    axes = ("head", "branch", "staged")
+    for target in axes:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _init_repo(str(repo))
+            _write_build_state_for_dispatch(repo, "S")
+            old_project = os.environ.get("CLAUDE_PROJECT_DIR")
+            old_working = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+            os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
+            os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+            try:
+                prior = _seed_dispatch_record(repo)
+                normal = {
+                    "head": cli._git_head(str(repo)),
+                    "branch": cli._git_branch(str(repo)),
+                    "staged": cli._git_staged(str(repo)),
+                }
+                calls = []
+
+                class _Provider(Provider):
+                    name = "codex"
+                    supports_workspace_write = True
+                    supports_continuation = True
+
+                    def is_available(self):
+                        return True, ""
+
+                    def run(self, *args, **kwargs):
+                        calls.append(kwargs)
+                        return ProviderResult(
+                            name="codex", model="o3", ok=True, output="BODY",
+                            error=None, elapsed=0.1,
+                            continuation=ContinuationOutcome(
+                                capability="supported", phase="fresh",
+                                conversation_id="new-thread",
+                            ),
+                            continuation_id="new-thread",
+                        )
+
+                values = {
+                    "_git_head": [normal["head"], normal["head"]],
+                    "_git_branch": [normal["branch"], normal["branch"]],
+                    "_git_staged": [normal["staged"], normal["staged"]],
+                }
+                values[f"_git_{target}"][0] = None
+                out_path = repo / "pre-unbuildable.json"
+                err = io.StringIO()
+                with mock.patch.object(cli, "get_provider", return_value=_Provider()), \
+                     contextlib.ExitStack() as stack:
+                    for helper, helper_values in values.items():
+                        stack.enter_context(
+                            mock.patch.object(cli, helper, side_effect=helper_values),
+                        )
+                    with contextlib.redirect_stderr(err):
+                        rc = cli.cmd_dispatch(_dispatch_ns(
+                            seat="codex", task="x", json=True, out=str(out_path),
+                            session_id="S", chain="build-executor",
+                        ))
+                after = continuations.load_record("S", "build-executor")
+                check(
+                    f"pre-run {target}_before=None aborts before provider and preserves record",
+                    rc == 2 and not calls and not out_path.exists()
+                    and after == prior and "ContinuationBindingError" not in err.getvalue()
+                    and "snapshot" in err.getvalue(),
+                    "exit 2, zero calls, same record, no binding traceback",
+                    f"axis={target} rc={rc} calls={calls} after={after!r} "
+                    f"stderr={err.getvalue()!r}",
+                )
+            finally:
+                if old_project is None:
+                    os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                else:
+                    os.environ["CLAUDE_PROJECT_DIR"] = old_project
+                if old_working is None:
+                    os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+                else:
+                    os.environ["CLAUDE_WORKING_DIRECTORY"] = old_working
+
+    for target in axes:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _init_repo(str(repo))
+            _write_build_state_for_dispatch(repo, "S")
+            old_project = os.environ.get("CLAUDE_PROJECT_DIR")
+            old_working = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+            os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
+            os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+            try:
+                _seed_dispatch_record(repo)
+                normal = {
+                    "head": cli._git_head(str(repo)),
+                    "branch": cli._git_branch(str(repo)),
+                    "staged": cli._git_staged(str(repo)),
+                }
+                calls = []
+
+                class _Provider(Provider):
+                    name = "codex"
+                    supports_workspace_write = True
+                    supports_continuation = True
+
+                    def is_available(self):
+                        return True, ""
+
+                    def run(self, *args, **kwargs):
+                        calls.append(kwargs)
+                        return ProviderResult(
+                            name="codex", model="o3", ok=True, output="BODY",
+                            error=None, elapsed=0.1,
+                            continuation=ContinuationOutcome(
+                                capability="supported", phase="fresh",
+                                conversation_id="new-thread",
+                            ),
+                            continuation_id="new-thread",
+                        )
+
+                values = {
+                    "_git_head": [normal["head"], normal["head"]],
+                    "_git_branch": [normal["branch"], normal["branch"]],
+                    "_git_staged": [normal["staged"], normal["staged"]],
+                }
+                values[f"_git_{target}"][1] = None
+                out_path = repo / "post-indeterminate.json"
+                with mock.patch.object(cli, "get_provider", return_value=_Provider()), \
+                     contextlib.ExitStack() as stack:
+                    for helper, helper_values in values.items():
+                        stack.enter_context(
+                            mock.patch.object(cli, helper, side_effect=helper_values),
+                        )
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        rc = cli.cmd_dispatch(_dispatch_ns(
+                            seat="codex", task="x", json=True, out=str(out_path),
+                            session_id="S", chain="build-executor",
+                        ))
+                envelope = json.loads(out_path.read_text())
+                check(
+                    f"post-run {target}_after=None classifies invalidated and clears",
+                    rc == 0 and calls and envelope["continuation"] == {
+                        "chain": "build-executor", "status": "invalidated",
+                        "resumed": False, "reset_reason": "invalidated",
+                    } and continuations.load_record("S", "build-executor") is None,
+                    "invalidated envelope explains reset and load_record None",
+                    f"axis={target} rc={rc} calls={len(calls)} envelope={envelope} "
+                    f"record={continuations.load_record('S', 'build-executor')!r}",
+                )
+            finally:
+                if old_project is None:
+                    os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                else:
+                    os.environ["CLAUDE_PROJECT_DIR"] = old_project
+                if old_working is None:
+                    os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+                else:
+                    os.environ["CLAUDE_WORKING_DIRECTORY"] = old_working
+
+
+def test_dispatch_chain_safety_and_output():
+    log_section("dispatch --chain safety, lock, and human output")
+    from multiagent import cli
+    from multiagent.providers import Provider
+    import contextlib
+    import io
+    import unittest.mock as mock
+
+    expected_envelope_fields = {
+        "seat", "model", "ok", "output", "error", "elapsed",
+        "head_before", "head_after", "head_moved",
+        "staged_before", "staged_after", "staged_changed",
+        "branch_before", "branch_after", "branch_changed",
+        "guard_warnings", "continuation",
+    }
+
+    for phase, with_prior, conversation_id in (
+        ("fresh", False, "persist-thread"),
+        ("resume", True, "existing-thread"),
+    ):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _init_repo(str(repo))
+            _write_build_state_for_dispatch(repo, "S")
+            old_project = os.environ.get("CLAUDE_PROJECT_DIR")
+            old_working = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+            os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
+            os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+            try:
+                prior = _seed_dispatch_record(repo) if with_prior else None
+                calls = []
+
+                class _StoreProvider(Provider):
+                    name = "codex"
+                    supports_workspace_write = True
+                    supports_continuation = True
+
+                    def is_available(self):
+                        return True, ""
+
+                    def run(self, *args, **kwargs):
+                        calls.append(kwargs)
+                        return ProviderResult(
+                            name="codex", model="o3", ok=True,
+                            output="PROVIDER BODY", error=None, elapsed=0.25,
+                            continuation=ContinuationOutcome(
+                                capability="supported", phase=phase,
+                                conversation_id=conversation_id,
+                            ),
+                            continuation_id=conversation_id,
+                        )
+
+                out_path = repo / f"store-{phase}.json"
+                err = io.StringIO()
+                with mock.patch.object(cli, "get_provider", return_value=_StoreProvider()), \
+                     mock.patch.object(
+                         continuations, "save_record", side_effect=OSError("store failed"),
+                     ), contextlib.redirect_stderr(err):
+                    rc = cli.cmd_dispatch(_dispatch_ns(
+                        seat="codex", task="x", json=True, out=str(out_path),
+                        session_id="S", chain="build-executor",
+                    ))
+                envelope = json.loads(out_path.read_text())
+                check(
+                    f"post-billing {phase} save failure preserves the full envelope",
+                    rc == 0 and calls and set(envelope) == expected_envelope_fields
+                    and envelope["output"] == "PROVIDER BODY"
+                    and envelope["ok"] is True
+                    and envelope["guard_warnings"] == []
+                    and envelope["continuation"] == {
+                        "chain": "build-executor", "status": "store_failed",
+                        "resumed": False, "reset_reason": "chain store write failed",
+                    }
+                    and continuations.load_record("S", "build-executor") is None
+                    and "Traceback" not in err.getvalue(),
+                    "exit 0, 17-field envelope, store_failed, no record, no traceback",
+                    f"phase={phase} rc={rc} prior={prior!r} calls={calls} "
+                    f"envelope={envelope} record={continuations.load_record('S', 'build-executor')!r} "
+                    f"stderr={err.getvalue()!r}",
+                )
+            finally:
+                if old_project is None:
+                    os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                else:
+                    os.environ["CLAUDE_PROJECT_DIR"] = old_project
+                if old_working is None:
+                    os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+                else:
+                    os.environ["CLAUDE_WORKING_DIRECTORY"] = old_working
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        _init_repo(str(repo))
+        _write_build_state_for_dispatch(repo, "S")
+        old_project = os.environ.get("CLAUDE_PROJECT_DIR")
+        old_working = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
+        os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+        try:
+            _seed_dispatch_record(repo)
+            observed = []
+
+            class _InterruptingProvider(Provider):
+                name = "codex"
+                supports_workspace_write = True
+                supports_continuation = True
+
+                def is_available(self):
+                    return True, ""
+
+                def run(self, *args, **kwargs):
+                    observed.append(
+                        continuations.load_record("S", "build-executor") is None,
+                    )
+                    raise RuntimeError("forced provider interruption")
+
+            raised = None
+            with mock.patch.object(cli, "get_provider", return_value=_InterruptingProvider()):
+                try:
+                    cli.cmd_dispatch(_dispatch_ns(
+                        seat="codex", task="x", json=True,
+                        out=str(repo / "interrupt.json"), session_id="S",
+                        chain="build-executor",
+                    ))
+                except RuntimeError as exc:
+                    raised = exc
+            check(
+                "provider interruption after tombstone leaves no resumable record",
+                isinstance(raised, RuntimeError) and observed == [True]
+                and continuations.load_record("S", "build-executor") is None,
+                "provider raises after tombstone, load_record None",
+                f"raised={raised!r} observed={observed} "
+                f"record={continuations.load_record('S', 'build-executor')!r}",
+            )
+        finally:
+            if old_project is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = old_project
+            if old_working is None:
+                os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+            else:
+                os.environ["CLAUDE_WORKING_DIRECTORY"] = old_working
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        _init_repo(str(repo))
+        _write_build_state_for_dispatch(repo, "S")
+        old_project = os.environ.get("CLAUDE_PROJECT_DIR")
+        old_working = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
+        os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+        try:
+            prior = _seed_dispatch_record(repo)
+            calls = []
+            state_path = repo / ".crew" / "build-state-S.json"
+
+            class _RacingProvider(Provider):
+                name = "codex"
+                supports_workspace_write = True
+                supports_continuation = True
+
+                def is_available(self):
+                    return True, ""
+
+                def run(self, *args, **kwargs):
+                    calls.append(kwargs)
+                    (repo / "provider-edit.txt").write_text("edited\n")
+                    _git(["add", "provider-edit.txt"], str(repo))
+                    state = json.loads(state_path.read_text())
+                    state["loop_instance_id"] = "loop-2"
+                    state_path.write_text(json.dumps(state))
+                    return ProviderResult(
+                        name="codex", model="o3", ok=True, output="EDITED BODY",
+                        error=None, elapsed=0.1,
+                        continuation=ContinuationOutcome(
+                            capability="supported", phase="resume",
+                            conversation_id=prior.conversation_id,
+                        ),
+                        continuation_id=prior.conversation_id,
+                    )
+
+            out_path = repo / "post-state-race.json"
+            with mock.patch.object(cli, "get_provider", return_value=_RacingProvider()):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = cli.cmd_dispatch(_dispatch_ns(
+                        seat="codex", task="x", json=True, out=str(out_path),
+                        session_id="S", chain="build-executor",
+                    ))
+            envelope = json.loads(out_path.read_text())
+            check(
+                "post-run state mismatch clears while preserving edits and warnings",
+                rc == 0 and calls
+                and envelope["output"] == "EDITED BODY"
+                and envelope["guard_warnings"]
+                and envelope["continuation"]["status"] == "invalidated"
+                and continuations.load_record("S", "build-executor") is None,
+                "invalidated with provider output, staged warning, no record",
+                f"rc={rc} envelope={envelope} record={continuations.load_record('S', 'build-executor')!r}",
+            )
+        finally:
+            if old_project is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = old_project
+            if old_working is None:
+                os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+            else:
+                os.environ["CLAUDE_WORKING_DIRECTORY"] = old_working
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        _init_repo(str(repo))
+        _write_build_state_for_dispatch(repo, "S")
+        old_project = os.environ.get("CLAUDE_PROJECT_DIR")
+        old_working = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
+        os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+        try:
+            calls = []
+
+            class _ContendedProvider(Provider):
+                name = "codex"
+                supports_workspace_write = True
+                supports_continuation = True
+
+                def is_available(self):
+                    return True, ""
+
+                def run(self, *args, **kwargs):
+                    calls.append(kwargs)
+                    return ProviderResult(
+                        name="codex", model="o3", ok=True, output="BODY",
+                        error=None, elapsed=0.1,
+                    )
+
+            err = io.StringIO()
+            with continuations.continuation_lock(
+                "S", "build-executor", timeout=1,
+            ):
+                with mock.patch.object(cli, "get_provider", return_value=_ContendedProvider()), \
+                     mock.patch.object(
+                         continuations, "DEFAULT_CHAIN_LOCK_TIMEOUT_SECONDS", 0.05,
+                     ), contextlib.redirect_stderr(err):
+                    rc = cli.cmd_dispatch(_dispatch_ns(
+                        seat="codex", task="x", json=True,
+                        out=str(repo / "contended.json"), session_id="S",
+                        chain="build-executor",
+                    ))
+            check(
+                "held chain lock makes the second dispatch exit 2 without provider calls",
+                rc == 2 and not calls and "continuation lock" in err.getvalue(),
+                "exit 2, zero provider calls, lock diagnostic",
+                f"rc={rc} calls={calls} stderr={err.getvalue()!r}",
+            )
+        finally:
+            if old_project is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = old_project
+            if old_working is None:
+                os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+            else:
+                os.environ["CLAUDE_WORKING_DIRECTORY"] = old_working
+
+    for label, setup_error in (
+        ("continuation path error", continuations.ContinuationError("symlink component")),
+        ("lock setup OSError", OSError("anchor outside project")),
+    ):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _init_repo(str(repo))
+            _write_build_state_for_dispatch(repo, "S")
+            old_project = os.environ.get("CLAUDE_PROJECT_DIR")
+            old_working = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+            os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
+            os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+            try:
+                calls = []
+
+                class _NeverProvider(Provider):
+                    name = "codex"
+                    supports_workspace_write = True
+                    supports_continuation = True
+
+                    def is_available(self):
+                        return True, ""
+
+                    def run(self, *args, **kwargs):
+                        calls.append(kwargs)
+                        raise AssertionError("provider must not run")
+
+                out_path = repo / "lock-setup.json"
+                err = io.StringIO()
+                with mock.patch.object(
+                    cli, "get_provider", return_value=_NeverProvider(),
+                ), mock.patch.object(
+                    continuations, "_continuation_paths", side_effect=setup_error,
+                ), contextlib.redirect_stderr(err):
+                    rc = cli.cmd_dispatch(_dispatch_ns(
+                        seat="codex", task="x", json=True, out=str(out_path),
+                        session_id="S", chain="build-executor",
+                    ))
+                check(
+                    f"{label} exits cleanly without a traceback",
+                    rc == 2 and not calls and not out_path.exists()
+                    and "Traceback" not in err.getvalue()
+                    and str(setup_error) in err.getvalue(),
+                    "exit 2, no provider, no envelope, no traceback",
+                    f"rc={rc} calls={calls} out={out_path.exists()} "
+                    f"stderr={err.getvalue()!r}",
+                )
+            finally:
+                if old_project is None:
+                    os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                else:
+                    os.environ["CLAUDE_PROJECT_DIR"] = old_project
+                if old_working is None:
+                    os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+                else:
+                    os.environ["CLAUDE_WORKING_DIRECTORY"] = old_working
+
+    for ok, expected_status, expected_rc in (
+        (True, "created", 0),
+        (False, "capture_failed", 1),
+    ):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _init_repo(str(repo))
+            _write_build_state_for_dispatch(repo, "S")
+            old_project = os.environ.get("CLAUDE_PROJECT_DIR")
+            old_working = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+            os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
+            os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+            try:
+                class _HumanProvider(Provider):
+                    name = "codex"
+                    supports_workspace_write = True
+                    supports_continuation = True
+
+                    def is_available(self):
+                        return True, ""
+
+                    def run(self, *args, **kwargs):
+                        return ProviderResult(
+                            name="codex", model="o3", ok=ok,
+                            output="HUMAN BODY" if ok else "",
+                            error=None if ok else "provider failed", elapsed=0.1,
+                            continuation=ContinuationOutcome(
+                                capability="supported", phase="fresh",
+                                conversation_id="human-thread" if ok else None,
+                                failure="none" if ok else "error",
+                            ),
+                            continuation_id="human-thread" if ok else None,
+                        )
+
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                guard_warning = "guard warning"
+                with mock.patch.object(cli, "get_provider", return_value=_HumanProvider()), \
+                     mock.patch.object(
+                         cli, "_dispatch_guard_warnings", return_value=[guard_warning],
+                     ), \
+                     contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    rc = cli.cmd_dispatch(_dispatch_ns(
+                        seat="codex", task="x", json=False,
+                        session_id="S", chain="build-executor",
+                    ))
+                human_path = repo / ".crew" / "reviews" / "S" / "dispatch-codex.json"
+                stream = human_path.read_text() if ok else stderr.getvalue()
+                lines = stream.splitlines()
+                status_line = f"continuation: {expected_status}"
+                order_ok = (
+                    guard_warning in lines
+                    and status_line in lines
+                    and lines.index(status_line) > lines.index(guard_warning)
+                )
+                check(
+                    f"human chained {'success' if ok else 'failure'} places continuation after guard warnings",
+                    rc == expected_rc and order_ok,
+                    f"rc {expected_rc}, {status_line} after guard warning",
+                    f"rc={rc} stdout={stdout.getvalue()!r} stderr={stderr.getvalue()!r}",
+                )
+            finally:
+                if old_project is None:
+                    os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                else:
+                    os.environ["CLAUDE_PROJECT_DIR"] = old_project
+                if old_working is None:
+                    os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+                else:
+                    os.environ["CLAUDE_WORKING_DIRECTORY"] = old_working
+
+
+def test_dispatch_chain_gates_and_regression():
+    log_section("dispatch --chain gates and unchained regression")
+    from multiagent import cli
+    from multiagent.providers import Provider
+    import contextlib
+    import io
+    import unittest.mock as mock
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        repo = root / "repo"
+        repo.mkdir()
+        _init_repo(str(repo))
+        _write_build_state_for_dispatch(repo, "S")
+        bins = root / "bin"
+        bins.mkdir()
+        calls = root / "calls.jsonl"
+        fake = f"""
+        import json, sys
+
+        args = sys.argv[1:]
+        if "--help" in args:
+            if args[:2] == ["exec", "resume"]:
+                sys.exit(0)
+            print("codex exec --json")
+            sys.exit(0)
+        sys.stdin.read()
+        with open({str(calls)!r}, "a") as handle:
+            handle.write(json.dumps({{"args": args}}) + "\\n")
+        output = args[args.index("-o") + 1]
+        with open(output, "w") as handle:
+            handle.write("BODY")
+        print(json.dumps({{"type": "thread.started", "thread_id": "gate-thread"}}))
+        sys.exit(0)
+        """
+        make_fake_bin(bins, "codex", fake)
+        env = path_with(bins)
+        env["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+        env["CLAUDE_SESSION_ID"] = "environment-session"
+        missing = _run_cli(
+            ["dispatch", "--seat", "codex", "--chain", "build-executor",
+             "task", "--json"], env=env, cwd=str(repo), timeout=30,
+        )
+        check(
+            "missing --session-id defeats the CLAUDE_SESSION_ID environment fallback",
+            missing.returncode == 2 and not missing.stdout.strip()
+            and "explicit --session-id" in missing.stderr
+            and not calls.exists(),
+            "exit 2, no envelope, no fake provider invocation",
+            f"rc={missing.returncode} stdout={missing.stdout!r} stderr={missing.stderr!r} "
+            f"calls={calls.read_text() if calls.exists() else ''!r}",
+        )
+        explicit = _run_cli(
+            ["dispatch", "--seat", "codex", "--chain", "build-executor",
+             "task", "--json", "--session-id", "S"],
+            env=env, cwd=str(repo), timeout=30,
+        )
+        call_lines = calls.read_text().splitlines() if calls.exists() else []
+        check(
+            "the same chain proceeds when an explicit session ID is supplied",
+            explicit.returncode == 0 and call_lines,
+            "exit 0 and at least one real fake invocation",
+            f"rc={explicit.returncode} stdout={explicit.stdout!r} stderr={explicit.stderr!r} "
+            f"calls={call_lines!r}",
+        )
+        before_invalid = len(call_lines)
+        invalid = _run_cli(
+            ["dispatch", "--seat", "codex", "--chain", "../unsafe", "task",
+             "--json", "--session-id", "S"],
+            env=env, cwd=str(repo), timeout=30,
+        )
+        after_invalid = calls.read_text().splitlines() if calls.exists() else []
+        check(
+            "invalid chain name exits 2 before any provider invocation",
+            invalid.returncode == 2 and "invalid continuation chain" in invalid.stderr
+            and len(after_invalid) == before_invalid,
+            "exit 2 and no additional fake invocation",
+            f"rc={invalid.returncode} stderr={invalid.stderr!r} "
+            f"before={before_invalid} after={len(after_invalid)}",
+        )
+        help_proc = _run_cli(
+            ["dispatch", "--help"], env=env, cwd=str(repo), timeout=30,
+        )
+        check(
+            "--chain is hidden from dispatch --help",
+            help_proc.returncode == 0 and "--chain" not in help_proc.stdout,
+            "help succeeds without --chain text", help_proc.stdout,
+        )
+
+    misuse_states = (
+        ("missing", None),
+        ("inactive", {"active": False}),
+        ("reviewing", {"phase": "reviewing"}),
+        ("done", {"phase": "done"}),
+        ("empty-loop", {"loop_instance_id": ""}),
+    )
+    for label, options in misuse_states:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _init_repo(str(repo))
+            if options is not None:
+                _write_build_state_for_dispatch(repo, "S", **options)
+            old_project = os.environ.get("CLAUDE_PROJECT_DIR")
+            old_working = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+            os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
+            os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+            try:
+                calls = []
+
+                class _NeverProvider(Provider):
+                    name = "codex"
+                    supports_workspace_write = True
+                    supports_continuation = True
+
+                    def is_available(self):
+                        return True, ""
+
+                    def run(self, *args, **kwargs):
+                        calls.append(kwargs)
+                        raise AssertionError("provider must not run")
+
+                out_path = repo / "misuse.json"
+                err = io.StringIO()
+                with mock.patch.object(cli, "get_provider", return_value=_NeverProvider()), \
+                     contextlib.redirect_stderr(err):
+                    rc = cli.cmd_dispatch(_dispatch_ns(
+                        seat="codex", task="x", json=True, out=str(out_path),
+                        session_id="S", chain="build-executor",
+                    ))
+                check(
+                    f"pre-run build-state gate {label} exits before provider and envelope",
+                    rc == 2 and not calls and not out_path.exists()
+                    and "active drafting build state" in err.getvalue(),
+                    "exit 2, zero provider calls, no envelope",
+                    f"label={label} rc={rc} calls={calls} out={out_path.exists()} "
+                    f"stderr={err.getvalue()!r}",
+                )
+            finally:
+                if old_project is None:
+                    os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                else:
+                    os.environ["CLAUDE_PROJECT_DIR"] = old_project
+                if old_working is None:
+                    os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+                else:
+                    os.environ["CLAUDE_WORKING_DIRECTORY"] = old_working
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        _init_repo(str(repo))
+        old_project = os.environ.get("CLAUDE_PROJECT_DIR")
+        old_working = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
+        os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+        try:
+            calls = []
+
+            class _LegacyProvider(Provider):
+                name = "codex"
+                supports_workspace_write = True
+                supports_continuation = True
+
+                def is_available(self):
+                    return True, ""
+
+                def run(self, *args, **kwargs):
+                    calls.append((args, kwargs))
+                    return ProviderResult(
+                        name="codex", model="o3", ok=True, output="LEGACY BODY",
+                        error=None, elapsed=0.1,
+                    )
+
+            # These are the pre-chain dispatch goldens, including every legacy
+            # provider keyword and the complete serialized envelope bytes.
+            golden_head = cli._git_head(str(repo))
+            golden_staged = cli._git_staged(str(repo))
+            golden_branch = cli._git_branch(str(repo))
+            golden_kwargs = {
+                "sandbox": "workspace-write",
+                "model": None,
+                "timeout": 600,
+                "dispatch_options": None,
+            }
+            golden_envelope = {
+                "seat": "codex",
+                "model": "o3",
+                "ok": True,
+                "output": "LEGACY BODY",
+                "error": None,
+                "elapsed": 0.1,
+                "head_before": golden_head,
+                "head_after": golden_head,
+                "head_moved": False,
+                "staged_before": golden_staged,
+                "staged_after": golden_staged,
+                "staged_changed": False,
+                "branch_before": golden_branch,
+                "branch_after": golden_branch,
+                "branch_changed": False,
+                "guard_warnings": [],
+            }
+            golden_bytes = (
+                json.dumps(golden_envelope, ensure_ascii=False) + "\n"
+            ).encode()
+            out_path = repo / "unchained.json"
+            with mock.patch.object(cli.config, "default_timeout", return_value=None), \
+                 mock.patch.object(cli.config, "dispatch_provider_options", return_value={}), \
+                 mock.patch.object(cli, "get_provider", return_value=_LegacyProvider()), \
+                 mock.patch.object(
+                     continuations, "continuation_lock",
+                     side_effect=AssertionError("unchained dispatch acquired a chain lock"),
+                 ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = cli.cmd_dispatch(_dispatch_ns(
+                        seat="codex", task="x", json=True, out=str(out_path),
+                    ))
+            envelope = json.loads(out_path.read_text())
+            exact_fields = [
+                "seat", "model", "ok", "output", "error", "elapsed",
+                "head_before", "head_after", "head_moved",
+                "staged_before", "staged_after", "staged_changed",
+                "branch_before", "branch_after", "branch_changed",
+                "guard_warnings",
+            ]
+            check(
+                "unchained dispatch matches the pre-chain kwargs and envelope golden",
+                rc == 0 and calls
+                and calls[0][1] == golden_kwargs
+                and set(calls[0][1]) == set(golden_kwargs)
+                and "continuation" not in calls[0][1]
+                and list(envelope) == exact_fields
+                and set(envelope) == set(exact_fields)
+                and out_path.read_bytes() == golden_bytes,
+                "no lock, identical complete kwargs, byte-identical 16-field envelope",
+                f"rc={rc} calls={calls} envelope={envelope} "
+                f"bytes={out_path.read_bytes()!r} golden={golden_bytes!r}",
+            )
+            human = io.StringIO()
+            with mock.patch.object(cli, "get_provider", return_value=_LegacyProvider()), \
+                 contextlib.redirect_stdout(human):
+                rc_human = cli.cmd_dispatch(_dispatch_ns(
+                    seat="codex", task="x", json=False,
+                ))
+            check(
+                "unchained human dispatch prints no continuation status line",
+                rc_human == 0 and "continuation:" not in human.getvalue(),
+                "exit 0 without continuation line", human.getvalue(),
+            )
+
+            class _UnchainedOSErrorProvider(_LegacyProvider):
+                def run(self, *args, **kwargs):
+                    raise OSError("provider output failed")
+
+            unchained_error = None
+            unchained_stderr = io.StringIO()
+            try:
+                with mock.patch.object(
+                    cli, "get_provider", return_value=_UnchainedOSErrorProvider(),
+                ), contextlib.redirect_stderr(unchained_stderr):
+                    cli.cmd_dispatch(_dispatch_ns(
+                        seat="codex", task="x", json=True,
+                    ))
+            except OSError as exc:
+                unchained_error = exc
+            check(
+                "unchained provider OSError is not reported as a lock failure",
+                unchained_error is not None
+                and str(unchained_error) == "provider output failed"
+                and "could not prepare continuation lock" not in unchained_stderr.getvalue(),
+                "original OSError and no lock diagnostic",
+                f"error={unchained_error!r} stderr={unchained_stderr.getvalue()!r}",
+            )
+        finally:
+            if old_project is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = old_project
+            if old_working is None:
+                os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+            else:
+                os.environ["CLAUDE_WORKING_DIRECTORY"] = old_working
 
 
 def test_dispatch():
@@ -14388,6 +16025,13 @@ def main():
     test_production_invocation_and_fanout()
     test_run_subcommand()
     test_dispatch()
+    test_dispatch_chain()
+    test_dispatch_chain_failure_invariants()
+    test_dispatch_chain_e2e_fake_clis()
+    test_dispatch_chain_classifier_precedence()
+    test_dispatch_chain_snapshot_probes()
+    test_dispatch_chain_safety_and_output()
+    test_dispatch_chain_gates_and_regression()
     test_dispatch_options()
     test_build_md_executor_task_anchoring()
     test_init_md_detection_fence_anchoring()

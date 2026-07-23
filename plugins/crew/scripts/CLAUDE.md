@@ -474,13 +474,16 @@ Key contracts (do NOT regress):
   cursor already pins its own). `_git_head` is TRI-STATE (sha / `"<unborn>"` /
   `None`) so an unborn-repo FIRST commit is caught; all three guards are NULL-SAFE
   typed booleans (`head_moved`/`staged_changed`/`branch_changed`, never `null`).
-  Dispatch emits its OWN 16-field JSON envelope (NOT a polluted `ProviderResult`),
+  Dispatch emits its OWN unchained 16-field or chained 17-field JSON envelope (NOT a polluted `ProviderResult`),
   which adds a `guard_warnings` field (the formatted recovery strings for whichever
   guards fired, empty when none did, from the same helper the human path prints) so
   the seam relays precise recovery guidance instead of re-deriving prose from the
   booleans. It DERIVES `dispatch-<seat>.json` from `--session-id` like `run`, AND prints the
   resolved path on stdout (`collect`-style) so the command markdown reads it back
-  without constructing the filename. An unavailable-CLI seat writes a skipped
+  without constructing the filename. The internal `--chain <safe-name>` option is
+  build-loop-only and requires an explicit `--session-id`; it adds the `continuation`
+  block that makes the chained envelope 17 fields while the unchained envelope stays
+  16. An unavailable-CLI seat writes a skipped
   `ok=false` envelope (exit 0) like `run`; unknown/Task/non-writable seats exit 2
   with no envelope. codex additionally OMITS `--ignore-user-config` in
   workspace-write mode so the WORK seat loads project context (`AGENTS.md` /

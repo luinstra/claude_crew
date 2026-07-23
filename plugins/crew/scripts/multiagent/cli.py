@@ -56,6 +56,7 @@ if _PKG_PARENT not in sys.path:
 
 import argparse
 import concurrent.futures
+import contextlib
 import dataclasses
 import datetime
 import json
@@ -68,6 +69,7 @@ import time
 
 from multiagent import (
     config,
+    continuations,
     findings,
     prompts,
     render,
@@ -77,6 +79,8 @@ from multiagent import (
     targets,
 )
 from multiagent.providers import (
+    ContinuationOutcome,
+    ProviderContinuation,
     ProviderResult,
     available_seats,
     dispatch_options_by_kind,
@@ -88,7 +92,9 @@ from state_discovery import (  # the ONE `.crew` root resolver (state layer shar
     anchor_path,
     crew_base,
     cwd_reanchored,
+    find_session_state_file,
 )
+from models import LOAD_MISSING, LOAD_OK, LoopState
 # One-time stderr notes for panel/availability resolution (mirrors config.py's
 # memoized-warn posture; keyed so each distinct note fires at most once/process).
 _warned: set[str] = set()
@@ -1117,8 +1123,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 # (prompts.dispatch). A Python guard captures HEAD + staged-index + branch state
 # BEFORE and AFTER the seat runs — pinned to the SAME tree the seat edits — so a
 # commit / stage / branch-flip against instruction is LOUD and recoverable
-# (detect-not-prevent). dispatch emits its OWN 16-field JSON envelope (never a
-# polluted six-field ProviderResult).
+# (detect-not-prevent). dispatch emits its OWN 16-field unchained or 17-field
+# chained JSON envelope (never a polluted six-field ProviderResult).
 
 # A sentinel distinct from any 40-hex sha and from None: a valid git work tree
 # with NO commit yet. Serializes as a self-describing JSON string so an
@@ -1353,7 +1359,8 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
 
     Steps run in the SAME canonical order as ``cmd_run`` (derive the session
     output path BEFORE the availability check), with the HEAD/staged/branch guard
-    wrapped around the seat run and a 16-field JSON envelope emitted.
+    wrapped around the seat run and an unchained 16-field or chained 17-field
+    JSON envelope emitted.
     """
     # --options: an early, NON-BILLABLE exit. It runs BEFORE seat resolution,
     # the task-required check, and every git probe: no seat process is ever
@@ -1439,6 +1446,34 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     else:
         task = args.task
 
+    chain = getattr(args, "chain", None)
+    chain_requested = chain is not None
+    sid = ""
+    pre_loop_instance_id = ""
+    model_identity = ""
+    workspace = ""
+    if chain_requested:
+        try:
+            continuations.validate_chain_name(chain)
+        except continuations.ContinuationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if not (isinstance(args.session_id, str) and args.session_id.strip()):
+            print(
+                "error: --chain requires an explicit --session-id",
+                file=sys.stderr,
+            )
+            return 2
+        sid = args.session_id.strip()
+        if "<" in sid or ">" in sid:
+            print(
+                f"error: session id looks like an unsubstituted placeholder "
+                f"({sid!r}); pass your actual session id (the "
+                "[Session ID: …] value), not the literal template",
+                file=sys.stderr,
+            )
+            return 2
+
     # Derive -o to dispatch-<seat>.json from --session-id (run's derive block +
     # placeholder guard). An explicit -o overrides; no session + no -o -> stdout.
     if args.session_id and args.session_id.strip():
@@ -1456,117 +1491,335 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
 
     prompt = prompts.dispatch(task)
 
-    # (d) Capture git BEFORE-state (all in repo_dir).
-    head_before = _git_head(repo_dir)
-    staged_before = _git_staged(repo_dir)
-    branch_before = _git_branch(repo_dir)
-
-    # (e) Availability — unavailable-seat skip (mirrors cmd_run EXACTLY): build a
-    # SKIPPED ok=false envelope, the seat NEVER runs (after==before, all guards
-    # false), write + print the path, exit 0 under --json. DISTINCT from the
-    # exit-2 pre-run rejections in (b).
-    avail, diag = provider.is_available()
-    if not avail:
-        result = ProviderResult(
-            name=seat, model=None, ok=False, output="",
-            error=f"skipped: {diag}", elapsed=0.0,
+    if chain_requested:
+        state_path = find_session_state_file(
+            crew_base() / ".crew", "build-state", sid,
         )
-        head_after, staged_after, branch_after = head_before, staged_before, branch_before
-    else:
-        # (f) Run the seat in workspace-write. Model precedence mirrors cmd_run.
-        # This is the ONLY run() call site that passes dispatch_options (the
-        # read-only review/debate/probe paths never do).
-        timeout = _resolve_timeout(args.timeout)
-        result = provider.run(
-            prompt, sandbox="workspace-write", model=args.model, timeout=timeout,
-            dispatch_options=dispatch_opts or None,
+        state, state_status = (
+            LoopState.load_with_status(state_path)
+            if state_path is not None
+            else (LoopState(), LOAD_MISSING)
         )
-        # (g) Capture git AFTER-state (all in repo_dir).
-        head_after = _git_head(repo_dir)
-        staged_after = _git_staged(repo_dir)
-        branch_after = _git_branch(repo_dir)
+        if (
+            state_status != LOAD_OK
+            or state.active is not True
+            or state.phase != "drafting"
+            or state.session_id != sid
+            or not state.continuation_reusable
+        ):
+            print(
+                f"error: --chain requires an active drafting build state for "
+                f"session {sid!r}",
+                file=sys.stderr,
+            )
+            return 2
+        pre_loop_instance_id = state.loop_instance_id
+        model_identity = continuations.resolve_model_identity(
+            args.model, seats.seat_spec(seat).model,
+        )
+        workspace = continuations.canonical_workspace(repo_dir)
 
-    # (h) Compute the three guards NULL-SAFE (typed booleans, never null) on the
-    # internal tri-state values, then build + emit the 16-field envelope.
-    head_moved = (
-        head_before is not None and head_after is not None
-        and head_before != head_after
+    lock_cm = (
+        continuations.continuation_lock(
+            sid, chain,
+            timeout=continuations.DEFAULT_CHAIN_LOCK_TIMEOUT_SECONDS,
+        )
+        if chain_requested
+        else contextlib.nullcontext()
     )
-    staged_changed = (
-        staged_before is not None and staged_after is not None
-        and staged_before != staged_after
-    )
-    branch_changed = (
-        branch_before is not None and branch_after is not None
-        and branch_before != branch_after
-    )
 
-    # Build the guard WARNING lines ONCE (single source), so the --json envelope
-    # carries the SAME recovery strings the human path prints. The seam that reads
-    # the envelope (build.md) relays these verbatim on a guard violation, rather
-    # than re-deriving prose from the booleans. Empty list when no guard fired.
-    guard_warnings = _dispatch_guard_warnings(
-        head_moved, head_before, head_after,
-        staged_changed, branch_changed, branch_before, branch_after,
-    )
+    lock_acquiring = chain_requested
+    try:
+        with lock_cm:
+            lock_acquiring = False
+            # Capture git BEFORE-state (all in repo_dir).
+            head_before = _git_head(repo_dir)
+            staged_before = _git_staged(repo_dir)
+            branch_before = _git_branch(repo_dir)
 
-    envelope = {
-        "seat": seat,
-        "model": result.model,
-        "ok": result.ok,
-        "output": result.output,
-        "error": result.error,
-        "elapsed": result.elapsed,
-        # head_before/after: a commit sha, the "<unborn>" sentinel, or null.
-        "head_before": head_before,
-        "head_after": head_after,
-        "head_moved": head_moved,
-        # staged_before/after: the index tree hash (git write-tree) or null —
-        # NOT a bool; its CHANGE (incl. already-staged -> more-staged) drives
-        # staged_changed.
-        "staged_before": staged_before,
-        "staged_after": staged_after,
-        "staged_changed": staged_changed,
-        # branch_before/after: a branch name, the "<detached HEAD>" sentinel, or null.
-        "branch_before": branch_before,
-        "branch_after": branch_after,
-        "branch_changed": branch_changed,
-        # The formatted recovery warnings for whichever guards fired (empty list
-        # when none did), from the SAME helper the human path renders.
-        "guard_warnings": guard_warnings,
-    }
+            mem_record = None
+            expected = None
+            binding_dims = ()
+            continuation = None
+            if chain_requested:
+                mem_record = continuations.load_record(sid, chain)
+                pre_snapshot_buildable = (
+                    head_before is not None
+                    and staged_before is not None
+                    and branch_before is not None
+                    and bool(model_identity)
+                )
+                if not pre_snapshot_buildable:
+                    print(
+                        "error: cannot establish a buildable pre-run workspace "
+                        "snapshot for --chain",
+                        file=sys.stderr,
+                    )
+                    return 2
+                expected = continuations.ContinuationBinding(
+                    chain=chain,
+                    loop_instance_id=pre_loop_instance_id,
+                    seat=seat,
+                    provider=kind,
+                    model=model_identity,
+                    workspace=workspace,
+                    head=head_before,
+                    branch=branch_before,
+                    index_tree=staged_before,
+                ).normalized()
+                if mem_record is not None:
+                    binding_dims = continuations.binding_mismatches(
+                        mem_record, expected,
+                    )
+                if (
+                    provider.supports_continuation
+                    and mem_record is not None
+                    and not binding_dims
+                    and continuations.valid_conversation_id(
+                        mem_record.conversation_id,
+                    )
+                ):
+                    continuation = ProviderContinuation(
+                        conversation_id=mem_record.conversation_id,
+                    )
+                elif provider.supports_continuation:
+                    continuation = ProviderContinuation()
 
-    if args.json:
-        _emit(json.dumps(envelope, ensure_ascii=False), args.out)
-        # collect-style: announce the resolved envelope path as the LAST clean
-        # stdout line so dispatch.md reads it back without constructing the name.
-        if args.out:
-            print(args.out)
-        return 0
+            # (e) Availability — unavailable-seat skip (mirrors cmd_run EXACTLY): build a
+            # SKIPPED ok=false envelope, the seat NEVER runs (after==before, all guards
+            # false), write + print the path, exit 0 under --json. DISTINCT from the
+            # exit-2 pre-run rejections in (b).
+            # Check availability, then perform the optional pre-run tombstone.
+            avail, diag = provider.is_available()
+            if not avail:
+                result = ProviderResult(
+                    name=seat, model=None, ok=False, output="",
+                    error=f"skipped: {diag}", elapsed=0.0,
+                )
+                head_after, staged_after, branch_after = (
+                    head_before, staged_before, branch_before,
+                )
+            else:
+                if chain_requested:
+                    try:
+                        continuations.invalidate(sid, chain)
+                    except Exception as exc:
+                        print(
+                            f"error: could not prepare continuation chain "
+                            f"{chain!r}: {exc}",
+                            file=sys.stderr,
+                        )
+                        return 2
+                # (f) Run the seat in workspace-write. Model precedence mirrors cmd_run.
+                # This is the ONLY run() call site that passes dispatch_options (the
+                # read-only review/debate/probe paths never do).
+                timeout = _resolve_timeout(args.timeout)
+                extra = {"continuation": continuation} if chain_requested else {}
+                result = provider.run(
+                    prompt, sandbox="workspace-write", model=args.model,
+                    timeout=timeout,
+                    dispatch_options=dispatch_opts or None,
+                    **extra,
+                )
+                # Capture git AFTER-state (all in repo_dir).
+                head_after = _git_head(repo_dir)
+                staged_after = _git_staged(repo_dir)
+                branch_after = _git_branch(repo_dir)
 
-    # Human (non-JSON) output: header + seat output + warnings LAST in fixed order.
-    # (guard_warnings was built above, shared with the --json envelope.)
-    if not result.ok:
-        err = result.error or "unknown error"
-        # When -o is set, still WRITE the envelope file on failure so the caller
-        # has a file to read regardless of ok. Human mode WRITES the envelope but
-        # does NOT print the path (unlike the JSON path, which writes AND prints).
-        # The diagnostic still goes to stderr and the exit stays 1.
-        if args.out:
-            _emit(json.dumps(envelope, ensure_ascii=False), args.out)
-        print(err, file=sys.stderr)
-        # A seat that FAILED may still have left edits and/or committed them, so the
-        # guard warnings matter MOST here: surface them (stderr) instead of dropping
-        # them at the early failure return.
-        for warning in guard_warnings:
-            print(warning, file=sys.stderr)
-        return 1
-    header = f"dispatch: {seat}" + (f" ({result.model})" if result.model else "")
-    lines = [header, "", result.output] + guard_warnings
-    _emit("\n".join(lines), args.out)
-    if args.out:
-        print(args.out)
-    return 0
+            # Compute the three guards NULL-SAFE (typed booleans, never null)
+            # on the internal tri-state values.
+            head_moved = (
+                head_before is not None and head_after is not None
+                and head_before != head_after
+            )
+            staged_changed = (
+                staged_before is not None and staged_after is not None
+                and staged_before != staged_after
+            )
+            branch_changed = (
+                branch_before is not None and branch_after is not None
+                and branch_before != branch_after
+            )
+
+            # Build the guard WARNING lines ONCE (single source), so the --json envelope
+            # carries the SAME recovery strings the human path prints. The seam that reads
+            # the envelope (build.md) relays these verbatim on a guard violation, rather
+            # than re-deriving prose from the booleans. Empty list when no guard fired.
+            guard_warnings = _dispatch_guard_warnings(
+                head_moved, head_before, head_after,
+                staged_changed, branch_changed, branch_before, branch_after,
+            )
+
+            chain_status = None
+            chain_reset_reason = None
+            chain_resumed = False
+            if chain_requested:
+                post_snapshot_buildable = (
+                    head_after is not None
+                    and staged_after is not None
+                    and branch_after is not None
+                )
+                post_state_path = find_session_state_file(
+                    crew_base() / ".crew", "build-state", sid,
+                )
+                post_state, post_state_status = (
+                    LoopState.load_with_status(post_state_path)
+                    if post_state_path is not None
+                    else (LoopState(), LOAD_MISSING)
+                )
+                state_ok = (
+                    post_snapshot_buildable
+                    and post_state_status == LOAD_OK
+                    and post_state.active is True
+                    and post_state.phase == "drafting"
+                    and post_state.loop_instance_id == pre_loop_instance_id
+                    and post_state.session_id == sid
+                )
+                guard = {
+                    "head_moved": head_moved,
+                    "staged_changed": staged_changed,
+                    "branch_changed": branch_changed,
+                    "post_run_state_mismatch": not state_ok,
+                    "binding_mismatches": binding_dims,
+                }
+                if provider.supports_continuation:
+                    outcome = result.continuation
+                else:
+                    outcome = ContinuationOutcome(
+                        capability="unsupported",
+                        phase="fresh",
+                        failure="error" if not result.ok else "none",
+                    )
+                chain_status, action = continuations.classify_continuation(
+                    mem_record, guard, avail, outcome,
+                )
+                chain_resumed = chain_status == "resumed"
+                if action == continuations.CHAIN_ACTION_CLEAR and mem_record is not None:
+                    if binding_dims:
+                        chain_reset_reason = ", ".join(binding_dims)
+                    elif chain_status == "unsupported":
+                        chain_reset_reason = "capability:unsupported"
+                    else:
+                        chain_reset_reason = chain_status
+
+                try:
+                    if action == continuations.CHAIN_ACTION_PERSIST:
+                        # Persisting the pre-run expected binding is correct only because a guard-clean
+                        # run guarantees pre == post for head, branch, and index (a non-clean run
+                        # classifies to CLEAR and never reaches PERSIST or UPDATE). A future edit that
+                        # loosens the guard must revisit this: expected would no longer match the
+                        # post-run tree.
+                        # PERSIST uses the classifier-validated outcome ID as the
+                        # sole source of the persisted conversation identity.
+                        new_record = continuations.new_record(
+                            binding=expected,
+                            conversation_id=result.continuation.conversation_id,
+                        )
+                        continuations.save_record(sid, chain, new_record)
+                    elif action == continuations.CHAIN_ACTION_UPDATE:
+                        new_record = continuations.new_record(
+                            binding=expected,
+                            conversation_id=mem_record.conversation_id,
+                            created_at=mem_record.created_at,
+                            updated_at=datetime.datetime.now(
+                                datetime.timezone.utc,
+                            ).isoformat(),
+                        )
+                        continuations.save_record(sid, chain, new_record)
+                    # CHAIN_ACTION_CLEAR is a deliberate no-op because the pre-run tombstone
+                    # already ran. CHAIN_ACTION_KEEP is also a deliberate no-op: unavailable
+                    # runs never tombstone, and a fresh no-record path has nothing to restore.
+                except Exception as exc:
+                    print(f"note: chain store write failed: {exc}", file=sys.stderr)
+                    chain_status = "store_failed"
+                    chain_resumed = False
+                    chain_reset_reason = "chain store write failed"
+                    with contextlib.suppress(Exception):
+                        continuations.invalidate(sid, chain)
+
+            envelope = {
+                "seat": seat,
+                "model": result.model,
+                "ok": result.ok,
+                "output": result.output,
+                "error": result.error,
+                "elapsed": result.elapsed,
+                # head_before/after: a commit sha, the "<unborn>" sentinel, or null.
+                "head_before": head_before,
+                "head_after": head_after,
+                "head_moved": head_moved,
+                # staged_before/after: the index tree hash (git write-tree) or null —
+                # NOT a bool; its CHANGE (incl. already-staged -> more-staged) drives
+                # staged_changed.
+                "staged_before": staged_before,
+                "staged_after": staged_after,
+                "staged_changed": staged_changed,
+                # branch_before/after: a branch name, the "<detached HEAD>" sentinel, or null.
+                "branch_before": branch_before,
+                "branch_after": branch_after,
+                "branch_changed": branch_changed,
+                # The formatted recovery warnings for whichever guards fired (empty list
+                # when none did), from the SAME helper the human path renders.
+                "guard_warnings": guard_warnings,
+            }
+            if chain_requested:
+                envelope["continuation"] = {
+                    "chain": chain,
+                    "status": chain_status,
+                    "resumed": chain_resumed,
+                    "reset_reason": chain_reset_reason,
+                }
+
+            if args.json:
+                _emit(json.dumps(envelope, ensure_ascii=False), args.out)
+                # collect-style: announce the resolved envelope path as the LAST clean
+                # stdout line so dispatch.md reads it back without constructing the name.
+                if args.out:
+                    print(args.out)
+                return 0
+
+            # Human output keeps warning order and adds the chain status last.
+            if not result.ok:
+                err = result.error or "unknown error"
+                # When -o is set, still WRITE the envelope file on failure so the caller
+                # has a file to read regardless of ok. Human mode WRITES the envelope but
+                # does NOT print the path (unlike the JSON path, which writes AND prints).
+                # The diagnostic still goes to stderr and the exit stays 1.
+                if args.out:
+                    _emit(json.dumps(envelope, ensure_ascii=False), args.out)
+                print(err, file=sys.stderr)
+                # A seat that FAILED may still have left edits and/or committed them, so the
+                # guard warnings matter MOST here: surface them (stderr) instead of dropping
+                # them at the early failure return.
+                for warning in guard_warnings:
+                    print(warning, file=sys.stderr)
+                if chain_requested:
+                    print(f"continuation: {chain_status}", file=sys.stderr)
+                return 1
+            header = f"dispatch: {seat}" + (f" ({result.model})" if result.model else "")
+            lines = [header, "", result.output] + guard_warnings
+            if chain_requested:
+                lines.append(f"continuation: {chain_status}")
+            _emit("\n".join(lines), args.out)
+            if args.out:
+                print(args.out)
+            return 0
+    except continuations.ContinuationLockError as exc:
+        if not lock_acquiring:
+            raise
+        print(
+            f"error: could not acquire continuation lock for {chain!r}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+    except (continuations.ContinuationError, OSError) as exc:
+        if not lock_acquiring:
+            raise
+        print(
+            f"error: could not prepare continuation lock for {chain!r}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
 
 
 def cmd_build_executor(args: argparse.Namespace) -> int:
@@ -5049,6 +5302,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--session-id", dest="session_id", default=None,
         help="derive -o to .crew/reviews/<session-id>/dispatch-<seat>.json when "
              "-o is omitted. Pass the literal id; the engine resolves it.",
+    )
+    # INTERNAL build-loop option only; requires an explicit --session-id.
+    disp.add_argument(
+        "--chain", dest="chain", default=None, help=argparse.SUPPRESS,
     )
     disp.add_argument(
         "--options", action="store_true",
