@@ -25,14 +25,22 @@ which plain ``--print`` does NOT guarantee. Dropped only for workspace-write.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import time
+from dataclasses import dataclass
 
+from multiagent.continuation_ids import valid_conversation_id
 from state_discovery import crew_base  # the ONE `.crew`/project-root resolver
 
-from multiagent.providers import Provider, ProviderContinuation, ProviderResult
+from multiagent.providers import (
+    ContinuationOutcome,
+    Provider,
+    ProviderContinuation,
+    ProviderResult,
+)
 from multiagent.providers._proc import TIMEOUT, run_reaped
 
 # ANSI escape code pattern for stripping terminal colour sequences.
@@ -45,6 +53,43 @@ _ARG_MAX_BYTES = 256 * 1024
 # (e.g. "2026.06.24-00-45-58-9f61de7") — NO literal "cursor" — so this regex,
 # not a "cursor" substring, is what positively identifies the binary.
 _VERSION_DATESTAMP_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}-")
+
+# Per-process continuation capability memo, keyed by the resolved agent binary.
+_CONTINUATION_PROBE_CACHE: dict[str, bool] = {}
+PROBE_TIMEOUT = 10
+
+
+@dataclass(frozen=True)
+class _CursorStream:
+    session_id: str | None
+    mismatched_id: str | None
+    ids_mismatched: bool
+    terminal_seen: bool
+    terminal_success: bool
+    terminal_result: str
+    assistant_deltas: str
+
+
+_valid_resume_id = valid_conversation_id
+
+
+def _reset_probe_cache_for_tests() -> None:
+    # Test-only reset for isolation of the module-level probe cache.
+    _CONTINUATION_PROBE_CACHE.clear()
+
+
+def _text_from_value(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("text", "delta", "content"):
+            text = _text_from_value(value.get(key))
+            if text:
+                return text
+    if isinstance(value, list):
+        return "".join(_text_from_value(item) for item in value)
+    return ""
+
 
 # Auth-failure substrings for Cursor-specific error detection.
 _AUTH_MARKERS = (
@@ -110,8 +155,10 @@ class CursorProvider(Provider):
     # dir + snapshot anchor to) so a divergent process cwd cannot review the wrong
     # repo (or lose sandbox access to the snapshot).
     supports_workspace_write = True
-    # Cursor remains fresh-only until exact-ID probing and resume are implemented.
-    supports_continuation = False
+    # Opt-in: this adapter has an exact-ID resume path. This is a coarse gate
+    # only, the runtime probe is the per-run authority and downgrades binaries
+    # without the required resume surface to a truthful fresh run.
+    supports_continuation = True
 
     # Write-mode dispatch tuning, declared on THIS class (never inherited from
     # the ABC's shared default). Single source: the config validator, the
@@ -158,6 +205,105 @@ class CursorProvider(Provider):
             return False, "agent binary found but does not appear to be Cursor Agent"
         return True, ""
 
+    def _supports_continuation_runtime(self) -> bool:
+        path = shutil.which("agent")
+        if not path:
+            return False
+        cached = _CONTINUATION_PROBE_CACHE.get(path)
+        if cached is not None:
+            return cached
+        supported = self._probe_continuation(path)
+        _CONTINUATION_PROBE_CACHE[path] = supported
+        return supported
+
+    @staticmethod
+    def _probe_continuation(path: str) -> bool:
+        try:
+            probe = run_reaped([path, "--help"], timeout=PROBE_TIMEOUT)
+            if probe is TIMEOUT:
+                return False
+            returncode, stdout, stderr = probe
+            help_text = (stdout or "") + (stderr or "")
+            return (
+                returncode == 0
+                and "--resume" in help_text
+                and "--output-format" in help_text
+                and "stream-json" in help_text
+            )
+        except OSError:
+            return False
+
+    @staticmethod
+    def _parse_stream(stdout: str) -> _CursorStream:
+        session_id: str | None = None
+        mismatched_id: str | None = None
+        ids_mismatched = False
+        initialized = False
+        terminal_seen = False
+        terminal_success = False
+        terminal_result = ""
+        assistant_deltas: list[str] = []
+
+        for line in (stdout or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(event, dict):
+                continue
+
+            event_type = event.get("type")
+            is_init = event_type == "system" and event.get("subtype") == "init"
+            is_assistant = event_type in {"assistant", "assistant_delta", "assistant.delta"}
+            is_result = event_type == "result"
+            event_id = event.get("session_id")
+            if session_id is not None and "session_id" in event and event_id != session_id:
+                ids_mismatched = True
+                mismatched_id = event_id if _valid_resume_id(event_id) else None
+
+            if is_init:
+                if not initialized:
+                    initialized = True
+                    if _valid_resume_id(event_id):
+                        session_id = event_id
+
+            if not (is_init or is_assistant or is_result):
+                continue
+
+            if is_assistant:
+                delta = _text_from_value(event.get("delta"))
+                if not delta:
+                    delta = _text_from_value(event.get("text"))
+                if not delta:
+                    delta = _text_from_value(event.get("message"))
+                if not delta:
+                    delta = _text_from_value(event.get("content"))
+                if delta:
+                    assistant_deltas.append(delta)
+
+            if is_result:
+                terminal_seen = True
+                subtype = event.get("subtype")
+                terminal_success = (
+                    subtype == "success"
+                    and event.get("is_error") is False
+                )
+                if terminal_success:
+                    terminal_result = _text_from_value(event.get("result"))
+
+        return _CursorStream(
+            session_id=session_id,
+            mismatched_id=mismatched_id,
+            ids_mismatched=ids_mismatched,
+            terminal_seen=terminal_seen,
+            terminal_success=terminal_success,
+            terminal_result=terminal_result,
+            assistant_deltas="".join(assistant_deltas),
+        )
+
     def run(
         self,
         prompt: str,
@@ -180,17 +326,81 @@ class CursorProvider(Provider):
         enabled`` additionally blocks network + out-of-workspace access. Only
         ``sandbox="workspace-write"`` drops ``--mode plan`` (writes permitted).
         """
+        start = time.monotonic()
+
         # Precedence: explicit model (CLI --model) > the seat's resolved model
         # (the catalog already folded the config layers over the shipped pin).
         chosen_model = model or self._default_model
+        want_continuation = continuation is not None and sandbox == "workspace-write"
+        requested_resume_id = continuation.conversation_id if want_continuation else None
+
+        capable = False
+        phase = "fresh"
+        capability = "unsupported"
+
+        # Every chained-path early exit must thread an outcome through this helper.
+        def make_continuation_result(
+            *,
+            ok: bool,
+            output: str,
+            error: str | None,
+            failure: str = "none",
+            conversation_id: str | None = None,
+            continuation_id: str | None = None,
+        ) -> ProviderResult:
+            values = {
+                "name": self.name,
+                "model": chosen_model,
+                "ok": ok,
+                "output": output,
+                "error": error,
+                "elapsed": time.monotonic() - start,
+            }
+            if want_continuation:
+                values["continuation"] = ContinuationOutcome(
+                    capability=capability,
+                    phase=phase,
+                    conversation_id=conversation_id,
+                    failure=failure,
+                )
+                values["continuation_id"] = continuation_id
+            return ProviderResult(**values)
+
         if not chosen_model:
-            return ProviderResult(
-                name=self.name, model=None, ok=False, output="",
+            capable = want_continuation and self._supports_continuation_runtime()
+            resume_id = requested_resume_id if capable else None
+            phase = "resume" if resume_id is not None else "fresh"
+            capability = "supported" if capable else "unsupported"
+            return make_continuation_result(
+                ok=False,
+                output="",
                 error=(f"cursor seat {self.name!r} has no model configured; pass "
                        f"--model or set [seats.{self.name}].model in .crew/config.toml "
                        f"or ~/.crew-config.toml"),
-                elapsed=0.0,
+                failure="error",
             )
+
+        if requested_resume_id is not None and not _valid_resume_id(requested_resume_id):
+            return ProviderResult(
+                name=self.name,
+                model=chosen_model,
+                ok=False,
+                output="",
+                error="cursor resume ID is invalid",
+                elapsed=0.0,
+                continuation=ContinuationOutcome(
+                    capability="supported",
+                    phase="resume",
+                    conversation_id=None,
+                    failure="error",
+                ),
+                continuation_id=None,
+            )
+        capable = want_continuation and self._supports_continuation_runtime()
+        resume_id = requested_resume_id if capable else None
+        phase = "resume" if resume_id is not None else "fresh"
+        capability = "supported" if capable else "unsupported"
+
         # A WORK seat edits CLAUDE_WORKING_DIRECTORY (the guard's tree); a
         # read-only review seat pins cwd + --workspace to crew_base() so a
         # divergent process cwd reviews the project, not whatever tree cwd is in.
@@ -202,14 +412,17 @@ class CursorProvider(Provider):
 
         prompt_bytes = len(prompt.encode("utf-8"))
         if prompt_bytes > _ARG_MAX_BYTES:
-            return ProviderResult(
-                name=self.name, model=chosen_model, ok=False, output="",
+            return make_continuation_result(
+                ok=False,
+                output="",
                 error=(f"Prompt too large for subprocess seat ({prompt_bytes} bytes "
                        f"> {_ARG_MAX_BYTES} byte cap). Use a shorter prompt."),
-                elapsed=0.0,
+                failure="error",
             )
 
         cmd = ["agent", "--print"]
+        if resume_id:
+            cmd += ["--resume", resume_id]
         # read-only review posture: --mode plan applies NO edits (verified) while
         # still allowing read-only shell (git diff) + producing review output.
         if sandbox != "workspace-write":
@@ -226,61 +439,121 @@ class CursorProvider(Provider):
                 cmd += ["--force"]
             if dispatch_options.get("approve_mcps") is True:
                 cmd += ["--approve-mcps"]
+        if capable:
+            cmd += ["--output-format", "stream-json"]
         cmd += [
             "--sandbox", "enabled", "--trust",
             "--workspace", cwd, "--model", chosen_model, prompt,
         ]
-        start = time.monotonic()
         # Shared reaped runner: start_new_session + SIGTERM→SIGKILL killpg
         # teardown on timeout so a hung cursor agent can't orphan billable
         # grandchildren. OSError (launch failure) preserved as before.
         try:
             result = run_reaped(cmd, timeout=timeout, cwd=cwd)
         except OSError as exc:
-            return ProviderResult(
-                name=self.name, model=chosen_model, ok=False, output="",
-                error=f"Failed to launch agent: {exc}",
-                elapsed=time.monotonic() - start,
+            return make_continuation_result(
+                ok=False, output="", error=f"Failed to launch agent: {exc}", failure="error"
             )
         if result is TIMEOUT:
-            return ProviderResult(
-                name=self.name, model=chosen_model, ok=False, output="",
+            return make_continuation_result(
+                ok=False,
+                output="",
                 error=f"Cursor Agent timed out after {timeout}s",
-                elapsed=time.monotonic() - start,
+                failure="timeout",
             )
         returncode, proc_stdout, proc_stderr = result
 
-        elapsed = time.monotonic() - start
+        if capable:
+            stream = self._parse_stream(proc_stdout)
+            reported_id = (
+                stream.mismatched_id
+                if stream.ids_mismatched
+                else stream.session_id
+            )
+            if stream.terminal_seen:
+                output = stream.terminal_result if stream.terminal_success else ""
+            else:
+                output = stream.assistant_deltas
+            output = _strip_ansi(output).strip()
+            stderr_clean = _strip_ansi(proc_stderr).strip()
+            auth_marker = _auth_failure_marker(output + stderr_clean)
+            if auth_marker is not None:
+                return make_continuation_result(
+                    ok=False,
+                    output=output,
+                    error=(f"Cursor Agent authentication required (detected: {auth_marker!r}). "
+                           "Sign in at cursor.com/login."),
+                    failure="error",
+                )
+            if returncode != 0:
+                return make_continuation_result(
+                    ok=False,
+                    output="",
+                    error=stderr_clean or f"agent exited with code {returncode}",
+                    failure="error",
+                    conversation_id=reported_id,
+                )
+
+            if not output:
+                return make_continuation_result(
+                    ok=False,
+                    output="",
+                    error=("agent returned empty stream result at exit 0"
+                           + (f"; stderr: {stderr_clean[:500]}" if stderr_clean else "")),
+                    failure="error",
+                    conversation_id=reported_id,
+                )
+
+            failure = "none"
+            if (
+                not stream.terminal_seen
+                or not stream.terminal_success
+                or stream.ids_mismatched
+                or (
+                    phase == "resume" and stream.session_id != resume_id
+                )
+            ):
+                failure = "error"
+            persisted_id = stream.session_id if failure == "none" else None
+            return make_continuation_result(
+                ok=True,
+                output=output,
+                error=None,
+                failure=failure,
+                conversation_id=reported_id,
+                continuation_id=persisted_id,
+            )
+
         raw_output = _strip_ansi(proc_stdout)
         combined_lower = (raw_output + proc_stderr).lower()
         auth_marker = _auth_failure_marker(combined_lower)
         if auth_marker is not None:
-            return ProviderResult(
-                name=self.name, model=chosen_model, ok=False, output=raw_output,
+            return make_continuation_result(
+                ok=False, output=raw_output,
                 error=(f"Cursor Agent authentication required (detected: {auth_marker!r}). "
                        "Sign in at cursor.com/login."),
-                elapsed=elapsed,
+                failure="error",
             )
         if returncode != 0:
-            return ProviderResult(
-                name=self.name, model=chosen_model, ok=False, output=raw_output,
+            return make_continuation_result(
+                ok=False, output=raw_output,
                 error=(f"agent exited with code {returncode}. "
                        f"stderr: {_strip_ansi(proc_stderr)[:500]}"),
-                elapsed=elapsed,
+                failure="error",
             )
         # Empty output at exit 0 is NOT a valid review (mirrors codex/agy): an
         # all-empty panel must not be rendered as an OK "(no output)" review.
         if not raw_output.strip():
             stderr_clean = _strip_ansi(proc_stderr).strip()
-            return ProviderResult(
-                name=self.name, model=chosen_model, ok=False, output="",
+            return make_continuation_result(
+                ok=False, output="",
                 error=("agent returned empty output at exit 0"
                        + (f"; stderr: {stderr_clean[:500]}" if stderr_clean else "")),
-                elapsed=elapsed,
+                failure="error",
             )
-        return ProviderResult(
-            name=self.name, model=chosen_model, ok=True, output=raw_output,
-            error=None, elapsed=elapsed,
+        return make_continuation_result(
+            ok=True, output=raw_output, error=None,
+            continuation_id=None,
         )
 
 

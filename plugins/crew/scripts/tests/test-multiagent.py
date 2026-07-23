@@ -694,6 +694,437 @@ def test_codex_continuation():
 
 
 # =============================================================================
+# CursorProvider continuation tests (fake `agent` with a capability probe and
+# stream-JSON session events).
+# =============================================================================
+
+_CURSOR_CONTINUATION_FAKE = '''
+import json, os, sys
+
+args = sys.argv[1:]
+
+if "--version" in args:
+    print("2026.07.20-00-00-00-test")
+    sys.exit(0)
+
+if "--help" in args:
+    probe_log = os.environ.get("FAKE_PROBE_LOG")
+    if probe_log:
+        with open(probe_log, "a") as f:
+            f.write(" ".join(args) + "\\n")
+    text = "usage: agent [options]\\n"
+    if not os.environ.get("FAKE_NO_RESUME"):
+        text += "  --resume <chatId>\\n"
+    if not os.environ.get("FAKE_NO_OUTPUT_FORMAT"):
+        text += "  --output-format <format>\\n"
+    if not os.environ.get("FAKE_NO_STREAM_JSON"):
+        text += "  stream-json\\n"
+    sys.stdout.write(text)
+    sys.exit(0)
+
+with open(CAPTURE, "w") as f:
+    json.dump({"args": args, "cwd": os.getcwd()}, f)
+
+if os.environ.get("FAKE_SLEEP"):
+    import time
+    time.sleep(float(os.environ["FAKE_SLEEP"]))
+
+if "--output-format" in args:
+    if "FAKE_STDOUT" in os.environ:
+        stdout = os.environ["FAKE_STDOUT"]
+    else:
+        session_id = os.environ.get("FAKE_SESSION_ID", "cursor-session-xyz")
+        stdout = (
+            json.dumps({"type": "system", "subtype": "init",
+                        "session_id": session_id}) + "\\n"
+            + json.dumps({"type": "result", "subtype": "success",
+                          "is_error": False, "result": "CURSOR EDIT DONE",
+                          "session_id": session_id}) + "\\n"
+        )
+else:
+    stdout = "CURSOR LEGACY OUTPUT"
+sys.stdout.write(stdout)
+
+if os.environ.get("FAKE_STDERR"):
+    sys.stderr.write(os.environ["FAKE_STDERR"])
+
+sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
+'''
+
+
+def _run_cursor_with_fake(*, continuation, sandbox="workspace-write", model="m1",
+                          dispatch_options=None, timeout=10, env_extra=None,
+                          prompt="PROMPT-BODY"):
+    """Drive CursorProvider.run() against the continuation fake."""
+    from multiagent.providers import cursor as cursor_mod
+    cursor_mod._reset_probe_cache_for_tests()
+    prov = cursor_mod.CursorProvider(name="cursor-test", default_model=model)
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        capture = d / "capture.json"
+        full = f"CAPTURE = {str(capture)!r}\n" + _CURSOR_CONTINUATION_FAKE
+        make_fake_bin(d, "agent", full)
+        env_path = os.environ["PATH"]
+        os.environ["PATH"] = str(d) + os.pathsep + env_path
+        saved = {}
+        if env_extra:
+            for k, v in env_extra.items():
+                saved[k] = os.environ.get(k)
+                os.environ[k] = v
+        try:
+            res = prov.run(prompt, sandbox=sandbox, model=model, timeout=timeout,
+                           dispatch_options=dispatch_options, continuation=continuation)
+        finally:
+            os.environ["PATH"] = env_path
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        cap = json.loads(capture.read_text()) if capture.exists() else None
+        return res, cap
+
+
+def test_cursor_continuation():
+    log_section("CursorProvider continuation (fake agent + capability probe)")
+
+    res, cap = _run_cursor_with_fake(
+        continuation=ProviderContinuation(),
+        env_extra={"FAKE_SESSION_ID": "cursor-session-xyz"},
+    )
+    check("fresh chained run: terminal result.result becomes output",
+          res.ok and res.output == "CURSOR EDIT DONE",
+          "ok=True 'CURSOR EDIT DONE'", f"ok={res.ok} output={res.output!r}")
+    check("fresh chained run: stream-json is continuation-only",
+          cap is not None and "--output-format" in cap["args"]
+          and cap["args"][cap["args"].index("--output-format") + 1] == "stream-json"
+          and cap["args"][-1] == "PROMPT-BODY",
+          "--output-format stream-json, prompt last", str(cap))
+    outcome = res.continuation
+    check("fresh chained run: init session_id captured and persisted",
+          outcome is not None and outcome.capability == "supported"
+          and outcome.phase == "fresh" and outcome.conversation_id == "cursor-session-xyz"
+          and outcome.failure == "none" and res.continuation_id == "cursor-session-xyz",
+          "supported/fresh/cursor-session-xyz/none",
+          f"outcome={outcome!r} id={res.continuation_id!r}")
+
+    with tempfile.TemporaryDirectory() as td:
+        from multiagent.providers import cursor as cursor_mod
+        cursor_mod._reset_probe_cache_for_tests()
+        d = Path(td)
+        capture = d / "capture.json"
+        probe_log = d / "probe.log"
+        make_fake_bin(d, "agent", f"CAPTURE = {str(capture)!r}\n" + _CURSOR_CONTINUATION_FAKE)
+        env_path = os.environ["PATH"]
+        os.environ["PATH"] = str(d) + os.pathsep + env_path
+        old_probe_log = os.environ.get("FAKE_PROBE_LOG")
+        os.environ["FAKE_PROBE_LOG"] = str(probe_log)
+        try:
+            prov = cursor_mod.CursorProvider(name="cursor-test", default_model="m1")
+            res = prov.run("PROMPT-BODY", sandbox="workspace-write", timeout=10,
+                           continuation=ProviderContinuation())
+            first = probe_log.read_text().splitlines() if probe_log.exists() else []
+            res2 = prov.run("PROMPT-BODY", sandbox="workspace-write", timeout=10,
+                            continuation=ProviderContinuation())
+            second = probe_log.read_text().splitlines() if probe_log.exists() else []
+        finally:
+            os.environ["PATH"] = env_path
+            if old_probe_log is None:
+                os.environ.pop("FAKE_PROBE_LOG", None)
+            else:
+                os.environ["FAKE_PROBE_LOG"] = old_probe_log
+        check("capability probe: help is non-billable and requires all stream flags",
+              first and all("--help" in line for line in first)
+              and any("--help" in line for line in first)
+              and res.ok and res2.ok,
+              "help-only probe and successful runs", str(first))
+        check("capability probe: memoized per resolved binary path",
+              len(second) == len(first), f"{len(first)} probe calls", str(second))
+
+    res, cap = _run_cursor_with_fake(
+        continuation=ProviderContinuation("cursor-session-abc"),
+        dispatch_options={"force": True, "approve_mcps": True},
+        env_extra={"FAKE_SESSION_ID": "cursor-session-abc"},
+    )
+    args = cap["args"]
+    resume_index = args.index("--resume")
+    check("resume run: exact ID, no --continue, prompt remains final positional",
+          args[resume_index + 1] == "cursor-session-abc"
+          and "--continue" not in args and args[-1] == "PROMPT-BODY",
+          "--resume cursor-session-abc ... PROMPT-BODY", str(args))
+    check("resume run: workspace/model/sandbox/trust/force/MCP options remain",
+          "--sandbox" in args and "enabled" in args and "--trust" in args
+          and "--workspace" in args and "--model" in args and "m1" in args
+          and "--force" in args and "--approve-mcps" in args
+          and args.index("--resume") < args.index("--sandbox"),
+          "all outer options retained", str(args))
+    outcome = res.continuation
+    check("resume run: confirmed ID produces successful resume outcome",
+          res.ok and outcome is not None and outcome.phase == "resume"
+          and outcome.conversation_id == "cursor-session-abc"
+          and outcome.failure == "none" and res.continuation_id == "cursor-session-abc",
+          "ok/resume/confirmed ID/none", f"{outcome!r} id={res.continuation_id!r}")
+
+    noisy = (
+        "not json\n"
+        + json.dumps({"type": "unknown", "session_id": "ignored"}) + "\n"
+        + json.dumps({"type": "system", "subtype": "init",
+                      "session_id": "cursor-noisy"}) + "\n"
+        + json.dumps({"type": "assistant", "delta": {"text": "PART "},
+                      "session_id": "cursor-noisy"}) + "\n"
+        + json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                      "result": "DONE",
+                      "session_id": "cursor-noisy"}) + "\n"
+    )
+    res, _ = _run_cursor_with_fake(
+        continuation=ProviderContinuation(), env_extra={"FAKE_STDOUT": noisy})
+    check("stream parser: malformed and unknown events do not traceback",
+          res.ok and res.output == "DONE" and res.continuation_id == "cursor-noisy",
+          "successful parsed result", f"{res!r}")
+
+    mismatched = (
+        json.dumps({"type": "system", "subtype": "init",
+                    "session_id": "cursor-session-abc"}) + "\n"
+        + json.dumps({"type": "assistant", "delta": "partial",
+                      "session_id": "cursor-session-other"}) + "\n"
+        + json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                      "result": "DONE",
+                      "session_id": "cursor-session-abc"}) + "\n"
+    )
+    res, _ = _run_cursor_with_fake(
+        continuation=ProviderContinuation("cursor-session-abc"),
+        env_extra={"FAKE_STDOUT": mismatched},
+    )
+    outcome = res.continuation
+    check("mismatched later ID: edits kept, continuation fails, ID not persisted",
+          res.ok and outcome is not None and outcome.failure == "error"
+          and res.continuation_id is None,
+          "ok=True/failure=error/no persisted ID", f"{res!r}")
+
+    non_assistant_mismatch = (
+        json.dumps({"type": "system", "subtype": "init",
+                    "session_id": "cursor-session-abc"}) + "\n"
+        + json.dumps({"type": "user", "message": "input",
+                      "session_id": "cursor-session-other"}) + "\n"
+        + json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                      "result": "DONE",
+                      "session_id": "cursor-session-abc"}) + "\n"
+    )
+    res, _ = _run_cursor_with_fake(
+        continuation=ProviderContinuation("cursor-session-abc"),
+        env_extra={"FAKE_STDOUT": non_assistant_mismatch},
+    )
+    outcome = res.continuation
+    check("mismatched non-assistant ID: continuation fails without persistence",
+          res.ok and res.output == "DONE" and outcome is not None
+          and outcome.phase == "resume" and outcome.failure == "error"
+          and res.continuation_id is None,
+          "ok=True/resume/failure=error/no persisted ID", f"{res!r}")
+
+    missing_id = json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                             "result": "DONE"}) + "\n"
+    res, _ = _run_cursor_with_fake(
+        continuation=ProviderContinuation("cursor-session-abc"),
+        env_extra={"FAKE_STDOUT": missing_id},
+    )
+    outcome = res.continuation
+    check("resume without confirmed init ID: hard failure and no persistence",
+          res.ok and outcome is not None and outcome.phase == "resume"
+          and outcome.failure == "error" and outcome.conversation_id is None
+          and res.continuation_id is None,
+          "ok=True/resume/error/None", f"{res!r}")
+
+    delta_stream = (
+        json.dumps({"type": "system", "subtype": "init",
+                    "session_id": "cursor-delta"}) + "\n"
+        + json.dumps({"type": "assistant", "delta": "one",
+                      "session_id": "cursor-delta"}) + "\n"
+        + json.dumps({"type": "assistant", "delta": {"text": " two"},
+                      "session_id": "cursor-delta"}) + "\n"
+    )
+    res, _ = _run_cursor_with_fake(
+        continuation=ProviderContinuation(), env_extra={"FAKE_STDOUT": delta_stream})
+    outcome = res.continuation
+    check("missing terminal result: deltas remain displayable without persistence",
+          res.ok and res.output == "one two" and outcome is not None
+          and outcome.failure == "error" and res.continuation_id is None,
+          "ok=True 'one two'/failure=error/no ID", f"{res!r}")
+
+    message_stream = (
+        json.dumps({"type": "system", "subtype": "init",
+                    "session_id": "cursor-message"}) + "\n"
+        + json.dumps({"type": "assistant", "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "canonical "},
+                        {"type": "text", "text": "message"}],
+        }, "session_id": "cursor-message"}) + "\n"
+    )
+    res, _ = _run_cursor_with_fake(
+        continuation=ProviderContinuation(), env_extra={"FAKE_STDOUT": message_stream})
+    outcome = res.continuation
+    check("missing terminal result: message fallback does not advance chain",
+          res.ok and res.output == "canonical message" and outcome is not None
+          and outcome.failure == "error" and res.continuation_id is None,
+          "ok=True 'canonical message'/failure=error/no ID", f"{res!r}")
+
+    for label, result_fields in (
+        ("non-success subtype", {"subtype": "error", "is_error": False}),
+        ("error flag", {"subtype": "success", "is_error": True}),
+        ("missing subtype", {"is_error": False}),
+        ("missing error flag", {"subtype": "success"}),
+    ):
+        terminal = {"type": "result", "result": "DISPLAY ONLY", **result_fields}
+        status_stream = (
+            json.dumps({"type": "system", "subtype": "init",
+                        "session_id": "cursor-status"}) + "\n"
+            + json.dumps(terminal) + "\n"
+        )
+        res, _ = _run_cursor_with_fake(
+            continuation=ProviderContinuation(), env_extra={"FAKE_STDOUT": status_stream})
+        outcome = res.continuation
+        check(f"terminal {label}: no continuation persistence",
+              outcome is not None and outcome.failure == "error"
+              and res.continuation_id is None,
+              "failure=error/no ID", f"{res!r}")
+
+    empty_stream = json.dumps({"type": "system", "subtype": "init",
+                               "session_id": "cursor-empty"}) + "\n"
+    res, _ = _run_cursor_with_fake(
+        continuation=ProviderContinuation(), env_extra={"FAKE_STDOUT": empty_stream})
+    outcome = res.continuation
+    check("empty stream: exit 0 is a failure, not a delta fallback",
+          res.ok is False and outcome is not None and outcome.failure == "error"
+          and "empty" in (res.error or "").lower(),
+          "ok=False/failure=error/empty diagnostic", f"{res!r}")
+
+    empty_result = (
+        json.dumps({"type": "system", "subtype": "init",
+                    "session_id": "cursor-empty-result"}) + "\n"
+        + json.dumps({"type": "assistant", "delta": "do not use",
+                      "session_id": "cursor-empty-result"}) + "\n"
+        + json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                      "result": "",
+                      "session_id": "cursor-empty-result"}) + "\n"
+    )
+    res, _ = _run_cursor_with_fake(
+        continuation=ProviderContinuation(), env_extra={"FAKE_STDOUT": empty_result})
+    outcome = res.continuation
+    check("empty terminal result: failure, no assistant-delta fallback",
+          res.ok is False and res.output == "" and outcome is not None
+          and outcome.failure == "error" and res.continuation_id is None,
+          "ok=False/empty output/no persistence", f"{res!r}")
+
+    auth_stream = (
+        json.dumps({"type": "system", "subtype": "init",
+                    "session_id": "cursor-auth"}) + "\n"
+        + json.dumps({"type": "result", "subtype": "success",
+                      "is_error": False,
+                      "result": "\x1b[31msign in to continue\x1b[0m",
+                      "session_id": "cursor-auth"}) + "\n"
+    )
+    res, _ = _run_cursor_with_fake(
+        continuation=ProviderContinuation(), env_extra={"FAKE_STDOUT": auth_stream})
+    outcome = res.continuation
+    check("capable exit-0 auth banner: normalized failure, no ID persistence",
+          res.ok is False and "authentication required" in (res.error or "")
+          and "\x1b" not in res.output and outcome is not None
+          and outcome.failure == "error" and outcome.conversation_id is None
+          and res.continuation_id is None,
+          "ok=False/failure=error/no persisted ID", f"{res!r}")
+
+    res, _ = _run_cursor_with_fake(
+        continuation=ProviderContinuation(),
+        env_extra={"FAKE_EXIT": "1", "FAKE_STDERR": "backend failed"},
+    )
+    check("capable nonzero exit: stderr preserved, stream JSON not leaked",
+          res.ok is False and "backend failed" in (res.error or "")
+          and "session_id" not in (res.error or "")
+          and "system" not in (res.error or ""),
+          "stderr diagnostic without raw stream", repr(res.error))
+
+    res, _ = _run_cursor_with_fake(
+        continuation=ProviderContinuation(), timeout=1,
+        env_extra={"FAKE_SLEEP": "10"},
+    )
+    outcome = res.continuation
+    check("capable timeout: timeout failure and no ID persistence",
+          res.ok is False and outcome is not None and outcome.failure == "timeout"
+          and outcome.conversation_id is None and res.continuation_id is None,
+          "ok=False/failure=timeout/no ID", f"{res!r}")
+
+    from multiagent.providers import cursor as cursor_mod
+    oversized = "x" * (cursor_mod._ARG_MAX_BYTES + 1)
+    res, cap = _run_cursor_with_fake(
+        continuation=ProviderContinuation("cursor-session-abc"), prompt=oversized)
+    outcome = res.continuation
+    check("oversized chained prompt: error outcome preserves resume phase",
+          res.ok is False and cap is None and outcome is not None
+          and outcome.capability == "supported" and outcome.phase == "resume"
+          and outcome.failure == "error" and outcome.conversation_id is None
+          and res.continuation_id is None,
+          "ok=False/supported/resume/failure=error/no ID", f"{res!r}")
+
+    res, cap = _run_cursor_with_fake(
+        continuation=ProviderContinuation("cursor-session-abc"), model=None)
+    outcome = res.continuation
+    check("no-model chained run: error outcome preserves probed resume phase",
+          res.ok is False and cap is None and outcome is not None
+          and outcome.capability == "supported" and outcome.phase == "resume"
+          and outcome.failure == "error" and outcome.conversation_id is None
+          and res.continuation_id is None,
+          "ok=False/supported/resume/failure=error/no ID", f"{res!r}")
+
+    for captured_id in ("   ", "--captured"):
+        res, _ = _run_cursor_with_fake(
+            continuation=ProviderContinuation(),
+            env_extra={"FAKE_SESSION_ID": captured_id},
+        )
+        outcome = res.continuation
+        status = continuations.classify_continuation(None, True, True, outcome)
+        check("invalid captured session ID is dropped and classified unavailable",
+              res.ok and outcome is not None and outcome.conversation_id is None
+              and outcome.failure == "none" and res.continuation_id is None
+              and status == ("unavailable", "keep"),
+              "failure=none, unavailable/keep, no continuation ID",
+              f"{res!r} status={status!r}")
+
+    for knob in ("FAKE_NO_RESUME", "FAKE_NO_OUTPUT_FORMAT", "FAKE_NO_STREAM_JSON"):
+        res, cap = _run_cursor_with_fake(
+            continuation=ProviderContinuation("cursor-session-abc"),
+            env_extra={knob: "1"},
+        )
+        outcome = res.continuation
+        check(f"unsupported help surface ({knob}): fresh run without stream or resume",
+              res.ok and cap is not None and "--resume" not in cap["args"]
+              and "--output-format" not in cap["args"]
+              and outcome is not None and outcome.capability == "unsupported"
+              and outcome.phase == "fresh" and outcome.conversation_id is None
+              and res.continuation_id is None,
+              "fresh/unsupported/no continuation argv", f"{res!r} args={cap}")
+
+    res, cap = _run_cursor_with_fake(
+        continuation=ProviderContinuation("cursor-session-abc"),
+        sandbox="read-only", dispatch_options={"force": True, "approve_mcps": True},
+    )
+    args = cap["args"]
+    check("read-only continuation: legacy argv unchanged and no outcome",
+          args[0:3] == ["--print", "--mode", "plan"]
+          and "--output-format" not in args and "--resume" not in args
+          and "--force" not in args and "--approve-mcps" not in args
+          and res.continuation is None and res.continuation_id is None
+          and args[-1] == "PROMPT-BODY",
+          "legacy read-only argv", str(args))
+
+    res, cap = _run_cursor_with_fake(continuation=None, sandbox="workspace-write")
+    args = cap["args"]
+    check("unchained workspace-write: legacy argv unchanged and no outcome",
+          args == ["--print", "--sandbox", "enabled", "--trust", "--workspace",
+                   cap["cwd"], "--model", "m1", "PROMPT-BODY"]
+          and res.continuation is None and res.continuation_id is None,
+          "legacy workspace-write argv", str(cap))
+
+
+# =============================================================================
 # AgyProvider tests
 # =============================================================================
 
@@ -1323,11 +1754,11 @@ def test_continuations():
     )
     agy = get_provider("agy")
     check(
-          "continuation gate: Agy/Cursor fail-closed, Codex opted in",
+        "continuation gate: Agy unsupported, Codex/Cursor opted in",
         not getattr(agy, "supports_continuation")
         and CodexProvider.supports_continuation
-        and not CursorProvider.supports_continuation,
-        "agy/cursor False, codex True",
+        and CursorProvider.supports_continuation,
+        "agy False, codex/cursor True",
         f"agy={getattr(agy, 'supports_continuation', None)} "
         f"codex={CodexProvider.supports_continuation} "
         f"cursor={CursorProvider.supports_continuation}",
@@ -13942,6 +14373,7 @@ def main():
     test_registry()
     test_codex()
     test_codex_continuation()
+    test_cursor_continuation()
     test_agy_helpers()
     test_agy_timeout_floor()
     test_agy_oversized()

@@ -946,7 +946,7 @@ executor settings. `ProviderResult.continuation` carries
 the structured continuation outcome and `continuation_id` carries the exact ID
 used by the chain store; both are optional. Providers remain
 `supports_continuation = False` unless their adapters implement exact-ID probing
-and resume; Codex is the current opt-in provider.
+and resume; Codex and Cursor are the current opt-in providers.
 `revision_round` is written by the review verbs, never the hook: the Stop hook
 still counts nothing but its own fires. A Stop hook cannot observe a revision
 round, and a round field with no honest writer would be a frozen `Round 1/N`
