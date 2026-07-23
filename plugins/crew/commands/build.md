@@ -34,6 +34,17 @@ a completing verdict. On [BLOCKING] findings you re-delegate and re-verify.
   run dir from; a raw id can diverge from it.
 - **Reference, not payload.** Point a seat at a file to `Read`; never paste
   file contents into a prompt.
+- **Pause for the human, don't spin.** Whenever you STOP and hand back to the
+  user with the loop STILL ACTIVE and nothing in flight — an `ok=false` /
+  guard-violation executor stop the human must resolve, an exit-3 `--force`
+  advisory, or any question you ask — FIRST run `await` so the Stop hook treats
+  the wait as a bounded pause (allow, no nudge) instead of nudging every
+  turn-end. It auto-clears the moment the loop advances (`begin-review` /
+  `record-verdict`), so you never clear it by hand on the happy path:
+
+  ```bash
+  "${CLAUDE_PLUGIN_ROOT}/crew" state await bl --session-id <session-id>
+  ```
 - The engine enforces and tests the mechanics these recipes rely on
   (run-scoping, preserve-valid, anchoring, quorum recount): `scripts/CLAUDE.md`.
 

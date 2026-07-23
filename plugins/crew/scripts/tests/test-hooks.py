@@ -4368,6 +4368,147 @@ def main():
             _clear_state_files()
 
             # =========================================================================
+            # AWAITING-INPUT PAUSE: waiting on a HUMAN must be FREE, like parking
+            # A loop stops on `ok=false` executor failures, exit-3 --force advisories,
+            # or any AskUserQuestion with NOTHING in flight, so `is_parked` is false
+            # and the old hook blocked EVERY turn-end: the agent was dragged back
+            # turn after turn (the nudge livelock). `awaiting_input` is the third
+            # state: active + waiting on the human. It parks the Stop under the SAME
+            # bounded cap, so a forgotten flag can never disable the loop.
+            # =========================================================================
+            log_section("awaiting-input pause (bl + mt)")
+
+            for loop, banner in (("bl", "Build Loop"), ("mt", "Measure-Twice Loop")):
+                # --- awaiting_input + active + NOT parked: ALLOW, and the wait costs
+                # no stop_fire (the whole point: the session actually stops, and the
+                # human's next message re-invokes it, instead of a forced re-entry) ---
+                _clear_state_files()
+                state_path = _write_loop_state(loop, stop_fires=5, awaiting_input=True)
+                await_outs = [
+                    run_script(persistent_mode, stop_payload) for _ in range(4)
+                ]
+                after = _read_state_json(state_path)
+                if (all(o == "{}" for o in await_outs)
+                        and after.get("stop_fires") == 5
+                        and after.get("parked_fires") == 4
+                        and after.get("active") is True):
+                    log_pass(f"{loop}: awaiting_input ALLOWS an UNPARKED Stop ({{}}), stop_fires unchanged")
+                else:
+                    log_fail(f"{loop}: awaiting_input ALLOWS an UNPARKED Stop ({{}}), stop_fires unchanged",
+                             "4x '{}', stop_fires=5, parked_fires=4, active=True",
+                             f"outs={[o[:60] for o in await_outs]}, "
+                             f"stop_fires={after.get('stop_fires')}, "
+                             f"parked_fires={after.get('parked_fires')}, active={after.get('active')}")
+
+                # --- the cap bounds a STUCK flag: past max_parked_fires an
+                # awaiting_input Stop nudges, burns a stop_fire, and CLEARS the flag
+                # so the next yield re-arms the nudge (the agent forgot to clear it) ---
+                _clear_state_files()
+                state_path = _write_loop_state(
+                    loop, stop_fires=0, parked_fires=3, max_parked_fires=3,
+                    awaiting_input=True)
+                out_trip = json.loads(run_script(persistent_mode, stop_payload))
+                after = _read_state_json(state_path)
+                if (out_trip.get("decision") == "block"
+                        and f"[{banner}]" in out_trip.get("reason", "")
+                        and after.get("stop_fires") == 1
+                        and after.get("parked_fires") == 0
+                        and after.get("awaiting_input") is False
+                        and after.get("active") is True):
+                    log_pass(f"{loop}: a stuck awaiting_input past the cap nudges, burns a fire, clears the flag")
+                else:
+                    log_fail(f"{loop}: a stuck awaiting_input past the cap nudges, burns a fire, clears the flag",
+                             f"block '[{banner}]', stop_fires=1, parked_fires=0, awaiting_input=False",
+                             f"decision={out_trip.get('decision')}, stop_fires={after.get('stop_fires')}, "
+                             f"parked_fires={after.get('parked_fires')}, "
+                             f"awaiting_input={after.get('awaiting_input')}")
+
+                # --- behavior-neutral: awaiting_input False + not parked STILL nudges
+                # (every existing not-parked test is this case with the key absent) ---
+                _clear_state_files()
+                state_path = _write_loop_state(loop, stop_fires=0, awaiting_input=False)
+                out_off = json.loads(run_script(persistent_mode, stop_payload))
+                after = _read_state_json(state_path)
+                if out_off.get("decision") == "block" and after.get("stop_fires") == 1:
+                    log_pass(f"{loop}: awaiting_input=False leaves the nudge behavior unchanged")
+                else:
+                    log_fail(f"{loop}: awaiting_input=False leaves the nudge behavior unchanged",
+                             "block nudge, stop_fires=1",
+                             f"decision={out_off.get('decision')}, stop_fires={after.get('stop_fires')}")
+
+                # --- the `await` verb SETS the flag field-level, counters untouched
+                # (it is NOT in AGENT_SETTABLE and must never carry back a stale
+                # counter snapshot, exactly like `set`) ---
+                _clear_state_files()
+                state_path = _write_loop_state(loop, stop_fires=7, parked_fires=2)
+                _, _, code_set = run_crew_state(["await", loop], test_path)
+                after = _read_state_json(state_path)
+                if (code_set == 0 and after.get("awaiting_input") is True
+                        and after.get("stop_fires") == 7
+                        and after.get("parked_fires") == 2):
+                    log_pass(f"{loop}: `crew state await` sets awaiting_input without touching counters")
+                else:
+                    log_fail(f"{loop}: `crew state await` sets awaiting_input without touching counters",
+                             "code=0, awaiting_input=True, stop_fires=7, parked_fires=2",
+                             f"code={code_set}, awaiting_input={after.get('awaiting_input')}, "
+                             f"stop_fires={after.get('stop_fires')}, parked_fires={after.get('parked_fires')}")
+
+                # --- `await --clear` clears it ---
+                _, _, code_clear = run_crew_state(["await", loop, "--clear"], test_path)
+                after = _read_state_json(state_path)
+                if code_clear == 0 and after.get("awaiting_input") is False:
+                    log_pass(f"{loop}: `crew state await --clear` clears awaiting_input")
+                else:
+                    log_fail(f"{loop}: `crew state await --clear` clears awaiting_input",
+                             "code=0, awaiting_input=False",
+                             f"code={code_clear}, awaiting_input={after.get('awaiting_input')}")
+
+                # --- key-ABSENT (legacy) still nudges: a state file that never had
+                # the key loads awaiting_input=False, so behavior is unchanged ---
+                _clear_state_files()
+                state_path = _write_loop_state(loop, stop_fires=0)  # no awaiting_input key
+                out_absent = json.loads(run_script(persistent_mode, stop_payload))
+                after = _read_state_json(state_path)
+                if out_absent.get("decision") == "block" and after.get("stop_fires") == 1:
+                    log_pass(f"{loop}: a key-ABSENT (legacy) state nudges (loads awaiting_input=False)")
+                else:
+                    log_fail(f"{loop}: a key-ABSENT (legacy) state nudges (loads awaiting_input=False)",
+                             "block, stop_fires=1",
+                             f"decision={out_absent.get('decision')}, stop_fires={after.get('stop_fires')}")
+
+                # --- a truthy-but-WRONG value ("yes") must STILL nudge: the strict
+                # `is True` load never lets a garbage value suppress the nudge ---
+                _clear_state_files()
+                state_path = _write_loop_state(loop, stop_fires=0, awaiting_input="yes")
+                out_garbage = json.loads(run_script(persistent_mode, stop_payload))
+                after = _read_state_json(state_path)
+                if out_garbage.get("decision") == "block" and after.get("stop_fires") == 1:
+                    log_pass(f"{loop}: a truthy-but-wrong awaiting_input ('yes') still nudges (strict is-True load)")
+                else:
+                    log_fail(f"{loop}: a truthy-but-wrong awaiting_input ('yes') still nudges (strict is-True load)",
+                             "block, stop_fires=1",
+                             f"decision={out_garbage.get('decision')}, stop_fires={after.get('stop_fires')}")
+
+                # --- termination BEATS waiting: a tripped bound (stop_fires cap) with
+                # awaiting_input SET still force-exits, never rides the pause. The
+                # bounds are evaluated before the wait branch, so the pause cannot
+                # hide a runaway loop. ---
+                _clear_state_files()
+                state_path = _write_loop_state(
+                    loop, stop_fires=2, max_stop_fires=2, awaiting_input=True)
+                out_term = json.loads(run_script(persistent_mode, stop_payload))
+                after = _read_state_json(state_path)
+                if ("Safety Limit Reached" in out_term.get("reason", "")
+                        and after.get("active") is False):
+                    log_pass(f"{loop}: termination beats waiting (a tripped bound force-exits even with awaiting_input set)")
+                else:
+                    log_fail(f"{loop}: termination beats waiting (a tripped bound force-exits even with awaiting_input set)",
+                             "'Safety Limit Reached' nudge, active=False",
+                             f"reason={out_term.get('reason', '')[:100]!r}, active={after.get('active')}")
+
+            _clear_state_files()
+
+            # =========================================================================
             # `crew state show --verbose` prints the ON-DISK dict
             # asdict(state) drops every key written outside the dataclass
             # (completed_at, reason, force_exit), and `init` REFUSES to restart a

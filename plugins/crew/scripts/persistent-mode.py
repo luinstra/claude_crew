@@ -233,12 +233,15 @@ def _hook_owned(data: dict, state) -> dict:
     return data
 
 
-def _persist_fires(loop_file: Path, state, stop_delta: int = 0, parked: str = "keep") -> None:
+def _persist_fires(loop_file: Path, state, stop_delta: int = 0, parked: str = "keep",
+                   clear_awaiting: bool = False) -> None:
     """Persist this fire's counters under the shared state lock.
 
     The counters are recomputed from the dict read INSIDE the lock, not from the
     snapshot this process loaded, so a bump another writer landed in that window is
     added to, never overwritten. `parked` is one of keep / bump / reset.
+    `clear_awaiting` turns off the human-wait flag on a nudge (the loop is being
+    told to work, so it is no longer waiting); the allow path leaves it set.
     """
     def mutate(data: dict) -> dict:
         _hook_owned(data, state)
@@ -250,6 +253,8 @@ def _persist_fires(loop_file: Path, state, stop_delta: int = 0, parked: str = "k
             parked_fires = 0
         data["stop_fires"] = stop_fires
         data["parked_fires"] = parked_fires
+        if clear_awaiting:
+            data["awaiting_input"] = False
         # Report what was PERSISTED (the nudge prints these), not the pre-lock read.
         state.stop_fires = stop_fires
         state.parked_fires = parked_fires
@@ -374,15 +379,23 @@ what did not, and what you were waiting on."""
         # real remaining step is the one a completed loop already routes to.
         completed = True
 
-    if parked:
+    # A WAIT, not a quit, in TWO shapes: `parked` (the harness has background work
+    # in flight) OR `awaiting_input` (the loop is blocked on the human: an ok=false
+    # executor stop, an exit-3 --force advisory, an AskUserQuestion, with nothing
+    # in flight, so `parked` is false). The old hook knew only the first, so a loop
+    # legitimately waiting on a human was blocked on EVERY turn-end and the agent
+    # was dragged back turn after turn: the nudge livelock. Both waits ALLOW the
+    # Stop under the SAME max_parked_fires cap, so a forgotten flag cannot disable
+    # the loop, and the wall-clock deadline (checked above) still bounds it.
+    waiting = parked or state.awaiting_input
+    if waiting:
         if state.parked_fires < state.max_parked_fires:
-            # Work the session launched is still in flight, so this Stop is a
-            # WAIT, not an attempt to quit. ALLOW it: the harness re-invokes the
-            # session when that work completes, and the loop picks up from
-            # there. Blocking here is what manufactured the busy-wait: the agent
-            # was forced to take a turn with nothing to do, so it polled, which
-            # burned the counter and flooded the context until compaction wiped
-            # its memory of the panel.
+            # Still waiting (launched work in flight, or the human has not replied).
+            # ALLOW it: the harness re-invokes the session when the work completes,
+            # and the human's next message re-invokes it when they reply. Blocking
+            # here is what manufactured the busy-wait: the agent was forced to take a
+            # turn with nothing to do, so it polled, which burned the counter and
+            # flooded the context until compaction wiped its memory of the panel.
             _persist_fires(loop_file, state, parked="bump")
             print(HookResult.allow().to_json())
             return True
@@ -399,7 +412,10 @@ what did not, and what you were waiting on."""
         # later turn-end burned a stop_fire. The next cap-length run of parks
         # still costs a nudge + a stop_fire, and the wall-clock deadline still
         # bounds a loop that only ever parks (termination beats parking).
-        _persist_fires(loop_file, state, stop_delta=1, parked="reset")
+        # `clear_awaiting`: if a STUCK awaiting_input drove this run to the cap (the
+        # agent forgot to clear it after the human replied), the nudge just earned
+        # clears it, so the next yield blocks again instead of riding a stale flag.
+        _persist_fires(loop_file, state, stop_delta=1, parked="reset", clear_awaiting=True)
     else:
         # parked_fires counts CONSECUTIVE parks: a fire with nothing in flight
         # means the session came back and did work, so the wait was real. (Any

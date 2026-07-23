@@ -669,6 +669,17 @@ class LoopState:
     parked_fires: int = 0
     max_parked_fires: int = DEFAULT_MAX_PARKED_FIRES
 
+    # The third Stop state: active + waiting on a HUMAN (an ok=false executor stop,
+    # an exit-3 --force advisory, an AskUserQuestion) with nothing in flight. The
+    # Stop hook treats it like a park (allow, no stop_fire) under the SAME
+    # max_parked_fires cap, so a forgotten flag can never disable the loop. The
+    # orchestrator SETS it (via `crew state await`) before yielding to the human;
+    # the review verbs (begin-review / record-verdict) and the past-cap nudge CLEAR
+    # it, so a resumed loop re-arms its nudge. It is NOT in AGENT_SETTABLE: it bounds
+    # nothing (the cap defeats a stuck one), so it gets its own verb rather than
+    # widening the allowlist the safety bounds depend on.
+    awaiting_input: bool = False
+
     # The ONLY fields `crew state set` will write. Everything the termination
     # predicate reads is refused because a safety limit the agent can rewrite is
     # not a safety limit (a live loop once reset its own counter 30 times), and
@@ -715,6 +726,10 @@ class LoopState:
             no_deadline=data.get("no_deadline", False) is True,
             parked_fires=data.get("parked_fires", 0),
             max_parked_fires=data.get("max_parked_fires", DEFAULT_MAX_PARKED_FIRES),
+            # Additive-optional: a legacy file (no key) loads False, so the hook's
+            # park path is inert until the orchestrator sets it. Only an exact True
+            # counts, so a truthy-but-wrong on-disk value never suppresses a nudge.
+            awaiting_input=data.get("awaiting_input", False) is True,
         ), LOAD_OK
 
     @classmethod

@@ -429,6 +429,56 @@ def cmd_set(args):
     _apply_field(cls, path, args.field, value)
 
 
+def cmd_await(args):
+    """Set (or `--clear`) the human-wait pause on a loop (`awaiting_input`).
+
+    The orchestrator runs this before yielding to the human while the loop is
+    active with nothing in flight (an ok=false executor stop, an exit-3 --force
+    advisory, an AskUserQuestion). The Stop hook then treats the wait like a park:
+    it ALLOWS the Stop (no `stop_fire`) under the same `max_parked_fires` cap, so
+    the session actually stops and the human's next message re-invokes it, instead
+    of the agent being dragged back on every turn-end (the nudge livelock).
+
+    It auto-clears when the loop advances (`begin-review` / `record-verdict`) or
+    when the cap trips; `--clear` clears it explicitly. FIELD-LEVEL, own key only,
+    so it never carries back a stale counter snapshot (the counter-reset hole
+    `set` closes); that is also why it is a dedicated verb, not an AGENT_SETTABLE
+    field: it bounds nothing (the cap defeats a stuck one), so it does not belong
+    on the allowlist the safety bounds depend on.
+
+    On an inactive / missing / corrupt / newer-schema loop it is a NO-OP success
+    (nothing written): the flag is inert unless the loop is active, and a no-op
+    keeps the verb safe to call defensively at teardown and honors refuse-to-touch
+    for a newer-schema file. The note names the actual load status so a live but
+    unparseable (corrupt / newer-schema) file is never mislabeled "not active".
+    """
+    session_id = resolve_session_id(args)
+    path = _resolve_loop_path(args.loop, session_id)
+    state, status = LoopState.load_with_status(path)
+    if not state.active:
+        if status == LOAD_CORRUPT:
+            why = "its state file is corrupt (unparseable)"
+        elif status == LOAD_FUTURE_SCHEMA:
+            why = "its state file was written by a newer crew (refusing to touch)"
+        else:
+            why = "it is not active"
+        print(
+            f"Note: {args.loop} loop: {why}; awaiting-input is a no-op "
+            f"(nothing written).",
+            file=sys.stderr,
+        )
+        return
+    target = not getattr(args, "clear", False)
+
+    def mutate(data: dict) -> dict:
+        data["awaiting_input"] = target
+        data["schema"] = SCHEMA_VERSION
+        return data
+
+    _mutate_state(LoopState, path, mutate)
+    print(f"awaiting_input={'true' if target else 'false'} {args.loop}")
+
+
 def check_for_conflicts(session_id: str = ""):
     """Check if this session already has an active loop. Returns error message or None.
 
@@ -916,6 +966,9 @@ def cmd_begin_review(args):
         data["target_spec"] = target_spec
         data["target_base"] = record.get("target_base") or ""
         data["expected_seats"] = expected
+        # The loop is advancing (a panel is about to run), so it is no longer
+        # waiting on the human: clear the pause so a resumed loop re-arms its nudge.
+        data["awaiting_input"] = False
         return data
 
     _mutate_or_refuse(path, mutate)
@@ -1027,6 +1080,9 @@ def cmd_record_verdict(args):
             data.pop("last_verdict_overrides", None)
             data["consecutive_review_failures"] = failures
             data["phase"] = "drafting"
+            # A recorded verdict means the loop advanced, so it is no longer
+            # waiting on the human: clear the pause (re-arms the nudge).
+            data["awaiting_input"] = False
             if failures >= MAX_CONSECUTIVE_REVIEW_FAILURES:
                 # In THIS transaction, never a follow-up deactivate call: an
                 # unlocked gap between recording the failure and turning the loop
@@ -1143,6 +1199,9 @@ def cmd_record_verdict(args):
 
         data["schema"] = SCHEMA_VERSION
         data["last_verdict"] = verdict
+        # A recorded verdict means the loop advanced (a completing verdict or a new
+        # revision round), so it is no longer waiting on the human: clear the pause.
+        data["awaiting_input"] = False
         # Any verdict that is not FAILED is evidence the panel CAN return.
         data["consecutive_review_failures"] = 0
         if completing:
@@ -1221,6 +1280,16 @@ def main():
     p_set.add_argument("value", help="Value to set")
     p_set.add_argument("--session-id", dest="session_id", help="Session ID for scoped state")
     p_set.set_defaults(func=cmd_set)
+
+    # await: set/clear the human-wait pause the Stop hook honors as a bounded wait
+    p_await = subparsers.add_parser(
+        "await", help="Pause the loop while waiting on the human (Stop-hook wait)")
+    p_await.add_argument("loop", choices=list(LOOP_ALIASES.keys()))
+    p_await.add_argument(
+        "--clear", action="store_true", default=False,
+        help="Clear the pause instead of setting it")
+    p_await.add_argument("--session-id", dest="session_id", help="Session ID for scoped state")
+    p_await.set_defaults(func=cmd_await)
 
     # init
     p_init = subparsers.add_parser("init", help="Initialize a loop")

@@ -741,6 +741,18 @@ crew state check-conflicts --session-id abc123
 # stored path is absolute), so every later reader resolves the same file.
 crew state set mt plan_file .crew/plans/auth-system.md --session-id abc123
 
+# Pause the loop while waiting on the HUMAN (the Stop hook's third wait state,
+# alongside harness-parked). Run it before yielding to the user with the loop
+# active and nothing in flight (an ok=false executor stop, an exit-3 --force
+# advisory, an AskUserQuestion): the hook then ALLOWS the stop (no stop_fire)
+# under the same max_parked_fires cap instead of nudging every turn-end. FIELD-
+# LEVEL like `set`, but NOT an AGENT_SETTABLE field (it bounds nothing, so it is
+# a dedicated verb). Auto-cleared by begin-review / record-verdict / the past-cap
+# nudge; `--clear` clears it explicitly. A no-op success on an inactive / missing
+# / corrupt / newer-schema loop (nothing written; honors refuse-to-touch).
+crew state await bl --session-id abc123
+crew state await bl --clear --session-id abc123
+
 # Begin a review: run it right after `crew review-prep`, BEFORE any seat runs.
 # It reads the prepped run's OWN run.json (never the pointer: seat results are
 # stamped from that record, so the gate must judge against the same authority)
@@ -913,8 +925,9 @@ class LoopState:
     started_at: str = ""           # hook-owned wall clock (ISO, UTC)
     deadline_minutes: int = 240    # 1..MAX_DEADLINE_MINUTES (1440) at init; 0 only with no_deadline
     no_deadline: bool = False      # 2nd half of the config-only opt-out marker; only init writes it
-    parked_fires: int = 0          # hook-owned CONSECUTIVE parked-Stop counter
+    parked_fires: int = 0          # hook-owned CONSECUTIVE wait counter (parked OR awaiting_input)
     max_parked_fires: int = 20
+    awaiting_input: bool = False   # human-wait pause; hook allows the stop (bounded by the cap). Set via `crew state await`, cleared by the review verbs. NOT in AGENT_SETTABLE
 
     AGENT_SETTABLE = frozenset({"plan_file"})
 ```
@@ -972,19 +985,33 @@ rules are load-bearing; each one is a bug that already happened.
    (`update_state_json`), because an unlocked `set` could otherwise roll a counter
    bump straight back off the disk (see the state-lock section above).
 
-3. **Waiting is FREE, but bounded.** When the Stop payload's `background_tasks`
-   or `session_crons` is non-empty the session is parked on work it launched, so
-   the hook **allows** the stop and does not touch `stop_fires`. The harness
-   re-invokes the session when that work completes. Blocking a parked Stop is
-   what manufactured the busy-wait: the agent was forced to take a turn with
-   nothing to do, so it polled, which burned the counter and flooded the context
-   until compaction wiped its memory of the panel mid-flight and it re-ran the
-   panel over its own completed seats.
+3. **Waiting is FREE, but bounded — in TWO shapes.** A wait is not a quit, so it
+   ALLOWS the stop and does not touch `stop_fires`, whether the wait is on the
+   harness or on the human:
+   - **Parked:** the Stop payload's `background_tasks` or `session_crons` is
+     non-empty — the session is on work it launched, and the harness re-invokes it
+     when that work completes.
+   - **`awaiting_input`:** the loop is blocked on the HUMAN (an `ok=false`
+     executor stop the human resolves, an exit-3 `--force` advisory, an
+     `AskUserQuestion`) with NOTHING in flight, so `is_parked` is false. Without
+     this the hook blocked every such turn-end and the agent was dragged back turn
+     after turn (the nudge livelock). The orchestrator sets it with `crew state
+     await <loop>`; the review verbs (`begin-review` / `record-verdict`) and the
+     past-cap nudge clear it, so a resumed loop re-arms. It is NOT in
+     `AGENT_SETTABLE` (it bounds nothing — the cap below defeats a stuck one — so
+     it gets a dedicated verb, not a widened allowlist).
 
-4. **`max_parked_fires` is the escape valve.** The park signal is broad: ANY
-   harness-tracked background shell (a dev server, a `tail -f`) parks every Stop,
-   which would otherwise disable the loop entirely (no nudge, no bound, no
-   diagnostic). So `parked_fires` counts CONSECUTIVE parks and resets on any
+   Blocking either wait is what manufactured the busy-wait: the agent was forced
+   to take a turn with nothing to do, so it polled, which burned the counter and
+   flooded the context until compaction wiped its memory of the panel mid-flight
+   and it re-ran the panel over its own completed seats.
+
+4. **`max_parked_fires` is the escape valve — for BOTH waits.** The park signal
+   is broad: ANY harness-tracked background shell (a dev server, a `tail -f`)
+   parks every Stop, which would otherwise disable the loop entirely (no nudge, no
+   bound, no diagnostic); a stuck `awaiting_input` (the agent forgot to clear it)
+   would do the same. Both share the one cap: `parked_fires` counts CONSECUTIVE
+   waits (parked OR awaiting_input) and resets on any
    BLOCKING fire: a fire with nothing in flight, or a past-cap parked fire
    that got nudged (the nudge forces a working turn, which ends the unbroken
    run of parks the cap bounds). Past `max_parked_fires` (20) a parked Stop is
