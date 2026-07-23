@@ -11093,6 +11093,11 @@ def test_scaffold_config():
               f"# deadline_minutes = {_DDM}" in out and f"1-{_MDM}" in out,
               f"commented `deadline_minutes = {_DDM}` + the 1-{_MDM} range",
               out[out.find("[tuning]"):][:200] if "[tuning]" in out else out[:120])
+        check("scaffold [build] documents default-ON resume_executor",
+              "# resume_executor: resume the external executor's provider conversation across" in out
+              and "#   Exact continuation applies ONLY to SUPPORTING providers (codex, cursor);" in out
+              and "# resume_executor = true" in out,
+              "resume_executor caveat + example", out[out.find("# [build].executor"):][:800])
         if parsed is not None:
             seats_tbl = parsed.get("seats", {})
             check("bare (no --detection) OMITS every per-seat available line",
@@ -15893,6 +15898,34 @@ def test_build_executor():
               config.build_executor_retries() == 1,
               "1", repr(config.build_executor_retries()))
 
+    # --- config.build_resume_executor(): default-ON bool ----------------------
+    with project_config(""):
+        check("unset -> build_resume_executor() is True",
+              config.build_resume_executor() is True,
+              "True", repr(config.build_resume_executor()))
+    with project_config("[build]\nresume_executor = false\n"):
+        check("resume_executor=false -> False",
+              config.build_resume_executor() is False,
+              "False", repr(config.build_resume_executor()))
+    with project_config("[build]\nresume_executor = true\n"):
+        check("resume_executor=true -> True",
+              config.build_resume_executor() is True,
+              "True", repr(config.build_resume_executor()))
+    with project_config('[build]\nresume_executor = "yes"\n'):
+        buf = _io.StringIO()
+        with redirect_stderr(buf):
+            first = config.build_resume_executor()
+            second = config.build_resume_executor()
+        diagnostics = [line for line in buf.getvalue().splitlines() if "resume_executor" in line]
+        check("invalid resume_executor warns once and defaults True",
+              first is True and second is True and len(diagnostics) == 1,
+              "True twice + one diagnostic", f"{first!r}, {second!r}, {buf.getvalue()!r}")
+    with crew_config(project="[build]\nresume_executor = false\n",
+                     glob="[build]\nresume_executor = true\n"):
+        check("resume_executor per-repo false beats global true",
+              config.build_resume_executor() is False,
+              "False", repr(config.build_resume_executor()))
+
     # --- cmd_build_executor: resolve + validate + print JSON, run NOTHING ---
     def _run_be(executor_flag=None):
         argv = ["build-executor"]
@@ -15919,8 +15952,31 @@ def test_build_executor():
         j = json.loads(out) if out.strip() else {}
         check("[build].executor=codex-luna -> exit 0, source config",
               rc == 0 and j.get("executor") == "codex-luna"
-              and j.get("source") == "config",
+              and j.get("source") == "config" and j.get("resume_executor") is True,
               "codex-luna/config", f"rc={rc} out={out!r}")
+
+    with project_config(""):
+        rc, out, err = _run_be()
+        j = json.loads(out) if out.strip() else {}
+        check("unset config -> build-executor JSON carries resume_executor=true",
+              rc == 0 and j.get("resume_executor") is True
+              and out.count("\n") == 1 and err == "",
+              "resume_executor=true, stdout-only", f"rc={rc} out={out!r} err={err!r}")
+    with project_config("[build]\nresume_executor = false\n"):
+        rc, out, err = _run_be()
+        j = json.loads(out) if out.strip() else {}
+        check("resume_executor=false surfaces in build-executor JSON",
+              rc == 0 and j.get("resume_executor") is False,
+              "resume_executor=false", f"rc={rc} out={out!r} err={err!r}")
+
+    # argparse renders a subparser's `help=` text in the parent command's
+    # subcommand listing; the subparser's own --help only lists its options.
+    parser = cli.build_parser()
+    help_out = parser.format_help()
+    normalized_help = " ".join(help_out.split())
+    check("build-executor help documents resume_executor",
+          "{executor, retries, resume_executor, source} JSON" in normalized_help,
+          "help includes resume_executor", help_out)
 
     # A Task seat (opus) and a group token (cursor) both fail the
     # subprocess-registry gate -> exit 2, stderr-only, NO stdout JSON.
@@ -15997,6 +16053,54 @@ def test_build_executor():
               "crew:executor/flag", f"{out!r}")
 
 
+def test_build_md_continuation_wiring():
+    """The build recipe resolves once, stamps init, and conditionally chains."""
+    log_section("build.md continuation wiring")
+    raw = (SCRIPT_DIR.parent / "commands" / "build.md").read_text(encoding="utf-8")
+    fences = _fence_lines("build.md")
+    resolver_index = next(
+        (i for i, line in enumerate(fences) if "build-executor" in line), -1
+    )
+    init_index = next(
+        (i for i, line in enumerate(fences) if "state init bl" in line), -1
+    )
+    check("build.md resolves executor before init",
+          resolver_index >= 0 and init_index >= 0 and resolver_index < init_index,
+          "build-executor fence before state init bl", str(fences))
+    init_lines = [line for line in fences if "state init bl" in line]
+    check("build.md passes resolved executor settings to init",
+          len(init_lines) == 1 and "--executor <executor>" in init_lines[0]
+          and "--resume-executor <true|false>" in init_lines[0],
+          "one init fence with both flags", str(init_lines))
+
+    chain_lines = [line for line in fences if "--chain build-executor" in line]
+    check("build.md has one canonical external chained dispatch fence",
+          len(chain_lines) == 1 and "dispatch" in chain_lines[0]
+          and "--seat <executor>" in chain_lines[0],
+          "one external dispatch chain fence", str(chain_lines))
+    check("build.md documents dropping the chain when resume_executor is false",
+          "resume_executor" in raw and "false" in raw and "omit" in raw.lower()
+          and "runs fresh" in raw,
+          "resume condition prose", raw[raw.find("--chain build-executor") - 100:raw.find("--chain build-executor") + 220])
+    check("build.md task path remains unchained",
+          len(chain_lines) == 1 and "--chain" not in raw[raw.find("Task("):raw.find("Else (an external")],
+          "only the external dispatch carries --chain", str(chain_lines))
+
+    resolve_heading = raw.index("## MANDATORY: Resolve the Executor")
+    activate_heading = raw.index("## MANDATORY: Activate the Loop")
+    trailing = raw[raw.rfind("First:"):]
+    check("build.md heading order is resolve before activate",
+          resolve_heading < activate_heading,
+          "Resolve heading before Activate heading", str((resolve_heading, activate_heading)))
+    check("build.md has no activate-then-resolve directive",
+          "after activation" not in raw.lower()
+          and trailing.lower().find("resolve") < trailing.lower().find("activation"),
+          "no after-activation directive; trailing reminder resolves first", trailing)
+    check("build.md preserves user-only executor flag ownership",
+          "pass `--executor <seat>` ONLY when the user named one" in raw,
+          "user-only --executor instruction", raw[raw.find("Executor option"):raw.find("Executor option") + 700])
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -16039,6 +16143,7 @@ def main():
     test_path_arg_anchoring()
     test_repair_seat_name_form()
     test_build_executor()
+    test_build_md_continuation_wiring()
     test_council_subcommand()
     test_debate_subcommand()
     test_rounds()

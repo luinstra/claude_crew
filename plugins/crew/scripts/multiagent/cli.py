@@ -1874,11 +1874,17 @@ def cmd_build_executor(args: argparse.Namespace) -> int:
 
     # 3. Retries: None (unset/invalid) falls to the safe default 0.
     retries = config.build_executor_retries() or 0
+    resume_executor = config.build_resume_executor()
 
     # 4. One-line JSON to stdout (stdout carries ONLY the payload, like the other
     #    machine-parsed commands), exit 0.
     print(json.dumps(
-        {"executor": executor, "retries": retries, "source": source},
+        {
+            "executor": executor,
+            "retries": retries,
+            "resume_executor": resume_executor,
+            "source": source,
+        },
         ensure_ascii=False,
     ))
     return 0
@@ -4080,9 +4086,15 @@ def _render_config_template(
     L.append("# executor_retries: how many times to retry a FAILED external-executor round")
     L.append("#   (int 0..2, default 0). Retries STACK on the failed attempt's partial edits")
     L.append("#   (no clean-tree revert), so the cap is low.")
+    L.append("# resume_executor: resume the external executor's provider conversation across")
+    L.append("#   build rounds (bool, DEFAULT true). Set false to start each round fresh.")
+    L.append("#   Only affects an external --executor / [build].executor seat.")
+    L.append("#   Exact continuation applies ONLY to SUPPORTING providers (codex, cursor);")
+    L.append("#   agy and other unsupported binaries always start fresh regardless of this toggle.")
     L.append("# [build]")
     L.append('# executor = "crew:executor"')
     L.append("# executor_retries = 0")
+    L.append("# resume_executor = true")
     L.append("")
     L.append("# ---- Per-seat tuning + availability -------------------------------------------------")
     L.append("# available = false drops a seat from EVERY resolved panel. It is an opt-OUT: runtime")
@@ -5320,7 +5332,7 @@ def build_parser() -> argparse.ArgumentParser:
         "build-executor",
         help="Resolve /crew:build's implement-step executor (--executor flag > "
              "[build].executor config > builtin crew:executor) and PRINT "
-             "{executor, retries, source} JSON. Validates: the crew:executor "
+             "{executor, retries, resume_executor, source} JSON. Validates: the crew:executor "
              "sentinel (the Task path) OR a known write-capable subprocess seat; "
              "a Task seat, group token, unknown, or read-only seat exits 2 naming "
              "the reason (never a silent fallback). Runs NOTHING.",

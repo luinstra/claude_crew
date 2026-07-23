@@ -68,7 +68,7 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   case-folded) is rejected on EVERY derived destination, flat and run-scoped alike (an explicit
   `-o` keeps ad-hoc freedom).
 - `dispatch` — write-mode single-seat WORK delegation (see below).
-- `build-executor` (RESOLVE-ONLY): prints `{executor, retries, source}` JSON for
+- `build-executor` (RESOLVE-ONLY): prints `{executor, retries, resume_executor, source}` JSON for
   /crew:build's implement step (`--executor` flag > `[build].executor` config >
   builtin `crew:executor`). Validates the resolved value is the `crew:executor`
   sentinel OR a known write-capable subprocess seat; a Task seat, group token,
@@ -530,7 +530,9 @@ Key contracts (do NOT regress):
   `[build].executor` (the `/crew:build` implement-step executor: a RAW string,
   type-checked only; known-ness/write-capability is the `build-executor`
   command's to validate, since the `crew:executor` sentinel is a legal value that
-  no registry knows), `[build].executor_retries` (int `0..2`; the seam's bounded
+  no registry knows), `[build].resume_executor` (bool, default `true`; whether
+  external executor rounds reuse the provider conversation),
+  `[build].executor_retries` (int `0..2`; the seam's bounded
   retry count, resolved per-repo THEN global before the built-in default `0`, like
   `deadline_minutes`/`timeout`. An out-of-range/non-int value in ONE layer is
   dropped with a warn and that layer is SKIPPED, so an invalid per-repo value can
@@ -943,9 +945,8 @@ The two on-disk file prefixes (`build-state-*` / `measure-twice-state-*`) and
 the `bl`/`mt` aliases stay: they are load-bearing across the hook, state
 discovery, and the session-start cleanup globs. What unified is the SHAPE.
 `loop_instance_id`, `executor`, and `resume_executor` are additive fields: legacy
-state loads empty/non-reusable values. Initialization currently stamps only
-`loop_instance_id`; a later build-loop integration will stamp the resolved
-executor settings. `ProviderResult.continuation` carries
+state loads empty/non-reusable values. Initialization stamps `loop_instance_id`
+plus the resolved executor and `resume_executor` settings. `ProviderResult.continuation` carries
 the structured continuation outcome and `continuation_id` carries the exact ID
 used by the chain store; both are optional. Providers remain
 `supports_continuation = False` unless their adapters implement exact-ID probing

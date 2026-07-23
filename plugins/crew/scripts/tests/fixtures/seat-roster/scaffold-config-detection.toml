@@ -36,9 +36,15 @@ seat = "codex"
 # executor_retries: how many times to retry a FAILED external-executor round
 #   (int 0..2, default 0). Retries STACK on the failed attempt's partial edits
 #   (no clean-tree revert), so the cap is low.
+# resume_executor: resume the external executor's provider conversation across
+#   build rounds (bool, DEFAULT true). Set false to start each round fresh.
+#   Only affects an external --executor / [build].executor seat.
+#   Exact continuation applies ONLY to SUPPORTING providers (codex, cursor);
+#   agy and other unsupported binaries always start fresh regardless of this toggle.
 # [build]
 # executor = "crew:executor"
 # executor_retries = 0
+# resume_executor = true
 
 # ---- Per-seat tuning + availability -------------------------------------------------
 # available = false drops a seat from EVERY resolved panel. It is an opt-OUT: runtime

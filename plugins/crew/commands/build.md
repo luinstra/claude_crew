@@ -83,29 +83,29 @@ a FAILED external round; retries STACK on the failed attempt's partial edits
 (no clean-tree revert), hence the low cap. `crew build-executor` OWNS
 resolution + validation; pass `--executor <seat>` ONLY when the user named one.
 
-## MANDATORY: Activate the Loop
-
-Write the raw `$ARGUMENTS` to `<project-root>/.crew/task-bl-<session-id>.txt`
-with the **Write tool** (exact bytes; creates `.crew/`), then init.
-`--consume` deletes the spill after a successful init (a failed init leaves it
-for retry):
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" state init bl -f ".crew/task-bl-<session-id>.txt" --session-id <session-id> --consume
-```
-
 ## MANDATORY: Resolve the Executor
 
-Immediately after activation, **before Step 1**. Add `--executor <seat>` ONLY
+Before activating the loop, resolve the executor. Add `--executor <seat>` ONLY
 when the user passed one; otherwise OMIT it:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" build-executor
 ```
 
-Keep `executor` and `retries` from its one-line JSON. **If it exits 2, SURFACE
-the reason and STOP**: a misconfigured executor (unknown seat, Task seat,
-group token, read-only seat) must NOT silently run as Claude.
+Keep `executor`, `retries`, and `resume_executor` from its one-line JSON. **If
+it exits 2, SURFACE the reason and STOP**: a misconfigured executor (unknown
+seat, Task seat, group token, read-only seat) must NOT silently run as Claude.
+
+## MANDATORY: Activate the Loop
+
+Write the raw `$ARGUMENTS` to `<project-root>/.crew/task-bl-<session-id>.txt`
+with the **Write tool** (exact bytes; creates `.crew/`), then init. Pass the
+resolved executor settings into init. `--consume` deletes the spill after a
+successful init (a failed init leaves it for retry):
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/crew" state init bl -f ".crew/task-bl-<session-id>.txt" --session-id <session-id> --consume --executor <executor> --resume-executor <true|false>
+```
 
 ## The executor step (shared)
 
@@ -137,8 +137,11 @@ dispatch` (a subprocess seat has no `TodoWrite`).
    changes uncommitted + unstaged, the dirty tree the panel reviews:
 
    ```bash
-   "${CLAUDE_PLUGIN_ROOT}/crew" dispatch --seat <executor> --session-id <session-id> -f ".crew/reviews/<session-id>/executor-task.txt" --json
+   "${CLAUDE_PLUGIN_ROOT}/crew" dispatch --seat <executor> --session-id <session-id> -f ".crew/reviews/<session-id>/executor-task.txt" --json --chain build-executor
    ```
+
+   This is the canonical resume-on form. When `resume_executor` is false, omit
+   the trailing `--chain build-executor` so the round runs fresh.
 
    **Check the PROCESS EXIT STATUS first, before reading any envelope** (the
    envelope path persists across rounds; nonzero exit = NO fresh envelope this
@@ -177,7 +180,11 @@ dispatch` (a subprocess seat has no `TodoWrite`).
 Whichever path ran, the summary is what Step 2b writes to
 `<run_dir>/executor-summary.md` (the run dir is minted later by `review-prep`:
 capture here, write there). Envelope overwrite across rounds is known and
-harmless; the step reads it immediately each round.
+harmless; the step reads it immediately each round. The chained envelope adds
+an inert `continuation` field; the existing guard/ok/output reads are
+unaffected. `executor_retries` behavior is unchanged by continuation: a retried
+round starts a fresh chain when the chain is absent or invalidated. Continuation
+adds no retry gating on `continuation.status`.
 
 ## Step 1: Delegate Work to Executor
 
@@ -596,5 +603,6 @@ refused there.
 
 ---
 
-First: run the activation command, then resolve the executor (`crew
-build-executor`). Then proceed to Step 1 (run the executor step).
+First: resolve the executor (`crew build-executor`), then run the activation
+command (passing the resolved `--executor`/`--resume-executor` to init). Then
+run the executor round.

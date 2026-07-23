@@ -6,9 +6,10 @@ the SEAT catalog (``[seats.<name>]`` for availability, model pins, per-provider
 tunes, and whole new seats: resolved in ``seats.py`` over ``raw_layers()``, not
 by a getter here), the global per-seat ``timeout``, the persistence loops'
 wall clock (``[tuning].deadline_minutes``), the ``/crew:build`` implement-step
-executor seat (``[build].executor`` + ``[build].executor_retries``), and the
-per-provider ``/crew:dispatch`` write-mode tuning (``[dispatch.<kind>]``, keys
-declared by each provider class's ``DISPATCH_OPTIONS``):
+executor seat (``[build].executor`` + ``[build].executor_retries`` +
+``[build].resume_executor``), and the per-provider ``/crew:dispatch`` write-mode
+tuning (``[dispatch.<kind>]``, keys declared by each provider class's
+``DISPATCH_OPTIONS``):
 
   * per-repo  ``<project>/.crew/config.toml`` (resolved against the shared
     ``crew_base()`` root, ``CLAUDE_PROJECT_DIR`` first then cwd, except a fallback
@@ -534,6 +535,36 @@ def build_executor_retries() -> int | None:
         _extract_build_executor_retries(_load(), "repo"),
         _extract_build_executor_retries(_global_load(), "global"),
     )
+
+
+def _extract_build_resume_executor(data: dict, layer: str) -> bool | None:
+    """Validate one layer's ``[build].resume_executor`` as a boolean."""
+    build_tbl = data.get("build")
+    if not isinstance(build_tbl, dict):
+        return None
+    val = build_tbl.get("resume_executor")
+    if val is None:
+        return None
+    if not isinstance(val, bool):
+        _warn_once(
+            f"build_resume_executor:{layer}",
+            f"[build].resume_executor must be a boolean; ignoring {val!r}",
+        )
+        return None
+    return val
+
+
+def build_resume_executor() -> bool:
+    """Resolve ``[build].resume_executor`` per-repo over global.
+
+    Unlike ``build_executor_retries``, whose safe default is 0, this toggle is
+    default-ON: unset or invalid configuration resolves to ``True``.
+    """
+    resolved = _first(
+        _extract_build_resume_executor(_load(), "repo"),
+        _extract_build_resume_executor(_global_load(), "global"),
+    )
+    return True if resolved is None else resolved
 
 
 # --- default timeout ----------------------------------------------------------

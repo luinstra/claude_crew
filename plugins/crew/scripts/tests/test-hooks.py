@@ -1029,6 +1029,49 @@ def main():
             else:
                 log_fail("init bl - creates state file", "exit 0 and file exists", f"exit {code}, stderr: {stderr}")
 
+            # Resolved executor settings are stamped at init,
+            # while omitted flags preserve the LoopState defaults in a fresh
+            # session. Both cases use a real prompt so the assertion reaches
+            # the write path rather than the pre-write validation failure.
+            stamp_project = test_path / "step5-stamp-project"
+            stamp_project.mkdir()
+            _, stamp_err, stamp_code = run_crew_state(
+                ["init", "bl", "--prompt", "stamped task", "--executor", "codex-luna",
+                 "--resume-executor", "false", "--session-id", "stampS"], stamp_project)
+            stamped_path = stamp_project / ".crew" / "build-state-stampS.json"
+            stamped = json.loads(stamped_path.read_text()) if stamped_path.exists() else {}
+            if (stamp_code == 0 and stamped.get("executor") == "codex-luna"
+                    and stamped.get("resume_executor") is False):
+                log_pass("init bl stamps executor + resume_executor settings")
+            else:
+                log_fail("init bl stamps executor + resume_executor settings",
+                         "executor=codex-luna, resume_executor=false",
+                         f"code={stamp_code} state={stamped} err={stamp_err[:120]}")
+
+            _, default_err, default_code = run_crew_state(
+                ["init", "bl", "--prompt", "default settings", "--session-id", "stampDefault"],
+                stamp_project)
+            default_path = stamp_project / ".crew" / "build-state-stampDefault.json"
+            default_state = json.loads(default_path.read_text()) if default_path.exists() else {}
+            if (default_code == 0 and default_state.get("executor") == ""
+                    and default_state.get("resume_executor") is None):
+                log_pass("init bl omitted settings preserves executor/resume_executor defaults")
+            else:
+                log_fail("init bl omitted settings preserves executor/resume_executor defaults",
+                         "executor='', resume_executor=null",
+                         f"code={default_code} state={default_state} err={default_err[:120]}")
+
+            _, garbage_err, garbage_code = run_crew_state(
+                ["init", "bl", "--prompt", "garbage toggle", "--resume-executor", "bogus",
+                 "--session-id", "stampGarbage"], stamp_project)
+            garbage_path = stamp_project / ".crew" / "build-state-stampGarbage.json"
+            if garbage_code == 2 and not garbage_path.exists():
+                log_pass("init rejects garbage --resume-executor before writing state")
+            else:
+                log_fail("init rejects garbage --resume-executor before writing state",
+                         "argparse exit 2, no state file",
+                         f"code={garbage_code} exists={garbage_path.exists()} err={garbage_err[:160]}")
+
             # Test show bl (compact default). The compact line reports the REAL
             # budget (the two bounds that can end the loop), never a round
             # counter: nothing writes one, so it could only report a frozen lie.
@@ -3546,6 +3589,32 @@ def main():
                     "started_at": _dt.now(_tz.utc).isoformat(), "schema": 2,
                 }))
                 return path
+
+            # Terminal continuation cleanup deliberately remains with the
+            # next fresh build-loop init. A persistent-mode force exit must not
+            # remove the chain it did not create or own.
+            from multiagent import continuations as continuations_live
+            chain_path = continuations_live.chain_dir(
+                "chainS", "build-executor", base=test_path / ".crew" / "reviews")
+            chain_path.mkdir(parents=True, exist_ok=True)
+            (chain_path / "record.json").write_text("{}")
+            force_chain_path = crew_dir / "build-state-chainS.json"
+            force_chain_path.write_text(json.dumps({
+                "active": True, "prompt": "chain task", "session_id": "chainS",
+                "schema": 3,
+            }))
+            force_chain_state = models_live.LoopState(
+                active=True, loop="bl", task="chain task", session_id="chainS")
+            pm_module._force_exit(force_chain_path, force_chain_state, "livelock circuit breaker")
+            force_chain_after = _read_state_json(force_chain_path)
+            if (force_chain_after.get("active") is False
+                    and force_chain_after.get("exit_kind") == "force_exit"
+                    and chain_path.exists()):
+                log_pass("force exit leaves the build-executor continuation chain for init cleanup")
+            else:
+                log_fail("force exit leaves the build-executor continuation chain for init cleanup",
+                         "force_exit state + existing chain directory",
+                         f"state={force_chain_after} chain_exists={chain_path.exists()}")
 
             conc_payload = json.dumps({"directory": str(test_path), "session_id": "conc"})
 

@@ -689,8 +689,8 @@ class LoopState:
     # Continuation lifetime and resolved build-executor settings. These are
     # additive optional fields: legacy state files load with empty defaults and
     # cannot reuse a continuation until a newer lifecycle stamps them.
-    # The build-loop integration writer owns executor/resume_executor; lifecycle
-    # initialization stamps loop_instance_id.
+    # A build-loop init stamps all three: loop_instance_id plus the executor and
+    # resume_executor values the recipe resolved for this loop.
     loop_instance_id: str = ""
     executor: str = ""
     resume_executor: bool | None = None

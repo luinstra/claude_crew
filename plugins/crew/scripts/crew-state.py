@@ -689,6 +689,8 @@ def cmd_init(args):
             started_at=utc_now_iso(),
             deadline_minutes=deadline,
             no_deadline=deadline == NO_DEADLINE,
+            executor=getattr(args, "executor", None) or "",
+            resume_executor=getattr(args, "resume_executor", None),
         )
     else:  # mt
         task = _resolve_init_text(args, args.task, "--task")
@@ -805,6 +807,16 @@ def deadline_minutes_arg(value: str) -> int:
             f"{minutes} (no-deadline is config-only: [tuning].deadline_minutes = 0)"
         )
     return minutes
+
+
+def resume_executor_arg(value: str) -> bool:
+    """argparse type for the explicit true/false continuation toggle."""
+    normalized = value.lower()
+    if normalized not in {"true", "false"}:
+        raise argparse.ArgumentTypeError(
+            f"expected 'true' or 'false', got {value!r}"
+        )
+    return normalized == "true"
 
 
 def cmd_deactivate(args):
@@ -1338,6 +1350,14 @@ def main():
              f"minutes (default: [tuning].deadline_minutes, else "
              f"{DEFAULT_DEADLINE_MINUTES}; the no-deadline opt-out is "
              f"config-only)",
+    )
+    p_init.add_argument(
+        "--executor", dest="executor",
+        help="Resolved build executor to stamp into loop state (bl only)",
+    )
+    p_init.add_argument(
+        "--resume-executor", dest="resume_executor", type=resume_executor_arg,
+        help="Resolved continuation toggle to stamp (bl only; true|false)",
     )
     p_init.add_argument(
         "--force", action="store_true", default=False,
