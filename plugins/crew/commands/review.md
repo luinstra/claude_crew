@@ -166,6 +166,15 @@ The staged prompt already states plan-vs-code, the frozen snapshot as review
 authority, the criteria, and the per-criterion PASS/FAIL +
 `[BLOCKING]`/`[MINOR]` findings + one-line verdict. `.crew/` is gitignored.
 
+> **Spawn EXACTLY as written: a bare one-shot `Task(...)`, NO `name` argument.**
+> A named spawn creates a long-lived TEAMMATE instead, and a teammate delivers
+> ONLY by calling `SendMessage`: its plain final message reaches nobody, so a
+> finished review is stranded in its own transcript and the seat reads as idle
+> forever. (Seen live: opus seats strand every time while sonnet happens to call
+> `SendMessage`, so the loss masquerades as a model bug and costs a day.) A
+> one-shot Task is resumable by its returned id if a follow-up is ever needed,
+> so a name buys the panel nothing.
+
 > **The Task RESULT is the only completion signal.** Each `Task(...)` RETURNS
 > the seat's final message as its tool result; that returned text IS the
 > seat's review *and* the proof it finished.

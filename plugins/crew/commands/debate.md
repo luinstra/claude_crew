@@ -179,6 +179,16 @@ instead. Most debates are discuss.)
 
 ## A4 — Normalize + synthesize + log
 
+> **Spawn EXACTLY as written: a bare one-shot `Task(...)`, NO `name` argument.**
+> A named spawn creates a long-lived TEAMMATE instead, and a teammate delivers
+> ONLY by calling `SendMessage`: its plain final message reaches nobody, so a
+> finished take is stranded in its own transcript and the seat reads as idle
+> forever. (Seen live: opus seats strand every time while sonnet happens to call
+> `SendMessage`, so the loss masquerades as a model bug and costs a day.) A
+> one-shot Task is resumable by its returned id if a follow-up is ever needed,
+> so a name buys the panel nothing. This governs BOTH dispatch sites above
+> (single-round and per-round).
+
 > **The Task RESULT is the only completion signal.** Each `Task(...)` RETURNS
 > the seat's final message; that returned text IS the seat's take *and* the
 > proof it finished. Take `ok`/`output` from it. **NEVER judge a seat by a

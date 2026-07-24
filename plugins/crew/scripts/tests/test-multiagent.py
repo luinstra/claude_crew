@@ -6866,6 +6866,7 @@ def test_persist_seat_doc_sync():
     # ONE doc fails here instead of silently drifting.
     SENTINEL_PHRASES = [
         'crew" persist-seat',
+        "Spawn EXACTLY as written: a bare one-shot `Task(...)`, NO `name` argument.",
         "The Task RESULT is the only completion signal",
         "NEVER judge a seat by a proxy",
         "Wait-for-BOTH barrier.",
