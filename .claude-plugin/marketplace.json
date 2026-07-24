@@ -19,7 +19,7 @@
     {
       "name": "sk",
       "source": "./plugins/sk",
-      "description": "Tech-stack skills: Kotlin, Exposed, Gradle, Trino patterns"
+      "description": "Tech-stack skills: Kotlin, Exposed, Gradle, Python patterns"
     }
   ]
 }
