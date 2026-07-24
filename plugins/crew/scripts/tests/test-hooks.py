@@ -662,6 +662,12 @@ def main():
                 json.dumps({"directory": str(test_path), "session_id": "s9"}),
                 "--session-id s9",
             )
+            test_contains_verbose(
+                "Build loop nudge (verbose) - build-executor carries session flag",
+                persistent_mode,
+                json.dumps({"directory": str(test_path), "session_id": "s9"}),
+                "crew build-executor --session-id s9",
+            )
             # A session_id carrying a space/shell metacharacter must be
             # shlex.quote'd in the copy-pasteable nudge (complements the spaced
             # plan-path test) — an unquoted value would split/execute.

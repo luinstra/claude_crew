@@ -501,7 +501,7 @@ Continue working. When complete, verify via the multi-model panel
 7. If REVISE with [BLOCKING] issues, fix and re-verify from step 1
 
 When re-delegating the implement/revision step, route it through the CONFIGURED
-executor (re-resolve via `crew build-executor` / the shared executor-step block in
+executor (re-resolve via `crew build-executor{session_flag}` / the shared executor-step block in
 /crew:build), NOT a bare `Task(crew:executor)`: substituting Claude for the seat the
 user configured defeats the never-silently-fall-back guarantee.
 

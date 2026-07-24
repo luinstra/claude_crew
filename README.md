@@ -220,8 +220,16 @@ lists them, non-billable).
 `/crew:build`'s implement step normally runs the `crew:executor` Task agent
 (Claude); `[build].executor` can instead route each round through a write-capable
 subprocess seat (e.g. `codex-luna`), and `[build].executor_retries` (0..2, default
-0) caps how many times a FAILED external-executor round is retried. The
-`--executor <seat>` flag overrides the config per invocation.
+0) caps how many times a FAILED external-executor round is retried. `[build].resume_executor`
+(bool, default `true`) lets a supporting external executor REUSE its provider
+conversation across rounds; set `false` to opt out and run each round fresh; only
+codex and cursor resume, agy and any unsupported binary always start fresh
+regardless of the toggle. On a fresh start with no active loop, the
+`--executor <seat>` flag overrides `[build].executor` config for that invocation;
+on a resumed build loop the resolution is active-loop stamp (`source: "state"`,
+only when an active valid loop with a non-empty stamp matches the resolved
+session) > `--executor` flag > `[build].executor` config > builtin, so a resumed
+loop cannot drift its executor.
 
 ```toml
 # .crew/config.toml
@@ -244,6 +252,7 @@ seat = "codex"                    # default seat for /crew:dispatch; validated v
 [build]
 executor = "crew:executor"        # /crew:build implement-step executor; a write-capable seat (e.g. codex-luna) routes each round through that model
 executor_retries = 0              # retries for a FAILED external-executor round (0..2); retries STACK on partial edits, so the cap is low
+resume_executor = true             # default ON; codex/cursor reuse conversations, other executors always start fresh
 
 [seats.codex]
 model = "gpt-5.5"

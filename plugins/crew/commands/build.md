@@ -77,24 +77,37 @@ choice survives across iterations. A one-seat panel is fine.
 The IMPLEMENT step defaults to `Task(crew:executor)` (Claude); `--executor
 <seat>` (start-of-`$ARGUMENTS`) routes it through an external write-capable
 subprocess seat instead (or the literal `crew:executor` to force the default),
-the panel still gating completion. Precedence: flag > `[build].executor`
-config > builtin. `[build].executor_retries` (int `0..2`, default `0`) retries
+the panel still gating completion. Precedence: active-loop stamp (`source: "state"`,
+only when an active valid loop with a non-empty stamp matches the resolved
+session) > `--executor` flag > `[build].executor` config > builtin.
+`[build].executor_retries` (int `0..2`, default `0`) retries
 a FAILED external round; retries STACK on the failed attempt's partial edits
-(no clean-tree revert), hence the low cap. `crew build-executor` OWNS
-resolution + validation; pass `--executor <seat>` ONLY when the user named one.
+(no clean-tree revert), hence the low cap. `resume_executor` (config
+`[build].resume_executor`, default ON) controls whether an external executor
+round reuses its provider conversation; `resume_executor = false` opts out (the
+recipe already omits `--chain` when false); only codex/cursor resume, agy and
+unsupported binaries always start fresh. `crew build-executor` OWNS resolution
+and validation; pass `--executor <seat>` ONLY when the user named one.
 
 ## MANDATORY: Resolve the Executor
 
 Before activating the loop, resolve the executor. Add `--executor <seat>` ONLY
-when the user passed one; otherwise OMIT it:
+when the user passed one; otherwise OMIT it. Always pass the literal session id:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" build-executor
+"${CLAUDE_PLUGIN_ROOT}/crew" build-executor --session-id <session-id>
 ```
 
 Keep `executor`, `retries`, and `resume_executor` from its one-line JSON. **If
 it exits 2, SURFACE the reason and STOP**: a misconfigured executor (unknown
 seat, Task seat, group token, read-only seat) must NOT silently run as Claude.
+On a resumed loop, this command reads the active loop's frozen executor, so
+running it again after resume or compaction returns the executor the loop
+started with even without the original `--executor`; a removed or
+misconfigured seat, or an unreadable build state, exits nonzero and stops.
+After any resume or compaction, RE-RUN this resolve recipe with
+`--session-id <session-id>` before the next implement round so the frozen stamp
+is consulted.
 
 ## MANDATORY: Activate the Loop
 
@@ -603,6 +616,6 @@ refused there.
 
 ---
 
-First: resolve the executor (`crew build-executor`), then run the activation
+First: resolve the executor (`crew build-executor --session-id <session-id>`), then run the activation
 command (passing the resolved `--executor`/`--resume-executor` to init). Then
 run the executor round.

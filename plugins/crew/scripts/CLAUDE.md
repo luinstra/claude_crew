@@ -69,8 +69,11 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   `-o` keeps ad-hoc freedom).
 - `dispatch` — write-mode single-seat WORK delegation (see below).
 - `build-executor` (RESOLVE-ONLY): prints `{executor, retries, resume_executor, source}` JSON for
-  /crew:build's implement step (`--executor` flag > `[build].executor` config >
-  builtin `crew:executor`). Validates the resolved value is the `crew:executor`
+  /crew:build's implement step (active-loop stamp (`source: "state"`, only when
+  an active valid loop with a non-empty stamp matches the resolved session) >
+  `--executor` flag > `[build].executor` config > builtin `crew:executor`). An
+  unreadable or session-mismatched active state file exits 2 rather than
+  silently resolving fresh. Validates the resolved value is the `crew:executor`
   sentinel OR a known write-capable subprocess seat; a Task seat, group token,
   unknown, or read-only seat exits 2 naming the reason. Runs NOTHING.
 - `render` — build/stage a seat prompt; `--stage-all` collapses N stages into one call.
@@ -947,8 +950,9 @@ discovery, and the session-start cleanup globs. What unified is the SHAPE.
 `loop_instance_id`, `executor`, and `resume_executor` are additive fields: legacy
 state loads empty/non-reusable values. Initialization stamps `loop_instance_id`
 plus the resolved executor and `resume_executor` settings. `ProviderResult.continuation` carries
-the structured continuation outcome and `continuation_id` carries the exact ID
-used by the chain store; both are optional. Providers remain
+the structured continuation outcome, and the chain-store PERSIST writes its
+classified `continuation.conversation_id`; the flat `continuation_id` is the
+mirror both adapters set alongside it. Both are optional. Providers remain
 `supports_continuation = False` unless their adapters implement exact-ID probing
 and resume; Codex and Cursor are the current opt-in providers.
 `revision_round` is written by the review verbs, never the hook: the Stop hook

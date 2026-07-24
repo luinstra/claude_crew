@@ -13,6 +13,7 @@ $ARGUMENTS
 > the engine's `config.py` loader (`default_panel`, `[debate].panel`,
 > `[dispatch].seat`, `[dispatch.<kind>]`, per-seat `model`/`available`,
 > `[tuning].timeout`, `[build].executor`, `[build].executor_retries`,
+> `[build].resume_executor` (default ON; `false` opts out; codex/cursor only),
 > `[panels]`). It DETECTS installed provider CLIs, then writes a **commented**
 > starter config. Not to be confused with `/crew:crew-config`, which copies
 > the CLAUDE.md operating-instructions doc and touches NO `.toml`.
@@ -137,7 +138,8 @@ Point the user at the knobs, documented inline in the file they just got:
 per-seat tuning (`model`, codex `reasoning_effort`, agy `print_timeout`),
 `[tuning].timeout`, `[tuning].deadline_minutes` (the persistence loops' wall
 clock, 1-1440, or 0 for no deadline, global file only), `[build].executor` /
-`executor_retries`, the `[dispatch.<kind>]` write-mode options
+`executor_retries` / `[build].resume_executor` (default ON; `false` opts out;
+codex/cursor only), the `[dispatch.<kind>]` write-mode options
 (`"${CLAUDE_PLUGIN_ROOT}/crew" dispatch --options` lists every key,
 non-billable), and `[panels]` rosters. For the operating-instructions doc (a
 different file), mention `/crew:crew-config`.

@@ -32,7 +32,9 @@ seat = "codex"
 # [build].executor: /crew:build's implement-step executor. Default is the
 #   crew:executor Task agent (Claude); set it to ONE write-capable subprocess
 #   seat (e.g. codex-luna) to route each round through that model instead. The
-#   --executor <seat> flag overrides this per invocation.
+#   Resolution: active-loop stamp (source: "state") > --executor <seat>
+#   flag > [build].executor config > built-in. With no active-loop stamp, the
+#   --executor <seat> flag overrides this config for a fresh resolve.
 # executor_retries: how many times to retry a FAILED external-executor round
 #   (int 0..2, default 0). Retries STACK on the failed attempt's partial edits
 #   (no clean-tree revert), so the cap is low.

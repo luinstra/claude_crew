@@ -1694,10 +1694,20 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
                     mem_record, guard, avail, outcome,
                 )
                 chain_resumed = chain_status == "resumed"
-                if action == continuations.CHAIN_ACTION_CLEAR and mem_record is not None:
-                    if binding_dims:
-                        chain_reset_reason = ", ".join(binding_dims)
-                    elif chain_status == "unsupported":
+                if (
+                    mem_record is not None
+                    and binding_dims
+                    and action in (
+                        continuations.CHAIN_ACTION_CLEAR,
+                        continuations.CHAIN_ACTION_PERSIST,
+                    )
+                ):
+                    # A prior chain existed whose binding no longer matches, so
+                    # the old conversation was abandoned whether this run
+                    # cleared it or replaced it with a freshly captured id.
+                    chain_reset_reason = ", ".join(binding_dims)
+                elif action == continuations.CHAIN_ACTION_CLEAR and mem_record is not None:
+                    if chain_status == "unsupported":
                         chain_reset_reason = "capability:unsupported"
                     else:
                         chain_reset_reason = chain_status
@@ -1826,24 +1836,73 @@ def cmd_build_executor(args: argparse.Namespace) -> int:
     """Resolve /crew:build's implement-step executor and PRINT a JSON contract;
     it runs NOTHING (mirrors review-prep's resolve + validate + emit shape).
 
-    Precedence: ``--executor`` flag > ``config.build_executor()``
-    (``[build].executor``, per-repo > global) > the builtin ``crew:executor``
-    sentinel. The resolved value is either that sentinel (the Task path build.md
-    runs as today) OR a known subprocess seat that is write-capable; anything
-    else exits 2 naming the reason, never a silent fallback (a misconfigured
-    executor must not quietly run as Claude and produce a diff attributed to the
-    wrong model).
+    On a fresh resolve, precedence is ``--executor`` flag >
+    ``config.build_executor()`` (``[build].executor``, per-repo > global) > the
+    builtin ``crew:executor`` sentinel. An active, valid build loop with a
+    non-empty matching executor stamp is authoritative as ``source: "state"``
+    above that fresh chain, so a resumed loop cannot drift its executor. An
+    unreadable or mismatched active state file exits 2 rather than silently
+    resolving fresh. A stale active loop in the same session therefore causes a
+    first resolve to read ``source: "state"`` and ignore a new ``--executor``;
+    cancel the prior loop before starting a genuinely different build. The
+    resolved value is either the sentinel (the Task path build.md runs as today)
+    OR a known subprocess seat that is write-capable; anything else exits 2
+    naming the reason, never a silent fallback.
     """
-    # 1. Resolve + track the source for the JSON.
-    if args.executor is not None:
-        executor = args.executor
-        source = "flag"
+    sid = _resolve_session_id(args.session_id)
+    if "<" in sid or ">" in sid:
+        print(
+            f"error: session id looks like an unsubstituted placeholder "
+            f"({sid!r}); pass your actual session id (the "
+            "[Session ID: …] value), not the literal template",
+            file=sys.stderr,
+        )
+        return 2
+    path = find_session_state_file(crew_base() / ".crew", "build-state", sid)
+    state, status = (
+        LoopState.load_with_status(path)
+        if path is not None
+        else (LoopState(), LOAD_MISSING)
+    )
+    if status not in (LOAD_OK, LOAD_MISSING):
+        print(
+            f"error: build executor cannot resolve over an unreadable build "
+            f"state ({status}): {path}",
+            file=sys.stderr,
+        )
+        return 2
+
+    # 1. Resolve + track the source for the JSON. An active stamped loop is
+    # authoritative; inactive and legacy unstamped loops use the fresh chain.
+    if status == LOAD_OK and state.active is True and state.executor.strip():
+        if state.session_id != sid:
+            # This guard is intentionally stricter than find_adoptable_legacy's adoption rule, fail-safe for an unreachable stamped-legacy case.
+            stamped_session = state.session_id or "<empty>"
+            print(
+                f"error: build state session mismatch in {path}: the loop's "
+                f"stamped session id {stamped_session!r} does not match "
+                f"requested session id {sid!r}",
+                file=sys.stderr,
+            )
+            return 2
+        executor = state.executor
+        source = "state"
+        resume_executor = (
+            state.resume_executor
+            if isinstance(state.resume_executor, bool)
+            else config.build_resume_executor()
+        )
     else:
-        configured = config.build_executor()
-        if configured is not None:
-            executor, source = configured, "config"
+        if args.executor is not None:
+            executor = args.executor
+            source = "flag"
         else:
-            executor, source = "crew:executor", "builtin"
+            configured = config.build_executor()
+            if configured is not None:
+                executor, source = configured, "config"
+            else:
+                executor, source = "crew:executor", "builtin"
+        resume_executor = config.build_resume_executor()
 
     # 2. Validate. The sentinel bypasses the seat checks: it IS the Task path,
     #    which the engine never runs and which no registry knows.
@@ -1874,8 +1933,6 @@ def cmd_build_executor(args: argparse.Namespace) -> int:
 
     # 3. Retries: None (unset/invalid) falls to the safe default 0.
     retries = config.build_executor_retries() or 0
-    resume_executor = config.build_resume_executor()
-
     # 4. One-line JSON to stdout (stdout carries ONLY the payload, like the other
     #    machine-parsed commands), exit 0.
     print(json.dumps(
@@ -4082,7 +4139,9 @@ def _render_config_template(
     L.append("# [build].executor: /crew:build's implement-step executor. Default is the")
     L.append("#   crew:executor Task agent (Claude); set it to ONE write-capable subprocess")
     L.append("#   seat (e.g. codex-luna) to route each round through that model instead. The")
-    L.append("#   --executor <seat> flag overrides this per invocation.")
+    L.append('#   Resolution: active-loop stamp (source: "state") > --executor <seat>')
+    L.append("#   flag > [build].executor config > built-in. With no active-loop stamp, the")
+    L.append("#   --executor <seat> flag overrides this config for a fresh resolve.")
     L.append("# executor_retries: how many times to retry a FAILED external-executor round")
     L.append("#   (int 0..2, default 0). Retries STACK on the failed attempt's partial edits")
     L.append("#   (no clean-tree revert), so the cap is low.")
@@ -5330,18 +5389,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     be = sub.add_parser(
         "build-executor",
-        help="Resolve /crew:build's implement-step executor (--executor flag > "
-             "[build].executor config > builtin crew:executor) and PRINT "
-             "{executor, retries, resume_executor, source} JSON. Validates: the crew:executor "
-             "sentinel (the Task path) OR a known write-capable subprocess seat; "
-             "a Task seat, group token, unknown, or read-only seat exits 2 naming "
-             "the reason (never a silent fallback). Runs NOTHING.",
+        help="Resolve /crew:build's implement-step executor (active-loop stamp "
+             "source: state > --executor flag > [build].executor config > "
+             "builtin) and PRINT {executor, retries, resume_executor, source} "
+             "JSON. An unreadable or session-mismatched active state exits 2 "
+             "instead of silently resolving fresh; empty or inactive state falls "
+             "back to the normal chain. Validates the crew:executor sentinel "
+             "(the Task path) OR a known write-capable subprocess seat; a Task "
+             "seat, group token, unknown, or read-only seat exits 2 naming the "
+             "reason. Runs NOTHING.",
     )
     be.add_argument(
         "--executor", dest="executor", default=None,
         help="explicit executor seat: a write-capable subprocess seat (e.g. "
              "codex-luna) or the crew:executor sentinel for the default Task "
-             "path. Wins over [build].executor config.",
+             "path. Active-loop stamp source: \"state\" wins over this flag; "
+             "otherwise this flag wins over [build].executor config and the "
+             "builtin crew:executor.",
+    )
+    be.add_argument(
+        "--session-id", dest="session_id", default=None,
+        help="the session whose active build loop, if any, freezes the executor "
+             "on a re-resolution",
     )
     be.set_defaults(func=cmd_build_executor)
 

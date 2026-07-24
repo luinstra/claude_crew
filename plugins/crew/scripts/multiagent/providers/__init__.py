@@ -72,8 +72,10 @@ class ProviderResult:
     target_sha256: str | None = None
 
     # OPTIONAL continuation fields.  The structured outcome is the classifier's
-    # input; the flat ID is the value a chain-store write persists.  Both are
-    # omitted when unset so every review/unchained result retains the exact
+    # input; a chain-store PERSIST writes the classified
+    # continuation.conversation_id, while the flat continuation_id is the
+    # co-set convenience mirror. Both are omitted when unset so every
+    # review/unchained result retains the exact
     # legacy six-field JSON shape.
     continuation: ContinuationOutcome | None = None
     continuation_id: str | None = None

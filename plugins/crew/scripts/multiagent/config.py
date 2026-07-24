@@ -473,9 +473,10 @@ def _extract_build_executor(data: dict, layer: str) -> str | None:
     ``crew:executor`` is a legitimate value that is NOT a registered subprocess
     seat, so a ``known_seat_names()`` gate here would reject the default. The
     loud exit-2 rejection of an unknown / Task / read-only seat belongs to the
-    ``build-executor`` command, which also applies the ``--executor`` flag
-    precedence a config getter never sees. Only the TYPE is checked here: a
-    non-string warns once + ``None``.
+    ``build-executor`` command, which also applies the resolution precedence a
+    config getter never sees (an active build loop's stamped executor, then the
+    ``--executor`` flag, then this config value, then the builtin). Only the TYPE
+    is checked here: a non-string warns once + ``None``.
     """
     build_tbl = data.get("build")
     if not isinstance(build_tbl, dict):

@@ -426,7 +426,7 @@ def test_codex_continuation():
           and o.conversation_id == "thread-xyz" and o.failure == "none",
           "supported/fresh/thread-xyz/none",
           repr(o))
-    check("fresh chained run: flat continuation_id set for persist",
+    check("fresh chained run: flat continuation_id mirrors the structured id",
           res.continuation_id == "thread-xyz", "thread-xyz", repr(res.continuation_id))
 
     # Resume supported run with the EXACT supplied id (never --last).
@@ -7397,20 +7397,50 @@ def _write_build_state_for_dispatch(
     loop_instance_id: str = "loop-1",
     active: bool = True,
     phase: str = "drafting",
+    executor: str = "",
+    resume_executor=None,
+    unsuffixed: bool = False,
+    inner_session_id: str | None = None,
 ) -> None:
     crew_dir = repo / ".crew"
     crew_dir.mkdir(parents=True, exist_ok=True)
-    (crew_dir / f"build-state-{session_id}.json").write_text(
-        json.dumps({
-            "schema": 3,
-            "active": active,
-            "loop": "bl",
-            "phase": phase,
-            "session_id": session_id,
-            "loop_instance_id": loop_instance_id,
-        }),
+    data = {
+        "schema": 3,
+        "active": active,
+        "loop": "bl",
+        "phase": phase,
+        "session_id": session_id if inner_session_id is None else inner_session_id,
+        "loop_instance_id": loop_instance_id,
+    }
+    if executor:
+        data["executor"] = executor
+    if resume_executor is not None:
+        data["resume_executor"] = resume_executor
+    state_path = crew_dir / (
+        "build-state.json" if unsuffixed else f"build-state-{session_id}.json"
+    )
+    state_path.write_text(
+        json.dumps(data),
         encoding="utf-8",
     )
+
+
+def _run_be(executor_flag=None, session_id=None):
+    """Run the in-process build-executor resolver and capture its streams."""
+    import io as _io
+    from contextlib import redirect_stdout, redirect_stderr
+    from multiagent import cli
+
+    argv = ["build-executor"]
+    if executor_flag is not None:
+        argv += ["--executor", executor_flag]
+    if session_id is not None:
+        argv += ["--session-id", session_id]
+    args = cli.build_parser().parse_args(argv)
+    out, err = _io.StringIO(), _io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = args.func(args)
+    return rc, out.getvalue(), err.getvalue()
 
 
 def _seed_dispatch_record(
@@ -8184,6 +8214,177 @@ def test_dispatch_chain_classifier_precedence():
                 f"classifier {status} clear_stale follows prior presence={prior is not None}",
                 got == expected, repr(expected), repr(got),
             )
+
+
+def test_dispatch_chain_reset_reason_binding_persist():
+    """Binding changes explain both fresh replacement and preserved chains."""
+    log_section("dispatch --chain binding reset reason on fresh persist")
+    from multiagent import cli
+    from multiagent.providers import Provider
+    import contextlib
+    import io
+    import unittest.mock as mock
+
+    def set_project(repo):
+        saved = (
+            os.environ.get("CLAUDE_PROJECT_DIR"),
+            os.environ.get("CLAUDE_WORKING_DIRECTORY"),
+        )
+        os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
+        os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+        return saved
+
+    def restore_project(saved):
+        project, working = saved
+        if project is None:
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        else:
+            os.environ["CLAUDE_PROJECT_DIR"] = project
+        if working is None:
+            os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+        else:
+            os.environ["CLAUDE_WORKING_DIRECTORY"] = working
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        _init_repo(str(repo))
+        _write_build_state_for_dispatch(repo, "S")
+        saved_env = set_project(repo)
+        try:
+            _seed_dispatch_record(
+                repo, model="stale-model", conversation_id="old-thread",
+            )
+
+            class _FreshProvider(Provider):
+                name = "codex"
+                supports_workspace_write = True
+                supports_continuation = True
+
+                def is_available(self):
+                    return True, ""
+
+                def run(self, *args, **kwargs):
+                    return ProviderResult(
+                        name="codex", model="o3", ok=True, output="BODY",
+                        error=None, elapsed=0.1,
+                        continuation=ContinuationOutcome(
+                            capability="supported", phase="fresh",
+                            conversation_id="fresh-thread",
+                        ),
+                        continuation_id="fresh-thread",
+                    )
+
+            out_path = repo / "binding-persist.json"
+            with mock.patch.object(cli, "get_provider", return_value=_FreshProvider()), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                rc = cli.cmd_dispatch(_dispatch_ns(
+                    seat="codex", task="x", json=True, out=str(out_path),
+                    session_id="S", chain="build-executor",
+                ))
+            envelope = json.loads(out_path.read_text())
+            stored = continuations.load_record("S", "build-executor")
+            check(
+                "binding mismatch fresh capture records its reset dimension",
+                rc == 0
+                and envelope["continuation"]["status"] == "created"
+                and envelope["continuation"]["reset_reason"] == "model"
+                and stored is not None
+                and stored.conversation_id == "fresh-thread",
+                "created/model/fresh-thread persisted",
+                f"rc={rc} envelope={envelope} stored={stored!r}",
+            )
+        finally:
+            restore_project(saved_env)
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        _init_repo(str(repo))
+        _write_build_state_for_dispatch(repo, "S")
+        saved_env = set_project(repo)
+        try:
+            _seed_dispatch_record(repo, conversation_id="old-thread")
+
+            class _ResumeMismatchProvider(Provider):
+                name = "codex"
+                supports_workspace_write = True
+                supports_continuation = True
+
+                def is_available(self):
+                    return True, ""
+
+                def run(self, *args, **kwargs):
+                    return ProviderResult(
+                        name="codex", model="o3", ok=True, output="BODY",
+                        error=None, elapsed=0.1,
+                        continuation=ContinuationOutcome(
+                            capability="supported", phase="resume",
+                            conversation_id="different-thread",
+                        ),
+                        continuation_id="different-thread",
+                    )
+
+            out_path = repo / "resume-failed.json"
+            with mock.patch.object(
+                cli, "get_provider", return_value=_ResumeMismatchProvider(),
+            ), contextlib.redirect_stdout(io.StringIO()):
+                rc = cli.cmd_dispatch(_dispatch_ns(
+                    seat="codex", task="x", json=True, out=str(out_path),
+                    session_id="S", chain="build-executor",
+                ))
+            envelope = json.loads(out_path.read_text())
+            check(
+                "status-based CLEAR keeps its existing reset reason",
+                rc == 0
+                and envelope["continuation"]["status"] == "resume_failed"
+                and envelope["continuation"]["reset_reason"] == "resume_failed",
+                "resume_failed/reset_reason=resume_failed",
+                f"rc={rc} envelope={envelope}",
+            )
+        finally:
+            restore_project(saved_env)
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        _init_repo(str(repo))
+        _write_build_state_for_dispatch(repo, "S")
+        saved_env = set_project(repo)
+        try:
+            prior = _seed_dispatch_record(
+                repo, model="stale-model", conversation_id="old-thread",
+            )
+
+            class _UnavailableProvider(Provider):
+                name = "codex"
+                supports_workspace_write = True
+                supports_continuation = True
+
+                def is_available(self):
+                    return False, "missing"
+
+                def run(self, *args, **kwargs):
+                    raise AssertionError("unavailable provider ran")
+
+            out_path = repo / "skipped.json"
+            with mock.patch.object(
+                cli, "get_provider", return_value=_UnavailableProvider(),
+            ), contextlib.redirect_stdout(io.StringIO()):
+                rc = cli.cmd_dispatch(_dispatch_ns(
+                    seat="codex", task="x", json=True, out=str(out_path),
+                    session_id="S", chain="build-executor",
+                ))
+            envelope = json.loads(out_path.read_text())
+            after = continuations.load_record("S", "build-executor")
+            check(
+                "skipped stale mismatch keeps reset_reason empty",
+                rc == 0
+                and envelope["continuation"]["status"] == "skipped"
+                and envelope["continuation"]["reset_reason"] is None
+                and after == prior,
+                "skipped/null reset reason/prior record preserved",
+                f"rc={rc} envelope={envelope} after={after!r}",
+            )
+        finally:
+            restore_project(saved_env)
 
 
 def test_dispatch_chain_snapshot_probes():
@@ -15927,28 +16128,32 @@ def test_build_executor():
               "False", repr(config.build_resume_executor()))
 
     # --- cmd_build_executor: resolve + validate + print JSON, run NOTHING ---
-    def _run_be(executor_flag=None):
-        argv = ["build-executor"]
-        if executor_flag is not None:
-            argv += ["--executor", executor_flag]
-        args = cli.build_parser().parse_args(argv)
-        out, err = _io.StringIO(), _io.StringIO()
-        with redirect_stdout(out), redirect_stderr(err):
-            rc = args.func(args)
-        return rc, out.getvalue(), err.getvalue()
+    def _run_be_fresh(executor_flag=None):
+        saved_session_id = os.environ.pop("CLAUDE_SESSION_ID", None)
+        try:
+            return _run_be(executor_flag)
+        finally:
+            if saved_session_id is None:
+                os.environ.pop("CLAUDE_SESSION_ID", None)
+            else:
+                os.environ["CLAUDE_SESSION_ID"] = saved_session_id
 
     # Unset config resolves to the crew:executor sentinel (the default Task path).
     with project_config(""):
-        rc, out, err = _run_be()
+        rc, out, err = _run_be_fresh()
         j = json.loads(out) if out.strip() else {}
         check("unset config -> {executor:crew:executor, retries:0, source:builtin}, exit 0",
               rc == 0 and j.get("executor") == "crew:executor"
               and j.get("source") == "builtin" and j.get("retries") == 0,
               "crew:executor/builtin/0", f"rc={rc} out={out!r}")
+        check("fresh build-executor never reads state",
+              rc == 0 and j.get("source") in {"builtin", "config", "flag"}
+              and j.get("source") != "state",
+              "fresh source is builtin/config/flag", f"source={j.get('source')!r}")
 
     # A known write-capable subprocess seat in [build].executor routes through.
     with project_config('[build]\nexecutor = "codex-luna"\n'):
-        rc, out, err = _run_be()
+        rc, out, err = _run_be_fresh()
         j = json.loads(out) if out.strip() else {}
         check("[build].executor=codex-luna -> exit 0, source config",
               rc == 0 and j.get("executor") == "codex-luna"
@@ -15956,14 +16161,14 @@ def test_build_executor():
               "codex-luna/config", f"rc={rc} out={out!r}")
 
     with project_config(""):
-        rc, out, err = _run_be()
+        rc, out, err = _run_be_fresh()
         j = json.loads(out) if out.strip() else {}
         check("unset config -> build-executor JSON carries resume_executor=true",
               rc == 0 and j.get("resume_executor") is True
               and out.count("\n") == 1 and err == "",
               "resume_executor=true, stdout-only", f"rc={rc} out={out!r} err={err!r}")
     with project_config("[build]\nresume_executor = false\n"):
-        rc, out, err = _run_be()
+        rc, out, err = _run_be_fresh()
         j = json.loads(out) if out.strip() else {}
         check("resume_executor=false surfaces in build-executor JSON",
               rc == 0 and j.get("resume_executor") is False,
@@ -15981,12 +16186,12 @@ def test_build_executor():
     # A Task seat (opus) and a group token (cursor) both fail the
     # subprocess-registry gate -> exit 2, stderr-only, NO stdout JSON.
     with project_config('[build]\nexecutor = "opus"\n'):
-        rc, out, err = _run_be()
+        rc, out, err = _run_be_fresh()
         check("executor=opus (Task seat) -> exit 2 naming Task-seat, no stdout",
               rc == 2 and "opus" in err and "Task seat" in err and out.strip() == "",
               "exit2 Task-seat", f"rc={rc} out={out!r} err={err!r}")
     with project_config('[build]\nexecutor = "cursor"\n'):
-        rc, out, err = _run_be()
+        rc, out, err = _run_be_fresh()
         check("executor=cursor (group token) -> exit 2, no stdout",
               rc == 2 and "cursor" in err and out.strip() == "",
               "exit2", f"rc={rc} err={err!r}")
@@ -15994,7 +16199,7 @@ def test_build_executor():
     # Known-seat guard NON-VACUITY: an unknown seat exits 2; a KNOWN one (codex,
     # exercised at exit 0 just below) passes, so the gate is not always-firing.
     with project_config('[build]\nexecutor = "bogus-seat"\n'):
-        rc, out, err = _run_be()
+        rc, out, err = _run_be_fresh()
         check("known-seat guard: unknown seat -> exit 2, no stdout",
               rc == 2 and "bogus-seat" in err and out.strip() == "",
               "exit2", f"rc={rc} err={err!r}")
@@ -16009,14 +16214,14 @@ def test_build_executor():
         saved_gp = cli.get_provider
         cli.get_provider = lambda name: _ReadOnly()
         try:
-            rc, out, err = _run_be()
+            rc, out, err = _run_be_fresh()
         finally:
             cli.get_provider = saved_gp
         check("write-capable guard: known read-only seat -> exit 2 naming read-only",
               rc == 2 and "read-only" in err and out.strip() == "",
               "exit2 read-only", f"rc={rc} err={err!r}")
     with project_config('[build]\nexecutor = "codex"\n'):
-        rc, out, err = _run_be()
+        rc, out, err = _run_be_fresh()
         j = json.loads(out) if out.strip() else {}
         check("write-capable guard non-vacuity: same seat, real provider -> exit 0",
               rc == 0 and j.get("executor") == "codex",
@@ -16025,12 +16230,12 @@ def test_build_executor():
     # executor_retries surfaces in the JSON; an out-of-range 3 falls to 0 with the
     # warn (NOT clamped to 2), proving None-means-safe-default-0.
     with project_config('[build]\nexecutor = "codex-luna"\nexecutor_retries = 1\n'):
-        rc, out, err = _run_be()
+        rc, out, err = _run_be_fresh()
         j = json.loads(out) if out.strip() else {}
         check("executor_retries=1 surfaced in JSON",
               rc == 0 and j.get("retries") == 1, "retries=1", f"{out!r}")
     with project_config('[build]\nexecutor = "codex-luna"\nexecutor_retries = 3\n'):
-        rc, out, err = _run_be()
+        rc, out, err = _run_be_fresh()
         j = json.loads(out) if out.strip() else {}
         check("executor_retries=3 -> resolves to 0 with the warn (not clamped to 2)",
               rc == 0 and j.get("retries") == 0 and "executor_retries" in err,
@@ -16039,18 +16244,302 @@ def test_build_executor():
     # Flag precedence: --executor beats [build].executor; it can also name the
     # sentinel explicitly to force the Task path back on.
     with project_config('[build]\nexecutor = "codex-luna"\n'):
-        rc, out, err = _run_be("codex")
+        rc, out, err = _run_be_fresh("codex")
         j = json.loads(out) if out.strip() else {}
         check("--executor flag beats [build].executor config, source=flag",
               rc == 0 and j.get("executor") == "codex" and j.get("source") == "flag",
               "codex/flag", f"{out!r}")
     with project_config('[build]\nexecutor = "codex-luna"\n'):
-        rc, out, err = _run_be("crew:executor")
+        rc, out, err = _run_be_fresh("crew:executor")
         j = json.loads(out) if out.strip() else {}
         check("--executor crew:executor overrides config back to the Task path",
               rc == 0 and j.get("executor") == "crew:executor"
               and j.get("source") == "flag",
               "crew:executor/flag", f"{out!r}")
+
+
+def test_build_executor_state_recovery():
+    """The active build-loop stamp is the recovery resolver's source of truth."""
+    log_section("build-executor: active-loop state recovery")
+    from models import SCHEMA_VERSION
+
+    @contextmanager
+    def controlled_session(value=None):
+        saved = os.environ.get("CLAUDE_SESSION_ID")
+        if value is None:
+            os.environ.pop("CLAUDE_SESSION_ID", None)
+        else:
+            os.environ["CLAUDE_SESSION_ID"] = value
+        try:
+            yield
+        finally:
+            if saved is None:
+                os.environ.pop("CLAUDE_SESSION_ID", None)
+            else:
+                os.environ["CLAUDE_SESSION_ID"] = saved
+
+    def result_json(output):
+        return json.loads(output) if output.strip() else {}
+
+    with project_config(
+        '[build]\nexecutor = "codex"\nresume_executor = true\n'
+    ) as repo:
+        _write_build_state_for_dispatch(
+            repo, "S", executor="codex-luna", resume_executor=False,
+        )
+        rc, out, err = _run_be(session_id="S")
+        payload = result_json(out)
+        check(
+            "resume reads the active executor and resume stamp",
+            rc == 0 and payload.get("executor") == "codex-luna"
+            and payload.get("source") == "state"
+            and payload.get("resume_executor") is False,
+            "state/codex-luna/false",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+
+    with project_config('[build]\nexecutor = "codex"\n') as repo:
+        _write_build_state_for_dispatch(repo, "S", executor="codex-luna")
+        rc, out, err = _run_be("cursor-composer", session_id="S")
+        payload = result_json(out)
+        check(
+            "active stamp wins over a new executor flag",
+            rc == 0 and payload.get("executor") == "codex-luna"
+            and payload.get("source") == "state",
+            "state/codex-luna",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+
+    with project_config('[build]\nexecutor = "codex"\n') as repo:
+        _write_build_state_for_dispatch(repo, "S", executor="crew:executor")
+        rc, out, err = _run_be(session_id="S")
+        payload = result_json(out)
+        check(
+            "sentinel stamp remains source=state",
+            rc == 0 and payload.get("executor") == "crew:executor"
+            and payload.get("source") == "state",
+            "state/crew:executor",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+
+    with project_config('[build]\nresume_executor = true\n') as repo:
+        _write_build_state_for_dispatch(
+            repo, "S", executor="codex", resume_executor=False,
+        )
+        rc, out, err = _run_be(session_id="S")
+        payload = result_json(out)
+        check(
+            "stamped false resume setting survives config true",
+            rc == 0 and payload.get("source") == "state"
+            and payload.get("resume_executor") is False,
+            "state/resume_executor=false",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+
+    with project_config('[build]\nresume_executor = false\n') as repo:
+        _write_build_state_for_dispatch(
+            repo, "S", executor="codex", resume_executor=True,
+        )
+        rc, out, err = _run_be(session_id="S")
+        payload = result_json(out)
+        check(
+            "stamped true resume setting survives config false",
+            rc == 0 and payload.get("source") == "state"
+            and payload.get("resume_executor") is True,
+            "state/resume_executor=true",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+
+    with project_config('[build]\nresume_executor = false\n') as repo:
+        _write_build_state_for_dispatch(
+            repo, "S", executor="codex", resume_executor="yes",
+        )
+        rc, out, err = _run_be(session_id="S")
+        payload = result_json(out)
+        check(
+            "non-bool stamped resume setting falls back to config",
+            rc == 0 and payload.get("source") == "state"
+            and payload.get("executor") == "codex"
+            and payload.get("resume_executor") is False,
+            "state/codex/false",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+
+    with project_config('[build]\nexecutor = "codex-luna"\n') as repo:
+        _write_build_state_for_dispatch(
+            repo, "", unsuffixed=True, inner_session_id="", executor="codex",
+        )
+        with controlled_session():
+            rc, out, err = _run_be()
+        payload = result_json(out)
+        check(
+            "valid unsuffixed active loop resumes with an empty session id",
+            rc == 0 and payload.get("executor") == "codex"
+            and payload.get("source") == "state",
+            "state/codex",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+
+    with project_config('[build]\nexecutor = "codex-luna"\n') as repo:
+        _write_build_state_for_dispatch(repo, "S", executor="")
+        with controlled_session("S"):
+            rc, out, err = _run_be(session_id="S")
+        payload = result_json(out)
+        check(
+            "legacy empty executor stamp falls back fresh",
+            rc == 0 and payload.get("executor") == "codex-luna"
+            and payload.get("source") == "config",
+            "config/codex-luna",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+
+    with project_config('[build]\nexecutor = "codex-luna"\n') as repo:
+        _write_build_state_for_dispatch(
+            repo, "S", active=False, executor="codex",
+        )
+        with controlled_session("S"):
+            rc, out, err = _run_be(session_id="S")
+        payload = result_json(out)
+        check(
+            "inactive stamped loop falls back fresh",
+            rc == 0 and payload.get("executor") == "codex-luna"
+            and payload.get("source") == "config",
+            "config/codex-luna",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+
+    with project_config('[build]\nexecutor = "codex-luna"\n') as repo:
+        with controlled_session():
+            rc, out, err = _run_be()
+        payload = result_json(out)
+        check(
+            "no session and no unsuffixed state resolve fresh",
+            rc == 0 and payload.get("executor") == "codex-luna"
+            and payload.get("source") == "config"
+            and payload.get("source") != "state",
+            "config/codex-luna",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+        _write_build_state_for_dispatch(repo, "S", executor="codex")
+        with controlled_session("S"):
+            rc, out, err = _run_be()
+        payload = result_json(out)
+        check(
+            "omitted session flag still uses CLAUDE_SESSION_ID recovery",
+            rc == 0 and payload.get("executor") == "codex"
+            and payload.get("source") == "state",
+            "state/codex",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+
+    with project_config('[build]\nexecutor = "codex"\n') as repo:
+        state_path = repo / ".crew" / "build-state-S.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text("not json", encoding="utf-8")
+        rc, out, err = _run_be(session_id="S")
+        check(
+            "corrupt scoped state fails closed",
+            rc == 2 and out.strip() == "" and state_path.name in err,
+            "exit 2, named state, no stdout",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+
+    with project_config('[build]\nexecutor = "codex"\n') as repo:
+        state_path = repo / ".crew" / "build-state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text("[]", encoding="utf-8")
+        with controlled_session():
+            rc, out, err = _run_be()
+        check(
+            "corrupt empty-session legacy state fails closed",
+            rc == 2 and out.strip() == "" and state_path.name in err,
+            "exit 2, named legacy state, no stdout",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+
+    with project_config('[build]\nexecutor = "codex"\n') as repo:
+        state_path = repo / ".crew" / "build-state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text("[]", encoding="utf-8")
+        with controlled_session("S"):
+            rc, out, err = _run_be(session_id="S")
+        payload = result_json(out)
+        check(
+            "corrupt non-empty-session legacy state stays fresh",
+            rc == 0 and payload.get("executor") == "codex"
+            and payload.get("source") == "config" and payload.get("source") != "state",
+            "config/codex",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+
+    with project_config('[build]\nexecutor = "codex"\n') as repo:
+        state_path = repo / ".crew" / "build-state-S.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps({
+                "schema": SCHEMA_VERSION + 1,
+                "active": True,
+                "session_id": "S",
+                "executor": "codex",
+            }),
+            encoding="utf-8",
+        )
+        rc, out, err = _run_be(session_id="S")
+        check(
+            "future-schema scoped state fails closed",
+            rc == 2 and out.strip() == "" and state_path.name in err,
+            "exit 2, named future state, no stdout",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+
+    with project_config('[build]\nexecutor = "codex"\n') as repo:
+        state_path = repo / ".crew" / "build-state-S.json"
+        _write_build_state_for_dispatch(
+            repo, "S", executor="codex", inner_session_id="OTHER",
+        )
+        rc, out, err = _run_be(session_id="S")
+        check(
+            "active stamped session mismatch fails closed",
+            rc == 2 and out.strip() == "" and state_path.name in err
+            and "stamped session id 'OTHER' does not match requested session id 'S'" in err,
+            "exit 2, named mismatch, no stdout",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+
+    with project_config('[build]\nexecutor = "codex"\n') as repo:
+        _write_build_state_for_dispatch(repo, "S", executor="opus")
+        rc, out, err = _run_be(session_id="S")
+        check(
+            "stamped invalid seat exits 2",
+            rc == 2 and out.strip() == "" and "opus" in err,
+            "exit 2 naming opus, no stdout",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+        _write_build_state_for_dispatch(repo, "S", executor="codex")
+        rc, out, err = _run_be(session_id="S")
+        payload = result_json(out)
+        check(
+            "stamped valid seat proves the validation gate is non-vacuous",
+            rc == 0 and payload.get("executor") == "codex"
+            and payload.get("source") == "state",
+            "exit 0/state/codex",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
+
+
+def test_build_executor_placeholder_session_id():
+    """A literal recipe placeholder must not fall through to fresh resolution."""
+    log_section("build-executor: placeholder session id guard")
+
+    with project_config('[build]\nexecutor = "codex"\n'):
+        rc, out, err = _run_be(session_id="<session-id>")
+        check(
+            "literal placeholder session id exits 2 before fresh resolve",
+            rc == 2 and out.strip() == ""
+            and "unsubstituted placeholder" in err,
+            "exit 2, placeholder diagnostic, no stdout",
+            f"rc={rc} out={out!r} err={err!r}",
+        )
 
 
 def test_build_md_continuation_wiring():
@@ -16067,6 +16556,10 @@ def test_build_md_continuation_wiring():
     check("build.md resolves executor before init",
           resolver_index >= 0 and init_index >= 0 and resolver_index < init_index,
           "build-executor fence before state init bl", str(fences))
+    check("build.md resolve fence passes the mandatory session id",
+          resolver_index >= 0 and "--session-id <session-id>" in fences[resolver_index],
+          "build-executor fence with --session-id <session-id>",
+          str(fences[resolver_index] if resolver_index >= 0 else fences))
     init_lines = [line for line in fences if "state init bl" in line]
     check("build.md passes resolved executor settings to init",
           len(init_lines) == 1 and "--executor <executor>" in init_lines[0]
@@ -16083,7 +16576,8 @@ def test_build_md_continuation_wiring():
           and "runs fresh" in raw,
           "resume condition prose", raw[raw.find("--chain build-executor") - 100:raw.find("--chain build-executor") + 220])
     check("build.md task path remains unchained",
-          len(chain_lines) == 1 and "--chain" not in raw[raw.find("Task("):raw.find("Else (an external")],
+          len(chain_lines) == 1
+          and sum("--chain" in line for line in fences) == 1,
           "only the external dispatch carries --chain", str(chain_lines))
 
     resolve_heading = raw.index("## MANDATORY: Resolve the Executor")
@@ -16133,6 +16627,7 @@ def main():
     test_dispatch_chain_failure_invariants()
     test_dispatch_chain_e2e_fake_clis()
     test_dispatch_chain_classifier_precedence()
+    test_dispatch_chain_reset_reason_binding_persist()
     test_dispatch_chain_snapshot_probes()
     test_dispatch_chain_safety_and_output()
     test_dispatch_chain_gates_and_regression()
@@ -16143,6 +16638,8 @@ def main():
     test_path_arg_anchoring()
     test_repair_seat_name_form()
     test_build_executor()
+    test_build_executor_state_recovery()
+    test_build_executor_placeholder_session_id()
     test_build_md_continuation_wiring()
     test_council_subcommand()
     test_debate_subcommand()
