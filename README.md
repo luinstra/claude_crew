@@ -127,7 +127,12 @@ repo-relative path.
 
 > **`/crew:init` vs `/crew:crew-config`** — different files, different concerns.
 > `/crew:init` scaffolds the **engine-tuning `.toml`** (`default_panel`, panels, seats,
-> `available`, `[dispatch].seat`, per-provider `[dispatch.<kind>]` dispatch tuning)
+> `available`, `[dispatch].seat`, `[dispatch].timeout` (default 1800 seconds,
+> dispatch WORK only; provider floors raise the effective timeout only when the
+> resolved `[dispatch].timeout` is below the floor; agy's floor is its print
+> timeout plus grace, about 8 minutes by default, so the 1800-second default is
+> not floored; `--timeout` > `[dispatch].timeout` > builtin 1800),
+> per-provider `[dispatch.<kind>]` dispatch tuning)
 > that the `config.py` loader reads. `/crew:crew-config`
 > copies the **`CLAUDE.md` operating-instructions doc** into `.claude/CLAUDE.md` (project)
 > or `~/.claude/CLAUDE.md` (global) — it touches no `.toml`.
@@ -201,8 +206,12 @@ single seat is plenty for routine work.
 
 `full` is the **built-in** default panel. An optional, personal per-repo
 `.crew/config.toml` (already gitignored under `.crew/`) can override that default, tune per-seat
-models (plus codex `reasoning_effort`, agy `print_timeout`) and the global
-per-seat `timeout`, and declare brand-new model seats ([Add a model seat](#add-a-model-seat)). When you name no panel, `default_panel` resolves from
+models (plus codex `reasoning_effort`, agy `print_timeout`) and the
+NON-DISPATCH (review/council/run/probe) seat wall-clock `[tuning].timeout`,
+while dispatch WORK has its own `[dispatch].timeout` wall-clock (default 1800
+seconds; provider floors raise the effective timeout only when the resolved
+`[dispatch].timeout` is below the floor; agy's floor is its print timeout plus
+grace, about 8 minutes by default, so the 1800-second default is not floored), and declare brand-new model seats ([Add a model seat](#add-a-model-seat)). When you name no panel, `default_panel` resolves from
 config, falling back to built-in `full`; the per-seat tuning knobs follow
 **CLI flag > per-repo config > global config > built-in**. A malformed file is
 ignored with a one-time stderr note, so a config typo never takes down a panel.
@@ -217,6 +226,18 @@ rejected), falling back to the built-in `codex`; an explicit `--seat` overrides.
 Per-provider write-mode dispatch tuning lives under `[dispatch.<kind>]` (keyed
 by provider kind, keys declared by each provider; `crew dispatch --options`
 lists them, non-billable).
+`[dispatch].timeout` supplies the dispatch-WORK wall-clock. Provider floors raise
+the effective timeout only when the resolved `[dispatch].timeout` is below the
+floor; agy's floor is its print timeout plus grace, about 8 minutes by default,
+so the 1800-second default is not floored. The NON-DISPATCH (review/council/run/probe)
+seats use `[tuning].timeout`. Its precedence is
+`--timeout` > `[dispatch].timeout` > builtin 1800.
+
+> **Migration:** `[dispatch].timeout` is a new behavior split: `crew dispatch`
+> no longer reads `[tuning].timeout` and now uses `[dispatch].timeout` (default
+> 1800). If you previously raised `[tuning].timeout` above 1800 specifically to
+> give dispatch WORK more time, set `[dispatch].timeout` instead, because raising
+> `[tuning].timeout` no longer affects dispatch.
 `/crew:build`'s implement step normally runs the `crew:executor` Task agent
 (Claude); `[build].executor` can instead route each round through a write-capable
 subprocess seat (e.g. `codex-luna`), and `[build].executor_retries` (0..2, default
@@ -240,6 +261,12 @@ panel = "full"                    # /crew:debate-only default; falls back to def
 
 [dispatch]
 seat = "codex"                    # default seat for /crew:dispatch; validated vs known seats, falls back to built-in codex
+# timeout = 1800                   # dispatch WORK wall-clock; provider floors raise
+#                                   the effective timeout only when the resolved
+#                                   [dispatch].timeout is below the floor; agy's floor is
+#                                   its print timeout plus grace, about 8 minutes by default,
+#                                   so the 1800-second default is not floored;
+#                                   --timeout > [dispatch].timeout > builtin 1800
 
 # Per-provider write-mode tuning, keyed by provider KIND (opt-in; unknown keys warn
 # and drop; `crew dispatch --options` lists every declared key, non-billable):
@@ -262,7 +289,7 @@ reasoning_effort = "high"
 print_timeout = "8m"
 
 [tuning]
-timeout = 600                     # global per-seat wall-clock seconds
+timeout = 600                     # NON-DISPATCH (review/council/run/probe) seat wall-clock seconds
 deadline_minutes = 240            # the persistence loops' wall clock (1-1440); read by `crew state init`.
                                   # 0 = no deadline exists but is honored ONLY in the global
                                   # ~/.crew-config.toml (this repo file sits in the tree the agent edits)

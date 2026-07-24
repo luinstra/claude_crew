@@ -153,6 +153,20 @@ dispatch` (a subprocess seat has no `TodoWrite`).
    "${CLAUDE_PLUGIN_ROOT}/crew" dispatch --seat <executor> --session-id <session-id> -f ".crew/reviews/<session-id>/executor-task.txt" --json --chain build-executor
    ```
 
+   > **Long dispatches:** Run a long external-executor dispatch as a
+   > BACKGROUNDED, killable shell and poll it across turns. A provider's own
+   > print-timeout floor raises the effective timeout only when the resolved
+   > `[dispatch].timeout` is below the floor; agy's floor is its print timeout
+   > plus grace, about 8 minutes by default, so the 1800-second default is not
+   > floored.
+   > A blocking foreground Bash call may be killed before its timeout, losing the
+   > JSON envelope and post-run git guards.
+
+   If this dispatch is BACKGROUNDED, POLL it to completion and capture its exit
+   status plus printed stdout, including the envelope path, before applying the
+   exit-status guard below. Do not inspect a still-running process or read a
+   prior round's envelope.
+
    This is the canonical resume-on form. When `resume_executor` is false, omit
    the trailing `--chain build-executor` so the round runs fresh.
 

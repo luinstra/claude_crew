@@ -11,8 +11,13 @@ $ARGUMENTS
 > **What this is.** The onboarding companion to crew's two tuning files: the
 > global `~/.crew-config.toml` and the per-repo `.crew/config.toml` read by
 > the engine's `config.py` loader (`default_panel`, `[debate].panel`,
-> `[dispatch].seat`, `[dispatch.<kind>]`, per-seat `model`/`available`,
-> `[tuning].timeout`, `[build].executor`, `[build].executor_retries`,
+> `[dispatch].seat`, `[dispatch].timeout` (default 1800 seconds for dispatch WORK
+> only; provider floors raise the effective timeout only when the resolved
+> `[dispatch].timeout` is below the floor; agy's floor is its print timeout plus
+> grace, about 8 minutes by default, so the 1800-second default is not floored),
+> `[dispatch.<kind>]`,
+> per-seat `model`/`available`,
+> `[tuning].timeout` (review, council, run, and probe seats), `[build].executor`, `[build].executor_retries`,
 > `[build].resume_executor` (default ON; `false` opts out; codex/cursor only),
 > `[panels]`). It DETECTS installed provider CLIs, then writes a **commented**
 > starter config. Not to be confused with `/crew:crew-config`, which copies
@@ -136,7 +141,11 @@ command -v diff && diff -u <target> <target>.new
 
 Point the user at the knobs, documented inline in the file they just got:
 per-seat tuning (`model`, codex `reasoning_effort`, agy `print_timeout`),
-`[tuning].timeout`, `[tuning].deadline_minutes` (the persistence loops' wall
+`[dispatch].timeout` (default 1800 seconds, dispatch WORK only; provider floors
+raise the effective timeout only when the resolved value is below the floor;
+agy's floor is its print timeout plus grace, about 8 minutes by default, so the
+1800-second default is not floored),
+`[tuning].timeout` (review, council, run, and probe seats), `[tuning].deadline_minutes` (the persistence loops' wall
 clock, 1-1440, or 0 for no deadline, global file only), `[build].executor` /
 `executor_retries` / `[build].resume_executor` (default ON; `false` opts out;
 codex/cursor only), the `[dispatch.<kind>]` write-mode options

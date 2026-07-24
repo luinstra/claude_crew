@@ -1423,6 +1423,108 @@ def test_resolve_timeout():
               _resolve_timeout(None) >= 600, ">=600", str(_resolve_timeout(None)))
 
 
+def test_dispatch_timeout():
+    log_section("dispatch WORK timeout")
+    import contextlib  # noqa: E402
+    import io  # noqa: E402
+    import unittest.mock as mock  # noqa: E402
+
+    from multiagent import cli, config  # noqa: E402
+    from multiagent.providers import Provider, ProviderResult  # noqa: E402
+
+    with project_config("", write_file=False):
+        check("no [dispatch].timeout -> getter is None",
+              config.dispatch_timeout() is None, "None", str(config.dispatch_timeout()))
+        with mock.patch.object(config, "dispatch_timeout", return_value=None):
+            check("no [dispatch].timeout -> dispatch resolver defaults to 1800",
+                  cli._resolve_dispatch_timeout(None) == 1800,
+                  "1800", str(cli._resolve_dispatch_timeout(None)))
+        check("dispatch --timeout arg overrides the built-in",
+              cli._resolve_dispatch_timeout(45) == 45, "45", str(cli._resolve_dispatch_timeout(45)))
+
+    with project_config("[tuning]\ntimeout = 333\n"):
+        check("review/run resolver still uses [tuning].timeout",
+              cli._resolve_timeout(None) == 333, "333", str(cli._resolve_timeout(None)))
+        with mock.patch.object(config, "dispatch_timeout", return_value=None):
+            check("[tuning].timeout does not change dispatch default",
+                  cli._resolve_dispatch_timeout(None) == 1800,
+                  "1800", str(cli._resolve_dispatch_timeout(None)))
+
+    with project_config("[dispatch]\ntimeout = 777\n"):
+        check("valid [dispatch].timeout -> 777",
+              config.dispatch_timeout() == 777, "777", str(config.dispatch_timeout()))
+        check("valid [dispatch].timeout reaches dispatch resolver",
+              cli._resolve_dispatch_timeout(None) == 777,
+              "777", str(cli._resolve_dispatch_timeout(None)))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            options = config.dispatch_provider_options("codex")
+        check("[dispatch].timeout is reserved from provider-option warnings",
+              options == {} and err.getvalue() == "", "empty options, no warning", repr(err.getvalue()))
+
+    with crew_config(glob="[dispatch]\ntimeout = 888\n"):
+        check("global [dispatch].timeout applies when repo is unset",
+              config.dispatch_timeout() == 888, "888", str(config.dispatch_timeout()))
+
+    with crew_config(project="[dispatch]\ntimeout = 999\n",
+                     glob="[dispatch]\ntimeout = 888\n"):
+        check("per-repo [dispatch].timeout beats global",
+              config.dispatch_timeout() == 999, "999", str(config.dispatch_timeout()))
+
+    for label, raw in (("non-int", '"soon"'), ("bool", "true"), ("negative", "-5")):
+        with project_config(f"[dispatch]\ntimeout = {raw}\n"):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                value = config.dispatch_timeout()
+                repeated = config.dispatch_timeout()
+            warning = err.getvalue()
+            check(f"{label} [dispatch].timeout -> None + warns once",
+                  value is None and repeated is None
+                  and warning.count("[dispatch].timeout") == 1,
+                  "None and one warning", repr(warning))
+
+    def capture_timeout(config_text: str) -> tuple[int, list[dict]]:
+        with project_config(config_text) as repo:
+            _init_repo(str(repo))
+            saved_working = os.environ.get("CLAUDE_WORKING_DIRECTORY")
+            os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
+            calls: list[dict] = []
+
+            class _TimeoutProvider(Provider):
+                name = "codex"
+                supports_workspace_write = True
+                supports_continuation = True
+
+                def is_available(self):
+                    return True, ""
+
+                def run(self, *args, **kwargs):
+                    calls.append(kwargs)
+                    return ProviderResult(
+                        name="codex", model="o3", ok=True, output="", error=None, elapsed=0.1,
+                    )
+
+            try:
+                with mock.patch.object(cli, "get_provider", return_value=_TimeoutProvider()), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=True))
+            finally:
+                if saved_working is None:
+                    os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
+                else:
+                    os.environ["CLAUDE_WORKING_DIRECTORY"] = saved_working
+            return rc, calls
+
+    rc, calls = capture_timeout("[tuning]\ntimeout = 333\n")
+    check("cmd_dispatch uses 1800 when [dispatch].timeout is unset",
+          rc == 0 and calls and calls[0]["timeout"] == 1800,
+          "exit 0 and timeout 1800", f"rc={rc} calls={calls}")
+    rc, calls = capture_timeout("[tuning]\ntimeout = 333\n\n[dispatch]\ntimeout = 777\n")
+    check("cmd_dispatch uses [dispatch].timeout and not [tuning].timeout",
+          rc == 0 and calls and calls[0]["timeout"] == 777,
+          "exit 0 and timeout 777", f"rc={rc} calls={calls}")
+
+
 def test_deadline_minutes():
     """[tuning].deadline_minutes: the persistence loops' wall clock. Exactly 0 is
     the deliberate no-deadline opt-out; corruption-shaped values stay bounded.
@@ -9125,7 +9227,7 @@ def test_dispatch_chain_gates_and_regression():
             golden_kwargs = {
                 "sandbox": "workspace-write",
                 "model": None,
-                "timeout": 600,
+                "timeout": 1800,
                 "dispatch_options": None,
             }
             golden_envelope = {
@@ -9150,7 +9252,7 @@ def test_dispatch_chain_gates_and_regression():
                 json.dumps(golden_envelope, ensure_ascii=False) + "\n"
             ).encode()
             out_path = repo / "unchained.json"
-            with mock.patch.object(cli.config, "default_timeout", return_value=None), \
+            with mock.patch.object(cli.config, "dispatch_timeout", return_value=None), \
                  mock.patch.object(cli.config, "dispatch_provider_options", return_value={}), \
                  mock.patch.object(cli, "get_provider", return_value=_LegacyProvider()), \
                  mock.patch.object(
@@ -11294,6 +11396,11 @@ def test_scaffold_config():
               f"# deadline_minutes = {_DDM}" in out and f"1-{_MDM}" in out,
               f"commented `deadline_minutes = {_DDM}` + the 1-{_MDM} range",
               out[out.find("[tuning]"):][:200] if "[tuning]" in out else out[:120])
+        check("scaffold [dispatch] documents the independent WORK timeout",
+              "# timeout = 1800" in out
+              and "NON-DISPATCH (review/council/run/probe) seats use [tuning].timeout." in out,
+              "commented dispatch timeout 1800 and tuning distinction",
+              out[out.find("[dispatch]"):][:300] if "[dispatch]" in out else out[:120])
         check("scaffold [build] documents default-ON resume_executor",
               "# resume_executor: resume the external executor's provider conversation across" in out
               and "#   Exact continuation applies ONLY to SUPPORTING providers (codex, cursor);" in out
@@ -16601,6 +16708,7 @@ def main():
     test_continuations()
     test_default_seats()
     test_resolve_timeout()
+    test_dispatch_timeout()
     test_deadline_minutes()
     test_stage()
     test_stage_all()

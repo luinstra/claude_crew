@@ -4,7 +4,11 @@ Two small, optional, PERSONAL config files tune the default panel choice (when
 the user names no panel), the panel ROSTER (``[panels]``: what's *in* a preset),
 the SEAT catalog (``[seats.<name>]`` for availability, model pins, per-provider
 tunes, and whole new seats: resolved in ``seats.py`` over ``raw_layers()``, not
-by a getter here), the global per-seat ``timeout``, the persistence loops'
+by a getter here), the NON-DISPATCH (review/council/run/probe) seat wall-clock
+``[tuning].timeout`` and dispatch-WORK ``[dispatch].timeout`` wall clocks.
+Provider floors raise the effective timeout only when the resolved value is
+below the floor; agy's floor is its print timeout plus grace, about 8 minutes
+by default, so the 1800-second default is not floored. The persistence loops'
 wall clock (``[tuning].deadline_minutes``), the ``/crew:build`` implement-step
 executor seat (``[build].executor`` + ``[build].executor_retries`` +
 ``[build].resume_executor``), and the per-provider ``/crew:dispatch`` write-mode
@@ -327,7 +331,8 @@ def _extract_dispatch_options(
         seat getter already returns None silently for this shape, so this warn
         has exactly one owner).
       * table grammar ``dispatch_options_table:{layer}:{name}`` — hygiene over
-        EVERY key of ``[dispatch]``: ``"seat"`` is reserved and skipped silently
+        EVERY key of ``[dispatch]``: ``"seat"`` and ``"timeout"`` are reserved and
+        skipped silently
         (the other getter's key); a dict named after an executor-bearing kind is
         a provider table; anything else (unknown table like ``[dispatch.codx]``,
         a seat-name table like ``[dispatch.codex-luna]``, scalar junk like
@@ -351,8 +356,8 @@ def _extract_dispatch_options(
     # (the _warn_once keys keep each note one-time per process).
     kinds_list = ", ".join(sorted(exec_kinds))
     for name, val in dispatch_tbl.items():
-        if name == "seat":
-            continue  # reserved: the dispatch-seat getter's key
+        if name in {"seat", "timeout"}:
+            continue  # reserved: dispatch getter keys
         if name in exec_kinds and isinstance(val, dict):
             continue  # a provider table; key validation is lazy (requested kind only)
         if name in exec_kinds:
@@ -589,11 +594,44 @@ def _extract_default_timeout(data: dict, layer: str) -> int | None:
 
 
 def default_timeout() -> int | None:
-    """``[tuning].timeout`` per-seat wall-clock default (per-repo over global), or
-    ``None`` so the caller keeps its built-in default."""
+    """Resolve the NON-DISPATCH (review/council/run/probe) seat wall-clock from
+    ``[tuning].timeout`` (per-repo over global), or return ``None`` so the caller
+    keeps its built-in default."""
     return _first(
         _extract_default_timeout(_load(), "repo"),
         _extract_default_timeout(_global_load(), "global"),
+    )
+
+
+# --- dispatch timeout --------------------------------------------------------
+
+def _extract_dispatch_timeout(data: dict, layer: str) -> int | None:
+    dispatch = data.get("dispatch")
+    if not isinstance(dispatch, dict):
+        return None
+    val = dispatch.get("timeout")
+    if val is None:
+        return None
+    # bool is a subclass of int, reject it explicitly so `timeout = true`
+    # doesn't sneak through as 1.
+    if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
+        _warn_once(
+            f"dispatch_timeout:{layer}",
+            f"[dispatch].timeout must be a positive integer; ignoring {val!r}",
+        )
+        return None
+    return val
+
+
+def dispatch_timeout() -> int | None:
+    """Resolve the dispatch-WORK wall-clock from ``[dispatch].timeout``
+    (per-repo over global), or return ``None`` for builtin 1800. Provider floors
+    raise the effective timeout only when the resolved value is
+    below the floor; agy's floor is its print timeout plus grace, about 8
+    minutes by default, so the 1800-second default is not floored."""
+    return _first(
+        _extract_dispatch_timeout(_load(), "repo"),
+        _extract_dispatch_timeout(_global_load(), "global"),
     )
 
 

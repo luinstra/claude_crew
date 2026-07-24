@@ -48,7 +48,7 @@ multiagent/
 ├── continuations.py     # exact provider conversation chain records: safe paths, binding validation, atomic 0600 writes, sibling locks, invalidation, and ordered classification. NO provider/CLI imports.
 ├── seats.py             # The seat CATALOG loader: reads shipped `seats.toml`, merges the user's config layers per-seat-per-key, exposes merged_catalog()/merged_panels()/seat_spec()/task_seats()/group_tokens()/premium_off_seats() + PROVIDER_KINDS + the SeatSpec dataclass
 ├── seats.toml           # DATA — the shipped seat + panel catalog (`[seats.<name>]` rows, `[panels]` rosters); merged with per-repo/global config. The one place a built-in model seat is declared
-├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel, [debate].panel, [dispatch].seat validated vs known_seat_names(), dispatch_provider_options for the per-provider `[dispatch.<kind>]` write-mode options validated per layer against each provider's DISPATCH_OPTIONS declaration, [panels] roster) + `raw_layers()` feeding seats.py's per-seat resolution (per-seat tuning + `available` live on `SeatSpec`, not here); per-repo>global>builtin; pure leaf, no cli/providers import; parses with stdlib tomllib (the 3.11 floor the `crew` dispatcher asserts)
+├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel, [debate].panel, [dispatch].seat, [dispatch].timeout, dispatch_provider_options for the per-provider `[dispatch.<kind>]` write-mode options validated per layer against each provider's DISPATCH_OPTIONS declaration, [panels] roster) + `raw_layers()` feeding seats.py's per-seat resolution (per-seat tuning + `available` live on `SeatSpec`, not here); per-repo>global>builtin; pure leaf, no cli/providers import; parses with stdlib tomllib (the 3.11 floor the `crew` dispatcher asserts)
 ├── render.py            # side-by-side panel + --json rendering (the faithful projection + raw-fallback)
 ├── findings.py          # PURE parser + complete-linkage grouping + grouped-digest renderer (no I/O, no model calls, never raises); powers `collect --group`
 └── providers/
@@ -461,8 +461,13 @@ Key contracts (do NOT regress):
   complement to read-only review/debate: `crew dispatch "<task>" [--seat <name>]`
   sends ONE subprocess seat (default `codex`; resolution `--seat` >
   `config.dispatch_seat()` (`[dispatch].seat`) > builtin) at the working tree in
-  `sandbox="workspace-write"` — it OPTS INTO the existing `run -s workspace-write`
-  plumbing, so review/debate (which never pass `-s`) stay `read-only` and
+  `sandbox="workspace-write"`. Its dispatch-WORK wall-clock resolution is
+  `--timeout` > `[dispatch].timeout` > builtin 1800, except where a provider's own
+  print-timeout floor raises the effective timeout only when the resolved value is
+  below the floor; agy's floor is its print timeout plus grace, about 8 minutes by
+  default, so the 1800-second default is not floored. `[tuning].timeout` belongs to
+  NON-DISPATCH (review/council/run/probe) seats. It opts into the existing
+  `run -s workspace-write` plumbing, so review/debate (which never pass `-s`) stay `read-only` and
   byte-for-byte unchanged. Per-provider write-mode tuning lives under
   `[dispatch.<kind>]` in config (keys declared by each provider class's
   `DISPATCH_OPTIONS`): `config.dispatch_provider_options(kind)` validates it per
@@ -514,14 +519,19 @@ Key contracts (do NOT regress):
   `.crew/config.toml` and global `~/.crew-config.toml` (`config.py`, two memoized
   loaders). Knobs: `default_panel`, `[debate].panel`, `[dispatch].seat`
   (the `/crew:dispatch` default seat, validated against `known_seat_names()` —
-  a panel name / group token like `cursor` is rejected), `[dispatch.<kind>]`
+  a panel name / group token like `cursor` is rejected), `[dispatch].timeout`
+  (dispatch WORK only, default 1800 seconds; provider floors raise the effective
+  timeout only when the resolved value is below the floor; agy's floor is its
+  print timeout plus grace, about 8 minutes by default, so the 1800-second
+  default is not floored), `[dispatch.<kind>]`
   (per-provider write-mode dispatch tuning, keyed by provider KIND, not seat
   name; the valid keys are declared by each provider class's `DISPATCH_OPTIONS`
   and `crew dispatch --options` lists them; applied only in workspace-write, so
   read-only review/debate argv is unchanged even when configured), `[seats.<name>]`
   (tunes an existing seat's `model`/`reasoning_effort`/`print_timeout`/`available`,
   OR declares a brand-new first-class seat by giving `provider` + `model`, plus
-  optional `opt_in` to keep it out of the built-in panels), `[tuning].timeout`,
+  optional `opt_in` to keep it out of the built-in panels), `[tuning].timeout`
+  (NON-DISPATCH review/council/run/probe seat wall clock),
   `[tuning].deadline_minutes` (the persistence loops' wall clock, read by `crew
   state init` when `--deadline-minutes` is not passed; validated 1..1440, plus
   exactly 0 as the deliberate no-deadline opt-out for remote or

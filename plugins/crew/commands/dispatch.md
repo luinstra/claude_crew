@@ -23,7 +23,14 @@ $ARGUMENTS
 > **Seat resolution is ENGINE-OWNED.** This command NEVER reads config and
 > NEVER hardcodes a seat: it passes `--seat` ONLY when you explicitly named
 > one; otherwise the engine applies `[dispatch].seat` config, then a built-in
-> default. The authoritative resolved-seat line is read from the returned
+> default. Dispatch WORK uses `--timeout` > `[dispatch].timeout` > builtin 1800
+> for its wall-clock; a provider's own print-timeout floor raises it only when
+> the resolved `[dispatch].timeout` is below that floor; agy's floor is
+> its print timeout plus grace, about 8 minutes by default, so the 1800-second
+> default is not floored;
+> `[dispatch].timeout` is dispatch-only and does not alter
+> the NON-DISPATCH (review/council/run/probe) seat wall-clock from
+> `[tuning].timeout`. The authoritative resolved-seat line is read from the returned
 > envelope's `seat` field POST-run (step 4). Per-provider write-mode tuning
 > lives under `[dispatch.<kind>]`; `crew dispatch --options` (non-billable)
 > lists each provider's keys.
@@ -73,9 +80,21 @@ Substitute your actual session id (the `[Session ID: …]` value) for
 
 (When the user named a seat, add `--seat <seat>` to the command.)
 
-**Immediately sweep the task spill**, right after the invocation and BEFORE
-checking exit status, so EVERY exit path sweeps it (including the exit-2 STOP
-below). A shell `rm` gets no engine anchoring, so it takes the double-quoted
+> **Long dispatches:** Run a long-running dispatch as a BACKGROUNDED, killable
+> shell and poll it across turns; its wall-clock follows the configured
+> `[dispatch].timeout` (1800s by default, or higher when configured or overridden
+> by `--timeout`). A blocking foreground Bash call may be killed before its
+> timeout, losing the JSON envelope and post-run `head_moved`, `staged`, and
+> `branch` guards.
+
+**Sweep the task spill according to invocation mode.** For a short foreground
+dispatch, run the command below immediately after the blocking invocation
+returns and BEFORE checking exit status, so EVERY exit path sweeps it (including
+the exit-2 STOP below). For a backgrounded dispatch, do NOT run it while the
+process is running: poll until it exits, capture its exit status and printed
+stdout, including the envelope path on exit 0, then run the command once to
+remove the spill. Only after that sweep, branch on exit status. A shell `rm`
+gets no engine anchoring, so it takes the double-quoted
 ABSOLUTE literal (the `${…}` ban is on expansions, not literals):
 
 ```bash
@@ -84,15 +103,18 @@ rm -f "<project-root>/.crew/dispatch/<session-id>-task.txt"
 
 ## Step 4 — Check exit status, then read the envelope
 
-**Check the dispatcher's exit status FIRST.** On a NONZERO exit (a pre-run
-failure: unknown / Task / non-writable seat, or an unsubstituted session-id
-placeholder; exit `2`) the engine wrote NO envelope and printed NO path:
-surface stderr and STOP. Do NOT Read any JSON path.
+**After the mode-specific sweep above, branch on the dispatcher's exit
+status.** On a NONZERO exit (a pre-run failure: unknown / Task / non-writable
+seat, or an unsubstituted session-id placeholder; exit `2`) the engine wrote NO
+envelope and printed NO path: surface stderr and STOP. Do NOT Read any JSON
+path.
 
 On exit `0`, the engine printed the resolved envelope path as the **last
-clean line of stdout**. Capture it by reading the Bash tool's stdout directly
-(no `$(…)` wrapper), and do NOT construct the filename yourself (you may not
-know the resolved seat). **Read** the envelope JSON from that path.
+clean line of stdout**. For a backgrounded dispatch, this is the envelope path
+captured before the spill sweep. For a foreground dispatch, capture it by
+reading the Bash tool's stdout directly (no `$(…)` wrapper). Do NOT construct
+the filename yourself (you may not know the resolved seat). **Read** the
+envelope JSON from that path.
 
 - **If `envelope.ok` is false** (ran-but-failed OR skipped-unavailable; exit
   was still `0`), surface `envelope.error` as a FAILURE banner: `dispatch

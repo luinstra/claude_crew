@@ -222,7 +222,7 @@ def _filter_available(names: list[str], explicit: set[str]) -> list[str]:
 
 
 def _resolve_timeout(arg: int | None) -> int:
-    # Default per-seat wall-clock ceiling. Reference mode (the default) makes the
+    # Default NON-DISPATCH seat wall-clock ceiling. Reference mode (the default) makes the
     # seat do its own fetch + scoped read, which is more work than reviewing an
     # inlined diff — a thorough seat (codex) can legitimately need several
     # minutes on a large review. We'd rather give a real review room than
@@ -240,6 +240,24 @@ def _resolve_timeout(arg: int | None) -> int:
     if cfg is not None:
         return cfg
     return 600
+
+
+def _resolve_dispatch_timeout(arg: int | None) -> int:
+    # Dispatch WORK can legitimately take longer than a NON-DISPATCH review,
+    # council, run, or probe seat, so it has its own thirty-minute built-in
+    # wall-clock default. Provider floors raise the effective timeout only when
+    # the resolved [dispatch].timeout is below the floor; agy's floor is its
+    # print timeout plus grace, about 8 minutes by default, so the 1800-second
+    # default is not floored.
+    if arg is not None:
+        return arg
+    # Precedence: --timeout arg (above) > per-repo .crew/config.toml > global
+    # ~/.crew-config.toml ([dispatch].timeout, via config.dispatch_timeout())
+    # > built-in 1800s dispatch WORK ceiling.
+    cfg = config.dispatch_timeout()
+    if cfg is not None:
+        return cfg
+    return 1800
 
 
 def _run_seat(name: str, prompt: str, timeout: int) -> ProviderResult:
@@ -1613,7 +1631,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
                 # (f) Run the seat in workspace-write. Model precedence mirrors cmd_run.
                 # This is the ONLY run() call site that passes dispatch_options (the
                 # read-only review/debate/probe paths never do).
-                timeout = _resolve_timeout(args.timeout)
+                timeout = _resolve_dispatch_timeout(args.timeout)
                 extra = {"continuation": continuation} if chain_requested else {}
                 result = provider.run(
                     prompt, sandbox="workspace-write", model=args.model,
@@ -4113,6 +4131,12 @@ def _render_config_template(
     L.append("# seat: codex-*/agy/cursor-*; a panel name or the 'cursor' group token is rejected).")
     L.append("[dispatch]")
     L.append(f"seat = {_toml_str(dispatch_seat)}")
+    L.append("# timeout = 1800   # /crew:dispatch WORK wall-clock; provider floors raise")
+    L.append("#   the effective timeout only when the resolved [dispatch].timeout is")
+    L.append("#   below the floor; agy's floor is its print timeout plus grace, about 8")
+    L.append("#   minutes by default, so the 1800-second default is not floored;")
+    L.append("#   --timeout > [dispatch].timeout > builtin 1800")
+    L.append("#   NON-DISPATCH (review/council/run/probe) seats use [tuning].timeout.")
     L.append("")
     # Commented [dispatch.<kind>] blocks, sourced from the SAME provider
     # declarations the `dispatch --options` listing renders (one public map,
@@ -4198,7 +4222,8 @@ def _render_config_template(
     # scaffolded default and the enforced bound from drifting apart.
     from models import DEFAULT_DEADLINE_MINUTES, MAX_DEADLINE_MINUTES
 
-    L.append("# [tuning].timeout — per-seat wall-clock default (positive integer seconds).")
+    L.append("# [tuning].timeout: NON-DISPATCH (review/council/run/probe) seat wall-clock")
+    L.append("#   default (positive integer seconds).")
     L.append("# [tuning].deadline_minutes: the persistence loops' wall clock, read by")
     L.append(f"#   `crew state init` (1-{MAX_DEADLINE_MINUTES}; 0 = no deadline, honored from the")
     L.append("#   global ~/.crew-config.toml only, and the stop-fires cap still bounds")

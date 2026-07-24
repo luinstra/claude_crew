@@ -15,6 +15,12 @@ default_panel = "full"
 # seat: codex-*/agy/cursor-*; a panel name or the 'cursor' group token is rejected).
 [dispatch]
 seat = "codex"
+# timeout = 1800   # /crew:dispatch WORK wall-clock; provider floors raise
+#   the effective timeout only when the resolved [dispatch].timeout is
+#   below the floor; agy's floor is its print timeout plus grace, about 8
+#   minutes by default, so the 1800-second default is not floored;
+#   --timeout > [dispatch].timeout > builtin 1800
+#   NON-DISPATCH (review/council/run/probe) seats use [tuning].timeout.
 
 # [dispatch.codex]: write-mode tuning for /crew:dispatch (opt-in; unknown keys warn and drop)
 # [dispatch.codex]
@@ -86,7 +92,8 @@ available = false   # opt-in; see docs/engine-notes.md for why
 [seats.cursor-grok]
 available = false   # not found on PATH
 
-# [tuning].timeout — per-seat wall-clock default (positive integer seconds).
+# [tuning].timeout: NON-DISPATCH (review/council/run/probe) seat wall-clock
+#   default (positive integer seconds).
 # [tuning].deadline_minutes: the persistence loops' wall clock, read by
 #   `crew state init` (1-1440; 0 = no deadline, honored from the
 #   global ~/.crew-config.toml only, and the stop-fires cap still bounds
