@@ -122,8 +122,8 @@ repo-relative path.
 | Command | Description |
 |---------|-------------|
 | `/crew:init` | Onboarding scaffolder for the engine-tuning config — detects installed provider CLIs, then writes a commented `~/.crew-config.toml` (or `.crew/config.toml` with `--repo`, seeded from the global) with cost-safe defaults + honest `available` flags. Never clobbers an existing file silently. |
-| `/crew:crew-config` | Copy CLAUDE.md to current project |
-| `/crew:crew-config global` | Copy CLAUDE.md to global config |
+| `/crew:crew-config` | Install crew's operating instructions for the current project: writes the crew-owned `.claude/crew-instructions.md` and links it from `.claude/CLAUDE.md` with one `@` import. Never overwrites your `CLAUDE.md`. |
+| `/crew:crew-config global` | Same, against `~/.claude/` |
 
 > **`/crew:init` vs `/crew:crew-config`** — different files, different concerns.
 > `/crew:init` scaffolds the **engine-tuning `.toml`** (`default_panel`, panels, seats,
@@ -134,8 +134,17 @@ repo-relative path.
 > not floored; `--timeout` > `[dispatch].timeout` > builtin 1800),
 > per-provider `[dispatch.<kind>]` dispatch tuning)
 > that the `config.py` loader reads. `/crew:crew-config`
-> copies the **`CLAUDE.md` operating-instructions doc** into `.claude/CLAUDE.md` (project)
-> or `~/.claude/CLAUDE.md` (global) — it touches no `.toml`.
+> installs the **operating-instructions doc** as the crew-owned
+> `crew-instructions.md` (project `.claude/`, or `~/.claude/` for global) and links
+> it from that scope's `CLAUDE.md` with a single `@crew-instructions.md` line: it
+> touches no `.toml`.
+>
+> The two files are split by OWNER, deliberately. `crew-instructions.md` is crew's
+> and is overwritten wholesale on every run, so re-running after an update is how
+> you pick up changes and nothing goes stale. `CLAUDE.md` is yours and is never
+> overwritten (crew appends at most that one import line). The command is strictly
+> additive: it writes the crew-owned file, appends at most that one line, and
+> deletes nothing.
 
 ### Multi-Model Review
 

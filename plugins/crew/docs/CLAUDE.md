@@ -35,44 +35,25 @@ Delegate to specialists when the task warrants it. Do simple things directly.
 | Specialized work (docs) | - | Yes |
 | Deep codebase exploration | - | Yes |
 
-## Available Agents
+## What crew provides
 
-Use the Task tool to delegate to specialized agents:
+Crew ships agents, skills, and `/crew:*` slash commands. That inventory is NOT
+listed here on purpose: the harness already advertises the live set, and a
+hand-maintained copy in your CLAUDE.md goes stale the moment crew updates (it
+has, naming agents and commands that no longer existed). Read it from the
+source instead:
 
-| Agent | Purpose | When to Use |
-|-------|---------|-------------|
-| `advisor` | Architecture, debugging & planning | Complex problems, root cause analysis, work plans |
-| `reader` | Information finding | Codebase search, external docs, images, code graph |
-| `executor` | Focused execution | Direct task implementation |
-| `document-writer` | Documentation | README, API docs, comments |
-| `reviewer` | Review-panel seat — rubric + APPROVED/REVISE (read-only by convention; not sandbox-enforced) | Driven by `/crew:review` (spawned at `model: opus` / `model: sonnet`) |
-| `panelist` | Discuss-panel seat — direct take / objection / tradeoffs, no verdict (read-only by convention) | Driven by `/crew:debate` discuss mode (spawned at `model: opus` / `model: sonnet`) |
-| `formatter` | Cheap faithful reformatter — reshapes a seat's review into the FINDINGS schema verbatim (no inventing/dropping/re-judging) | Per-seat repair pass in `/crew:review`, `/crew:build`, `/crew:measure-twice` (spawned at `model: haiku`) |
-| `scribe` | Cheap verbatim persist-Writer — writes one review seat's text to disk on the orchestrator's behalf so the persist-Write does not render (Write-only, no reformat/judge) | Success-path Task-seat persist in `/crew:review`, `/crew:build`, `/crew:measure-twice` (spawned at `model: haiku`) |
+- **Agents**: the Task tool lists each agent with its description. Crew's
+  SessionStart hook also names the ones you invoke directly; the rest
+  (review-panel seats and their helpers) are driven by the commands, not called
+  by hand.
+- **Slash commands**: `/help`, or the command list in the crew README.
+- **Skills**: they self-activate from their own description; no roster needed.
 
-## Skills
+What follows is the part no registry can tell you: how to drive the panel, and
+the working style crew expects.
 
-Skills provide specialized guidance that activates automatically based on context:
-
-| Skill | Purpose | Triggers |
-|-------|---------|----------|
-| `sk:git` | Commits, rebasing, history search | "commit this", "rebase", "when was X added?" |
-
-## Slash Commands
-
-### Core Workflow
-
-| Command | Description |
-|---------|-------------|
-| `/crew:build "task"` | Verified persistence loop — a multi-model panel normally approves before completion (a human may `--force` over an advisory) |
-| `/crew:cancel-build` | Exit an active build loop |
-| `/crew:measure-twice "task"` | Self-refining plan loop — a panel reviews toward approval (a human may `--force` completion over an advisory) |
-| `/crew:cancel-measure-twice` | Exit an active measure-twice loop |
-| `/crew:plan "description"` | Start a planning session |
-| `/crew:execute "task or plan"` | Execute a task or plan via executor agent (saves context) |
-| `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff → `APPROVED`/`REVISE` verdict |
-| `/crew:debate "question"` | Multi-model debate — single-round council by default, or `--rounds N` for rebuttals; synthesized into agreement/disagreement/recommendation |
-| `/crew:dispatch "[--seat <name>] <task>"` | Delegate a WORK task to ONE non-Claude seat (default `codex`) in WRITE mode — edits left UNCOMMITTED + UNSTAGED on the same branch to review (keep / revert / pipe into `/crew:review`); a HEAD/staged/branch guard surfaces any commit/stage/branch made against instruction |
+## Panels & config
 
 In `/crew:build` and `/crew:measure-twice` completion is normally reached by a completing verdict (`APPROVED`, or `REVISE --minor-only`). The panel's sign-off is advisory, not a hard gate: a human may authorize completion over an advisory (a `NOT MET` quorum, target drift) with `--force`, which is stamped in `last_verdict_overrides` as an explicit override for the audit trail (never laundered into a clean sign-off).
 
@@ -85,25 +66,6 @@ In `/crew:build` and `/crew:measure-twice` completion is normally reached by a c
 **Config:** `full` is the built-in default. A per-repo `.crew/config.toml` or global `~/.crew-config.toml` can set `default_panel`, redefine/add `[panels]` presets (usable via `--panel <name>`), mark seats `available = false` (drops an un-authed seat), or override per-command (`[debate].panel`, `[dispatch].seat`, `[dispatch].timeout`, `[build].executor`, `[build].executor_retries`, `[build].resume_executor`). `[dispatch].timeout` defaults to 1800 seconds and applies only to dispatch WORK; provider floors raise the effective timeout only when the resolved value is below the floor; agy's floor is its print timeout plus grace, about 8 minutes by default, so the 1800-second default is not floored; review, council, run, and probe seats still use `[tuning].timeout`. Precedence: **CLI flag > per-repo config > global config > built-in** governs panel/config resolution on a fresh resolve (per-repo wins over global; no env-var tier). Needs Python 3.11+ (stdlib `tomllib`); the `crew` engine refuses to run below that. Review/build/measure-twice resolve their panel through `review-prep`; `/crew:debate` and `/crew:dispatch` have their own config-aware resolvers (`[debate].panel`, `[dispatch].seat`, `[dispatch].timeout`). Per-provider write-mode dispatch tuning lives under `[dispatch.<kind>]` (keys declared by each provider; `crew dispatch --options` lists them). `/crew:build` also routes its IMPLEMENT step through a resolved executor: `--executor <seat>` (or `[build].executor`, per-repo then global) picks the write-capable subprocess seat that implements each round instead of the default `crew:executor` Task, and `[build].executor_retries` (int `0..2`, default `0`) bounds how many times a failed external-executor round retries before it surfaces and stops. `[build].resume_executor` is default-ON reuse of the external executor's provider conversation; `resume_executor = false` opts out, and only codex/cursor support resume. For a build loop, the implement-step executor resolves active-loop stamp (`source: "state"`, only when an active valid loop with a non-empty stamp matches the resolved session) > `--executor` flag > `[build].executor` config > builtin, so a resumed loop keeps the executor it started with; the generic flag-over-config precedence above describes only a fresh resolve with no active loop.
 
 **Onboarding:** `/crew:init` detects which provider CLIs are installed and writes a commented config file, never clobbering an existing one silently. A fresh scaffold (`~/.crew-config.toml`, or `.crew/config.toml` with `--repo` when no global exists) gets cost-safe defaults + honest per-seat `available` flags; with `--repo` AND an existing global `~/.crew-config.toml`, the per-repo file is instead seeded from that global verbatim (comments preserved), then lightly adjusted. (Distinct from `/crew:crew-config`, which copies this `CLAUDE.md`, not the engine-tuning `.toml`.)
-
-### Utilities
-
-| Command | Description |
-|---------|-------------|
-| `/crew:code-search "query"` | Search codebase via reader agent |
-| `/crew:analyze "target"` | Deep analysis via advisor agent |
-| `/crew:status` | Show active loops and crew state |
-| `/crew:save-context` | Save context snapshot for session recovery |
-| `/crew:restore-context` | Restore a previously saved context snapshot |
-| `/crew:deepinit` | Initialize CLAUDE.md hierarchy for a codebase |
-
-### Setup
-
-| Command | Description |
-|---------|-------------|
-| `/crew:init` | Scaffold the engine-tuning config (`~/.crew-config.toml`, or `.crew/config.toml` with `--repo`) — detects provider CLIs, writes commented cost-safe defaults (or seeds from an existing global when `--repo` finds one), never clobbers silently |
-| `/crew:crew-config` | Copy CLAUDE.md to current project |
-| `/crew:crew-config global` | Copy CLAUDE.md globally |
 
 ## Planning Workflow
 
