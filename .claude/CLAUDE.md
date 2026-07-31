@@ -2,9 +2,13 @@
 
 > **Type:** Claude Code Plugin Marketplace
 > **Plugins:** `crew` (agents, commands, persistence), `sk` (tech-stack skills)
-> **Python:** the lifecycle hooks run on 3.10+; the engine (the `multiagent`
-> package and `crew state`, both reached through the `crew` dispatcher) needs
-> 3.11+ because it parses TOML config with stdlib `tomllib`
+> **Python:** 3.11+, everywhere, one floor. The engine needs it for stdlib
+> `tomllib`; the lifecycle hooks (crew's two and sk's) hold the same line so
+> there is only ever one number to remember. Every entry point enforces it with
+> a stdlib-only, old-parseable guard placed BEFORE its real imports, degrading
+> to a visible no-op (exit 0 + a loud diagnostic) rather than a traceback: the
+> shebang resolves to whatever `python3` PATH hands over, which on macOS can
+> still be the system 3.9.
 
 ## Overview
 
@@ -87,6 +91,7 @@ git commit -m "ci: update workflow permissions"
 | `python plugins/crew/scripts/tests/test-hooks.py` | Run hook unit tests |
 | `python plugins/crew/scripts/tests/test-multiagent.py` | Run the multi-model engine + dispatcher tests |
 | `python plugins/crew/scripts/tests/test-version-bump.py` | Run the post-commit version-bump hardening tests |
+| `python plugins/sk/scripts/tests/test-sk-hook.py` | Run the sk stack-detection hook tests |
 | `"${CLAUDE_PLUGIN_ROOT}/crew" state show bl` | Debug build loop state (via the bare dispatcher) |
 
 ### Install Git Hook (Required for Contributors)
@@ -108,8 +113,16 @@ plugins/
 │   ├── hooks/hooks.json            ← Lifecycle integration
 │   └── scripts/                    ← Python state machine
 └── sk/                             ← Tech-stack plugin
+    ├── hooks/hooks.json            ← Lifecycle integration
+    ├── scripts/                    ← stack detection hook + tests
     └── skills/                     ← tech-stack skills
 ```
+
+**Plugin boundary:** each plugin's hooks speak only for that plugin. crew's
+SessionStart names crew agents; sk's SessionStart detects the stack and names sk
+skills. Neither names the other's components: a plugin cannot see whether the
+other is installed, so a cross-plugin list drifts silently (crew went on
+advertising an sk skill for days after sk deleted it).
 
 ## Documentation Index
 

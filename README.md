@@ -11,7 +11,7 @@ A Claude Code plugin for persistence, specialized agents, and tech-stack guidanc
 
 - **Persistence**: loops persist toward completion (they won't stop on a premature stop), and also end on a completing verdict, your cancel, or a safety bound (build & measure-twice loops)
 - **Specialized Agents** — Delegate to focused agents for specific tasks
-- **Tech-Stack Skills** — Auto-injected guidance for Kotlin, Exposed, Gradle, Trino (via `sk` plugin)
+- **Tech-Stack Skills** — Auto-injected guidance for Kotlin, Exposed, Gradle, Python (via `sk` plugin)
 - **Session Restoration** — Resume where you left off after restarts
 
 ## The Workflow
@@ -461,18 +461,18 @@ All skills ship in the **sk plugin** (the `crew` plugin ships no skills).
 | **kotlin-testing** | Tests, Kotest, MockK, TestIdProvider | Test utilities, DatabaseTest, Testcontainers patterns |
 | **exposed** | Exposed ORM, database queries | Repository patterns, transaction handling |
 | **gradle** | Gradle builds, dependencies | Version catalogs, lockfiles, plugin patterns |
-| **trino** | Trino queries, analytics | QueryRouter patterns, read-only queries |
 
-Skills are in `plugins/*/skills/*/SKILL.md`. They activate based on the `description` field in their frontmatter.
+Skills are in `plugins/*/skills/*/SKILL.md`. They activate based on the `description` field in their frontmatter, and sk's SessionStart hook names the ones matching the detected stack (see below).
 
 ## Hooks
 
 Hooks run automatically at specific points in the session.
 
-| Hook | When | What It Does |
-|------|------|--------------|
-| **SessionStart** | Session begins | Restores build loop / measure-twice state and saved context |
-| **Stop** | Claude tries to stop | Enforces build loop / measure-twice continuation |
+| Plugin | Hook | When | What It Does |
+|--------|------|------|--------------|
+| crew | **SessionStart** | Session begins | Restores build loop / measure-twice state and saved context |
+| crew | **Stop** | Claude tries to stop | Enforces build loop / measure-twice continuation |
+| sk | **SessionStart** | Session begins | Detects the project's stack and names the matching sk skills |
 
 ### Persistence Behavior
 
@@ -495,16 +495,48 @@ A build loop normally ends on a completing verdict from the multi-model review p
 - **A hook-owned safety limit** (a stop-fire cap or the wall-clock deadline), which force-exits the loop and asks for a status report instead of an approval.
 - **A parked turn.** While the session still has background work in flight (its own panel seats, but also any unrelated background shell: a dev server, a `tail -f`), the Stop is ALLOWED and the turn ends: waiting is not quitting, and the session resumes when that work completes. The loop stays active. Consecutive parked turns are capped (20), after which a parked stop is nudged like any other, so a background process that never exits cannot switch the loop off.
 
-### SessionStart Plugin Guidance
+### SessionStart Agent Guidance (crew)
 
-The SessionStart hook also injects plugin guidance (agents and skills) into every session. Output volume is controlled by the `CREW_VERBOSE` environment variable:
+crew's SessionStart hook names its own agents in every session. Output volume is controlled by the `CREW_VERBOSE` environment variable:
 
-| `CREW_VERBOSE` | Skill output | Agent output |
-|----------------|--------------|--------------|
-| unset (default) | One-line list: `Skills available: sk:kotlin, sk:kotlin-testing` | Single line listing agents |
-| `1` | Full bulleted descriptions per skill | Full `<system-reminder>` block with per-agent notes |
+| `CREW_VERBOSE` | Agent output |
+|----------------|--------------|
+| unset (default) | Single line listing agents |
+| `1` | Full `<system-reminder>` block with per-agent notes |
 
-When a project stack is detected (Kotlin, Exposed, Gradle, Trino), the guidance is wrapped in a `<system-reminder>` block for high salience. For Kotlin projects, a required first action is prepended: load the Kotlin LSP via `ToolSearch(query='select:LSP')` before reading or editing any code, preferring LSP operations over Read+grep for navigation.
+crew names no skills. It cannot see whether the sk plugin is installed, so a skill list kept here would advertise skills that may not exist, and would go stale whenever sk changed.
+
+### SessionStart Stack Detection (sk)
+
+sk's own SessionStart hook (`plugins/sk/scripts/session-start.py`) scans the project for stack markers and names the sk skills that cover what it finds:
+
+| Detected | Marker | Names |
+|----------|--------|-------|
+| Kotlin | any `.kt` / `.kts` | `sk:kotlin`, `sk:kotlin-testing` |
+| Gradle | any `.gradle.kts` | `sk:gradle` |
+| Python | any `.py` | `sk:python` |
+| Exposed | `exposed` in the root `build.gradle.kts` | `sk:exposed` |
+
+`sk:git` is deliberately absent. It maps to an action (commit, rebase) rather than to anything structural about the codebase, so there is nothing to detect, and its own `description` already activates it reliably. Python is detected by extension rather than by a root `pyproject.toml` / `setup.py` / `requirements.txt`, because a repo can carry real Python with none of those present (this marketplace is one).
+
+This exists because passive activation (Claude matching a conversation against each SKILL.md `description`) rarely fired on its own.
+
+Two properties keep it honest:
+
+- **A skill is named only if sk actually ships it.** A detector whose skill has been removed stays silent instead of pointing at nothing, and lights up on its own if that skill is added back. This is the guard against the drift that had the old crew-side mapping advertising a skill for days after it was deleted.
+- **Nothing to say means nothing is said.** With no stack detected (or no shipped skill matching it), the hook emits an empty result rather than an empty reminder.
+
+#### Where the file list comes from
+
+The scan reads `git ls-files --cached --others --exclude-standard` when the project is a git repo, and falls back to a bounded directory walk when it isn't (no repo, or no `git` on PATH).
+
+The index is preferred for **correctness**, not speed. The walk needs a hard entry cap (20,000) to stay inside the 10s hook budget, and a cap plus arbitrary directory order means a large generated directory can exhaust the budget before a real source directory is ever reached — detection then under-reports the stack with no error. That is not hypothetical: a repo here has a `benchmarks/` directory with 33,213 files on disk and 14 tracked, and the walk caps out inside it and never reaches the `service/` directory holding the project's only `.py`.
+
+The index has no such failure mode. It is also gitignore-aware for free, which is a better prune list than any hardcoded set: build output, virtualenvs, and `.crew/` artifacts drop out because the project already declared them uninteresting. `--others --exclude-standard` keeps it honest mid-edit — a file written but not yet `git add`ed still counts, and a fresh `git init` is not read as an empty project. Deleted-but-still-tracked paths are confirmed on disk before they count, since the index lists entries rather than files.
+
+Both sources scale with the number of paths they see; the index simply sees far fewer of them, and pays a fixed process spawn up front. Measured on repos here (385 to 1,075 indexed paths, 783 to 34,039 on-disk files), the index route ran 9-13ms and the walk 1.5-21ms — so the walk wins on small trees, the index on larger ones, and a repo with a very large index would narrow the gap again. At these magnitudes neither matters against a 10s budget, which is why correctness decided it and not speed.
+
+Fallback triggers on anything that makes the index unusable: not a git repo, no `git` on PATH, a nonzero exit, or the 5s subprocess timeout. A capped walk that may under-report beats no detection at all.
 
 ## Project Structure
 
@@ -532,13 +564,18 @@ claude-crew/
 │   └── sk/
 │       ├── .claude-plugin/
 │       │   └── plugin.json   # Plugin manifest
+│       ├── hooks/
+│       │   └── hooks.json    # Hook configuration
+│       ├── scripts/
+│       │   ├── session-start.py  # Stack detection + skill naming
+│       │   └── tests/            # Test suite (test-sk-hook.py)
 │       └── skills/
 │           ├── git/
+│           ├── python/
 │           ├── kotlin/
 │           ├── kotlin-testing/
 │           ├── exposed/
-│           ├── gradle/
-│           └── trino/
+│           └── gradle/
 └── README.md
 ```
 

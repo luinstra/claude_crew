@@ -5,18 +5,18 @@ Blocks Stop while a build or measure-twice loop is active.
 Generic todo continuation is handled by Claude Code natively.
 """
 
-# --- Version guard: stdlib-only, 3.9-parseable, BEFORE any project import.
-# Python 3.9 is UNSUPPORTED for hook functionality (repo requires 3.10+), but
-# must be GRACEFUL: allow + loud diagnostic, never a silent crash and never
+# --- Version guard: stdlib-only, old-parseable, BEFORE any project import.
+# Anything below the marketplace's 3.11 floor is UNSUPPORTED, but must be
+# GRACEFUL: allow + loud diagnostic, never a silent crash and never
 # functional persistence. Diagnostic channels: stderr + systemMessage (allow-side).
 import json
 import sys
 
-if sys.version_info < (3, 10):
+if sys.version_info < (3, 11):
     _DIAG = (
-        "[crew] Stop hook disabled: Python %d.%d is unsupported (crew hooks "
-        "require Python 3.10+). Persistence loops will NOT block — fix the "
-        "hook interpreter (e.g. install python3 >= 3.10 on PATH)."
+        "[crew] Stop hook disabled: Python %d.%d is unsupported (crew requires "
+        "Python 3.11+). Persistence loops will NOT block — fix the "
+        "hook interpreter (e.g. install python3 >= 3.11 on PATH)."
         % sys.version_info[:2]
     )
     print(json.dumps({"systemMessage": _DIAG}))

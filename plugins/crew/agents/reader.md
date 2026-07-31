@@ -88,7 +88,6 @@ When researching these technologies, WebFetch these first:
 | Kotlin | https://kotlinlang.org/docs/home.html |
 | Gradle | https://docs.gradle.org/current/userguide/userguide.html |
 | Exposed | https://github.com/JetBrains/Exposed/wiki |
-| Trino | https://trino.io/docs/current/ |
 
 ## Code Graph (when available)
 

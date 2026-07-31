@@ -680,25 +680,32 @@ You were working on: fixing the auth bug
 print(result.to_json())
 ```
 
-### build_plugin_guidance: CREW_VERBOSE Gating and Stack Behavior
+### build_plugin_guidance: CREW_VERBOSE gating, and what does NOT belong here
 
-`build_plugin_guidance` (invoked by `session-start.py` at every session start) controls what plugin and skill context gets injected. Three behaviors are key:
+`build_plugin_guidance` (invoked by `session-start.py` at every session start)
+emits crew's OWN agent hint, and nothing else. Output is bifurcated by
+`is_verbose()` (`models.py`), which checks the `CREW_VERBOSE` env var
+(`1`/`true`/`yes` → verbose), the same var that gates the Stop-hook persistence
+nudge in `persistent-mode.py`:
+- Default (unset): a one-line hint (`Crew agents (via Task tool): advisor, executor, …`).
+- `CREW_VERBOSE=1`: a full `<system-reminder>` crew-agents block.
 
-**CREW_VERBOSE gating** — output is bifurcated by `is_verbose()` (`models.py`), which checks the `CREW_VERBOSE` env var (`1`/`true`/`yes` → verbose):
-- Default (unset): terse — a single `**Skills available**: sk:kotlin, sk:kotlin-testing` line + a one-line crew-agents hint (`Crew agents (via Task tool): advisor, executor, …`).
-- `CREW_VERBOSE=1`: verbose — full bulleted skill descriptions + a full `<system-reminder>` crew-agents block.
+**Do NOT reintroduce tech-stack detection or skill advertisement here.** This
+function used to walk the tree for Kotlin/Gradle/Exposed markers, name the
+matching `sk:*` skills, and order a Kotlin LSP load. Both halves were wrong in
+the same way: crew cannot verify what it was asserting.
+- The skill list named another plugin's skills without being able to see whether
+  that plugin was installed. It drifted exactly as you would expect: a skill sk
+  had deleted went on being advertised here for days. Stack detection now lives
+  in `plugins/sk/scripts/session-start.py`, which gates each name on the skill
+  directory actually being present.
+- The LSP block ordered a REQUIRED `ToolSearch(query='select:LSP')` first action
+  while unable to check that the tool exists, that it is configured for Kotlin,
+  or that a server is running. Language-server wiring is harness configuration,
+  not something a workflow plugin can assert; it is gone rather than moved.
 
-This extends the same env var that already gates the Stop-hook persistence nudge in `persistent-mode.py`.
-
-**`<system-reminder>` wrapping** — when a project stack is detected (Kotlin, Exposed, Gradle, Trino), the entire stack guidance block is wrapped in `<system-reminder>` tags (replaced the older `<IMPORTANT>` block and `## This project uses:` header). Terse vs. verbose only changes skill bullet verbosity; the wrapper and Kotlin LSP instruction are always present when the stack is detected.
-
-**Kotlin LSP-load instruction** — when `"Kotlin"` is in `stack_hints`, the block prepends a REQUIRED first-action instruction before the skill list:
-- Call `ToolSearch(query='select:LSP')` BEFORE reading or editing any code.
-- Prefer LSP operations (`goToDefinition`, `findReferences`, `hover`, `documentSymbol`) over Read+grep for navigating Kotlin code.
-- Print a `🔧 [crew] Kotlin LSP available · skills ready: …` status line in the first reply.
-- Prefix the next user-facing message with `[skill: <name>]` when a skill is invoked.
-
-LSP loading is Kotlin-only for now (`needs_lsp = "Kotlin" in stack_hints`); extending it requires adding the analogous check and `confirm_parts` entry in `build_plugin_guidance`.
+A regression test in `tests/test-hooks.py` asserts crew's guidance names no
+`sk:`, no `select:LSP`, and no stack line even on a Kotlin tree.
 
 ## crew-state CLI
 

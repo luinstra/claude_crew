@@ -1,0 +1,17 @@
+{
+  "description": "sk stack detection: names the sk skills covering the project's stack",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/session-start.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

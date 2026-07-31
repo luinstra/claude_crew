@@ -1,33 +1,32 @@
 #!/usr/bin/env python3
 """
 Claude Crew Session Start Hook
-Restores persistent mode states and injects plugin integration guidance.
+Restores persistent mode states and injects crew's own agent guidance.
 """
 
-# --- Version guard: stdlib-only, 3.9-parseable, BEFORE any project import.
-# Python 3.9 is UNSUPPORTED for hook functionality (repo requires 3.10+), but
-# must be GRACEFUL: allow + loud diagnostic, never a silent crash. This
+# --- Version guard: stdlib-only, old-parseable, BEFORE any project import.
+# Anything below the marketplace's 3.11 floor is UNSUPPORTED, but must be
+# GRACEFUL: allow + loud diagnostic, never a silent crash. This
 # pre-import fallback runs stdlib-only (it CANNOT build a SessionStartResult,
 # models isn't imported yet), so it emits its diagnostic on the `systemMessage`
 # channel (the allow-side carrier) + stderr. This is the
-# intentional split from the post-import 3.10+ crash handler at the bottom of
+# intentional split from the post-import crash handler at the bottom of
 # the module, which CAN build a SessionStartResult and therefore emits via
 # SessionStart's documented hookSpecificOutput.additionalContext channel.
 import json
 import sys
 
-if sys.version_info < (3, 10):
+if sys.version_info < (3, 11):
     _DIAG = (
         "[crew] SessionStart hook disabled: Python %d.%d is unsupported (crew "
-        "hooks require Python 3.10+). State restore and cleanup skipped — fix "
-        "the hook interpreter (e.g. install python3 >= 3.10 on PATH)."
+        "requires Python 3.11+). State restore and cleanup skipped — fix "
+        "the hook interpreter (e.g. install python3 >= 3.11 on PATH)."
         % sys.version_info[:2]
     )
     print(json.dumps({"systemMessage": _DIAG}))
     print(_DIAG, file=sys.stderr)
     sys.exit(0)
 
-import os
 import re
 import time
 from pathlib import Path
@@ -59,13 +58,6 @@ MAX_AGE_DAYS = 7
 MAX_AGE_SECONDS = MAX_AGE_DAYS * 86400
 STALE_INACTIVE_DAYS = 1
 STALE_INACTIVE_SECONDS = STALE_INACTIVE_DAYS * 86400
-
-# bound the stack-detection walk so it can't blow the 10s SessionStart hook
-# budget on a big tree. Canonical artifact/vendor dirs are pruned (real Kotlin
-# sources never live under them); the entry cap is a hard ceiling on files
-# visited. Both are module-level so tests can dial the cap down.
-STACK_PRUNE_DIRS = {".git", "node_modules", "build", ".venv", "venv", ".gradle", "dist", "target"}
-STACK_WALK_MAX_ENTRIES = 20_000
 
 
 def cleanup_stale_files(directory: Path) -> None:
@@ -322,148 +314,20 @@ def cleanup_stale_todos(todos_dir: Path) -> None:
             pass
 
 
-def detect_project_stack(directory: Path) -> list[str]:
-    """Detect project tech stack and return skill trigger hints.
-
-    A single BOUNDED ``os.walk`` pass (pruned artifact dirs + an entry cap +
-    early-exit once all extensions are seen) replaces three unbounded recursive
-    globs, so a huge tree can't blow the 10s SessionStart hook budget. The hint
-    output is behavior-identical to the old glob logic.
-    """
-    hints = []
-
-    # Kotlin (.kt / .kts) and Gradle Kotlin DSL (.gradle.kts, which ALSO matches
-    # **/*.kts) — detected in one walk. Exposed/Trino stay a root build-file read.
-    found_kt = found_kts = found_gradle_kts = False
-    visited = 0
-    capped = False
-    for root, dirnames, filenames in os.walk(str(directory)):
-        # Prune in-place so os.walk never descends into artifact/vendor dirs.
-        dirnames[:] = [d for d in dirnames if d not in STACK_PRUNE_DIRS]
-        for name in filenames:
-            # Check the cap INSIDE the file loop so one pathological directory
-            # can't be fully iterated before the ceiling fires.
-            if visited >= STACK_WALK_MAX_ENTRIES:
-                capped = True
-                break
-            visited += 1
-            if name.endswith(".gradle.kts"):
-                found_gradle_kts = True
-                found_kts = True  # .gradle.kts also matched the old **/*.kts glob
-            elif name.endswith(".kts"):
-                found_kts = True
-            elif name.endswith(".kt"):
-                found_kt = True
-            if found_kt and found_kts and found_gradle_kts:
-                break
-        if capped or (found_kt and found_kts and found_gradle_kts):
-            break
-
-    if found_kt or found_kts:
-        hints.append("Kotlin")
-    if found_gradle_kts:
-        hints.append("Gradle")
-
-    # Exposed ORM: check build files for exposed dependency → triggers sk:exposed
-    build_file = directory / "build.gradle.kts"
-    if build_file.is_file():
-        try:
-            content = build_file.read_text()
-            if "exposed" in content.lower():
-                hints.append("Exposed")
-            if "trino" in content.lower():
-                hints.append("Trino")
-        except OSError:
-            pass
-
-    return hints
-
-
-def build_plugin_guidance(stack_hints: list[str]) -> str:
-    """Build plugin integration guidance for session context.
+def build_plugin_guidance() -> str:
+    """Build crew's own agent guidance for session context.
 
     Output is gated by CREW_VERBOSE (see ``is_verbose``): the default is a TERSE
-    one-liner for skills + agents; the FULL bulleted block is emitted only when
-    CREW_VERBOSE is set. Stack guidance (when a stack is detected) is always
-    wrapped in a high-salience ``<system-reminder>`` and, for Kotlin, prepends a
-    REQUIRED instruction to load the LSP before reading/editing code.
+    one-liner, the full bulleted block only when CREW_VERBOSE is set. Tech-stack
+    detection and skill advertisement belong to the plugin that OWNS the skills,
+    not here: crew cannot see whether another plugin is installed, so a mapping
+    kept here goes stale silently.
     """
     lines = []
     verbose = is_verbose()
 
-    # Map stack hints → relevant skills (in priority order)
-    relevant_skills: list[str] = []
-    if "Kotlin" in stack_hints:
-        relevant_skills.append("sk:kotlin")
-        relevant_skills.append("sk:kotlin-testing")
-    if "Exposed" in stack_hints:
-        relevant_skills.append("sk:exposed")
-    if "Gradle" in stack_hints:
-        relevant_skills.append("sk:gradle")
-    if "Trino" in stack_hints:
-        relevant_skills.append("sk:trino")
-
-    # LSP is currently configured for Kotlin only — load it whenever Kotlin is present
-    needs_lsp = "Kotlin" in stack_hints
-
-    if stack_hints:
-        # Always wrap stack guidance in a system-reminder for high salience.
-        # Terse vs verbose only changes how chatty the bullets are.
-        lines.append("<system-reminder>")
-        lines.append(f"Project stack detected: {', '.join(stack_hints)}.")
-        lines.append("")
-
-        if needs_lsp:
-            lines.append(
-                "**REQUIRED first action**: Load the Kotlin LSP by calling "
-                "`ToolSearch(query='select:LSP')` BEFORE reading or editing any code. "
-                "Prefer LSP operations (goToDefinition, findReferences, hover, documentSymbol) "
-                "over Read+grep for navigating Kotlin code."
-            )
-            lines.append("")
-
-        if relevant_skills:
-            if verbose:
-                lines.append("**Skills available for this stack** — invoke `Skill(<name>)` BEFORE writing code in that domain:")
-                if "Kotlin" in stack_hints:
-                    lines.append("- `sk:kotlin` — data classes, coroutines, null safety, extension functions")
-                    lines.append("- `sk:kotlin-testing` — Kotest, MockK, TestIdProvider, DatabaseTest")
-                if "Exposed" in stack_hints:
-                    lines.append("- `sk:exposed` — repositories, transactions, table definitions")
-                if "Gradle" in stack_hints:
-                    lines.append("- `sk:gradle` — build config, dependencies, version catalogs")
-                if "Trino" in stack_hints:
-                    lines.append("- `sk:trino` — analytics queries, query routing")
-                lines.append("- `sk:git` — commits, rebasing, history (always available)")
-            else:
-                skill_list = ", ".join(relevant_skills)
-                lines.append(f"**Skills available**: {skill_list}")
-                lines.append(
-                    "Invoke the matching `Skill(<name>)` BEFORE writing code in that domain (lazy-load)."
-                )
-            lines.append(
-                "When you invoke a skill, prefix your NEXT user-facing message with "
-                "`[skill: <name>]` so the user can see it loaded."
-            )
-            lines.append("")
-
-        # Confirmation line — gives the user in-session visibility that the hook fired
-        confirm_parts: list[str] = []
-        if needs_lsp:
-            confirm_parts.append("Kotlin LSP available")
-        if relevant_skills:
-            confirm_parts.append(f"skills ready: {', '.join(relevant_skills)}")
-        confirm_text = " · ".join(confirm_parts) if confirm_parts else "stack detected"
-
-        lines.append(
-            "**In your first reply this session**, include a single status line "
-            f"(after any leading thought, before substantive content): `🔧 [crew] {confirm_text}`"
-        )
-        lines.append("</system-reminder>")
-
     if verbose:
         lines.extend([
-            "",
             "<system-reminder>",
             "**Crew agents** for specialized work:",
             "- Analysis/debugging/planning: `advisor` agent",
@@ -473,10 +337,9 @@ def build_plugin_guidance(stack_hints: list[str]) -> str:
             "</system-reminder>",
         ])
     else:
-        lines.extend([
-            "",
-            "Crew agents (via Task tool): advisor, executor, document-writer, reader.",
-        ])
+        lines.append(
+            "Crew agents (via Task tool): advisor, executor, document-writer, reader."
+        )
 
     return "\n".join(lines)
 
@@ -557,7 +420,6 @@ def orphan_loop_line(label: str, loop: str, file_session: str, task: str, age_da
 def build_session_status(
     directory: Path,
     home: Path,
-    stack_hints: list[str],
     session_id: str = "",
 ) -> list[str]:
     """Build session status messages.
@@ -566,10 +428,6 @@ def build_session_status(
     and brief mentions of other sessions' active loops.
     """
     messages: list[str] = []
-
-    # Project stack detection
-    if stack_hints:
-        messages.append(f"[Project: {', '.join(stack_hints)}]")
 
     # Session ID injection for Claude to use in commands
     if session_id:
@@ -705,14 +563,11 @@ def main():
     sweep_signal_markers_all(crew_dir)
     swab_notice = report_stale_artifacts(crew_dir)
 
-    # Detect project stack
-    stack_hints = detect_project_stack(directory)
-
-    # Build plugin integration guidance
-    guidance = build_plugin_guidance(stack_hints)
+    # Build crew's agent guidance
+    guidance = build_plugin_guidance()
 
     # Build session status messages (session-scoped)
-    status_messages = build_session_status(directory, home, stack_hints, session_id)
+    status_messages = build_session_status(directory, home, session_id)
 
     # Combine guidance and status into additionalContext
     context_parts = [guidance]

@@ -185,8 +185,8 @@ def main():
 
     # SessionStart uses its OWN diagnostic/context channel —
     # hookSpecificOutput.additionalContext — NOT systemMessage. This is the
-    # channel the 3.10+ crash handler (session-start.py bottom) emits on; the
-    # 3.9 pre-import version-guard fallback emits systemMessage instead only
+    # channel the post-import crash handler (session-start.py bottom) emits on;
+    # the pre-import version-guard fallback emits systemMessage instead only
     # because it's stdlib-only and can't build this object.
     from models import SessionStartResult
     _ctx_json = SessionStartResult.with_context("restored context").to_json()
@@ -366,106 +366,7 @@ def main():
                 "advisor",
             )
 
-            # Test with Kotlin file (stack detection)
-            (test_path / "Test.kt").write_text("fun main() {}")
-
-            # Terse mode (default): stack guidance wrapped in <system-reminder>
-            test_contains(
-                "Terse mode, Kotlin stack - stack detection line present",
-                session_start,
-                json.dumps({"directory": str(test_path)}),
-                "Project stack detected: Kotlin",
-            )
-
-            # Check sk: skills are referenced in terse hint
-            test_contains(
-                "Terse mode, Kotlin stack - sk: reference in hint",
-                session_start,
-                json.dumps({"directory": str(test_path)}),
-                "sk:kotlin",
-            )
-
-            # LSP load instruction must be present when Kotlin detected
-            test_contains(
-                "Terse mode, Kotlin stack - LSP load instruction present",
-                session_start,
-                json.dumps({"directory": str(test_path)}),
-                "select:LSP",
-            )
-
-            # Confirmation line instruction must be present
-            test_contains(
-                "Terse mode, Kotlin stack - confirmation line instruction present",
-                session_start,
-                json.dumps({"directory": str(test_path)}),
-                "[crew] Kotlin LSP available",
-            )
-
-            # Skill-prefix instruction must be present
-            test_contains(
-                "Terse mode, Kotlin stack - skill-prefix instruction present",
-                session_start,
-                json.dumps({"directory": str(test_path)}),
-                "[skill:",
-            )
-
-            # No legacy <IMPORTANT> tag in either mode (replaced by <system-reminder>)
-            test_not_contains(
-                "Terse mode, Kotlin stack - no legacy <IMPORTANT> tag",
-                session_start,
-                json.dumps({"directory": str(test_path)}),
-                "<IMPORTANT>",
-            )
-
-            # Stack guidance is now wrapped in <system-reminder> (was <IMPORTANT>)
-            test_contains(
-                "Terse mode, Kotlin stack - stack guidance wrapped in <system-reminder>",
-                session_start,
-                json.dumps({"directory": str(test_path)}),
-                "<system-reminder>",
-            )
-
-            # No '## This project uses:' header in terse mode
-            test_not_contains(
-                "Terse mode, Kotlin stack - no '## This project uses:' header",
-                session_start,
-                json.dumps({"directory": str(test_path)}),
-                "## This project uses:",
-            )
-
-            # Verbose mode: <system-reminder> wrap + LSP instruction + skill bullets
-            output_verbose = run_script_verbose(session_start, json.dumps({"directory": str(test_path)}))
-            if "<system-reminder>" in output_verbose and "select:LSP" in output_verbose:
-                log_pass("Verbose mode, Kotlin stack - <system-reminder> + LSP instruction present")
-            else:
-                log_fail("Verbose mode, Kotlin stack - <system-reminder> + LSP instruction present",
-                         "contains <system-reminder> and select:LSP", output_verbose[:400])
-
-            # Verbose mode: skill bullets reference sk: names
-            if "sk:kotlin" in output_verbose:
-                log_pass("Verbose mode, Kotlin stack - sk:kotlin skill bullet present")
-            else:
-                log_fail("Verbose mode, Kotlin stack - sk:kotlin skill bullet present",
-                         "contains sk:kotlin", output_verbose[:400])
-
-            # Verbose mode: no legacy <IMPORTANT> wrap
-            if "<IMPORTANT>" not in output_verbose:
-                log_pass("Verbose mode, Kotlin stack - no legacy <IMPORTANT> tag")
-            else:
-                log_fail("Verbose mode, Kotlin stack - no legacy <IMPORTANT> tag",
-                         "does NOT contain <IMPORTANT>", output_verbose[:200])
-
-            # Verbose mode: no '## This project uses:' header
-            if "## This project uses:" not in output_verbose:
-                log_pass("Verbose mode, Kotlin stack - '## This project uses:' header removed")
-            else:
-                log_fail("Verbose mode, Kotlin stack - '## This project uses:' header removed",
-                         "does NOT contain '## This project uses:'", output_verbose[:200])
-
-            # Clean up kotlin file
-            (test_path / "Test.kt").unlink()
-
-            # Terse mode: one-line agent hint (no stack present)
+            # Terse mode: one-line agent hint
             test_contains(
                 "Terse mode - one-line agent hint present",
                 session_start,
@@ -473,9 +374,9 @@ def main():
                 "advisor, executor, document-writer, reader",
             )
 
-            # Terse mode with no stack: no <system-reminder> block at all
+            # Terse mode: no <system-reminder> block at all
             test_not_contains(
-                "Terse mode (no stack) - no <system-reminder> tag",
+                "Terse mode - no <system-reminder> tag",
                 session_start,
                 json.dumps({"directory": str(test_path)}),
                 "<system-reminder>",
@@ -484,10 +385,25 @@ def main():
             # Verbose mode: full <system-reminder> agent block
             output_v = run_script_verbose(session_start, json.dumps({"directory": str(test_path)}))
             if "<system-reminder>" in output_v:
-                log_pass("Verbose mode (no stack) - <system-reminder> agent block present")
+                log_pass("Verbose mode - <system-reminder> agent block present")
             else:
-                log_fail("Verbose mode (no stack) - <system-reminder> agent block present",
+                log_fail("Verbose mode - <system-reminder> agent block present",
                          "contains <system-reminder>", output_v[:200])
+
+            # Tech-stack detection and skill advertisement moved to the sk plugin
+            # (plugins/sk/scripts/session-start.py). A Kotlin source in the tree
+            # is what used to trigger crew's sk + LSP block, so detect the leak
+            # with one present: crew cannot see whether sk is installed, and must
+            # name neither it nor a language server.
+            (test_path / "Leak.kt").write_text("fun main() {}")
+            for _leak in ("sk:", "select:LSP", "Project stack detected"):
+                test_not_contains(
+                    f"crew guidance names no cross-plugin {_leak!r} on a Kotlin tree",
+                    session_start,
+                    json.dumps({"directory": str(test_path)}),
+                    _leak,
+                )
+            (test_path / "Leak.kt").unlink()
 
             # Test with context snapshot
             crew_dir = test_path / ".crew"
@@ -4695,85 +4611,6 @@ def main():
             _clear_state_files()
 
             # =========================================================================
-            # BOUNDED STACK DETECTION
-            # =========================================================================
-            log_section("stack detection (pruned bounded walk)")
-
-            detect_project_stack = ss_module.detect_project_stack
-
-            # Prune proven: a .kt ONLY under a pruned dir is NOT detected.
-            p6_prune = test_path / "p6-prune"
-            (p6_prune / "node_modules" / "pkg" / "src").mkdir(parents=True)
-            (p6_prune / "node_modules" / "pkg" / "src" / "Buried.kt").write_text("class X")
-            if "Kotlin" not in detect_project_stack(p6_prune):
-                log_pass("stack detect: .kt only under a pruned dir (node_modules) is NOT detected")
-            else:
-                log_fail("stack detect: .kt only under a pruned dir is NOT detected", "no Kotlin", "Kotlin detected")
-
-            # Hit: a .kt in a real source dir IS detected.
-            p6_hit = test_path / "p6-hit"
-            (p6_hit / "src" / "main").mkdir(parents=True)
-            (p6_hit / "src" / "main" / "App.kt").write_text("class A")
-            if "Kotlin" in detect_project_stack(p6_hit):
-                log_pass("stack detect: .kt in a real source dir IS detected")
-            else:
-                log_fail("stack detect: .kt in a real source dir IS detected", "Kotlin", "not detected")
-
-            # Parity: a .gradle.kts yields BOTH Kotlin and Gradle (old globs did).
-            p6_gradle = test_path / "p6-gradle"
-            p6_gradle.mkdir()
-            (p6_gradle / "settings.gradle.kts").write_text('rootProject.name = "x"')
-            gh = detect_project_stack(p6_gradle)
-            if "Kotlin" in gh and "Gradle" in gh:
-                log_pass("stack detect: a .gradle.kts yields both Kotlin and Gradle (glob parity)")
-            else:
-                log_fail("stack detect: a .gradle.kts yields both Kotlin and Gradle", "Kotlin+Gradle", str(gh))
-
-            # Wall-clock bound: a deep/wide decoy under node_modules + one real
-            # .kt returns well under the hook budget because the decoy is pruned.
-            p6_wall = test_path / "p6-wall"
-            (p6_wall / "src").mkdir(parents=True)
-            (p6_wall / "src" / "Main.kt").write_text("class M")
-            _decoy = p6_wall / "node_modules"
-            for _i in range(40):
-                _d = _decoy / f"pkg{_i}" / "deep" / "deeper"
-                _d.mkdir(parents=True)
-                for _j in range(20):
-                    (_d / f"f{_j}.js").write_text("x")
-            _t0 = _time.perf_counter()
-            wall_hints = detect_project_stack(p6_wall)
-            _elapsed = _time.perf_counter() - _t0
-            if "Kotlin" in wall_hints and _elapsed < 2.0:
-                log_pass(f"stack detect: pruned walk returns fast on a big decoy tree ({_elapsed:.3f}s)")
-            else:
-                log_fail("stack detect: pruned walk returns fast on a big decoy tree",
-                         "Kotlin + < 2s", f"hints={wall_hints}, elapsed={_elapsed:.3f}s")
-
-            # Entry-cap: a low cap halts the walk before it descends to a deep
-            # .kt (root's plain files exhaust the budget first) — proves the cap.
-            p6_cap = test_path / "p6-cap"
-            p6_cap.mkdir()
-            for _j in range(10):
-                (p6_cap / f"plain{_j}.txt").write_text("x")
-            _sub = p6_cap / "sub"
-            _sub.mkdir()
-            (_sub / "Deep.kt").write_text("class D")
-            _saved_cap = ss_module.STACK_WALK_MAX_ENTRIES
-            ss_module.STACK_WALK_MAX_ENTRIES = 5
-            try:
-                capped = detect_project_stack(p6_cap)
-            finally:
-                ss_module.STACK_WALK_MAX_ENTRIES = _saved_cap
-            if "Kotlin" not in capped:
-                log_pass("stack detect: entry cap halts the walk before a deep .kt (bounded)")
-            else:
-                log_fail("stack detect: entry cap halts the walk before a deep .kt", "no Kotlin (cap hit)", str(capped))
-            if "Kotlin" in detect_project_stack(p6_cap):
-                log_pass("stack detect: same tree with default cap finds the deep .kt (cap was the cause)")
-            else:
-                log_fail("stack detect: same tree with default cap finds the deep .kt", "Kotlin", "not detected")
-
-            # =========================================================================
             # LOOP INIT -f (task off the shell)
             # =========================================================================
             # =========================================================================
@@ -6348,16 +6185,17 @@ def main():
                              "no block decision", allowed[:200])
 
             # =========================================================================
-            # PYTHON 3.9 IMPORT BOMB + LOUD FAIL-OPEN
+            # SUB-FLOOR IMPORT BOMB + LOUD FAIL-OPEN
             # =========================================================================
             log_section("hooks: version guard + fail-open")
 
             session_start_path = SCRIPT_DIR / "session-start.py"
             state_discovery_path = SCRIPT_DIR / "state_discovery.py"
 
-            # Static: state_discovery carries the __future__ import (the
-            # `-> Path | None` annotation is a def-time TypeError on 3.9
-            # without it).
+            # Static: state_discovery carries the __future__ import, keeping
+            # its annotations lazy. Not load-bearing under the 3.11 floor (a
+            # `-> Path | None` evaluates fine there); kept because the module
+            # is imported by tooling that may not share the floor.
             sd_src = state_discovery_path.read_text()
             if "from __future__ import annotations" in sd_src:
                 log_pass("state_discovery.py has `from __future__ import annotations`")
@@ -6369,7 +6207,7 @@ def main():
             # the first project import in both hook entry points.
             for hook_path in (persistent_mode, session_start_path):
                 src = hook_path.read_text()
-                guard_idx = src.find("sys.version_info < (3, 10)")
+                guard_idx = src.find("sys.version_info < (3, 11)")
                 import_idx = src.find("from models import")
                 if 0 <= guard_idx < import_idx:
                     log_pass(f"{hook_path.name}: version guard precedes project imports")
@@ -6421,39 +6259,30 @@ def main():
                              "rc 0, allow JSON with loud diagnostic field, stderr diagnostic",
                              f"rc={proc.returncode} stdout={proc.stdout[:150]!r} stderr={proc.stderr[:150]!r}")
 
-            # Real-interpreter test (skip if no Python 3.9 available): both
-            # hook entry points are visible no-ops on 3.9 (allow + loud
-            # diagnostic, exit 0), and state_discovery imports cleanly.
-            py39 = None
-            for candidate in ("python3.9", "/usr/bin/python3"):
-                cand_path = shutil.which(candidate) if candidate == "python3.9" else candidate
+            # Real-interpreter test (skip if no sub-floor interpreter is around):
+            # both hook entry points are visible no-ops below the 3.11 floor
+            # (allow + loud diagnostic, exit 0). 3.9 is the one that shows up in
+            # practice, since macOS ships it as /usr/bin/python3.
+            old_python = None
+            for candidate in ("python3.9", "python3.10", "/usr/bin/python3"):
+                cand_path = candidate if candidate.startswith("/") else shutil.which(candidate)
                 if not cand_path or not Path(cand_path).exists():
                     continue
                 ver = subprocess.run([cand_path, "-c", "import sys; print(sys.version_info[:2])"],
                                      capture_output=True, text=True)
-                if ver.returncode == 0 and ver.stdout.strip() == "(3, 9)":
-                    py39 = cand_path
+                if ver.returncode == 0 and ver.stdout.strip() in ("(3, 9)", "(3, 10)"):
+                    old_python = cand_path
                     break
-            if py39 is None:
-                print(f"{YELLOW}~ SKIP{NC}: no Python 3.9 interpreter found (real-interpreter guard test)")
+            if old_python is None:
+                print(f"{YELLOW}~ SKIP{NC}: no sub-3.11 interpreter found (real-interpreter guard test)")
             else:
-                imp = subprocess.run(
-                    [py39, "-c", "import state_discovery"],
-                    capture_output=True, text=True, cwd=SCRIPT_DIR,
-                )
-                if imp.returncode == 0:
-                    log_pass("python3.9 imports state_discovery (annotations lazy)")
-                else:
-                    log_fail("python3.9 imports state_discovery",
-                             "rc 0", f"rc={imp.returncode} stderr={imp.stderr[:200]!r}")
-
                 for hook_path in (persistent_mode, session_start_path):
                     proc = subprocess.run(
-                        [py39, str(hook_path)],
+                        [old_python, str(hook_path)],
                         input=json.dumps({"directory": str(test_path)}),
                         capture_output=True, text=True, cwd=SCRIPT_DIR, env=_neutral_env(),
                     )
-                    name = f"{hook_path.name} on 3.9: visible no-op (allow + diagnostic)"
+                    name = f"{hook_path.name} below the 3.11 floor: visible no-op (allow + diagnostic)"
                     try:
                         payload = json.loads(proc.stdout.strip())
                     except (json.JSONDecodeError, ValueError):
