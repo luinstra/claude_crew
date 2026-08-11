@@ -6,12 +6,13 @@
 # resolution is per-seat-per-key (repo > global > this file).
 #
 # Seat keys:
-#   provider          which kind drives the seat (see PROVIDER_KINDS in seats.py):
-#                     codex / cursor / agy run an external CLI; claude-code seats
-#                     are the in-session Task voices the orchestrator dispatches.
-#   model             the model string that provider accepts (`codex exec --model`,
-#                     `agent --model`, `agy --model`); for a claude-code seat it
-#                     must be a Task-tool alias (TASK_MODEL_ALIASES).
+#   via               the execution channel, as a one-element list: codex / cursor
+#                     / agy run an external CLI; claude seats are the in-session
+#                     Task voices the orchestrator dispatches.
+#   provider          accepted as the legacy spelling of `via` for user config.
+#   model             the model string that the channel accepts (`codex exec
+#                     --model`, `agent --model`, `agy --model`); for a `claude`
+#                     channel it must be a Task-tool alias (TASK_MODEL_ALIASES).
 #   opt_in            true keeps the seat OUT of every built-in panel: it is
 #                     registered but only runs when named (--seats <name>). WHY
 #                     each one is opt-in (premium cost bucket, redundancy) lives
@@ -23,63 +24,63 @@
 # the scaffolded config all read this table in the order written here.
 
 [seats.codex]
-provider = "codex"
+via = ["codex"]
 model = "gpt-5.6-sol"
 
 [seats.codex-luna]
-provider = "codex"
+via = ["codex"]
 model = "gpt-5.6-luna"
 
 [seats.codex-terra]
-provider = "codex"
+via = ["codex"]
 model = "gpt-5.6-terra"
 opt_in = true
 
 [seats.agy]
-provider = "agy"
+via = ["agy"]
 model = "Gemini 3.1 Pro (High)"
 
 [seats.cursor-gpt]
-provider = "cursor"
+via = ["cursor"]
 model = "gpt-5.5-extra-high"
 opt_in = true
 
 [seats.cursor-gemini]
-provider = "cursor"
+via = ["cursor"]
 model = "gemini-3.1-pro"
 opt_in = true
 
 [seats.cursor-glm]
-provider = "cursor"
+via = ["cursor"]
 model = "glm-5.2-max"
 opt_in = true
 
 [seats.cursor-grok]
-provider = "cursor"
+via = ["cursor"]
 model = "grok-4.5-xhigh"
 opt_in = true
 
 [seats.cursor-auto]
-provider = "cursor"
+via = ["cursor"]
 model = "auto"
 
 [seats.cursor-composer]
-provider = "cursor"
+via = ["cursor"]
 model = "composer-2.5"
 
 # The Claude (Task) seats. Same catalog, different driver: the orchestrator
 # spawns these in-session on the subscription, so they carry no CLI and the
 # engine never executes them.
 [seats.opus]
-provider = "claude-code"
+via = ["claude"]
 model = "opus"
 
 [seats.sonnet]
-provider = "claude-code"
+via = ["claude"]
 model = "sonnet"
 
 [seats.fable]
-provider = "claude-code"
+via = ["claude"]
 model = "fable"
 opt_in = true
 

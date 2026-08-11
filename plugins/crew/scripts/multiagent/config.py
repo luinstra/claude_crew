@@ -189,9 +189,10 @@ def _reset_cache_for_tests() -> None:
     _global_cache = _UNLOADED
     _warned.clear()
 
-    from multiagent import providers, seats
+    from multiagent import channels, providers, seats
 
     seats._reset_for_tests()
+    channels.set_capabilities(None)
     providers._REGISTRY = None
 
 

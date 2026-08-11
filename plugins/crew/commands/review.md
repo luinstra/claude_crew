@@ -53,8 +53,9 @@ the review request.
 One review prompt fans out across a multi-model panel; you synthesize the
 results into the `APPROVED / REVISE / [BLOCKING] / [MINOR]` verdict. Two seat
 kinds: **subprocess seats** (external-CLI entries, via the engine) and **task
-seats** (Claude voices, each the single `crew:reviewer` agent spawned via the
-Task tool with a per-spawn `model` override; in-session on the subscription,
+seats** (seats resolved native for this run, each the single `crew:reviewer`
+agent spawned via the Task tool with a per-spawn `model` override; in-session
+on the subscription,
 no `claude -p`, no API key; read-only by convention). `review-prep`'s JSON is
 the roster of record; only fan out those seats. A failed/skipped seat NEVER
 aborts the review.
@@ -105,7 +106,8 @@ RUN-SCOPED review dir (`run.json` + a frozen snapshot of the reviewed
 content), stages every seat prompt against that snapshot, and PRINTS
 `{prompt_path, subprocess_seats, task_seats, task_seat_models, run_dir,
 run_id, target_sha256, session_segment, task_prompt_paths,
-pending_subprocess_seats, pending_task_seats}` as one-line JSON. It runs
+pending_subprocess_seats, pending_task_seats, host,
+seat_channels}` as one-line JSON. It runs
 NOTHING. **Quote `"<TARGET>"`/`"<BASE>"`** (a plan path can contain spaces);
 `<TARGET>` is the plan `.md` path or git scope from Step 1. (`--inline-diff`
 embeds content instead; reference mode is the default.)
@@ -392,5 +394,6 @@ review — all seats failed: <per-seat diagnostics>`.
 ---
 
 Subscription safety: the engine drives only external-CLI subprocess seats;
-Claude voices are in-session Task seats. No `claude -p`, no Anthropic API — a
+Claude-model seats resolved native for this run are in-session Task seats. No
+`claude -p`, no Anthropic API — a
 stray `ANTHROPIC_API_KEY` is irrelevant.

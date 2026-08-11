@@ -70,11 +70,14 @@ When the user DID name a panel, pass it through so the explicit choice wins:
 ```
 
 The split: **`subprocess_seats`** (external-CLI entries; fan out one
-`crew run <seat>` per seat), **`task_seats`** (Claude voices, `crew:panelist`
-for discuss / `crew:reviewer` for review, via the Task tool; in-session on
+`crew run <seat>` per seat), **`task_seats`** (seats resolved native for this
+run, `crew:panelist` for discuss / `crew:reviewer` for review, via the Task
+tool; in-session on
 the subscription, no `claude -p`, no API key), **`task_seat_models`** (each
 Task seat's model pin FROM the catalog; spawn with
 `model = task_seat_models[<seat>]`, NEVER assume the seat name is its model).
+
+PRINTS `{subprocess_seats, task_seats, task_seat_models, host, seat_channels}` as one-line JSON.
 
 Seat only the models in this split. For `--panel cursor`, `task_seats` is
 empty and the Task-seats step is SKIPPED. A failed/skipped seat NEVER sinks

@@ -560,7 +560,7 @@ class CursorProvider(Provider):
 # =============================================================================
 # To add another Cursor model as a panel seat:
 #   1. Add a [seats.cursor-<x>] table to multiagent/seats.toml with
-#      provider = "cursor" and the model string (`agent models` lists them);
+#      via = ["cursor"] and the model string (`agent models` lists them);
 #      opt_in = true keeps it out of the default panels. A DEFAULT seat also needs
 #      its entry in the [panels] full list, which the drift guard pins.
 #   2. That's it. The registry builds every executor-bearing catalog row, the

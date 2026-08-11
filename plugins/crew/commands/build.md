@@ -75,8 +75,9 @@ choice survives across iterations. A one-seat panel is fine.
 ## Executor option (optional)
 
 The IMPLEMENT step defaults to `Task(crew:executor)` (Claude); `--executor
-<seat>` (start-of-`$ARGUMENTS`) routes it through an external write-capable
-subprocess seat instead (or the literal `crew:executor` to force the default),
+<seat>` (start-of-`$ARGUMENTS`) routes it through an external resolved
+write-capable seat instead (or the literal `crew:executor` to force the
+default),
 the panel still gating completion. Precedence: active-loop stamp (`source: "state"`,
 only when an active valid loop with a non-empty stamp matches the resolved
 session) > `--executor` flag > `[build].executor` config > builtin.
@@ -87,7 +88,8 @@ a FAILED external round; retries STACK on the failed attempt's partial edits
 round reuses its provider conversation; `resume_executor = false` opts out (the
 recipe already omits `--chain` when false); only codex/cursor resume, agy and
 unsupported binaries always start fresh. `crew build-executor` OWNS resolution
-and validation; pass `--executor <seat>` ONLY when the user named one.
+and validation records the resolved `channel`.
+For the caller, pass `--executor <seat>` ONLY when the user named one.
 
 ## MANDATORY: Resolve the Executor
 
@@ -98,9 +100,10 @@ when the user passed one; otherwise OMIT it. Always pass the literal session id:
 "${CLAUDE_PLUGIN_ROOT}/crew" build-executor --session-id <session-id>
 ```
 
-Keep `executor`, `retries`, and `resume_executor` from its one-line JSON. **If
-it exits 2, SURFACE the reason and STOP**: a misconfigured executor (unknown
-seat, Task seat, group token, read-only seat) must NOT silently run as Claude.
+Keep `executor`, `retries`, `resume_executor`, and `channel` from its one-line
+JSON. **If it exits 2, SURFACE the reason and STOP**: a misconfigured executor
+(unknown seat, native-only seat, group token, unresolved execution, or
+read-only seat) must NOT silently run as Claude.
 On a resumed loop, this command reads the active loop's frozen executor, so
 running it again after resume or compaction returns the executor the loop
 started with even without the original `--executor`; a removed or
@@ -228,9 +231,10 @@ Work through the task systematically. Create todos to track progress. Implement 
 
 When the executor reports complete with no unresolved blockers, verify with a
 multi-model panel over the **working-tree diff**. Two seat kinds: **subprocess
-seats** (external-CLI entries, via the engine) and **task seats** (Claude
-voices, each a `crew:reviewer` spawned via the Task tool, in-session on the
-subscription; no `claude -p`, no API key). `review-prep`'s JSON is the roster
+seats** (external-CLI entries, via the engine) and **task seats** (seats
+resolved native for this run, each a `crew:reviewer` spawned via the Task
+tool, in-session on the subscription; no `claude -p`, no API key).
+`review-prep`'s JSON is the roster
 of record; only fan out those seats.
 
 > **`allowed-tools` scopes THIS orchestrator only.** Seat tool access is
@@ -255,8 +259,9 @@ registry), mints the RUN-SCOPED review dir (`run.json` + a frozen snapshot of
 the reviewed diff, untracked files included as new-file diffs), stages every
 seat prompt against that snapshot, and PRINTS `{prompt_path, subprocess_seats,
 task_seats, task_seat_models, run_dir, run_id, target_sha256, session_segment,
-task_prompt_paths, pending_subprocess_seats, pending_task_seats}` as one-line
-JSON. It runs NOTHING. (`--inline-diff` embeds content; reference mode is the
+task_prompt_paths, pending_subprocess_seats, pending_task_seats, host,
+seat_channels}` as one-line JSON. It runs NOTHING. (`--inline-diff` embeds
+content; reference mode is the
 default. No `--base`: `working-tree` reviews the uncommitted diff vs `HEAD`.)
 
 ```bash

@@ -46,6 +46,7 @@ multiagent/
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
 ├── review_runs.py       # review-run lifecycle (pure leaf like rounds.py): run identity mint (content hash + review inputs), reviews-subdir session sanitizer (the ONE mechanism cli.py delegates to), write-once run.json + mint-conflict refusal, snapshot write/self-heal, the landed-and-valid seat predicate, preserve-valid seat writes (per-seat lock), pointer read/write. NO model calls.
 ├── continuations.py     # exact provider conversation chain records: safe paths, binding validation, atomic 0600 writes, sibling locks, invalidation, and ordered classification. NO provider/CLI imports.
+├── channels.py          # Per-host channel table, capability seam, and seat execution resolver
 ├── seats.py             # The seat CATALOG loader: reads shipped `seats.toml`, merges the user's config layers per-seat-per-key, exposes merged_catalog()/merged_panels()/seat_spec()/task_seats()/group_tokens()/premium_off_seats() + PROVIDER_KINDS + the SeatSpec dataclass
 ├── seats.toml           # DATA — the shipped seat + panel catalog (`[seats.<name>]` rows, `[panels]` rosters); merged with per-repo/global config. The one place a built-in model seat is declared
 ├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel, [debate].panel, [dispatch].seat, [dispatch].timeout, dispatch_provider_options for the per-provider `[dispatch.<kind>]` write-mode options validated per layer against each provider's DISPATCH_OPTIONS declaration, [panels] roster) + `raw_layers()` feeding seats.py's per-seat resolution (per-seat tuning + `available` live on `SeatSpec`, not here); per-repo>global>builtin; pure leaf, no cli/providers import; parses with stdlib tomllib (the 3.11 floor the `crew` dispatcher asserts)
@@ -68,14 +69,16 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   case-folded) is rejected on EVERY derived destination, flat and run-scoped alike (an explicit
   `-o` keeps ad-hoc freedom).
 - `dispatch` — write-mode single-seat WORK delegation (see below).
-- `build-executor` (RESOLVE-ONLY): prints `{executor, retries, resume_executor, source}` JSON for
+- `build-executor` (RESOLVE-ONLY): prints
+  `{executor, retries, resume_executor, source, channel}` JSON for
   /crew:build's implement step (active-loop stamp (`source: "state"`, only when
   an active valid loop with a non-empty stamp matches the resolved session) >
   `--executor` flag > `[build].executor` config > builtin `crew:executor`). An
   unreadable or session-mismatched active state file exits 2 rather than
   silently resolving fresh. Validates the resolved value is the `crew:executor`
-  sentinel OR a known write-capable subprocess seat; a Task seat, group token,
-  unknown, or read-only seat exits 2 naming the reason. Runs NOTHING.
+  sentinel OR a catalog seat whose resolved execution is engine-runnable and
+  supports workspace-write; a native-only seat, group token, unknown,
+  unresolved, or read-only seat exits 2 naming the reason. Runs NOTHING.
 - `render` — build/stage a seat prompt; `--stage-all` collapses N stages into one call.
 - `seats` — resolve/print a panel; `--debate` prints the config-aware full debate panel.
 - `collect` — fold per-seat `<seat>.json` into a digest; `--group`/`--full`/`--report-unparsed`.
@@ -236,9 +239,9 @@ Key contracts (do NOT regress):
 
 - **Panel selection** — the commands accept `--panel full|lite|solo|cursor|quick` / `--seats <subset>`
   and pass them STRAIGHT to `crew review-prep`, which OWNS the resolution (`seats.merged_panels()`
-  for the roster + `seats.merged_catalog()` for each seat's provider/model): it splits the preset/`--seats` into `subprocess_seats` (the
-  external-CLI entries), `task_seats` (the Claude voices), and `task_seat_models` (each Task
-  seat's model pin), and the orchestrator just reads that JSON — it no longer classifies seat names,
+  for the roster + the host-aware channel resolver for each seat's resolved execution): it splits the preset/`--seats` into `subprocess_seats` (the
+  external-CLI entries), `task_seats` (seats resolved native for this run), `task_seat_models` (each Task
+  seat's model pin), `host`, and `seat_channels`, and the orchestrator just reads that JSON — it no longer classifies seat names,
   defines presets, or hardcodes a model pin (the engine still EXECUTES only the subprocess subset,
   skipped when empty).
 <!-- seat-roster:default -->
@@ -327,13 +330,13 @@ Key contracts (do NOT regress):
   `.crew/reviews/<id>/<run_id>/` (identity = content hash + replayable target spec + base + a per-seat
   EXECUTION SIGNATURE for every seat: kind + resolved provider + model for subprocess seats, kind +
   model for Task seats (no subprocess provider). A panel change, a kind flip, a
-  `[seats.<name>].provider` flip, or a `[seats.<name>].model` change on EITHER seat kind mints a new
+  `[seats.<name>].via`/`provider` execution-key flip, or a `[seats.<name>].model` change on EITHER seat kind mints a new
   run; write-once `run.json` carrying
   the full `identity_digest`; frozen snapshot `target.md`/`target.diff`; the
   `current-run.json` pointer as a launch-time handoff), stages the shared subprocess prompt AND one
   prompt per Task seat against the SNAPSHOT, and PRINTS `{prompt_path, subprocess_seats, task_seats,
   task_seat_models, run_dir, run_id, target_sha256, session_segment, task_prompt_paths,
-  pending_subprocess_seats, pending_task_seats}` as JSON — it runs NOTHING. A re-prep of an identical spec RESUMES the same dir
+  pending_subprocess_seats, pending_task_seats, host, seat_channels}` as JSON — it runs NOTHING. A re-prep of an identical spec RESUMES the same dir
   (`run.json` byte-untouched, landed-valid seats excluded from the pending lists); changed content or
   review inputs mint a DIFFERENT dir, so stale results are unreachable rather than merely inadvisable.
   Before printing, prep CLEARS each pending SUBPROCESS seat's stale non-valid `<seat>.json` (a prior
@@ -529,7 +532,8 @@ Key contracts (do NOT regress):
   and `crew dispatch --options` lists them; applied only in workspace-write, so
   read-only review/debate argv is unchanged even when configured), `[seats.<name>]`
   (tunes an existing seat's `model`/`reasoning_effort`/`print_timeout`/`available`,
-  OR declares a brand-new first-class seat by giving `provider` + `model`, plus
+  OR declares a brand-new first-class seat by giving `via = ["<channel>"]` +
+  `model` (`provider` remains the accepted legacy spelling), plus
   optional `opt_in` to keep it out of the built-in panels), `[tuning].timeout`
   (NON-DISPATCH review/council/run/probe seat wall clock),
   `[tuning].deadline_minutes` (the persistence loops' wall clock, read by `crew
@@ -540,6 +544,10 @@ Key contracts (do NOT regress):
   dropped with a warn and cannot mask a global bound. The stop-fires cap still
   bounds an unclocked loop; a non-int, a negative value, or one past the
   ceiling is dropped with a one-time warn, never clamped silently),
+  A table must not contain both `provider` and `via`: that row is ignored with
+  the migration warning. A user-layer legacy `provider` may legally override a
+  shipped seat's `via`; it translates mechanically to the equivalent
+  one-element channel.
   `[build].executor` (the `/crew:build` implement-step executor: a RAW string,
   type-checked only; known-ness/write-capability is the `build-executor`
   command's to validate, since the `crew:executor` sentinel is a legal value that

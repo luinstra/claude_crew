@@ -5,11 +5,11 @@ and every panel, in order. This module reads it, merges the user's
 ``[seats.<name>]`` / ``[panels]`` tables over it (per-repo > global > shipped,
 resolved per-seat-per-key), and hands back ``SeatSpec`` rows. Adding a seat is a
 TOML edit, in this repo OR in a personal config: a declared seat with a known
-``provider`` and an explicit ``model`` is a first-class seat (registry entry,
-panel member, dispatch seat). Its fields may be SPLIT across the two config
-files: rows are folded per key across the layers before any requirement is
-judged, so the provider in one file and the tunes in the other still make one
-seat.
+``via`` channel and an explicit ``model`` is a first-class seat (registry entry,
+panel member, dispatch seat). ``provider`` remains accepted as the legacy
+spelling for one channel. Its fields may be SPLIT across the two config files:
+rows are folded per key across the layers before any requirement is judged, so
+the execution key in one file and the tunes in the other still make one seat.
 
 This module stays a LEAF: it imports nothing from ``providers/`` or ``cli``.
 ``PROVIDER_KINDS`` is the DATA half of that split (what a provider kind can do);
@@ -18,14 +18,14 @@ provider name to decide behavior.
 
 Never-choke, as everywhere else in the config path: a bad row is DROPPED with a
 one-time stderr warn, never an exception, so one typo cannot take down a panel.
-A seat is dropped when it names an unknown provider, when its name is empty or
+A seat is dropped when it names an unknown channel, when its name is empty or
 would not survive the staged-filename slug (``name != slug(name)``: the dot-strip
 is not injective, so two seats could collide on one prompt file, and an empty
 name falls back to the literal ``seat`` slug), when it is not lowercase (result
 file names are not case-sensitive on every filesystem, so a case-variant of an
 existing seat would collide with that seat's files), when its name is a reserved token
 (a shipped panel name or a group token, which resolve to seat LISTS), when it
-declares a provider but never (in any layer) an explicit model, or when a
+declares an execution key but never (in any layer) an explicit model, or when a
 ``claude-code`` seat's MERGED spec pins a model the Task tool would reject (a
 SHIPPED seat whose tune fails that rule reverts to its shipped row instead).
 A configured ``[panels]`` entry named after a live seat is resolved on the
@@ -86,6 +86,19 @@ PROVIDER_KINDS: dict[str, ProviderKind] = {
     "claude-code": ProviderKind("claude-code", has_executor=False, model_rule="alias"),
 }
 
+# The public schema is channel-first. Keep the legacy provider spelling at this
+# leaf so existing consumers can continue to read ``SeatSpec.provider`` without
+# making the provider registry own config translation.
+LEGACY_PROVIDER_TO_CHANNEL: dict[str, str] = {
+    "codex": "codex",
+    "cursor": "cursor",
+    "agy": "agy",
+    "claude-code": "claude",
+}
+CHANNEL_TO_LEGACY_KIND: dict[str, str] = {
+    channel: provider for provider, channel in LEGACY_PROVIDER_TO_CHANNEL.items()
+}
+
 
 # =============================================================================
 # SeatSpec — one resolved row of the catalog
@@ -105,13 +118,18 @@ class SeatSpec:
     must not change their answer.
     """
     name: str
-    provider: str
+    via: tuple[str, ...]
     model: str | None = None
     opt_in: bool = False
     available: bool = True
     reasoning_effort: str | None = None
     print_timeout: str | None = None
     declared: bool = False
+
+    @property
+    def provider(self) -> str:
+        """The legacy provider kind for downstream registry consumers."""
+        return CHANNEL_TO_LEGACY_KIND[self.via[0]]
 
     @property
     def kind(self) -> ProviderKind:
@@ -130,6 +148,14 @@ _shipped_raw: dict | None = None
 _catalog: dict[str, SeatSpec] | None = None
 _panels: dict[str, list[str]] | None = None
 _premium_off: tuple[str, ...] | None = None
+
+
+class _NoExecutionKey:
+    """Module-level marker for a table with no effective execution key."""
+
+
+_NO_KEY = _NoExecutionKey()
+
 
 # Keys of warnings already emitted this process (one-time-note guard, mirroring
 # config._warned). Cleared by the shared test reset: a warn fires ONCE per
@@ -226,6 +252,81 @@ def _str_field(tbl: dict, key: str, seat: str, layer: str) -> str | None:
     return val
 
 
+def _str_list_field(tbl: dict, key: str, seat: str, layer: str) -> list[str] | None:
+    """A list of non-empty strings, or ``None`` with a warn for a bad value."""
+    val = tbl.get(key)
+    if not isinstance(val, list) or any(not isinstance(item, str) or not item.strip()
+                                       for item in val):
+        _warn_once(
+            f"{key}-shape:{layer}:{seat}",
+            f"[seats.{seat}].{key} must be a list of channel-name strings; "
+            f"ignoring {val!r}",
+        )
+        return None
+    return val
+
+
+def _via_from_table(
+    tbl: dict, name: str, layer: str,
+) -> tuple[str, ...] | None | _NoExecutionKey:
+    """Translate one layer's execution key to a validated one-channel tuple.
+
+    ``_NO_KEY`` means this table does not provide an execution key, while
+    ``None`` means it explicitly provided one but the row must be dropped.
+    """
+    has_provider = "provider" in tbl
+    has_via = "via" in tbl
+    if has_provider and has_via:
+        _warn_once(
+            f"both-keys:{layer}:{name}",
+            f"[seats.{name}] declares both provider and via; use via "
+            f"(provider is the legacy spelling); ignoring the seat",
+        )
+        return None
+    if has_provider:
+        provider = _str_field(tbl, "provider", name, layer)
+        if provider is None:
+            return _NO_KEY
+        if provider not in PROVIDER_KINDS:
+            _warn_once(
+                f"provider:{layer}:{name}",
+                f"[seats.{name}].provider={provider!r} is not a known provider "
+                f"({', '.join(sorted(PROVIDER_KINDS))}); ignoring the seat",
+            )
+            return None
+        return (LEGACY_PROVIDER_TO_CHANNEL[provider],)
+    if not has_via:
+        return _NO_KEY
+
+    via = _str_list_field(tbl, "via", name, layer)
+    # A malformed via row has no installed base to protect, so this spelling is loud by design.
+    if via is None:
+        return None
+    if len(via) > 1:
+        _warn_once(
+            f"via-cardinality:{layer}:{name}",
+            f"[seats.{name}].via = {via!r} names more than one channel "
+            f"(one channel per seat until a second host exists); ignoring the seat",
+        )
+        return None
+    known = set(CHANNEL_TO_LEGACY_KIND)
+    unknown = next((channel for channel in via if channel not in known), None)
+    if unknown is not None:
+        _warn_once(
+            f"via-unknown:{layer}:{name}",
+            f"[seats.{name}].via names unknown channel {unknown!r} "
+            f"(known: {', '.join(sorted(known))}); dropping it",
+        )
+        via = []
+    if not via:
+        _warn_once(
+            f"via-empty:{layer}:{name}",
+            f"[seats.{name}].via lists no usable channel; ignoring the seat",
+        )
+        return None
+    return (via[0],)
+
+
 def _bool_field(tbl: dict, key: str, seat: str, layer: str, *, on_bad: bool) -> bool | None:
     val = tbl.get(key)
     if val is None:
@@ -243,31 +344,27 @@ def _bool_field(tbl: dict, key: str, seat: str, layer: str, *, on_bad: bool) -> 
 def _spec_from_table(name: str, tbl: dict, layer: str, base: SeatSpec | None) -> SeatSpec | None:
     """Fold one layer's ``[seats.<name>]`` table over ``base`` (``None`` = a new,
     config-DECLARED seat). Returns ``None`` when the row must be dropped."""
-    provider = _str_field(tbl, "provider", name, layer)
-    if provider is None and base is None:
-        # A table for a name no shipped seat carries and no provider to drive it:
+    via = _via_from_table(tbl, name, layer)
+    if via is _NO_KEY and base is None:
+        # A table for a name no shipped seat carries and no execution key to drive it:
         # nothing to tune and nothing to build. Almost always a typo'd seat name.
         _warn_once(
             f"unknown-seat:{layer}:{name}",
-            f"[seats.{name}] names no known seat and declares no provider; ignoring it",
+            f"[seats.{name}] names no known seat and declares no provider or via; "
+            f"ignoring it",
         )
         return None
-    if provider is not None and provider not in PROVIDER_KINDS:
-        _warn_once(
-            f"provider:{layer}:{name}",
-            f"[seats.{name}].provider={provider!r} is not a known provider "
-            f"({', '.join(sorted(PROVIDER_KINDS))}); ignoring the seat",
-        )
+    if via is None:
         return None
 
     # declared marks a seat ABSENT from the shipped catalog, not "a config layer
     # touched it": a tuned shipped seat keeps declared=False, so the consumers
     # keyed on it (the scaffold filter, the premium-off derivation) do not change
     # their answer just because the user pinned a knob on a built-in seat.
-    spec = base or SeatSpec(name=name, provider=provider or "", declared=True)
+    spec = base or SeatSpec(name=name, via=via, declared=True)
     fields: dict[str, Any] = {}
-    if provider is not None:
-        fields["provider"] = provider
+    if via is not _NO_KEY:
+        fields["via"] = via
     for key in ("model", "reasoning_effort", "print_timeout"):
         val = _str_field(tbl, key, name, layer)
         if val is not None:
@@ -359,7 +456,7 @@ def merged_catalog() -> dict[str, SeatSpec]:
     if _catalog is None:
         catalog = shipped_catalog()
         # Kept verbatim for the final sweep's per-key fallback: a shipped seat
-        # whose merged provider/model combination fails validation falls back to
+        # whose merged channel/model combination fails validation falls back to
         # these two keys (independent tunes like `available` are preserved).
         shipped_specs = dict(catalog)
         # Per-seat model candidates in precedence order (shipped first, then the
@@ -373,8 +470,9 @@ def merged_catalog() -> dict[str, SeatSpec]:
         # value lands last and wins, per key.
         #
         # A declared seat may be SPLIT across layers: its tunes (model, available,
-        # ...) in one file and its provider in the other. A provider-less row for
-        # an unknown name is therefore DEFERRED, not dropped: dropping it at its
+        # ...) in one file and its execution key in the other. An
+        # execution-key-less row for an unknown name is therefore DEFERRED, not
+        # dropped: dropping it at its
         # own layer would silently lose the tunes (including an explicit
         # available = false) the moment a later layer completes the seat. Only a
         # row no layer ever completes is the typo'd-name case worth a warn.
@@ -389,14 +487,14 @@ def merged_catalog() -> dict[str, SeatSpec]:
                     continue
                 base = catalog.get(name)
                 if base is None:
-                    provider = _str_field(tbl, "provider", name, layer)
-                    if provider is None:
+                    via = _via_from_table(tbl, name, layer)
+                    if via is _NO_KEY:
                         pending.setdefault(name, []).append((layer, tbl))
                         continue
-                    if provider in PROVIDER_KINDS:
-                        # Seed with the provider so the deferred lower-precedence
+                    if via is not None:
+                        # Seed with the channel so the deferred lower-precedence
                         # rows fold first and this row's keys still win, per key.
-                        base = SeatSpec(name=name, provider=provider, declared=True)
+                        base = SeatSpec(name=name, via=via, declared=True)
                         for p_layer, p_tbl in pending.pop(name, []):
                             pm = _str_field(p_tbl, "model", name, p_layer)
                             if pm is not None:
@@ -412,7 +510,7 @@ def merged_catalog() -> dict[str, SeatSpec]:
             for layer, _tbl in rows:
                 _warn_once(
                     f"unknown-seat:{layer}:{name}",
-                    f"[seats.{name}] names no known seat and declares no provider; "
+                    f"[seats.{name}] names no known seat and declares no provider or via; "
                     f"ignoring it",
                 )
         # Final-state validation, judged on the MERGED spec so a requirement one
@@ -427,7 +525,7 @@ def merged_catalog() -> dict[str, SeatSpec]:
             if spec.declared and spec.model is None:
                 _warn_once(
                     f"no-model:{name}",
-                    f"[seats.{name}] declares provider {spec.provider!r} but no "
+                    f"[seats.{name}] declares channel {spec.via[0]!r} but no "
                     f"model; a declared seat needs an explicit model, ignoring it",
                 )
                 del catalog[name]
@@ -457,7 +555,7 @@ def merged_catalog() -> dict[str, SeatSpec]:
                 else:
                     # A shipped seat converted to claude-code with no valid alias
                     # anywhere: the conversion itself is the invalid part, so
-                    # provider and model revert to the shipped pair and the
+                    # channel and model revert to the shipped pair and the
                     # independent tunes stay.
                     _warn_once(
                         f"task-model:merged:{name}",
@@ -467,7 +565,7 @@ def merged_catalog() -> dict[str, SeatSpec]:
                     )
                     catalog[name] = replace(
                         spec,
-                        provider=shipped_specs[name].provider,
+                        via=shipped_specs[name].via,
                         model=shipped_specs[name].model,
                     )
         _catalog = catalog

@@ -5863,7 +5863,8 @@ def test_review_prep():
                       "prompt_path", "subprocess_seats", "task_seats",
                       "task_seat_models", "run_dir", "run_id", "target_sha256",
                       "session_segment", "task_prompt_paths",
-                      "pending_subprocess_seats", "pending_task_seats"],
+                      "pending_subprocess_seats", "pending_task_seats",
+                      "host", "seat_channels"],
                   "exact key order", f"rc={proc.returncode} keys={list(obj.keys()) if obj else None}")
         check("review-prep stdout has no \\uXXXX escaping (ensure_ascii=False)",
               "\\u" not in proc.stdout, "no \\u", repr(proc.stdout[:160]))
@@ -6440,6 +6441,12 @@ def test_debate_panel_resolver():
                                    "cursor-auto", "cursor-composer"],
               "task_seats": ["opus", "sonnet"],
               "task_seat_models": {"opus": "opus", "sonnet": "sonnet"},
+              "host": "claude",
+              "seat_channels": {
+                  "codex": "codex", "codex-luna": "codex", "agy": "agy",
+                  "cursor-auto": "cursor", "cursor-composer": "cursor",
+                  "opus": "claude", "sonnet": "claude",
+              },
           }, "the three-field split with model pins", f"rc={rc} {payload}")
 
     # The JSON split is the SAME panel the plain listing prints, just partitioned:
@@ -9331,10 +9338,11 @@ def test_dispatch_chain_gates_and_regression():
                 os.environ["CLAUDE_WORKING_DIRECTORY"] = old_working
 
 
+# These assertions pin both dispatch rejection strings (task-seat and read-only), so no separate gate-freeze test exists.
 def test_dispatch():
     log_section("dispatch — prompt builder + capability")
-    from multiagent import cli, config
-    from multiagent.providers import Provider
+    from multiagent import channels, cli, config, seats
+    from multiagent.providers import Provider, known_seat_names
     import io, contextlib
     import unittest.mock as mock
 
@@ -9360,6 +9368,12 @@ def test_dispatch():
         check(f"{s} provider opts into supports_workspace_write=True",
               get_provider(s).supports_workspace_write is True,
               "True", str(get_provider(s).supports_workspace_write))
+    check(
+        "catalog seat names and group tokens remain disjoint",
+        set(seats.merged_catalog()).isdisjoint(set(seats.group_tokens())),
+        "no catalog name is a group token",
+        f"catalog={set(seats.merged_catalog()) & set(seats.group_tokens())}",
+    )
 
     # --- Task 2: codex --ignore-user-config conditional on sandbox ---
     log_section("dispatch — codex argv (--ignore-user-config gating) + cwd pin")
@@ -9793,6 +9807,27 @@ def test_dispatch():
         os.environ["CLAUDE_PROJECT_DIR"] = str(repo)
         os.chdir(str(repo))
         try:
+            with project_config(
+                '[seats.declared-native]\nvia = ["claude"]\nmodel = "opus"\n'
+            ):
+                known = ", ".join(known_seat_names())
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    rc = cli.cmd_dispatch(
+                        _dispatch_ns(seat="declared-native", task="x", json=True),
+                    )
+            expected = (
+                "error: 'declared-native' is a Task seat — owned by the orchestrator, "
+                "not runnable by the engine (engine runs subprocess seats only: "
+                f"{known})\n"
+            )
+            check(
+                "dispatch declared native seat keeps the Task-seat diagnostic",
+                rc == 2 and err.getvalue() == expected,
+                repr(expected),
+                f"rc={rc} stderr={err.getvalue()!r}",
+            )
+
             # Unavailable-but-known-writable seat -> skipped ok=false envelope, exit 0, path printed.
             class _Unavail(Provider):
                 name = "codex"
@@ -9813,19 +9848,22 @@ def test_dispatch():
                   and lines[-1].endswith("dispatch-codex.json"),
                   "exit0 ok=false skipped path-printed", f"rc={rc} {envj}")
 
-            # Non-writable provider -> fail fast exit 2, seat never probed/run.
-            class _NoWrite(Provider):
-                name = "codex"
-                supports_workspace_write = False
-                def is_available(self): raise AssertionError("is_available probed on non-writable seat")
-                def run(self, *a, **k): raise AssertionError("non-writable seat ran")
+            # Non-writable channel -> fail fast exit 2, seat never probed/run.
+            probes = []
+            channels.set_capabilities({
+                "codex": channels.ChannelCapability(
+                    False, lambda: probes.append("probed") or True,
+                ),
+            })
             err = io.StringIO()
-            with mock.patch("multiagent.cli.get_provider", return_value=_NoWrite()):
+            try:
                 with contextlib.redirect_stderr(err):
                     rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=True))
+            finally:
+                channels.set_capabilities(None)
             check("dispatch non-writable seat -> exit 2, fails fast (no is_available/run)",
-                  rc == 2 and "workspace-write" in err.getvalue(),
-                  "exit2 fail-fast", f"rc={rc} {err.getvalue()!r}")
+                  rc == 2 and "workspace-write" in err.getvalue() and probes == [],
+                  "exit2 fail-fast, no availability probe", f"rc={rc} {err.getvalue()!r} probes={probes}")
 
             # Null-model human header omits the (…) parens.
             class _OkNullModel(Provider):
@@ -13673,9 +13711,495 @@ def test_config_split_seat_layers():
           "cursor panel redefined", str(panels2.get("cursor")))
 
 
+def test_via_migration():
+    """The channel-first ``via`` key is additive and behavior-identical to
+    legacy ``provider`` rows while its four validation stages stay distinct."""
+    log_section("seats via schema: additive migration and diagnostics")
+    import io  # noqa: E402
+    from contextlib import redirect_stderr  # noqa: E402
+    from multiagent import seats  # noqa: E402
+
+    def load(project=None, glob=None, *, panels=False):
+        with crew_config(project=project, glob=glob):
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                cat = dict(seats.merged_catalog())
+                resolved_panels = dict(seats.merged_panels()) if panels else None
+            return cat, resolved_panels, buf.getvalue()
+
+    expected_mapping = {
+        "codex": "codex",
+        "cursor": "cursor",
+        "agy": "agy",
+        "claude-code": "claude",
+    }
+    with crew_config():
+        actual_mapping = {
+            spec.provider: spec.via[0]
+            for spec in seats.shipped_catalog().values()
+        }
+    check("legacy provider kinds map to the four channel names",
+          actual_mapping == expected_mapping,
+          str(expected_mapping), str(actual_mapping))
+
+    cat, _, warn = load(glob='[seats.via-seat]\nvia = ["cursor"]\n'
+                              'model = "composer-2.5"\n')
+    spec = cat.get("via-seat")
+    check("via list declares a first-class seat",
+          spec is not None and spec.via == ("cursor",)
+          and spec.provider == "cursor" and spec.model == "composer-2.5",
+          "via=(cursor,), provider=cursor, model=composer-2.5", str(spec))
+    check("valid via declaration emits no warning", not warn, "no warning", warn)
+
+    # A legacy row and its channel-first spelling must fold to the same spec,
+    # including an execution-key override on a shipped seat.
+    legacy, _, legacy_warn = load(glob='[seats.codex]\nprovider = "agy"\n'
+                                        'reasoning_effort = "high"\n')
+    current, _, current_warn = load(glob='[seats.codex]\nvia = ["agy"]\n'
+                                         'reasoning_effort = "high"\n')
+    check("legacy provider override and via override are behavior-identical",
+          legacy.get("codex") == current.get("codex")
+          and legacy["codex"].via == ("agy",)
+          and legacy["codex"].provider == "agy"
+          and not legacy_warn and not current_warn,
+          "equal converted catalog rows, no warnings",
+          f"legacy={legacy.get('codex')} current={current.get('codex')} "
+          f"warn={legacy_warn!r}/{current_warn!r}")
+
+    # Stage 1: shape, including a declared invalid row, must not fall through
+    # to the old missing-execution-key diagnostic.
+    cat, _, warn = load(glob='[seats.bad-shape]\nvia = "codex"\nmodel = "x"\n')
+    check("via stage 1 rejects a bare string with the exact shape diagnostic",
+          "bad-shape" not in cat
+          and "[seats.bad-shape].via must be a list of channel-name strings; "
+              "ignoring 'codex'" in warn
+          and "names no known seat and declares no provider or via" not in warn,
+          "shape warning only", warn)
+
+    # The same invalid via shape on a SHIPPED row emits the same stage
+    # diagnostic while the shipped execution key remains available.
+    cat, _, warn = load(glob='[seats.codex]\nvia = "codex"\n')
+    check("via stage 1 on a shipped row keeps the shipped seat and exact diagnostic",
+          cat.get("codex") is not None
+          and "[seats.codex].via must be a list of channel-name strings; "
+              "ignoring 'codex'" in warn
+          and "names no known seat and declares no provider or via" not in warn,
+          "shipped seat + the same shape warning", warn)
+
+    # Stage 2: more than one channel is rejected before channel knowledge is
+    # considered; the panel parser still remains usable in the same config.
+    cat, panels, warn = load(
+        glob='[seats.multi-channel]\nvia = ["codex", "bogus"]\nmodel = "x"\n'
+             '[panels]\nsafe = ["codex"]\n', panels=True)
+    check("via stage 2 rejects multi-channel rows without an unknown-channel warn",
+          "multi-channel" not in cat
+          and "[seats.multi-channel].via = ['codex', 'bogus'] names more than one "
+              "channel (one channel per seat until a second host exists); ignoring the seat" in warn
+          and "names unknown channel" not in warn
+          and "lists no usable channel" not in warn
+          and panels.get("safe") == ["codex"],
+          "seat dropped, exact cardinality warning, safe panel survives",
+          f"cat={cat.get('multi-channel')} panels={panels} warn={warn}")
+
+    # Stage 3 followed by stage 4: a lone unknown channel becomes an empty
+    # usable set and therefore gets both deliberate diagnostics.
+    cat, _, warn = load(glob='[seats.unknown-channel]\nvia = ["bogus"]\n'
+                              'model = "x"\n')
+    check("via stages 3 and 4 diagnose an unknown-only row",
+          "unknown-channel" not in cat
+          and "[seats.unknown-channel].via names unknown channel 'bogus' "
+              "(known: agy, claude, codex, cursor); dropping it" in warn
+          and "[seats.unknown-channel].via lists no usable channel; ignoring the seat" in warn,
+          "unknown-channel and empty-usable diagnostics", warn)
+
+    # Stage 4 directly: an empty list is well-shaped but has no usable channel.
+    cat, _, warn = load(glob='[seats.empty-via]\nvia = []\nmodel = "x"\n')
+    check("via stage 4 rejects an empty list",
+          "empty-via" not in cat
+          and "[seats.empty-via].via lists no usable channel; ignoring the seat" in warn,
+          "empty-usable diagnostic", warn)
+
+    # A missing execution key remains a distinct deferred-row case.
+    cat, _, warn = load(glob='[seats.missing-execution]\nmodel = "x"\n')
+    check("missing via and provider keeps the old deferred-row guard distinct",
+          "missing-execution" not in cat
+          and "[seats.missing-execution] names no known seat and declares no provider or via; "
+              "ignoring it" in warn
+          and "lists no usable channel" not in warn,
+          "missing-key diagnostic", warn)
+
+    # Both spellings in one table are an early, exclusive error: no via-shape,
+    # unknown-channel, or empty-channel follow-up is emitted.
+    cat, _, warn = load(glob='[seats.both-keys]\nprovider = "codex"\n'
+                              'via = ["bogus"]\nmodel = "x"\n')
+    check("both provider and via reject the row with only the migration diagnostic",
+          "both-keys" not in cat
+          and "[seats.both-keys] declares both provider and via; use via "
+              "(provider is the legacy spelling); ignoring the seat" in warn
+          and ".via must be a list" not in warn
+          and "names unknown channel" not in warn,
+          "both-keys diagnostic only", warn)
+
+    # Legacy malformed providers still return the missing-key sentinel: a
+    # shipped seat keeps its base execution key while a sibling tune survives.
+    cat, _, warn = load(glob='[seats.codex]\nprovider = 123\n'
+                              'reasoning_effort = "medium"\n')
+    check("malformed legacy provider preserves shipped execution and sibling tune",
+          cat.get("codex") and cat["codex"].provider == "codex"
+          and cat["codex"].reasoning_effort == "medium"
+          and "[seats.codex].provider must be a non-empty string; ignoring 123" in warn,
+          "codex base + reasoning_effort=medium + legacy shape warning",
+          f"spec={cat.get('codex')} warn={warn}")
+
+    # The same malformed legacy key on the higher layer must not erase a valid
+    # provider seeded by the lower layer or its independent tuning.
+    cat, _, warn = load(
+        glob='[seats.split-malformed]\nprovider = "codex"\nmodel = "gpt-5.6-sol"\n',
+        project='[seats.split-malformed]\nprovider = 123\nreasoning_effort = "medium"\n',
+    )
+    check("split-layer malformed legacy provider preserves the seeded seat",
+          cat.get("split-malformed")
+          and cat["split-malformed"].provider == "codex"
+          and cat["split-malformed"].model == "gpt-5.6-sol"
+          and cat["split-malformed"].reasoning_effort == "medium"
+          and "[seats.split-malformed].provider must be a non-empty string; ignoring 123" in warn,
+          "seeded codex + model + sibling tune", f"spec={cat.get('split-malformed')} warn={warn}")
+
+    # The channel-first spelling folds across layers exactly like the legacy
+    # provider spelling: model in one layer and via in the other survive as one
+    # resolved seat.
+    cat, _, warn = load(
+        glob='[seats.split-via]\nmodel = "composer-2.5"\n',
+        project='[seats.split-via]\nvia = ["cursor"]\n',
+    )
+    check("split-layer via + model folds into one complete seat",
+          cat.get("split-via") is not None
+          and cat["split-via"].via == ("cursor",)
+          and cat["split-via"].provider == "cursor"
+          and cat["split-via"].model == "composer-2.5",
+          "via=(cursor,), provider=cursor, model=composer-2.5",
+          f"spec={cat.get('split-via')} warn={warn}")
+
+
 def _write(path, text):
     path.write_text(text)
     return path
+
+
+def test_resolver():
+    """Exercise the host/channel resolver with injected capabilities."""
+    log_section("host-aware channel resolver and provider capability facts")
+    from multiagent import channels, providers, seats  # noqa: E402
+    from multiagent.providers import get_provider, known_seat_names  # noqa: E402
+
+    host = channels.current_host()
+    table = channels.channel_table(host)
+    check("Claude is the current host and its native channel is claude",
+          host == "claude" and channels.native_channel(host) == "claude",
+          "host='claude', native='claude'", f"host={host!r} native={channels.native_channel(host)!r}")
+    check("channel table is derived from the legacy-kind inverse",
+          set(table) == set(seats.CHANNEL_TO_LEGACY_KIND)
+          and table["claude"].legacy_kind == "claude-code"
+          and all(table[channel].legacy_kind == legacy
+                 for channel, legacy in seats.CHANNEL_TO_LEGACY_KIND.items()),
+          str(seats.CHANNEL_TO_LEGACY_KIND), str(table))
+    check("channel table marks exactly the native channel",
+          sum(spec.native for spec in table.values()) == 1
+          and table[channels.native_channel(host)].native
+          and all(spec.native == (name == channels.native_channel(host))
+                  for name, spec in table.items()),
+          "one native channel", str(table))
+    check("channel table keeps model rules in seats.PROVIDER_KINDS",
+          all(spec.model_rule == seats.PROVIDER_KINDS[spec.legacy_kind].model_rule
+              for spec in table.values()),
+          "model rules match provider-kind data", str(table))
+
+    calls: dict[str, int] = {}
+
+    def capability(name, *, available=True, writable=True):
+        def probe():
+            calls[name] = calls.get(name, 0) + 1
+            return available
+
+        return channels.ChannelCapability(writable, probe)
+
+    one = seats.SeatSpec(name="direct", via=("codex",), model=None)
+    resolved = channels.resolve_seat(
+        one, host=host, capabilities={"codex": capability("codex")})
+    check("one eligible external channel skips probing and is engine-runnable",
+          resolved is not None and resolved.channel == "codex"
+          and resolved.model is None and resolved.engine_runnable
+          and resolved.supports_workspace_write and calls == {},
+          "codex, no probe, writable", f"resolved={resolved!r} calls={calls}")
+
+    saved_default = channels._default_capabilities
+    channels._default_capabilities = lambda: (_ for _ in ()).throw(
+        AssertionError("provider capabilities were imported"))
+    try:
+        injected = channels.resolve_seat(
+            one, host=host, capabilities={"codex": capability("injected")})
+    finally:
+        channels._default_capabilities = saved_default
+    check("explicit capability injection is the sole resolver source",
+          injected is not None and injected.channel == "codex",
+          "injected codex resolution", repr(injected))
+
+    saved_default = channels._default_capabilities
+    channels._default_capabilities = lambda: (_ for _ in ()).throw(
+        AssertionError("default capabilities were consulted"))
+    channels.set_capabilities({"codex": capability("active-override")})
+    try:
+        active = channels.resolve_seat(one, host=host)
+    finally:
+        channels.set_capabilities(None)
+        channels._default_capabilities = saved_default
+    check("the active capability override is used when no call mapping is supplied",
+          active is not None and active.channel == "codex",
+          "active override codex resolution", repr(active))
+
+    missing = channels.resolve_seat(one, host=host, capabilities={})
+    native = seats.SeatSpec(name="opus", via=("claude",), model="opus")
+    native_missing = channels.resolve_seat(native, host=host, capabilities={})
+    check("missing capability key is fail-closed without a KeyError",
+          missing is not None and not missing.engine_runnable
+          and not missing.supports_workspace_write
+          and native_missing is not None and native_missing.native
+          and not native_missing.engine_runnable
+          and not native_missing.supports_workspace_write,
+          "resolved but unrunnable/write-disabled", f"external={missing!r} native={native_missing!r}")
+
+    bad_alias = seats.SeatSpec(name="bad-alias", via=("claude",), model="not-an-alias")
+    external_none = seats.SeatSpec(name="external-none", via=("cursor",), model=None)
+    check("model rules gate Claude aliases but allow external model=None",
+          channels.resolve_seat(bad_alias, host=host, capabilities={}) is None
+          and channels.resolve_seat(
+              external_none, host=host, capabilities={"cursor": capability("none")})
+              is not None,
+          "bad Claude alias rejected; external None accepted", "resolver result mismatch")
+    check("a seat with no known eligible channel is unresolved",
+          channels.resolve_seat(
+              seats.SeatSpec(name="unknown", via=("missing",), model="x"),
+              host=host, capabilities={}) is None,
+          "None", "resolved")
+
+    deterministic_a = channels.resolve_seat(
+        one, host=host, capabilities={"codex": capability("codex")})
+    deterministic_b = channels.resolve_seat(
+        one, host=host, capabilities={"codex": capability("codex")})
+    check("the same seat and capability inputs resolve deterministically",
+          deterministic_a == deterministic_b,
+          repr(deterministic_a), repr(deterministic_b))
+
+    # Config parsing rejects multi-element via in this scope. These direct
+    # SeatSpec cases are the dormant ordered-walk shape for a later host.
+    multi = seats.SeatSpec(name="multi", via=("codex", "cursor"), model=None)
+    calls.clear()
+    selected = channels.resolve_seat(
+        multi, host=host,
+        capabilities={"codex": capability("codex", available=False),
+                      "cursor": capability("cursor", available=True)})
+    check("multiple eligible channels choose the first available external channel",
+          selected is not None and selected.channel == "cursor"
+          and calls == {"codex": 1, "cursor": 1},
+          "cursor after probing codex then cursor", f"selected={selected!r} calls={calls}")
+    calls.clear()
+    first = channels.resolve_seat(
+        seats.SeatSpec(name="first", via=("cursor", "codex"), model=None),
+        host=host,
+        capabilities={"cursor": capability("cursor", available=True),
+                      "codex": capability("codex", available=True)})
+    check("multiple eligible channels stop probing after the first available",
+          first is not None and first.channel == "cursor" and calls == {"cursor": 1},
+          "cursor only", f"selected={first!r} calls={calls}")
+    calls.clear()
+    missing_first = channels.resolve_seat(
+        multi, host=host, capabilities={"cursor": capability("cursor", available=True)})
+    check("a missing earlier capability falls through to a later available channel",
+          missing_first is not None and missing_first.channel == "cursor"
+          and calls == {"cursor": 1},
+          "cursor, probe only cursor", f"selected={missing_first!r} calls={calls}")
+    calls.clear()
+    fallback = channels.resolve_seat(
+        multi, host=host,
+        capabilities={"codex": capability("codex", available=False),
+                      "cursor": capability("cursor", available=False)})
+    check("no available channel falls back deterministically to the first eligible",
+          fallback is not None and fallback.channel == "codex"
+          and calls == {"codex": 1, "cursor": 1},
+          "codex fallback after both probes", f"selected={fallback!r} calls={calls}")
+
+    facts = providers.executor_capabilities()
+    expected_kinds = {
+        kind for kind, provider_kind in seats.PROVIDER_KINDS.items()
+        if provider_kind.has_executor
+    }
+    check("provider capability facts cover exactly executor-bearing kinds",
+          set(facts) == expected_kinds
+          and all(facts[kind].supports_workspace_write is True for kind in expected_kinds),
+          str(expected_kinds), str(facts))
+    saved_path = os.environ.get("PATH")
+    os.environ["PATH"] = ""
+    try:
+        probe_results = [facts[kind].probe_available() for kind in sorted(facts)]
+    finally:
+        if saved_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = saved_path
+    check("provider capability probes are fresh bool availability checks",
+          all(isinstance(result, bool) for result in probe_results),
+          "bool probe results", repr(probe_results))
+
+    with crew_config():
+        catalog = seats.merged_catalog()
+        capabilities = channels.active_capabilities()
+        executions = {
+            name: channels.resolve_seat(
+                spec, host=host, capabilities=capabilities,
+            )
+            for name, spec in catalog.items()
+        }
+        resolved_catalog = {
+            name: execution for name, execution in executions.items()
+            if execution is not None
+        }
+        external_names = set(known_seat_names())
+        native_names = set(seats.task_seats())
+        check("resolver engine/native membership matches the registry roster",
+          set(name for name, execution in resolved_catalog.items()
+              if execution.engine_runnable) == external_names
+          and set(name for name, execution in resolved_catalog.items()
+                  if execution.native) == native_names
+          and all(execution.native != execution.engine_runnable
+                  for execution in resolved_catalog.values()),
+          f"external={external_names}, native={native_names}",
+          str(resolved_catalog))
+        check("resolved external write capability matches the provider class",
+              all(execution.supports_workspace_write
+                  == get_provider(name).supports_workspace_write
+                  for name, execution in resolved_catalog.items()
+                  if execution.engine_runnable),
+              "provider-class write capability", str(resolved_catalog))
+
+
+def test_workplan_doc_sync():
+    """Keep command documentation's JSON field inventories synchronized."""
+    log_section("command documentation JSON contract synchronization")
+    common = (
+        "prompt_path", "subprocess_seats", "task_seats", "task_seat_models",
+        "run_dir", "run_id", "target_sha256", "session_segment",
+        "task_prompt_paths", "pending_subprocess_seats", "pending_task_seats",
+        "host", "seat_channels",
+    )
+    expected = {
+        "review.md": common,
+        "build.md": common,
+        "measure-twice.md": common,
+        "debate.md": (
+            "subprocess_seats", "task_seats", "task_seat_models", "host",
+            "seat_channels",
+        ),
+    }
+    for filename, keys in expected.items():
+        raw = (PLUGIN_ROOT / "commands" / filename).read_text(encoding="utf-8")
+        found = []
+        for body in re.findall(r"`\{(.*?)\}`", raw, flags=re.DOTALL):
+            fields = tuple(field.strip() for field in body.replace("\n", " ").split(",")
+                           if field.strip())
+            if fields and fields[0] == keys[0]:
+                found.append(fields)
+        check(f"{filename} documents the exact current JSON field order",
+              found == [keys], str(keys), str(found))
+
+
+def test_roster_channel_invariant():
+    """Ensure every emitted final roster member has exactly one channel entry."""
+    log_section("final roster and seat-channel map invariant")
+    full_subprocess = [
+        "codex", "codex-luna", "agy", "cursor-auto", "cursor-composer",
+    ]
+    full_task = ["opus", "sonnet"]
+
+    def write_config(project: Path, disabled: list[str]) -> None:
+        crew = project / ".crew"
+        crew.mkdir(parents=True, exist_ok=True)
+        (crew / "config.toml").write_text(
+            "".join(f"[seats.{name}]\navailable = false\n" for name in disabled),
+            encoding="utf-8",
+        )
+
+    def assert_invariant(label: str, payload: dict, expected_subprocess: list[str],
+                         expected_task: list[str]) -> None:
+        roster = expected_subprocess + expected_task
+        expected_channels = {
+            name: ("claude" if name in expected_task
+                   else "cursor" if name.startswith("cursor-")
+                   else "codex" if name.startswith("codex") else "agy")
+            for name in roster
+        }
+        check(
+            f"{label}: seat_channels keys equal the final roster",
+            set(payload.get("seat_channels", {})) == set(roster)
+            and len(payload.get("seat_channels", {})) == len(roster)
+            and payload.get("seat_channels") == expected_channels,
+            str(expected_channels), str(payload.get("seat_channels")),
+        )
+
+    for command_name, command_args in (
+        ("review-prep", ["review-prep", "plan.md", "--panel", "full",
+                         "--session-id", "invariant"]),
+        ("debate JSON", ["seats", "--debate", "--json", "--panel", "full"]),
+    ):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td)
+            write_config(project, ["cursor-auto"])
+            if command_name == "review-prep":
+                _write_plan(project)
+            proc = _run_dispatcher(command_args, cwd=td, env=_clean_env(td), timeout=30)
+            payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
+            expected_subprocess = [name for name in full_subprocess if name != "cursor-auto"]
+            check(f"{command_name}: partial availability keeps resolver output usable",
+                  proc.returncode == 0 and payload.get("host") == "claude"
+                  and payload.get("subprocess_seats") == expected_subprocess
+                  and payload.get("task_seats") == full_task,
+                  "partial roster with host=claude", f"rc={proc.returncode} payload={payload}")
+            assert_invariant(f"{command_name}: partial availability", payload,
+                             expected_subprocess, full_task)
+
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td)
+            write_config(project, full_subprocess + full_task)
+            if command_name == "review-prep":
+                _write_plan(project)
+            proc = _run_dispatcher(command_args, cwd=td, env=_clean_env(td), timeout=30)
+            payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
+            check(f"{command_name}: whole-panel fallback restores every seat",
+                  proc.returncode == 0 and payload.get("host") == "claude"
+                  and payload.get("subprocess_seats") == full_subprocess
+                  and payload.get("task_seats") == full_task,
+                  "unfiltered full roster with host=claude",
+                  f"rc={proc.returncode} payload={payload}")
+            assert_invariant(f"{command_name}: whole-panel fallback", payload,
+                             full_subprocess, full_task)
+
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td)
+        _write_plan(project)
+        proc = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "", "--task-seats", "codex",
+             "--session-id", "opaque-task"],
+            cwd=td, env=_clean_env(td), timeout=30,
+        )
+        payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
+        check(
+            "opaque --task-seats names map to the native channel",
+            proc.returncode == 0
+            and payload.get("subprocess_seats") == []
+            and payload.get("task_seats") == ["codex"]
+            and payload.get("seat_channels") == {"codex": "claude"},
+            "task_seats=['codex'], seat_channels={'codex': 'claude'}",
+            f"rc={proc.returncode} payload={payload} stderr={proc.stderr!r}",
+        )
 
 
 # =============================================================================
@@ -14980,7 +15504,31 @@ def test_collect_run_scoped():
         _write_plan(tdp)
         _, o1 = _prep_json(ARGS, td)
         run_d = tdp / o1["run_dir"]
+        record = json.loads((run_d / "run.json").read_text(encoding="utf-8"))
+        check("run.json persists the host and final seat-channel map",
+              record.get("host") == "claude"
+              and record.get("seat_channels") == {
+                  "codex": "codex", "opus": "claude", "sonnet": "claude",
+              },
+              "host=claude and three final seat channels",
+              str({key: record.get(key) for key in ("host", "seat_channels")}))
+        legacy_record = dict(record)
+        legacy_record.pop("host", None)
+        legacy_record.pop("seat_channels", None)
+        (run_d / "run.json").write_text(json.dumps(legacy_record), encoding="utf-8")
+        resumed, resumed_payload = _prep_json(ARGS, td)
+        resumed_record = json.loads((run_d / "run.json").read_text(encoding="utf-8"))
+        check("legacy run.json without host/channel fields still resumes unchanged",
+              resumed.returncode == 0 and resumed_payload is not None
+              and resumed_payload["run_dir"] == o1["run_dir"]
+              and "host" not in resumed_record
+              and "seat_channels" not in resumed_record,
+              "same run dir, legacy record accepted", str(resumed_record))
         _land_opus(td, o1)
+        legacy_collect = _collect(td, "opus", ("--run-id", o1["run_id"]))
+        check("collect accepts the legacy run record without new additive fields",
+              legacy_collect.returncode == 0 and "APPROVED" in legacy_collect.stdout,
+              "legacy run result collected", legacy_collect.stdout[:200])
         good = json.loads((run_d / "opus.json").read_text())
         bad = dict(good)
         bad["target_sha256"] = "0" * 64
@@ -16153,7 +16701,7 @@ def test_build_executor():
     log_section("build-executor: config getters + resolver command")
     import io as _io
     from contextlib import redirect_stdout, redirect_stderr
-    from multiagent import cli, config  # noqa: E402
+    from multiagent import channels, cli, config  # noqa: E402
 
     # --- config.build_executor(): RAW string, type-checked (no known-ness here) ---
     with project_config(""):
@@ -16252,7 +16800,8 @@ def test_build_executor():
         j = json.loads(out) if out.strip() else {}
         check("unset config -> {executor:crew:executor, retries:0, source:builtin}, exit 0",
               rc == 0 and j.get("executor") == "crew:executor"
-              and j.get("source") == "builtin" and j.get("retries") == 0,
+              and j.get("source") == "builtin" and j.get("retries") == 0
+              and j.get("channel") == "claude",
               "crew:executor/builtin/0", f"rc={rc} out={out!r}")
         check("fresh build-executor never reads state",
               rc == 0 and j.get("source") in {"builtin", "config", "flag"}
@@ -16265,7 +16814,8 @@ def test_build_executor():
         j = json.loads(out) if out.strip() else {}
         check("[build].executor=codex-luna -> exit 0, source config",
               rc == 0 and j.get("executor") == "codex-luna"
-              and j.get("source") == "config" and j.get("resume_executor") is True,
+              and j.get("source") == "config" and j.get("resume_executor") is True
+              and j.get("channel") == "codex",
               "codex-luna/config", f"rc={rc} out={out!r}")
 
     with project_config(""):
@@ -16288,7 +16838,7 @@ def test_build_executor():
     help_out = parser.format_help()
     normalized_help = " ".join(help_out.split())
     check("build-executor help documents resume_executor",
-          "{executor, retries, resume_executor, source} JSON" in normalized_help,
+          "{executor, retries, resume_executor, source, channel} JSON" in normalized_help,
           "help includes resume_executor", help_out)
 
     # A Task seat (opus) and a group token (cursor) both fail the
@@ -16312,19 +16862,17 @@ def test_build_executor():
               rc == 2 and "bogus-seat" in err and out.strip() == "",
               "exit2", f"rc={rc} err={err!r}")
 
-    # Write-capable guard NON-VACUITY: all shipped subprocess providers ARE
-    # write-capable, so patch get_provider to make a KNOWN seat read-only and
-    # prove the gate fires; then the same seat with its real provider passes.
-    class _ReadOnly:
-        supports_workspace_write = False
-
+    # Write-capable guard NON-VACUITY: all shipped subprocess channels ARE
+    # write-capable, so inject a KNOWN channel as read-only and prove the gate
+    # fires; then the same seat with its real mapping passes.
     with project_config('[build]\nexecutor = "codex"\n'):
-        saved_gp = cli.get_provider
-        cli.get_provider = lambda name: _ReadOnly()
+        channels.set_capabilities({
+            "codex": channels.ChannelCapability(False, lambda: True),
+        })
         try:
             rc, out, err = _run_be_fresh()
         finally:
-            cli.get_provider = saved_gp
+            channels.set_capabilities(None)
         check("write-capable guard: known read-only seat -> exit 2 naming read-only",
               rc == 2 and "read-only" in err and out.strip() == "",
               "exit2 read-only", f"rc={rc} err={err!r}")
@@ -16703,6 +17251,485 @@ def test_build_md_continuation_wiring():
           "user-only --executor instruction", raw[raw.find("Executor option"):raw.find("Executor option") + 700])
 
 
+def test_workplan_contract_freeze():
+    """Freeze the current review-prep JSON shape and roster partition."""
+    log_section("contract freeze: review-prep work-plan JSON")
+    expected_keys = [
+        "prompt_path", "subprocess_seats", "task_seats", "task_seat_models",
+        "run_dir", "run_id", "target_sha256", "session_segment",
+        "task_prompt_paths", "pending_subprocess_seats", "pending_task_seats",
+        "host", "seat_channels",
+    ]
+    cursor_seats = [
+        "cursor-auto", "cursor-composer", "cursor-gemini", "cursor-glm",
+        "cursor-gpt", "cursor-grok",
+    ]
+    cases = [
+        (
+            "default panel",
+            ["review-prep", "plan.md", "--session-id", "freeze-default"],
+            ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"],
+            ["opus", "sonnet"],
+            {"opus": "opus", "sonnet": "sonnet"},
+            {"codex": "codex", "codex-luna": "codex", "agy": "agy",
+             "cursor-auto": "cursor", "cursor-composer": "cursor",
+             "opus": "claude", "sonnet": "claude"},
+        ),
+        (
+            "explicit mixed seats",
+            [
+                "review-prep", "plan.md", "--seats", "codex,opus",
+                "--session-id", "freeze-mixed",
+            ],
+            ["codex"],
+            ["opus"],
+            {"opus": "opus"},
+            {"codex": "codex", "opus": "claude"},
+        ),
+        (
+            "task-only solo panel",
+            [
+                "review-prep", "plan.md", "--panel", "solo",
+                "--session-id", "freeze-solo",
+            ],
+            [],
+            ["opus"],
+            {"opus": "opus"},
+            {"opus": "claude"},
+        ),
+        (
+            "external-only explicit seat",
+            [
+                "review-prep", "plan.md", "--seats", "codex",
+                "--session-id", "freeze-external",
+            ],
+            ["codex"],
+            [],
+            {},
+            {"codex": "codex"},
+        ),
+        (
+            "external-only cursor panel",
+            [
+                "review-prep", "plan.md", "--panel", "cursor",
+                "--session-id", "freeze-cursor",
+            ],
+            cursor_seats,
+            [],
+            {},
+            {name: "cursor" for name in cursor_seats},
+        ),
+    ]
+
+    for (label, args, expected_subprocess, expected_task, expected_models,
+         expected_channels) in cases:
+        with tempfile.TemporaryDirectory() as td:
+            _write_plan(Path(td))
+            proc = _run_dispatcher(
+                args, cwd=td, env=_clean_env(td), timeout=30,
+            )
+            try:
+                payload = json.loads(proc.stdout)
+            except json.JSONDecodeError as exc:
+                payload = None
+                check(
+                    f"{label}: review-prep emits JSON",
+                    False,
+                    "valid JSON",
+                    f"{exc}: rc={proc.returncode} stdout={proc.stdout[:160]!r}",
+                )
+            if payload is not None:
+                check(
+                    f"{label}: review-prep exact key order and exit 0",
+                    proc.returncode == 0 and list(payload) == expected_keys,
+                    str(expected_keys),
+                    f"rc={proc.returncode} keys={list(payload)}",
+                )
+                check(
+                    f"{label}: review-prep exact seat partition",
+                    payload["subprocess_seats"] == expected_subprocess
+                    and payload["task_seats"] == expected_task
+                    and payload["task_seat_models"] == expected_models,
+                    f"subprocess={expected_subprocess}, task={expected_task}, models={expected_models}",
+                    f"subprocess={payload.get('subprocess_seats')}, "
+                    f"task={payload.get('task_seats')}, models={payload.get('task_seat_models')}",
+                )
+                check(
+                    f"{label}: host and final roster channel map",
+                    payload["host"] == "claude"
+                    and payload["seat_channels"] == expected_channels
+                    and set(payload["seat_channels"]) == set(
+                        expected_subprocess + expected_task),
+                    f"host='claude', seat_channels={expected_channels}",
+                    f"host={payload.get('host')!r}, channels={payload.get('seat_channels')}",
+                )
+
+    # An opaque task override is deliberately not a catalog lookup: its channel
+    # provenance is the current host's native channel, while the name remains
+    # exactly the caller-supplied roster member.
+    with tempfile.TemporaryDirectory() as td:
+        _write_plan(Path(td))
+        proc = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "", "--task-seats", "opaque-task",
+             "--session-id", "freeze-opaque"],
+            cwd=td, env=_clean_env(td), timeout=30,
+        )
+        payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
+        check(
+            "opaque task override maps to the current host native channel",
+            proc.returncode == 0
+            and payload.get("task_seats") == ["opaque-task"]
+            and payload.get("seat_channels") == {"opaque-task": "claude"},
+            "task=['opaque-task'], channel=claude",
+            f"rc={proc.returncode} payload={payload}",
+        )
+
+
+def test_debate_split_contract_freeze():
+    """Freeze the current seats --debate --json shape and partition."""
+    log_section("contract freeze: debate JSON split")
+    expected_keys = [
+        "subprocess_seats", "task_seats", "task_seat_models", "host", "seat_channels",
+    ]
+    cases = [
+        (
+            "default mixed panel",
+            ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"],
+            ["opus", "sonnet"],
+            {"opus": "opus", "sonnet": "sonnet"},
+            {"codex": "codex", "codex-luna": "codex", "agy": "agy",
+             "cursor-auto": "cursor", "cursor-composer": "cursor",
+             "opus": "claude", "sonnet": "claude"},
+            ["seats", "--debate", "--json"],
+        ),
+        (
+            "cursor external panel",
+            [
+                "cursor-auto", "cursor-composer", "cursor-gemini", "cursor-glm",
+                "cursor-gpt", "cursor-grok",
+            ],
+            [],
+            {},
+            {name: "cursor" for name in (
+                "cursor-auto", "cursor-composer", "cursor-gemini", "cursor-glm",
+                "cursor-gpt", "cursor-grok")},
+            [
+                "seats", "--debate", "--json", "--panel", "cursor",
+            ],
+        ),
+    ]
+
+    for (label, expected_subprocess, expected_task, expected_models,
+         expected_channels, args) in cases:
+        with tempfile.TemporaryDirectory() as td:
+            proc = _run_dispatcher(
+                args, cwd=td, env=_clean_env(td), timeout=30,
+            )
+            try:
+                payload = json.loads(proc.stdout)
+            except json.JSONDecodeError as exc:
+                payload = None
+                check(
+                    f"{label}: debate emits JSON",
+                    False,
+                    "valid JSON",
+                    f"{exc}: rc={proc.returncode} stdout={proc.stdout[:160]!r}",
+                )
+            if payload is not None:
+                check(
+                    f"{label}: debate exact key order and exit 0",
+                    proc.returncode == 0 and list(payload) == expected_keys,
+                    str(expected_keys),
+                    f"rc={proc.returncode} keys={list(payload)}",
+                )
+                check(
+                    f"{label}: debate exact seat partition",
+                    payload["subprocess_seats"] == expected_subprocess
+                    and payload["task_seats"] == expected_task
+                    and payload["task_seat_models"] == expected_models,
+                    f"subprocess={expected_subprocess}, task={expected_task}, models={expected_models}",
+                    f"subprocess={payload.get('subprocess_seats')}, "
+                    f"task={payload.get('task_seats')}, models={payload.get('task_seat_models')}",
+                )
+                check(
+                    f"{label}: host and final roster channel map",
+                    payload["host"] == "claude"
+                    and payload["seat_channels"] == expected_channels
+                    and set(payload["seat_channels"]) == set(
+                        expected_subprocess + expected_task),
+                    f"host='claude', seat_channels={expected_channels}",
+                    f"host={payload.get('host')!r}, channels={payload.get('seat_channels')}",
+                )
+
+
+def test_build_executor_contract_freeze():
+    """Freeze build-executor sources, JSON keys, and rejection diagnostics."""
+    log_section("contract freeze: build-executor JSON")
+    from multiagent import channels, cli  # noqa: E402
+    from multiagent.providers import known_seat_names  # noqa: E402
+
+    expected_keys = {"executor", "retries", "resume_executor", "source", "channel"}
+
+    def run_fresh(executor_flag=None, session_id=None):
+        saved_session_id = os.environ.pop("CLAUDE_SESSION_ID", None)
+        try:
+            return _run_be(executor_flag, session_id=session_id)
+        finally:
+            if saved_session_id is None:
+                os.environ.pop("CLAUDE_SESSION_ID", None)
+            else:
+                os.environ["CLAUDE_SESSION_ID"] = saved_session_id
+
+    def assert_source(label, expected_source, executor_flag=None, session_id=None):
+        rc, out, err = run_fresh(executor_flag, session_id)
+        payload = json.loads(out) if out.strip() else {}
+        check(
+            f"{label}: exact JSON keys and source",
+            rc == 0 and set(payload) == expected_keys
+            and payload.get("source") == expected_source
+            and payload.get("channel") == (
+                "claude" if payload.get("executor") == "crew:executor" else "codex"
+            ),
+            f"exit 0, keys={expected_keys}, source={expected_source!r}, channel",
+            f"rc={rc} payload={payload} stderr={err!r}",
+        )
+
+    with project_config(""):
+        assert_source("builtin source", "builtin")
+    with project_config('[build]\nexecutor = "codex-luna"\n'):
+        assert_source("config source", "config")
+    with project_config(""):
+        assert_source("flag source", "flag", executor_flag="codex")
+    with project_config('[build]\nexecutor = "codex"\n') as repo:
+        _write_build_state_for_dispatch(repo, "freeze-state", executor="codex-luna")
+        assert_source("state source", "state", session_id="freeze-state")
+
+    for executor, label in (("opus", "Task seat"), ("cursor", "group token")):
+        with project_config(f'[build]\nexecutor = "{executor}"\n'):
+            # The diagnostic's valid-seat list must come from the same isolated
+            # project configuration as the resolver, never from the caller's
+            # global declared-seat registry.
+            known = ", ".join(known_seat_names())
+            rc, out, err = run_fresh()
+        expected = (
+            f"error: build executor {executor!r} is not a known subprocess seat "
+            f"(a Task seat like opus/sonnet is orchestrator-owned and unrunnable "
+            f"by the engine; a group token like cursor names no single seat); "
+            f"valid subprocess seats: {known}\n"
+        )
+        check(
+            f"{label} rejection keeps its exact diagnostic",
+            rc == 2 and out == "" and err == expected,
+            repr(expected),
+            f"rc={rc} stdout={out!r} stderr={err!r}",
+        )
+
+    with project_config(
+        '[seats.declared-native]\nvia = ["claude"]\nmodel = "opus"\n'
+        '[build]\nexecutor = "declared-native"\n'
+    ):
+        known = ", ".join(known_seat_names())
+        rc, out, err = run_fresh()
+    expected = (
+        "error: build executor 'declared-native' is not a known subprocess seat "
+        "(a Task seat like opus/sonnet is orchestrator-owned and unrunnable by "
+        "the engine; a group token like cursor names no single seat); valid "
+        f"subprocess seats: {known}\n"
+    )
+    check(
+        "declared native seat keeps the shared not-subprocess diagnostic",
+        rc == 2 and out == "" and err == expected,
+        repr(expected),
+        f"rc={rc} stdout={out!r} stderr={err!r}",
+    )
+
+    with project_config('[build]\nexecutor = "codex"\n'):
+        saved_resolve = channels.resolve_seat
+        channels.resolve_seat = lambda *args, **kwargs: None
+        try:
+            rc, out, err = run_fresh()
+        finally:
+            channels.resolve_seat = saved_resolve
+    expected = "error: executor seat 'codex' resolves to no eligible execution channel\n"
+    check(
+        "catalog hit with no eligible resolved channel uses its pinned diagnostic",
+        rc == 2 and out == "" and err == expected,
+        repr(expected),
+        f"rc={rc} stdout={out!r} stderr={err!r}",
+    )
+
+    with project_config('[build]\nexecutor = "codex"\n'):
+        channels.set_capabilities({
+            "codex": channels.ChannelCapability(False, lambda: True),
+        })
+        try:
+            rc, out, err = run_fresh()
+        finally:
+            channels.set_capabilities(None)
+    expected = (
+        "error: build executor 'codex' is read-only (does not support "
+        "workspace-write); the build seam dispatches it in write mode, so it "
+        "cannot implement the task\n"
+    )
+    check(
+        "read-only rejection keeps its exact diagnostic",
+        rc == 2 and out == "" and err == expected,
+        repr(expected),
+        f"rc={rc} stdout={out!r} stderr={err!r}",
+    )
+
+
+def test_run_identity_freeze():
+    """Freeze a representative run identity and its full digest."""
+    log_section("contract freeze: review run identity")
+    from multiagent import cli, review_runs, seats  # noqa: E402
+
+    check(
+        "subprocess identity provider remains a legacy provider kind",
+        cli._subprocess_seat_provider("codex") == "codex",
+        "codex",
+        repr(cli._subprocess_seat_provider("codex")),
+    )
+    native_spec = seats.seat_spec("opus")
+    check(
+        "native seat identity provider does not use the channel spelling",
+        native_spec is not None
+        and native_spec.via == ("claude",)
+        and native_spec.provider == "claude-code",
+        "via=('claude',), provider='claude-code'",
+        repr(native_spec),
+    )
+
+    seat_signatures = {
+        "codex": {
+            "kind": "subprocess",
+            "provider": "codex",
+            "model": "gpt-5.6-sol",
+        },
+        "opus": {"kind": "task", "model": "opus"},
+    }
+    run_id, identity_digest = review_runs.mint_identity(
+        target_sha256="a" * 64,
+        target_spec="plan.md",
+        target_base="",
+        seat_signatures=seat_signatures,
+    )
+    check(
+        "mint_identity golden run_id is unchanged",
+        run_id == "run-b8e1d22c034a",
+        "run-b8e1d22c034a",
+        run_id,
+    )
+    check(
+        "mint_identity golden full digest is unchanged",
+        identity_digest == "b8e1d22c034a314ccfee02cb06c9bf665b6fbacae241441532b303384f76789e",
+        "b8e1d22c034a314ccfee02cb06c9bf665b6fbacae241441532b303384f76789e",
+        identity_digest,
+    )
+
+
+def test_channel_source_gates():
+    """Keep resolver-consuming commands free of catalog execution oracles."""
+    log_section("channel source gates and negative control")
+    import ast
+    import copy
+
+    cli_tree = ast.parse(
+        (MULTIAGENT_DIR / "cli.py").read_text(encoding="utf-8"),
+        filename="cli.py",
+    )
+    scanned = {"cmd_review_prep", "cmd_seats", "cmd_build_executor", "cmd_dispatch"}
+
+    def function_nodes(tree):
+        return {
+            node.name: node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in scanned
+        }
+
+    def task_seat_calls(tree):
+        hits = []
+        for name, function in function_nodes(tree).items():
+            start, end = function.lineno, function.end_lineno
+            for node in ast.walk(function):
+                if not isinstance(node, ast.Call):
+                    continue
+                if (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "task_seats"
+                    and start <= node.lineno <= end
+                ):
+                    hits.append((name, node.lineno))
+        return hits
+
+    negative_tree = copy.deepcopy(cli_tree)
+    review_prep = function_nodes(negative_tree)["cmd_review_prep"]
+    synthetic_call = ast.Call(
+        func=ast.Attribute(
+            value=ast.Name(id="seats", ctx=ast.Load()),
+            attr="task_seats",
+            ctx=ast.Load(),
+        ),
+        args=[],
+        keywords=[],
+    )
+    review_prep.body.append(ast.Expr(value=synthetic_call))
+    ast.fix_missing_locations(negative_tree)
+    negative_hits = task_seat_calls(negative_tree)
+    actual_hits = task_seat_calls(cli_tree)
+    check(
+        "source gate negative control detects a reintroduced task-seat oracle",
+        bool(negative_hits),
+        "at least one task_seats call",
+        repr(negative_hits),
+    )
+    check(
+        "resolver-consuming command bodies contain no task-seat oracle",
+        actual_hits == [],
+        "no task_seats calls",
+        repr(actual_hits),
+    )
+
+    channels_tree = ast.parse(
+        (MULTIAGENT_DIR / "channels.py").read_text(encoding="utf-8"),
+        filename="channels.py",
+    )
+    parents = {}
+    docstrings = set()
+    for parent in ast.walk(channels_tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+        if isinstance(parent, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            if parent.body and isinstance(parent.body[0], ast.Expr):
+                value = parent.body[0].value
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    docstrings.add(id(value))
+
+    def enclosing_function(node):
+        parent = parents.get(id(node))
+        while parent is not None:
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return parent.name
+            parent = parents.get(id(parent))
+        return None
+
+    literal_owners = []
+    for node in ast.walk(channels_tree):
+        if (
+            isinstance(node, ast.Constant)
+            and node.value == "claude"
+            and id(node) not in docstrings
+        ):
+            literal_owners.append(enclosing_function(node))
+    check(
+        "native channel literals stay inside the channel resolver definitions",
+        set(literal_owners) <= {"channel_table", "native_channel", "current_host"},
+        "only channel_table/native_channel/current_host",
+        repr(literal_owners),
+    )
+
+
 def main():
     print(f"{YELLOW}Running multiagent engine tests...{NC}")
     test_result_contract()
@@ -16747,6 +17774,7 @@ def main():
     test_path_arg_anchoring()
     test_repair_seat_name_form()
     test_build_executor()
+    test_build_executor_contract_freeze()
     test_build_executor_state_recovery()
     test_build_executor_placeholder_session_id()
     test_build_md_continuation_wiring()
@@ -16764,14 +17792,21 @@ def main():
     test_config()
     test_global_roster_availability()
     test_panel_availability_consistency()
+    test_roster_channel_invariant()
     test_review_prep()
+    test_workplan_contract_freeze()
+    test_workplan_doc_sync()
     test_review_prep_never_clears_task_seat_file()
     test_debate_panel_resolver()
+    test_debate_split_contract_freeze()
     test_debate_oracle_removed()
     test_panel_catalog()
     test_config_declared_seats()
     test_config_declared_negative()
     test_config_split_seat_layers()
+    test_via_migration()
+    test_resolver()
+    test_channel_source_gates()
     test_catalog_cache_reset()
     test_seat_roster_drift_guard()
     test_catalog_registry_disjoint()
@@ -16790,6 +17825,7 @@ def main():
     test_persist_seat_scribe_gate_inputs()
     test_visible_if_corrupted()
     test_review_runs()
+    test_run_identity_freeze()
     test_replay_spec()
     test_run_scoped_reviews()
     test_collect_run_scoped()

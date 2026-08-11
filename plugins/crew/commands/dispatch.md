@@ -15,10 +15,13 @@ $ARGUMENTS
 > ALL changes **UNCOMMITTED and UNSTAGED and on the same branch**; you review
 > the dirty tree and decide (keep / revert / pipe into `/crew:review`).
 
-> **`allowed-tools` scopes THIS orchestrator only.** The seat's write access
+> **`allowed-tools` scopes THIS orchestrator only.** The resolved seat's write access
 > is governed by the engine's `workspace-write` sandbox flag, not this
 > frontmatter. `Write` is listed because step 3 ALWAYS spills the task to a
 > file for the engine's `-f`.
+
+The dispatch envelope keeps its existing fields; the separate `build-executor`
+resolver records the selected execution `channel` alongside its executor.
 
 > **Seat resolution is ENGINE-OWNED.** This command NEVER reads config and
 > NEVER hardcodes a seat: it passes `--seat` ONLY when you explicitly named

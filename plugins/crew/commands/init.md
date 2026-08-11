@@ -97,8 +97,9 @@ Ask ONLY what detection can't infer:
 4. **`[dispatch].seat`**: the default `/crew:dispatch` WRITE seat (default
    `codex`; must be a subprocess seat).
 5. **Declared seats**: mention (don't interview) that the config can REGISTER
-   brand-new seats via `[seats.<name>]` with `provider` + explicit `model`;
-   the README's "Add a model seat" section has the recipe.
+   brand-new seats via `[seats.<name>]` with one-element `via` + explicit `model`
+   (`provider` remains the accepted legacy spelling); the README's "Add a model
+   seat" section has the recipe.
 
 ## Step 4 — Scaffold the config
 

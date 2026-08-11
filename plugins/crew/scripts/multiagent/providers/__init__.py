@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -27,6 +28,14 @@ class ContinuationOutcome:
     phase: str
     conversation_id: str | None = None
     failure: str = "none"
+
+
+@dataclass(frozen=True)
+class KindCapability:
+    """Capability facts derived from one registered provider class."""
+
+    supports_workspace_write: bool
+    probe_available: Callable[[], bool]
 
 
 # =============================================================================
@@ -243,12 +252,13 @@ class Provider(ABC):
 
     @abstractmethod
     def is_available(self) -> tuple[bool, str]:
-        """PATH check only — no auth probe, no network, no spawning the CLI.
+        """Availability check; no auth probe or network call.
 
-        Returns ``(True, "")`` when the CLI is on PATH, else
+        Returns ``(True, "")`` when the provider is available, else
         ``(False, "<diagnostic>")`` so the seat is *skipped* before any run
         (never timed out). Authentication problems are NOT detected here; they
-        surface at run time.
+        surface at run time. An adapter may perform a short, non-billable
+        identity check as part of determining availability.
         """
         ...
 
@@ -316,6 +326,17 @@ def dispatch_options_by_kind() -> dict[str, dict]:
     mutating the returned map cannot alter a provider class's declaration.
     """
     return {kind: dict(entry[0].DISPATCH_OPTIONS) for kind, entry in _provider_classes().items()}
+
+
+def executor_capabilities() -> dict[str, KindCapability]:
+    """Return capability facts for exactly the provider registry's executor kinds."""
+    return {
+        kind: KindCapability(
+            supports_workspace_write=cls.supports_workspace_write,
+            probe_available=lambda cls=cls: cls("probe", None).is_available()[0],
+        )
+        for kind, (cls, _tunes) in _provider_classes().items()
+    }
 
 
 def _build_registry() -> dict:

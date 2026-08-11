@@ -156,8 +156,9 @@ Focus on clarity and executability — this plan will be reviewed by a multi-mod
 ### Step 3: Get a Multi-Model Plan Review
 
 Review the plan with a multi-model panel. Two seat kinds: **subprocess seats**
-(external-CLI entries, via the engine) and **task seats** (Claude voices, each
-a `crew:reviewer` spawned via the Task tool, in-session on the subscription;
+(external-CLI entries, via the engine) and **task seats** (seats resolved
+native for this run, each a `crew:reviewer` spawned via the Task tool, in-session
+on the subscription;
 no `claude -p`, no API key). `review-prep`'s JSON is the roster of record;
 only fan out those seats.
 
@@ -182,7 +183,8 @@ mints the RUN-SCOPED review dir (`run.json` + a frozen snapshot of the plan
 body), stages every seat prompt against that snapshot, and PRINTS
 `{prompt_path, subprocess_seats, task_seats, task_seat_models, run_dir,
 run_id, target_sha256, session_segment, task_prompt_paths,
-pending_subprocess_seats, pending_task_seats}` as one-line JSON. It runs
+pending_subprocess_seats, pending_task_seats, host, seat_channels}` as one-line
+JSON. It runs
 NOTHING. **Quote `"[plan_file from state]"`** (a plan path can contain
 spaces). (`--inline-diff` embeds content; reference mode is the default. No
 `--base`: a plan-file target ignores it.)

@@ -30,7 +30,8 @@ task split, mint the run-scoped review dir (``review_runs``: identity, run.json,
 snapshot), stage EVERY seat prompt against the snapshot, and PRINT the JSON
 contract (``prompt_path, subprocess_seats, task_seats, task_seat_models`` plus
 the run-scoped keys ``run_dir, run_id, target_sha256, session_segment,
-task_prompt_paths, pending_subprocess_seats, pending_task_seats``): it runs
+task_prompt_paths, pending_subprocess_seats, pending_task_seats, host,
+seat_channels``): it runs
 NOTHING; the per-seat
 ``run`` loop + the Task-seat dispatch stay in the command markdown).
 
@@ -68,6 +69,7 @@ import subprocess
 import time
 
 from multiagent import (
+    channels,
     config,
     continuations,
     findings,
@@ -159,8 +161,9 @@ def _subprocess_seat_model(name: str) -> str:
 def _subprocess_seat_provider(name: str) -> str:
     """The config-resolved provider KIND executing a subprocess seat (codex /
     cursor / agy): the executor half of the run identity's execution
-    signature, so a `[seats.<name>].provider` flip (same model, different
-    executor) mints a new run instead of resuming the old executor's results."""
+    signature, so a `[seats.<name>].via`/`provider` execution-key flip (same
+    model, different executor) mints a new run instead of resuming the old
+    executor's results."""
     spec = seats.seat_spec(name)
     return (spec.provider if spec and spec.provider else "")
 
@@ -290,6 +293,20 @@ def _expand_seat_groups(names: list[str]) -> list[str]:
         else:
             out.append(n)
     return out
+
+
+def _resolved_catalog_executions(
+    host: str,
+) -> dict[str, channels.ResolvedExecution]:
+    """Resolve each catalog seat once for the current host."""
+    capabilities = channels.active_capabilities()
+    return {
+        name: resolved
+        for name, spec in seats.merged_catalog().items()
+        if (resolved := channels.resolve_seat(
+            spec, host=host, capabilities=capabilities,
+        )) is not None
+    }
 
 
 def _resolve_seats(seats_arg: str | None) -> list[str]:
@@ -1395,7 +1412,25 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     repo_dir = os.environ.get("CLAUDE_WORKING_DIRECTORY") or os.getcwd()
 
     # (b) Seat-name guards — pre-run, exit 2, NO envelope (parity with cmd_run).
-    if seat in seats.task_seats():
+    spec = seats.seat_spec(seat)
+    if spec is None:
+        known = ", ".join(known_seat_names())
+        print(
+            f"error: unknown or non-subprocess seat {seat!r}; "
+            f"valid subprocess seats: {known}",
+            file=sys.stderr,
+        )
+        return 2
+    resolved = channels.resolve_seat(spec, host=channels.current_host())
+    if resolved is None:
+        known = ", ".join(known_seat_names())
+        print(
+            f"error: unknown or non-subprocess seat {seat!r}; "
+            f"valid subprocess seats: {known}",
+            file=sys.stderr,
+        )
+        return 2
+    if resolved.native:
         print(
             f"error: '{seat}' is a Task seat — owned by the orchestrator, not "
             f"runnable by the engine (engine runs subprocess seats only: "
@@ -1403,7 +1438,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    if seat not in known_seat_names():
+    if not resolved.engine_runnable:
         known = ", ".join(known_seat_names())
         print(
             f"error: unknown or non-subprocess seat {seat!r}; "
@@ -1415,8 +1450,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     # (parity with cmd_run's explicit single-seat path) — a config-disabled seat
     # still runs when named directly. is_available() (step e) is the distinct
     # "is the CLI installed" check.
-    provider = get_provider(seat)
-    if not provider.supports_workspace_write:
+    if not resolved.supports_workspace_write:
         # Fail-CLOSED capability guard (D6): a seat that has not opted into
         # workspace-write must not be silently run read-only.
         print(
@@ -1432,7 +1466,8 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     # invocation mechanics); safe because the seat passed known_seat_names()
     # above, so it is a catalog row. The getter warns + drops anything invalid
     # and returns {} when unconfigured (never-choke: dispatch always runs).
-    kind = seats.seat_spec(seat).provider
+    provider = get_provider(seat)
+    kind = spec.provider
     dispatch_opts = config.dispatch_provider_options(kind)
 
     # (c) Resolve the task source + derive the output path — BEFORE is_available()
@@ -1863,9 +1898,10 @@ def cmd_build_executor(args: argparse.Namespace) -> int:
     resolving fresh. A stale active loop in the same session therefore causes a
     first resolve to read ``source: "state"`` and ignore a new ``--executor``;
     cancel the prior loop before starting a genuinely different build. The
-    resolved value is either the sentinel (the Task path build.md runs as today)
-    OR a known subprocess seat that is write-capable; anything else exits 2
-    naming the reason, never a silent fallback.
+    resolved value is either the sentinel (the native Task path build.md runs as
+    today) OR a catalog seat whose resolved execution is engine-runnable and
+    write-capable; anything else exits 2 naming the reason, never a silent
+    fallback.
     """
     sid = _resolve_session_id(args.session_id)
     if "<" in sid or ">" in sid:
@@ -1924,11 +1960,10 @@ def cmd_build_executor(args: argparse.Namespace) -> int:
 
     # 2. Validate. The sentinel bypasses the seat checks: it IS the Task path,
     #    which the engine never runs and which no registry knows.
+    channel = channels.native_channel(channels.current_host())
     if executor != "crew:executor":
-        if executor not in known_seat_names():
-            # A Task-seat name (opus/sonnet) and a group token (cursor) BOTH fail
-            # this subprocess-registry check, so one gate covers all three causes;
-            # name the likely one so a misconfig is self-diagnosing.
+        spec = seats.seat_spec(executor)
+        if spec is None:
             print(
                 f"error: build executor {executor!r} is not a known subprocess "
                 f"seat (a Task seat like opus/sonnet is orchestrator-owned and "
@@ -1938,9 +1973,25 @@ def cmd_build_executor(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        if not get_provider(executor).supports_workspace_write:
-            # SAME capability the dispatch write-gate uses: the seam dispatches the
-            # executor in workspace-write, so a read-only seat cannot implement.
+        resolved = channels.resolve_seat(spec, host=channels.current_host())
+        if resolved is None:
+            print(
+                f"error: executor seat '{executor}' resolves to no eligible "
+                f"execution channel",
+                file=sys.stderr,
+            )
+            return 2
+        if resolved.native or not resolved.engine_runnable:
+            print(
+                f"error: build executor {executor!r} is not a known subprocess "
+                f"seat (a Task seat like opus/sonnet is orchestrator-owned and "
+                f"unrunnable by the engine; a group token like cursor names no "
+                f"single seat); valid subprocess seats: "
+                f"{', '.join(known_seat_names())}",
+                file=sys.stderr,
+            )
+            return 2
+        if not resolved.supports_workspace_write:
             print(
                 f"error: build executor {executor!r} is read-only (does not "
                 f"support workspace-write); the build seam dispatches it in write "
@@ -1948,6 +1999,7 @@ def cmd_build_executor(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+        channel = resolved.channel
 
     # 3. Retries: None (unset/invalid) falls to the safe default 0.
     retries = config.build_executor_retries() or 0
@@ -1959,6 +2011,7 @@ def cmd_build_executor(args: argparse.Namespace) -> int:
             "retries": retries,
             "resume_executor": resume_executor,
             "source": source,
+            "channel": channel,
         },
         ensure_ascii=False,
     ))
@@ -2269,17 +2322,30 @@ def cmd_seats(args: argparse.Namespace) -> int:
             # review-prep emits, so debate.md consumes an identical shape and never
             # classifies seat names itself. The debate resolver already applied
             # precedence + availability + expansion, so this only partitions: a
-            # registry name is a subprocess seat, a catalog Task seat is a task seat
-            # (the union is exhaustive — _resolve_debate_seats validates against it).
-            known = set(known_seat_names())
-            task_names = set(seats.task_seats())
+            # resolver-engine seat is a subprocess seat, a resolver-native seat is
+            # a task seat (the union is exhaustive under the current catalog).
+            host = channels.current_host()
+            resolved_catalog = _resolved_catalog_executions(host)
+            known = {
+                name for name, execution in resolved_catalog.items()
+                if execution.engine_runnable
+            }
+            task_names = {
+                name for name, execution in resolved_catalog.items()
+                if execution.native
+            }
             subprocess_seats = [s for s in resolved if s in known]
             task_seats = [s for s in resolved if s in task_names]
             task_seat_models = {n: _task_seat_model(n) for n in task_seats}
+            seat_channels = {
+                name: resolved_catalog[name].channel for name in subprocess_seats + task_seats
+            }
             payload = {
                 "subprocess_seats": subprocess_seats,
                 "task_seats": task_seats,
                 "task_seat_models": task_seat_models,
+                "host": host,
+                "seat_channels": seat_channels,
             }
             print(json.dumps(payload, ensure_ascii=False))
             return 0
@@ -3385,8 +3451,7 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     across three engine calls (``seats`` + ``render --mode review --stage`` + the
     prose seat-splitting): (a) resolve the target via the SAME ``targets.resolve``
     path ``render``/``review`` use; (b) resolve ``--panel``/``--seats`` into the
-    SUBPROCESS seats (through the registry) AND the TASK seats (the Claude voices,
-    via ``seats.merged_panels()`` + ``seats.task_seats()``); (c) build the
+    SUBPROCESS and TASK seats through the host-aware channel resolver; (c) build the
     ``task_seat_models`` map (the catalog's per-seat ``model`` is the SINGLE source of
     every model pin); (d) mint the run-scoped review dir (identity from content
     hash + review inputs; write-once ``run.json``; frozen snapshot) and stage
@@ -3395,7 +3460,7 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     object (the original four keys ``prompt_path, subprocess_seats, task_seats,
     task_seat_models`` in order, then ``run_dir, run_id, target_sha256,
     session_segment, task_prompt_paths, pending_subprocess_seats,
-    pending_task_seats``; ``session_segment`` is the SANITIZED session dir
+    pending_task_seats, host, seat_channels``; ``session_segment`` is the SANITIZED session dir
     segment (``review_runs.session_segment(session_id)``) the orchestrator
     reconstructs shell paths from, never the raw session id;
     ``ensure_ascii=False``) and exits.
@@ -3487,13 +3552,21 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     else:
         preset_names = None
 
-    known = set(known_seat_names())
+    host = channels.current_host()
+    resolved_catalog = _resolved_catalog_executions(host)
+    known = {
+        name for name, resolved in resolved_catalog.items()
+        if resolved.engine_runnable
+    }
+    native_names = {
+        name for name, resolved in resolved_catalog.items() if resolved.native
+    }
 
     def _dedup(xs: list[str]) -> list[str]:
         seen: set[str] = set()
         return [x for x in xs if not (x in seen or seen.add(x))]
 
-    # 2a. Subprocess RAW backing (registry-filtered, pre-availability) + explicit
+    # 2a. Subprocess RAW backing (resolver-filtered, pre-availability) + explicit
     #     set. An explicit-empty/omitted --seats yields []. Availability is NOT
     #     applied yet — that happens whole-panel in 2d so a per-split empty can't
     #     trigger the fallback on its own.
@@ -3515,7 +3588,7 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     #     opaque override is in play the task list bypasses availability entirely
     #     (task_raw stays empty so 2d's whole-panel fallback considers ONLY the
     #     subprocess seats — the override IS the task panel).
-    task_names = set(seats.task_seats())
+    task_names = native_names
     explicit_task_seats = [
         s.strip() for s in (args.task_seats or "").split(",") if s.strip()
     ]
@@ -3596,6 +3669,11 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    seat_channels = {
+        **{name: resolved_catalog[name].channel for name in subprocess_seats},
+        **{name: channels.native_channel(host) for name in task_seats},
+    }
 
     # Task-seat names double as run-dir FILENAMES (prompt-<seat>.txt,
     # <seat>.json), so they get the registry's lowercase rule too: result file
@@ -3695,6 +3773,8 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
         "task_seats": task_seats,
         "task_seat_models": task_seat_models,
         "seat_signatures": seat_signatures,
+        "host": host,
+        "seat_channels": seat_channels,
         "created_at": created_at,
     }
     try:
@@ -3813,6 +3893,8 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
         "task_prompt_paths": task_prompt_paths,
         "pending_subprocess_seats": pending_sub,
         "pending_task_seats": pending_task,
+        "host": host,
+        "seat_channels": seat_channels,
     }
     print(json.dumps(payload, ensure_ascii=False))
     return 0
@@ -4990,7 +5072,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     seats_p.add_argument(
         "--json", action="store_true",
-        help="with --debate: emit {subprocess_seats, task_seats, task_seat_models} "
+        help="with --debate: emit {subprocess_seats, task_seats, task_seat_models, "
+             "host, seat_channels} "
              "as JSON (mirrors review-prep's split) instead of one seat per line, so "
              "debate.md reads the roster split without classifying seat names itself.",
     )
@@ -5416,13 +5499,14 @@ def build_parser() -> argparse.ArgumentParser:
         "build-executor",
         help="Resolve /crew:build's implement-step executor (active-loop stamp "
              "source: state > --executor flag > [build].executor config > "
-             "builtin) and PRINT {executor, retries, resume_executor, source} "
-             "JSON. An unreadable or session-mismatched active state exits 2 "
+             "builtin) and PRINT {executor, retries, resume_executor, source, "
+             "channel} JSON. An unreadable or session-mismatched active state exits 2 "
              "instead of silently resolving fresh; empty or inactive state falls "
              "back to the normal chain. Validates the crew:executor sentinel "
-             "(the Task path) OR a known write-capable subprocess seat; a Task "
-             "seat, group token, unknown, or read-only seat exits 2 naming the "
-             "reason. Runs NOTHING.",
+             "(the native Task path) OR a catalog seat whose resolved execution "
+             "is engine-runnable and supports workspace-write; a native-only "
+             "seat, group token, unknown, unresolved, or read-only seat exits 2 "
+             "naming the reason. Runs NOTHING.",
     )
     be.add_argument(
         "--executor", dest="executor", default=None,
