@@ -240,6 +240,14 @@ shells and move to 3b.
 
 #### 3b — Fan out Task seats (parallel)
 
+> **Claude Code host ONLY.** Spawning Task seats applies only when the
+> running harness is Claude Code. In any other harness, do NOT emulate these
+> seats with host-native subagents (a lookalike persists a model that never
+> served the request); treat every entry in the native list as unspawnable,
+> persist each as a failed seat (`persist-seat <seat> ... --failed --error
+> "claude-native seat unavailable in this host"`), and continue with the
+> subprocess seats.
+
 Spawn a reviewer **in parallel for each entry in `pending_task_seats`** (skip
 if empty). Do NOT hand-write or re-render any prompt: `review-prep` ALREADY
 STAGED one per Task seat against the FROZEN snapshot of the plan

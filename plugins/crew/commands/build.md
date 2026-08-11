@@ -318,6 +318,14 @@ written; the templated call above never hits that path.
 
 ### Step 2b — Fan out Task seats (parallel)
 
+> **Claude Code host ONLY.** Spawning Task seats applies only when the
+> running harness is Claude Code. In any other harness, do NOT emulate these
+> seats with host-native subagents (a lookalike persists a model that never
+> served the request); treat every entry in the native list as unspawnable,
+> persist each as a failed seat (`persist-seat <seat> ... --failed --error
+> "claude-native seat unavailable in this host"`), and continue with the
+> subprocess seats.
+
 First **write the executor's summary to `<run_dir>/executor-summary.md`**
 (Write tool; a PATH, not inline, so it isn't re-transcribed into every seat's
 prompt).

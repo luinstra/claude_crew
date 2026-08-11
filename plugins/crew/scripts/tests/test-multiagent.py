@@ -6880,6 +6880,8 @@ def test_persist_seat_doc_sync():
         "`repair-seat` is **non-destructive**",
         "Never choke — synthesize from whatever succeeded.",
         "Some registered seats are opt-in and not in the built-in default panel",
+        "Claude Code host ONLY.",
+        "do NOT emulate these\n> seats with host-native subagents",
     ]
 
     for rel in docs:

@@ -154,6 +154,13 @@ are distinct shells you can watch and kill individually:
 
 ## A3 — Fan out task seats (parallel)
 
+> **Claude Code host ONLY.** Spawning Task seats applies only when the
+> running harness is Claude Code. In any other harness, do NOT emulate these
+> seats with host-native subagents (a lookalike records a model that never
+> served the request); treat every entry in the native list as unspawnable,
+> note each by name as unavailable in the synthesis, and continue with the
+> subprocess seats.
+
 **Skip this step if `task_seats` is empty** (e.g. `--panel cursor`). For EACH
 `<seat>` in `task_seats`, render its prompt (one render line per Task seat),
 then dispatch in parallel:
@@ -257,7 +264,10 @@ Then run the round's seats (in parallel where possible):
   ```
 - **Task seats**: one `crew:panelist` per seat, **pinned from
   `task_seat_models[<seat>]`** (the Task tool validates the model value), by
-  reference, exactly as A3:
+  reference, exactly as A3, INCLUDING A3's host gate: in any harness other
+  than Claude Code these seats are unspawnable, are never emulated by
+  host-native subagents, and are recorded by name as unavailable in EVERY
+  round's record and the final synthesis:
   ```
   # for each <seat> in task_seats:
   Task(subagent_type="crew:panelist", model="<task_seat_models[<seat>]>", prompt="You are the <seat> seat. Read <run-dir>/.prompt-<seat>-r<n>.txt and follow it exactly.")

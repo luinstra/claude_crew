@@ -179,7 +179,9 @@ and `model: sonnet`. It dispatches plan-vs-code from natural language and report
 `APPROVED`/`REVISE` with `[BLOCKING]`/`[MINOR]` findings. A skipped or failed
 seat (any kind) is reported but never sinks the panel: the verdict is synthesized
 from whichever seats succeed, and only an all-seats-failed panel skips the
-verdict. Certification is quorum-gated, though: the grouped digest opens with a
+verdict. In a harness other than Claude Code the Claude Task voices are
+unavailable and are reported by name as failed seats, never emulated by
+host-native subagents; the external-CLI seats run unchanged. Certification is quorum-gated, though: the grouped digest opens with a
 `PANEL: … quorum <n>: MET|NOT MET` header (a strict majority of the launched
 panel), and a `NOT MET` panel cannot certify an `APPROVED`; the orchestrator
 relaunches the pending seats or surfaces the shortfall instead. In the `/crew:build`
