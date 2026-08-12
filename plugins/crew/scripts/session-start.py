@@ -38,6 +38,7 @@ from models import (
     coalesce_task,
     override_completion_note,
     read_hook_input,
+    record_hook_payload_keys,
     effective_count,
     effective_deadline,
     NO_DEADLINE,
@@ -545,6 +546,7 @@ def build_session_status(
 
 def main():
     data = read_hook_input()
+    record_hook_payload_keys("SessionStart", data)
     hook_input = SessionStartInput.from_dict(data)
     directory = hook_input.directory_path
     session_id = hook_input.session_id

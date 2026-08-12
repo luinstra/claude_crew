@@ -652,6 +652,8 @@ if __name__ == "__main__":
     main()
 ```
 
+Debug aid: both hook entries call `models.record_hook_payload_keys(<event>, data)` right after the stdin parse; with `CREW_HOOK_DEBUG` set non-empty it appends the payload's top-level KEY NAMES (never values; an `(empty)` suffix marks an empty/null value) to `.crew/hook-payload-keys.txt`, which grows unbounded while the gate is set and is swept by neither session-start cleanup nor `crew swab` (truncate it manually).
+
 ### State File Pattern
 
 State is stored as JSON in `.crew/`:

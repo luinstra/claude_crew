@@ -837,6 +837,46 @@ def truncate(text: str, max_length: int = 120) -> str:
     return text[:max_length - 3] + "..."
 
 
+def record_hook_payload_keys(event, payload) -> None:
+    """Debug aid: log which TOP-LEVEL KEYS a hook payload carried, never values.
+
+    Gated on CREW_HOOK_DEBUG (unset/empty: pure no-op, no file access). When on,
+    appends one line per hook fire to `<crew_base()>/.crew/hook-payload-keys.txt`:
+
+        <iso-timestamp> <event>: key1,key2(empty),key3
+
+    The `(empty)` suffix marks a key whose value is None or an empty
+    string/list/dict, so "is session_id present AND non-empty" is answerable
+    without recording the id. Values are NEVER written: hook payloads can carry
+    transcript paths and prompts, and a values file is one `git add` from an
+    accident.
+
+    Silent on ANY failure: hooks own stdout (their JSON result), so this aid
+    must neither print nor raise; a capture that cannot write just records
+    nothing.
+    """
+    try:
+        if not os.environ.get("CREW_HOOK_DEBUG"):
+            return
+        parts = []
+        for key in sorted(payload, key=str):
+            value = payload[key]
+            empty = value is None or (value == "" or value == [] or value == {})
+            parts.append(f"{key}(empty)" if empty else str(key))
+        line = f"{utc_now_iso()} {event}: {','.join(parts)}\n"
+        target = crew_base() / ".crew" / "hook-payload-keys.txt"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # O_NOFOLLOW: a symlinked capture file must not redirect this
+        # unattended append outside the tree (refusal lands in the except).
+        fd = os.open(
+            target, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600
+        )
+        with open(fd, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        return
+
+
 def read_hook_input() -> dict:
     """Read and parse JSON input from stdin."""
     import sys

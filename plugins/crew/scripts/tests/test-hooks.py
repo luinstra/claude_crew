@@ -334,6 +334,88 @@ def main():
         log_fail("StopInput.is_parked: session_crons parks even with every task finished",
                  "is_parked=True", f"is_parked={_cron_in.is_parked!r}")
 
+    # =========================================================================
+    # MODELS: record_hook_payload_keys, the CREW_HOOK_DEBUG payload-key capture
+    # aid both hook entries call right after their stdin parse. Three contracts:
+    # gated-off touches nothing, gated-on writes KEY NAMES only (never values),
+    # and a write failure is swallowed (it must never raise into a hook or
+    # pollute the hook's stdout JSON).
+    # =========================================================================
+    log_section("models.record_hook_payload_keys (CREW_HOOK_DEBUG capture aid)")
+    import contextlib
+    import io
+    from models import record_hook_payload_keys
+
+    _hpk_payload = {
+        "session_id": "",
+        "transcript_path": "/secret/SENTINEL-VALUE-123.jsonl",
+        "hook_event_name": "SomeEvent",
+    }
+
+    _saved_debug = os.environ.pop("CREW_HOOK_DEBUG", None)
+    _saved_proj = os.environ.get("CLAUDE_PROJECT_DIR")
+    try:
+        # (a) gated off: no file is created, no .crew dir is minted
+        with tempfile.TemporaryDirectory() as _hpk_dir:
+            os.environ["CLAUDE_PROJECT_DIR"] = _hpk_dir
+            record_hook_payload_keys("Stop", _hpk_payload)
+            _hpk_file = Path(_hpk_dir) / ".crew" / "hook-payload-keys.txt"
+            if not _hpk_file.exists():
+                log_pass("record_hook_payload_keys: gate unset -> no file created")
+            else:
+                log_fail("record_hook_payload_keys: gate unset -> no file created",
+                         "no hook-payload-keys.txt", f"file exists: {_hpk_file}")
+
+        # (b) gated on: one line with sorted key names, (empty) suffix on the
+        # empty session_id, and NO payload value anywhere in the file
+        with tempfile.TemporaryDirectory() as _hpk_dir:
+            os.environ["CLAUDE_PROJECT_DIR"] = _hpk_dir
+            os.environ["CREW_HOOK_DEBUG"] = "1"
+            record_hook_payload_keys("Stop", _hpk_payload)
+            _hpk_file = Path(_hpk_dir) / ".crew" / "hook-payload-keys.txt"
+            _hpk_text = _hpk_file.read_text(encoding="utf-8") if _hpk_file.exists() else ""
+            if (" Stop: " in _hpk_text
+                    and "session_id(empty)" in _hpk_text
+                    and "transcript_path" in _hpk_text
+                    and "hook_event_name" in _hpk_text
+                    and "SENTINEL-VALUE-123" not in _hpk_text
+                    and "SomeEvent" not in _hpk_text):
+                log_pass("record_hook_payload_keys: gate set -> key names + (empty) suffix, no values")
+            else:
+                log_fail("record_hook_payload_keys: gate set -> key names + (empty) suffix, no values",
+                         "line with Stop, session_id(empty), other key names, no values",
+                         repr(_hpk_text))
+
+        # (c) never raises: the .crew path is occupied by a FILE, so mkdir and
+        # the append both fail; the helper must swallow it and print nothing
+        # (hooks own stdout, so even a diagnostic there would corrupt the JSON)
+        with tempfile.TemporaryDirectory() as _hpk_dir:
+            os.environ["CLAUDE_PROJECT_DIR"] = _hpk_dir
+            os.environ["CREW_HOOK_DEBUG"] = "1"
+            (Path(_hpk_dir) / ".crew").write_text("not a dir", encoding="utf-8")
+            _hpk_out = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(_hpk_out):
+                    record_hook_payload_keys("SessionStart", _hpk_payload)
+                _hpk_raised = None
+            except Exception as exc:
+                _hpk_raised = exc
+            if _hpk_raised is None and _hpk_out.getvalue() == "":
+                log_pass("record_hook_payload_keys: write failure -> swallowed, stdout untouched")
+            else:
+                log_fail("record_hook_payload_keys: write failure -> swallowed, stdout untouched",
+                         "no exception, empty stdout",
+                         f"raised={_hpk_raised!r}, stdout={_hpk_out.getvalue()!r}")
+    finally:
+        if _saved_debug is None:
+            os.environ.pop("CREW_HOOK_DEBUG", None)
+        else:
+            os.environ["CREW_HOOK_DEBUG"] = _saved_debug
+        if _saved_proj is None:
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        else:
+            os.environ["CLAUDE_PROJECT_DIR"] = _saved_proj
+
     # Global-state isolation: every subprocess env pins HOME to _NEUTRAL_HOME
     # (see _neutral_env), so the scripts under test can never read from — or
     # clean up — the developer's real ~/.claude. This replaces the old

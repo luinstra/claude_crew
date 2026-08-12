@@ -34,6 +34,7 @@ from models import (
     StateLockError,
     update_state_json,
     read_hook_input,
+    record_hook_payload_keys,
     is_verbose,
     override_completion_note,
     truncate,
@@ -456,6 +457,7 @@ what did not, and what you were waiting on."""
 def main():
     global _HOOK_INPUT
     data = read_hook_input()
+    record_hook_payload_keys("Stop", data)
     hook_input = StopInput.from_dict(data)
     _HOOK_INPUT = hook_input
     directory = hook_input.directory_path
