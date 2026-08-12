@@ -42,10 +42,15 @@ class ResolvedExecution:
 
 _capabilities_override: Mapping[str, ChannelCapability] | None = None
 
-# The table remains empty until two independent Codex-host captures agree on an
-# exact, non-noisy marker. CODEX_COMPANION_* names are
-# deliberately not included: genuine Claude hosts carry those companion vars.
-_CODEX_HOST_MARKERS: tuple[str, ...] = ()
+# Two independent Codex-host captures agreed on these exact names (see
+# docs/codex-host.md); neither appears in a genuine Claude host env.
+# CODEX_COMPANION_* names are deliberately not included: genuine Claude hosts
+# carry those companion vars. CODEX_CI was observed too but not adopted (a
+# CI-flavored name is the likeliest future collision).
+_CODEX_HOST_MARKERS: tuple[str, ...] = (
+    "CODEX_THREAD_ID",
+    "CODEX_SANDBOX_NETWORK_DISABLED",
+)
 
 _warned: set[str] = set()
 
