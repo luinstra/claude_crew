@@ -68,9 +68,13 @@ parseable JSON, SURFACE the error and STOP. Do NOT proceed with a
 missing/empty payload: that would silently trip the engine's "detection
 omitted" fallback and emit a config with no honest `available` flags.
 
-On success, SHOW the detection table: each present subprocess seat as
-"installed (auth unverified)", each absent one with its diag, the task seats
-(`opus`/`sonnet`/`fable`) as "subscription-backed (in-session)".
+On success, SHOW the detection table: each present external seat as
+"installed (auth unverified)", each absent one with its diag, and the Claude
+seats (`opus`/`sonnet`/`fable`) as "subscription-backed (in-session)" in the
+Task map when the current host resolves them natively. On another host they
+appear in the subprocess map only when the resolver selects the external
+`claude` channel; a missing CLI leaves them listed as named skipped seats, not
+absent from the catalog.
 
 - **Optional follow-up: `probe`.** For a stronger does-it-answer guarantee,
   offer `"${CLAUDE_PLUGIN_ROOT}/crew" probe --all` (or a seat subset). It is
@@ -95,7 +99,8 @@ Ask ONLY what detection can't infer:
    redundant since the two default codex seats already cover the OpenAI lineage). Offer them
    as opt-IN `--add-seat` only, with that note (per-seat WHY → engine-notes).
 4. **`[dispatch].seat`**: the default `/crew:dispatch` WRITE seat (default
-   `codex`; must be a subprocess seat).
+   `codex`; registry-known seats validate here, while read-only seats are refused
+   by dispatch at runtime).
 5. **Declared seats**: mention (don't interview) that the config can REGISTER
    brand-new seats via `[seats.<name>]` with one-element `via` + explicit `model`
    (`provider` remains the accepted legacy spelling); the README's "Add a model

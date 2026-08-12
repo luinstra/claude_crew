@@ -9,16 +9,17 @@
 
 ## Provider / seat model
 
-- **Why provider = executor, and Claude seats are NOT providers.** This is the
-  debate-validated shape: we deliberately did NOT adopt the Enterprise fork's
-  prompt-builder `BaseProvider`/`TaskProvider`, which modelled non-executable
-  Claude seats as providers. the subprocess seats are executors (they invoke a CLI →
-  `ProviderResult`); opus/sonnet Task seats are owned by the orchestrator.
+- **Providers own external execution; the resolver owns host placement.** The
+  provider adapters invoke external CLIs and return `ProviderResult`. Claude
+  catalog seats are native Task dispatches on a Claude host, but use
+  `ClaudeProvider` through the claude CLI on hosts without a native Claude
+  channel. This keeps the orchestrator's native ownership while making the
+  external path explicit and testable.
 - **"One prompt builder" evolves an older contract.** The rule that `render`
-  BUILDS the prompt for ANY seat (including Claude Task seats) *evolves* the older
-  "the engine only knows subprocess seats" framing — the engine still EXECUTES
-  only subprocess seats, but it BUILDS for all so the subprocess and Task prompts
-  can never drift. The parity test in `test-multiagent.py` asserts
+  BUILDS the prompt for ANY seat, including Claude Task seats, also supports
+  external Claude seats. Host resolution decides whether the engine executes a
+  seat or the orchestrator dispatches it, while the shared prompt builder keeps
+  the two paths from drifting. The parity test in `test-multiagent.py` asserts
   `render` output == `prompts.build_prompt(...)`.
 
 ## agy seat re-validation (history)

@@ -11,8 +11,8 @@ default_panel = "full"
 # [debate]
 # panel = "full"
 
-# [dispatch].seat — /crew:dispatch's default WRITE seat (must be ONE known subprocess
-# seat: codex-*/agy/cursor-*; a panel name or the 'cursor' group token is rejected).
+# [dispatch].seat: /crew:dispatch's default WRITE seat (must be ONE registry-known
+# seat; read-only Claude seats validate here but are refused by dispatch at runtime).
 [dispatch]
 seat = "codex"
 # timeout = 1800   # /crew:dispatch WORK wall-clock; provider floors raise

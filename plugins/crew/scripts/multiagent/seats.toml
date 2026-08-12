@@ -7,8 +7,8 @@
 #
 # Seat keys:
 #   via               the execution channel, as a one-element list: codex / cursor
-#                     / agy run an external CLI; claude seats are the in-session
-#                     Task voices the orchestrator dispatches.
+#                     / agy run an external CLI; claude seats are native Task
+#                     voices on a Claude host and use the claude CLI elsewhere.
 #   provider          accepted as the legacy spelling of `via` for user config.
 #   model             the model string that the channel accepts (`codex exec
 #                     --model`, `agent --model`, `agy --model`); for a `claude`
@@ -68,9 +68,9 @@ model = "auto"
 via = ["cursor"]
 model = "composer-2.5"
 
-# The Claude (Task) seats. Same catalog, different driver: the orchestrator
-# spawns these in-session on the subscription, so they carry no CLI and the
-# engine never executes them.
+# The Claude seats. Same catalog, host-resolved driver: the orchestrator spawns
+# them as native Task voices on a Claude host, while the engine uses the claude
+# CLI when no native Claude channel is available.
 [seats.opus]
 via = ["claude"]
 model = "opus"

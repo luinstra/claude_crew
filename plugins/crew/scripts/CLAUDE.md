@@ -6,7 +6,7 @@
 
 ## Quick Reference
 
-This directory contains the Python backend for crew's persistence features. Hooks receive JSON on stdin, process state, and output JSON results. The `crew-state.py` CLI manages loop state files. The `multiagent/` package is the review/council engine that fans a prompt across subprocess seats.
+This directory contains the Python backend for crew's persistence features. Hooks receive JSON on stdin, process state, and output JSON results. The `crew-state.py` CLI manages loop state files. The `multiagent/` package resolves seats per host and fans external seats out through providers.
 
 ## Structure
 
@@ -29,14 +29,19 @@ scripts/
 ## Multi-Model Review Engine (`multiagent/`)
 
 The engine that powers `/crew:review`, `/crew:debate`, and the review steps of
-`/crew:build` and `/crew:measure-twice`. It drives **subprocess seats** only —
-the registered external-CLI seats (the codex, agy, and cursor rows of the shipped
-catalog `multiagent/seats.toml`, merged with the user's config layers by
-`seats.merged_catalog()`; the premium cursor model-seats are opt-in via
-`--seats`). The **Claude seats** are NOT
-in here: they're spawned by the orchestrating command as `crew:reviewer` Task
-subagents (in-session, on the subscription), and the orchestrator normalizes
-their results into the same six-field shape the engine returns.
+`/crew:build` and `/crew:measure-twice`. It resolves each catalog seat against
+the current host: Claude seats are native Task seats on a Claude host and
+external `claude` CLI seats elsewhere; codex, agy, and cursor rows remain
+external provider seats. `review-prep` is the source of truth for that split,
+and the orchestrator normalizes native Task results into the same six-field core
+the engine returns. A missing external CLI produces a named skipped result.
+
+Host selection is explicit when needed: `CREW_HOST=claude` selects the native
+Claude Task channel, while `CREW_HOST=codex` selects the Codex-host external
+fallback. With no override, detection uses the shipped exact marker table and
+Claude compatibility markers; an unknown host has no native channel and keeps
+Claude seats external. The override is process-local and is scrubbed before an
+external Claude child is launched so nested crew calls re-detect their host.
 
 ```
 multiagent/
@@ -53,17 +58,18 @@ multiagent/
 ├── render.py            # side-by-side panel + --json rendering (the faithful projection + raw-fallback)
 ├── findings.py          # PURE parser + complete-linkage grouping + grouped-digest renderer (no I/O, no model calls, never raises); powers `collect --group`
 └── providers/
-    ├── __init__.py      # ProviderResult (six-field core plus additive continuation/continuation_id), Provider ABC (executor: run() + supports_workspace_write + supports_continuation, fail-CLOSED/opt-in for /crew:dispatch), registry + known_seat_names()
+    ├── __init__.py      # ProviderResult (six-field core plus optional channel, continuation, and run stamps), Provider ABC (external adapter: run() + supports_workspace_write + supports_continuation), registry + known_seat_names()
     ├── codex.py         # CodexProvider — the live codex model-seats (`codex exec - --sandbox read-only -o <tmp>`, prompt via stdin); each seat's name/model/reasoning_effort arrives from its SeatSpec, so a `[seats.<name>]` codex row in config is a first-class seat
     ├── cursor.py        # CursorProvider — the live cursor model-seats; each seat is driven by its SeatSpec, so a `[seats.<name>]` cursor row in config is a first-class seat
-    └── agy.py           # AgyProvider (default panel) — `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions)
+    ├── agy.py           # AgyProvider (default panel) - `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions)
+    └── claude.py        # ClaudeProvider - read-only `claude -p` external seat; used when a Claude seat does not resolve native, with no continuation or write mode
 ```
 
 Per-subcommand one-liners (do NOT regress the behavior each names):
 - `review` / `council` — ad-hoc one-shot fan-out across subprocess seats (`_fan_out`).
 - `debate` — scaffold-only (see below); the round loop lives in debate.md.
-- `run <seat>` — run ONE subprocess seat; `--json` always exits 0 with the six-field core result
-  for every result it WRITES (run-scoped results also carry the two optional identity stamps).
+- `run <seat>`: run ONE host-resolved external seat; `--json` always exits 0 with the six-field core
+  plus optional channel and identity stamps for every result it WRITES.
   Run-scoped MISUSE (non-member seat, prompt/model/sandbox override) exits 2 before any result is
   written, and a seat name matching a reserved control filename stem (run/current-run/seat,
   case-folded) is rejected on EVERY derived destination, flat and run-scoped alike (an explicit
@@ -79,6 +85,8 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   sentinel OR a catalog seat whose resolved execution is engine-runnable and
   supports workspace-write; a native-only seat, group token, unknown,
   unresolved, or read-only seat exits 2 naming the reason. Runs NOTHING.
+  The builtin sentinel keeps the ``channel`` key present with JSON ``null`` when
+  no external channel is resolved.
 - `render` — build/stage a seat prompt; `--stage-all` collapses N stages into one call.
 - `seats` — resolve/print a panel; `--debate` prints the config-aware full debate panel.
 - `collect` — fold per-seat `<seat>.json` into a digest; `--group`/`--full`/`--report-unparsed`.
@@ -199,18 +207,20 @@ Key contracts (do NOT regress):
   `repaired_output` precedent (serialized by `to_dict` only when set, coerced by
   `from_dict`, round-tripping through `repair-seat` untouched, ignored by `render`):
   `repaired_output` (the haiku repair) plus the run-identity stamps `run_id` /
-  `target_sha256`, which `run` and `persist-seat` stamp from the run dir's own
-  `run.json` whenever a result lands in a run-scoped review dir (never from the
-  pointer, so a stamp always describes the dir the file physically sits in). The
-  ad-hoc flat layout never sets the stamps, so its JSON stays byte-identical
-  six-field.
-- **Provider = executor.** The `Provider` ABC's job is `run()` (invoke a CLI →
-  `ProviderResult`). the subprocess providers are executors; opus/sonnet (Task seats) are NOT
-  providers — they're owned by the orchestrator. (WHY not model Claude seats as
-  providers → engine-notes.)
-- **One prompt builder; engine builds for all, executes only subprocess.**
+  `target_sha256`, and `channel`. `channel` comes from host resolution; `run` and
+  `persist-seat` stamp the run-identity fields from the run dir's own `run.json`
+  whenever a result lands in a run-scoped review dir (never from the pointer, so
+  a stamp always describes the dir the file physically sits in). An ad-hoc flat
+  result keeps the six-field core byte-identical only when channel is None or
+  omitted; host-resolved ``run`` results add channel when the resolver knows it.
+- **Providers and host-resolved seats.** The `Provider` ABC owns external adapter
+  behavior: `run()` invokes a CLI and returns `ProviderResult`. A Claude catalog
+  seat is a native Task dispatch on a Claude host and a `ClaudeProvider` external
+  seat on hosts without that native channel. The resolver, not the provider
+  class, owns that per-host split.
+- **One prompt builder; engine builds for all, executes external seats.**
   `prompts.build_prompt`/`council` is the SINGLE source of every seat's prompt.
-  The engine EXECUTES only subprocess seats, but `render` BUILDS the prompt for
+  The engine executes host-resolved external seats, while `render` BUILDS the prompt for
   ANY seat — including the Claude Task seats the orchestrator dispatches — so the
   subprocess and Task prompts can never drift. The parity test in
   `test-multiagent.py` asserts `render` output == `prompts.build_prompt(...)`.
@@ -242,8 +252,8 @@ Key contracts (do NOT regress):
   for the roster + the host-aware channel resolver for each seat's resolved execution): it splits the preset/`--seats` into `subprocess_seats` (the
   external-CLI entries), `task_seats` (seats resolved native for this run), `task_seat_models` (each Task
   seat's model pin), `host`, and `seat_channels`, and the orchestrator just reads that JSON — it no longer classifies seat names,
-  defines presets, or hardcodes a model pin (the engine still EXECUTES only the subprocess subset,
-  skipped when empty).
+  defines presets, or hardcodes a model pin (the engine EXECUTES the
+  host-resolved external subset, skipped when empty).
 <!-- seat-roster:default -->
 - Built-in default panel: `codex`, `codex-luna`, `agy`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`
 <!-- seat-roster:opt-in -->
@@ -252,8 +262,9 @@ Key contracts (do NOT regress):
 - Opt-in Task seats: `fable`
 - These lines document the BUILT-IN roster; a configured `default_panel`/`[panels]`
   override changes what actually runs. `"${CLAUDE_PLUGIN_ROOT}/crew" seats` prints
-  the resolved AVAILABLE external-CLI seats (the Claude Task voices complete the
-  panel and are not listed there). WHY each opt-in seat is opt-in → engine-notes.
+  the seats resolved external for the current host. Claude seats appear there
+  off-host, while native Claude-host Task seats stay in the Task split. WHY each
+  opt-in seat is opt-in → engine-notes.
 - When the user names NEITHER `--panel` nor `--seats`, the default panel NAME comes from `default_panel`
   (`config.py`, per-repo `.crew/config.toml` → global `~/.crew-config.toml`), falling back to the
   built-in `full`; precedence is CLI flag > per-repo config > global config > builtin (no env tier — the
@@ -282,8 +293,9 @@ Key contracts (do NOT regress):
 
 - `--panel cursor` = `--seats cursor` (every registered cursor-* seat, grows with
   the cursor rows of the catalog; no codex, no Claude).
-- The engine itself only knows subprocess seats, and its subprocess-seat allowlist is registry-derived
-  via `known_seat_names()` (no hardcoded codex/agy list). The `cursor` GROUP TOKEN (in `--seats` and
+- The registered-seat allowlist is registry-derived via `known_seat_names()` (no
+  hardcoded codex/agy list); host resolution decides which registered seats are
+  external for the current call. The `cursor` GROUP TOKEN (in `--seats` and
   `[panels]` rosters) expands to every registered `cursor-*` seat via `_expand_seat_groups`, so it grows
   with the cursor rows of the catalog (`seats.group_tokens()` supplies the expansion members).
 - `render --stage --session-id <id>` stages a seat prompt to the FLAT
@@ -574,9 +586,11 @@ Key contracts (do NOT regress):
   EXACTLY where the loader reads). They share ONE stdout/stderr discipline: **stdout
   carries ONLY the machine payload; EVERY note/error goes to stderr** (init.md parses
   stdout).
-  - **`doctor`** iterates `known_seat_names()` → `get_provider(n).is_available()` into a
-    `{session_segment, subprocess, task}` JSON map (the `task` block in
-    `sorted(seats.task_seats())` order → deterministic; `session_segment` is the top-level
+  - **`doctor`** iterates registered seats through `get_provider(n).is_available()` into a
+    `{session_segment, subprocess, task}` JSON map. The `subprocess` map contains seats
+    resolved external for the current host, including Claude seats when the host has no
+    native Claude channel; the `task` block contains seats resolved native, in
+    sorted registered-seat name order. `session_segment` is the top-level
     sanitized segment for the given `--session-id`, else `""` (empty string, the
     flat/sessionless layout, never JSON `null`)). NON-billable: the
     PATH-check seats' `is_available()` are pure `shutil.which`;

@@ -168,20 +168,23 @@ synthesizes one verdict. The built-in default panel and the presets:
 
 These lines document the BUILT-IN roster; a configured `default_panel`/`[panels]`
 override changes what actually runs. `"${CLAUDE_PLUGIN_ROOT}/crew" seats` prints
-the resolved AVAILABLE external-CLI seats (the Claude Task voices complete the
-panel and are not listed there).
+the resolved AVAILABLE seats that are external for the current host. Claude
+voices appear in the Task split on a Claude host and in the external list on a
+non-Claude host. If the `claude` CLI is missing, they remain listed and are
+recorded as named skipped seats.
 
-The external-CLI seats run via the bundled `multiagent` engine
+External seats run via the bundled `multiagent` engine
 (`plugins/crew/scripts/multiagent/`): the two codex seats are distinct OpenAI
-voices (`gpt-5.6-sol` and `gpt-5.6-luna`) on the one codex CLI, while the two
-Claude voices are the `crew:reviewer` agent spawned at `model: opus`
-and `model: sonnet`. It dispatches plan-vs-code from natural language and reports
-`APPROVED`/`REVISE` with `[BLOCKING]`/`[MINOR]` findings. A skipped or failed
-seat (any kind) is reported but never sinks the panel: the verdict is synthesized
-from whichever seats succeed, and only an all-seats-failed panel skips the
-verdict. In a harness other than Claude Code the Claude Task voices are
-unavailable and are reported by name as failed seats, never emulated by
-host-native subagents; the external-CLI seats run unchanged. Certification is quorum-gated, though: the grouped digest opens with a
+voices (`gpt-5.6-sol` and `gpt-5.6-luna`) on the one codex CLI, while Claude
+voices use the native `crew:reviewer` Task path on Claude Code and the
+read-only `claude` CLI elsewhere. It dispatches plan-vs-code from natural
+language and reports `APPROVED`/`REVISE` with `[BLOCKING]`/`[MINOR]` findings.
+A skipped or failed seat (any kind) is reported by name but never sinks the
+panel: the verdict is synthesized from whichever seats succeed, and only an
+all-seats-failed panel skips the verdict. A missing external CLI is a named
+skipped seat; a CLI failure is a named failed seat. Hosts without a native
+Claude channel do not emulate Claude seats with host-native subagents.
+Certification is quorum-gated, though: the grouped digest opens with a
 `PANEL: … quorum <n>: MET|NOT MET` header (a strict majority of the launched
 panel), and a `NOT MET` panel cannot certify an `APPROVED`; the orchestrator
 relaunches the pending seats or surfaces the shortfall instead. In the `/crew:build`
@@ -209,9 +212,10 @@ routine reviews never silently spend it; add it explicitly for the hardest calls
   (e.g. `/crew:build --seats codex,opus "fix the bug"`). The opt-in seats work
   via `--seats` (or `--panel cursor`) but are never in a built-in default panel
 
-Not every change needs the full panel — `lite` (the two Claude voices, no
-external CLI), `quick` (the cheapest cross-model pair) for routine diffs, or a
-single seat is plenty for routine work.
+Not every change needs the full panel: `lite` (the two Claude voices, native
+on a Claude host and external through `claude` elsewhere), `quick` (the
+cheapest cross-model pair) for routine diffs, or a single seat is plenty for
+routine work.
 
 #### Per-repo config
 
@@ -334,7 +338,7 @@ available = false                 # not authed here -> dropped from any panel;
                                   # with a one-time note (not an opaque failure)
 ```
 
-A `[panels]` entry names known seats (registry subprocess seats, the Claude Task
+A `[panels]` entry names known seats (registered external or Claude-channel
 seats, or the `cursor` group token); an unknown name is dropped with a one-time
 note. Panel names and seat names share ONE namespace: a `[panels]` entry named
 after a live seat is ignored with a note (the seat wins), so `--panel` and
@@ -386,10 +390,10 @@ launcher run directly via its shebang + exec bit — no `python` prefix, no
 "${CLAUDE_PLUGIN_ROOT}/crew" run codex "summarize this"
 ```
 
-`run <seat>` accepts any registered subprocess seat (the non-Claude seats in the
-panel section above), plus `-m/--model`,
+`run <seat>` accepts any registered seat resolved external for the current host,
+including Claude seats off-host, plus `-m/--model`,
 `-s/--sandbox read-only|workspace-write`, `--timeout N`, and `--json` (emits the
-same six-field result). It reuses the exact provider classes the review panel
+same six-field core plus optional channel provenance). It reuses the exact provider classes the review panel
 uses, so ANSI-stripping, agy auth-banner detection, timeout floors, and config
 resolution all apply unchanged. On success it prints the cleaned output and
 exits 0; on failure it prints the error to stderr and exits nonzero (in `--json`

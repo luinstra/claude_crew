@@ -101,7 +101,8 @@ when the user passed one; otherwise OMIT it. Always pass the literal session id:
 ```
 
 Keep `executor`, `retries`, `resume_executor`, and `channel` from its one-line
-JSON. **If it exits 2, SURFACE the reason and STOP**: a misconfigured executor
+JSON; the builtin `crew:executor` sentinel keeps `channel` present as JSON
+`null` when no external channel is resolved. **If it exits 2, SURFACE the reason and STOP**: a misconfigured executor
 (unknown seat, native-only seat, group token, unresolved execution, or
 read-only seat) must NOT silently run as Claude.
 On a resumed loop, this command reads the active loop's frozen executor, so
@@ -233,9 +234,10 @@ When the executor reports complete with no unresolved blockers, verify with a
 multi-model panel over the **working-tree diff**. Two seat kinds: **subprocess
 seats** (external-CLI entries, via the engine) and **task seats** (seats
 resolved native for this run, each a `crew:reviewer` spawned via the Task
-tool, in-session on the subscription; no `claude -p`, no API key).
-`review-prep`'s JSON is the roster
-of record; only fan out those seats.
+tool, in-session on the subscription). On a Claude Code host, this native path
+uses no `claude -p` or API key; on other hosts, Claude seats resolve to the
+external `claude` CLI instead of being emulated by host-native subagents.
+`review-prep`'s JSON is the roster of record; only fan out those seats.
 
 > **`allowed-tools` scopes THIS orchestrator only.** Seat tool access is
 > governed per-seat by the reviewer agent frontmatter and the engine's sandbox
@@ -306,9 +308,9 @@ calls); `run` DERIVES `-f`/`-o` from the run dir, so pass no paths:
 "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> --session-id <session-id> --run-id <run_id from the prep JSON> --json
 ```
 
-`run --json` exits 0 for every result it WRITES, the six-field shape
-(`name, model, ok, output, error, elapsed`); a failed/skipped seat lands as
-`ok=False` with a diagnostic, so per-seat never-choke is automatic. Run-scoped
+`run --json` exits 0 for every result it WRITES, the six-field core plus the
+optional `channel` provenance field (`name, model, ok, output, error, elapsed`);
+a failed/skipped seat lands as `ok=False` with a diagnostic, so per-seat never-choke is automatic. Run-scoped
 MISUSE (non-member seat, prompt/model/sandbox override) exits 2 with nothing
 written; the templated call above never hits that path.
 
@@ -318,13 +320,11 @@ written; the templated call above never hits that path.
 
 ### Step 2b — Fan out Task seats (parallel)
 
-> **Claude Code host ONLY.** Spawning Task seats applies only when the
-> running harness is Claude Code. In any other harness, do NOT emulate these
-> seats with host-native subagents (a lookalike persists a model that never
-> served the request); treat every entry in the native list as unspawnable,
-> persist each as a failed seat (`persist-seat <seat> ... --failed --error
-> "claude-native seat unavailable in this host"`), and continue with the
-> subprocess seats.
+> **Claude Code host ONLY.** Spawning Task seats applies only when the running
+> harness is Claude Code. On another host, `review-prep` resolves Claude seats
+> into the external `subprocess_seats` list for the `claude` CLI; do NOT emulate these
+> seats with host-native subagents. If that CLI is missing, the engine records
+> a named skipped result and continues with the other seats.
 
 First **write the executor's summary to `<run_dir>/executor-summary.md`**
 (Write tool; a PATH, not inline, so it isn't re-transcribed into every seat's
@@ -368,12 +368,13 @@ normalize it to `ok=False` (Step 2c) and continue.
 > have falsely declared a finished seat "dead", discarding a good review. A
 > seat that has not returned is **still running, not failed**: wait for it.
 
-Normalize each spawned seat's return into the SAME six fields as the
+Normalize each spawned seat's return into the SAME six-field core as the
 subprocess results: `name` = the seat name (its own filename stem), `model` =
 `task_seat_models[<seat>]`, `ok` = True only if the returned result is a
 usable review block, `error` = a populated diagnostic when `ok=False` (never a
 fabricated `ok=True`), `elapsed` = best-effort, `output` = the review text. A
-failed Task seat renders exactly like a failed subprocess seat.
+failed Task seat renders exactly like a failed subprocess seat; when the writer
+knows the resolved channel, it also stamps optional `channel` provenance.
 
 **Two Task kinds now.** The reviewer's return IS the review; the scribe's
 return IS the persist-write completion signal, not a landing gate. BOTH are

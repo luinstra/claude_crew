@@ -72,9 +72,10 @@ When the user DID name a panel, pass it through so the explicit choice wins:
 The split: **`subprocess_seats`** (external-CLI entries; fan out one
 `crew run <seat>` per seat), **`task_seats`** (seats resolved native for this
 run, `crew:panelist` for discuss / `crew:reviewer` for review, via the Task
-tool; in-session on
-the subscription, no `claude -p`, no API key), **`task_seat_models`** (each
-Task seat's model pin FROM the catalog; spawn with
+tool; in-session on the subscription). On a Claude Code host, this native path
+uses no `claude -p` or API key; on other hosts, Claude seats resolve to the
+external `claude` CLI instead of being emulated by host-native subagents.
+**`task_seat_models`** (each Task seat's model pin FROM the catalog; spawn with
 `model = task_seat_models[<seat>]`, NEVER assume the seat name is its model).
 
 PRINTS `{subprocess_seats, task_seats, task_seat_models, host, seat_channels}` as one-line JSON.
@@ -144,8 +145,8 @@ are distinct shells you can watch and kill individually:
 "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f ".crew/debates/<dir-name>/.prompt-<seat>.txt" --json -o ".crew/debates/<dir-name>/<seat>.json"
 ```
 
-`run --json` ALWAYS exits 0 and writes the six-field result
-(`name, model, ok, output, error, elapsed`); a failed/skipped seat lands as
+`run --json` ALWAYS exits 0 and writes the six-field core plus optional
+`channel` provenance (`name, model, ok, output, error, elapsed`); a failed/skipped seat lands as
 `ok=False` with a diagnostic, so per-seat never-choke is automatic.
 
 **A2.3 — collect.** WAIT for every A2.2 shell to exit first (a seat whose
@@ -154,12 +155,11 @@ are distinct shells you can watch and kill individually:
 
 ## A3 — Fan out task seats (parallel)
 
-> **Claude Code host ONLY.** Spawning Task seats applies only when the
-> running harness is Claude Code. In any other harness, do NOT emulate these
-> seats with host-native subagents (a lookalike records a model that never
-> served the request); treat every entry in the native list as unspawnable,
-> note each by name as unavailable in the synthesis, and continue with the
-> subprocess seats.
+> **Claude Code host ONLY.** Spawning Task seats applies only when the running
+> harness is Claude Code. On another host, `review-prep` resolves Claude seats
+> into the external `subprocess_seats` list for the `claude` CLI; do NOT emulate
+> these seats with host-native subagents. If that CLI is missing, the engine records
+> a named skipped result and continues with the other seats.
 
 **Skip this step if `task_seats` is empty** (e.g. `--panel cursor`). For EACH
 `<seat>` in `task_seats`, render its prompt (one render line per Task seat),
@@ -208,7 +208,7 @@ instead. Most debates are discuss.)
 > failed: wait for it. `ok=False` ONLY when the Task itself errors, returns
 > no usable block, or the harness reports it failed.
 
-Gather every seat into the six-field shape: subprocess seats from their
+Gather every seat into the six-field core shape: subprocess seats from their
 `<dir>/<seat>.json` (IGNORE the empty `subprocess.json` scaffold), Task seats
 normalized from their returned results. A failed/skipped seat renders with
 its diagnostic and never suppresses the others. Render the panel
@@ -264,10 +264,10 @@ Then run the round's seats (in parallel where possible):
   ```
 - **Task seats**: one `crew:panelist` per seat, **pinned from
   `task_seat_models[<seat>]`** (the Task tool validates the model value), by
-  reference, exactly as A3, INCLUDING A3's host gate: in any harness other
-  than Claude Code these seats are unspawnable, are never emulated by
-  host-native subagents, and are recorded by name as unavailable in EVERY
-  round's record and the final synthesis:
+  reference, exactly as A3. A Task seat appears in this list only when the
+  current host resolves it native; on another host, prep places it in the
+  external subprocess list instead. Never emulate an external seat with a
+  host-native subagent:
   ```
   # for each <seat> in task_seats:
   Task(subagent_type="crew:panelist", model="<task_seat_models[<seat>]>", prompt="You are the <seat> seat. Read <run-dir>/.prompt-<seat>-r<n>.txt and follow it exactly.")
@@ -275,7 +275,8 @@ Then run the round's seats (in parallel where possible):
   Use each Task's RETURNED result as its take and completion signal (see A4).
 
 **Record the round.** Wait for every seat (a seat still running is not a
-failed seat), normalize to the six-field shape, then with the **Write tool**
+failed seat), normalize to the six-field core plus optional channel provenance,
+then with the **Write tool**
 write all seats' positions, labeled by seat name, into:
 
 ```
@@ -303,7 +304,7 @@ A failed/skipped seat, subprocess OR task, any round, NEVER aborts the debate
 and is NEVER silently dropped:
 
 - Subprocess seats run one-per-seat via `run --json` (always exit 0,
-  six-field result); a failed seat lands as `ok=False`, the others are
+  six-field core plus optional channel provenance); a failed seat lands as `ok=False`, the others are
   unaffected. Read whichever `<seat>.json` files appear.
 - A `crew:panelist`/`crew:reviewer` Task that errors, times out, or returns
   no usable block is normalized to `ok=False` and rendered with its
@@ -315,8 +316,10 @@ and is NEVER silently dropped:
 
 ---
 
-Subscription safety: the engine drives only external-CLI subprocess seats;
-Claude voices are in-session Task seats. No `claude -p`, no Anthropic API — a
-stray `ANTHROPIC_API_KEY` is irrelevant here. This council is fully
+Subscription safety: on a Claude Code host, Claude voices resolved native are
+in-session Task seats, so that path uses no `claude -p` or Anthropic API. On
+other hosts, the engine may drive the external `claude` CLI; a missing CLI is a
+named skipped result, never a host-native emulation. A stray
+`ANTHROPIC_API_KEY` is irrelevant to the native path. This council is fully
 self-contained in crew: NEVER call `agy -p` / `codex exec` / `cursor-agent`
 directly, and NEVER hand off to any external debate plugin/shell.

@@ -69,6 +69,12 @@ from multiagent.providers.agy import (  # noqa: E402
     AGY_PROMPT_MAX_BYTES,
 )
 
+# The shipped assertions and JSON goldens are Claude-host goldens. Pin the
+# suite before any test body runs; detection occurs at call time, and tests that
+# need another host override locally. This pin deliberately leaks into every
+# _clean_env child and clobbers any dev-shell value by design.
+os.environ["CREW_HOST"] = "claude"
+
 
 def log_pass(name: str) -> None:
     global PASS_COUNT
@@ -301,6 +307,203 @@ def test_codex():
         check("codex timeout -> ok=False with timeout error",
               res.ok is False and res.error and "timed out" in res.error,
               "ok=False timed out", f"ok={res.ok} error={res.error!r}")
+
+
+# =============================================================================
+# ClaudeProvider tests (direct construction; host-resolution coverage is separate)
+# =============================================================================
+
+def test_claude():
+    log_section("ClaudeProvider")
+    from multiagent import channels, providers
+    from multiagent.providers import claude as claude_module
+    from multiagent.providers._proc import TIMEOUT
+
+    ClaudeProvider = claude_module.ClaudeProvider
+    provider = ClaudeProvider("opus", default_model="opus")
+    registry_classes = providers._provider_classes()
+    check("claude-code provider kind is registered",
+          registry_classes.get("claude-code", (None,))[0] is ClaudeProvider,
+          "claude-code -> ClaudeProvider", repr(registry_classes))
+    check("ClaudeProvider is explicitly read-only and non-continuable",
+          provider.supports_workspace_write is False
+          and provider.supports_continuation is False
+          and provider.DISPATCH_OPTIONS == {},
+          "False / False / {}",
+          f"{provider.supports_workspace_write} / "
+          f"{provider.supports_continuation} / {provider.DISPATCH_OPTIONS}")
+
+    original_run_reaped = claude_module.run_reaped
+    calls: list[dict] = []
+
+    def fake_run_reaped(argv, **kwargs):
+        calls.append({"argv": argv, **kwargs})
+        return 0, "\x1b[32mCLAUDE REVIEW OK\x1b[0m\n", ""
+
+    claude_module.run_reaped = fake_run_reaped
+    try:
+        result = provider.run("PROMPT-BODY", timeout=17)
+    finally:
+        claude_module.run_reaped = original_run_reaped
+
+    expected_tools = (
+        "Read,Grep,Glob,Bash(git diff:*),Bash(git --no-pager diff:*),"
+        "Bash(git show:*),Bash(git log:*),Bash(git status:*),Bash(git ls-files:*)"
+    )
+    expected_argv = [
+        "claude", "-p", "--permission-mode", "plan", "--allowedTools",
+        expected_tools, "--model", "opus",
+    ]
+    captured = calls[0] if calls else {}
+    check("claude argv is the pinned read-only form",
+          captured.get("argv") == expected_argv
+          and "--output-format" not in captured.get("argv", []),
+          repr(expected_argv), repr(captured.get("argv")))
+    from state_discovery import crew_base
+    check("claude prompt is delivered by stdin and cwd is crew_base",
+          captured.get("input_text") == "PROMPT-BODY"
+          and captured.get("cwd") == str(crew_base())
+          and captured.get("env") is not None,
+          "stdin prompt, crew cwd, explicit child env", repr(captured))
+    check("claude success strips ANSI and leaves channel unset",
+          result.ok is True and result.output == "CLAUDE REVIEW OK"
+          and result.model == "opus" and result.channel is None,
+          "ok, clean output, model opus, channel None", repr(result))
+
+    calls.clear()
+
+    def fake_no_model(argv, **kwargs):
+        calls.append({"argv": argv, **kwargs})
+        return 0, "", ""
+
+    claude_module.run_reaped = fake_no_model
+    try:
+        no_model = ClaudeProvider("claude").run("P")
+        no_model_call = calls[0] if calls else {}
+    finally:
+        claude_module.run_reaped = original_run_reaped
+    check("claude omits --model when no model is pinned",
+          "--model" not in no_model_call.get("argv", [])
+          and no_model.error == "claude returned no output",
+          "no --model and no-output diagnostic", repr(no_model))
+
+    def run_with_response(response):
+        claude_module.run_reaped = lambda argv, **kwargs: response
+        try:
+            return provider.run("P", timeout=23)
+        finally:
+            claude_module.run_reaped = original_run_reaped
+
+    timed_out = run_with_response(TIMEOUT)
+    check("claude timeout maps to the pinned diagnostic",
+          timed_out.ok is False and timed_out.error == "claude timed out after 23s",
+          "claude timed out after 23s", repr(timed_out))
+    nonzero = run_with_response((3, "ignored", "permission denied\n"))
+    check("claude nonzero exit uses stripped stderr",
+          nonzero.ok is False and nonzero.error == "permission denied",
+          "permission denied", repr(nonzero))
+    status = run_with_response((7, "", ""))
+    check("claude nonzero exit without stderr uses status",
+          status.ok is False and status.error == "claude exited with status 7",
+          "claude exited with status 7", repr(status))
+    launch_error = None
+
+    def raise_launch(argv, **kwargs):
+        raise OSError("binary disappeared")
+
+    claude_module.run_reaped = raise_launch
+    try:
+        launch_error = provider.run("P")
+    finally:
+        claude_module.run_reaped = original_run_reaped
+    check("claude launch OSError is a failed seat, not a traceback",
+          launch_error is not None
+          and launch_error.ok is False
+          and launch_error.error == "claude launch failed: binary disappeared",
+          "claude launch failed: binary disappeared", repr(launch_error))
+
+    saved_scrubbed = {name: os.environ.get(name) for name in claude_module._SCRUBBED_ENV_NAMES}
+    saved_sentinel = os.environ.get("CREW_TEST_SENTINEL")
+    saved_plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    for name in claude_module._SCRUBBED_ENV_NAMES:
+        os.environ[name] = "outer-marker"
+    os.environ["CREW_TEST_SENTINEL"] = "kept"
+    os.environ["CLAUDE_PLUGIN_ROOT"] = "/plugin/root"
+    env_capture: dict = {}
+
+    def capture_env(argv, **kwargs):
+        env_capture.update(kwargs)
+        return 0, "review", ""
+
+    claude_module.run_reaped = capture_env
+    try:
+        provider.run("P")
+    finally:
+        claude_module.run_reaped = original_run_reaped
+        for name, value in saved_scrubbed.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        if saved_sentinel is None:
+            os.environ.pop("CREW_TEST_SENTINEL", None)
+        else:
+            os.environ["CREW_TEST_SENTINEL"] = saved_sentinel
+        if saved_plugin_root is None:
+            os.environ.pop("CLAUDE_PLUGIN_ROOT", None)
+        else:
+            os.environ["CLAUDE_PLUGIN_ROOT"] = saved_plugin_root
+    child_env = env_capture.get("env", {})
+    check("claude child env scrubs every captured harness marker",
+          all(name not in child_env for name in claude_module._SCRUBBED_ENV_NAMES)
+          and "CREW_HOST" not in child_env
+          and child_env.get("CREW_TEST_SENTINEL") == "kept"
+          and child_env.get("CLAUDE_PLUGIN_ROOT") == "/plugin/root",
+          "scrubbed markers absent; sentinel and plugin root retained",
+          repr({name: child_env.get(name) for name in claude_module._SCRUBBED_ENV_NAMES})
+          + f" sentinel={child_env.get('CREW_TEST_SENTINEL')!r}")
+
+    marker_name = "FAKE_CODEX_HOST_MARKER"
+    original_marker_accessor = channels.codex_host_markers
+    saved_marker_value = os.environ.get(marker_name)
+    channels.codex_host_markers = lambda: (marker_name,)
+    os.environ[marker_name] = "codex-marker"
+    marker_env: dict = {}
+    claude_module.run_reaped = lambda argv, **kwargs: (
+        marker_env.update(kwargs) or (0, "review", "")
+    )
+    try:
+        provider.run("P")
+    finally:
+        claude_module.run_reaped = original_run_reaped
+        channels.codex_host_markers = original_marker_accessor
+        if saved_marker_value is None:
+            os.environ.pop(marker_name, None)
+        else:
+            os.environ[marker_name] = saved_marker_value
+    check("claude child env also scrubs populated Codex markers",
+          marker_name not in marker_env.get("env", {}),
+          f"{marker_name} absent", repr(marker_env.get("env", {})))
+
+    workspace_write = provider.run("P", sandbox="workspace-write")
+    check("claude workspace-write is refused explicitly",
+          workspace_write.ok is False
+          and workspace_write.error == "claude seat does not support workspace-write in this build",
+          "pinned workspace-write refusal", repr(workspace_write))
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = str(d)
+        try:
+            absent = provider.is_available()
+            make_fake_bin(d, "claude", "import sys\n")
+            present = provider.is_available()
+        finally:
+            os.environ["PATH"] = old_path
+    check("claude is_available returns the tuple contract",
+          absent == (False, "claude not found on PATH") and present == (True, ""),
+          "(False, diagnostic) and (True, '')", repr((absent, present)))
 
 
 # =============================================================================
@@ -1363,6 +1566,83 @@ def test_agy_is_available():
             os.environ["PATH"] = old_path
 
 
+def test_host_detection():
+    log_section("host detection and native-channel contract")
+    from multiagent import channels
+
+    saved_warned = set(channels._warned)
+    channels._warned.clear()
+    try:
+        check("CREW_HOST=claude override -> claude",
+              channels._detect_host({"CREW_HOST": "claude"}) == "claude",
+              "claude", repr(channels._detect_host({"CREW_HOST": "claude"})))
+        check("CREW_HOST=CODEX override is case-insensitive",
+              channels._detect_host({"CREW_HOST": "CoDeX"}) == "codex",
+              "codex", repr(channels._detect_host({"CREW_HOST": "CoDeX"})))
+
+        import contextlib
+        import io
+        warning = io.StringIO()
+        with contextlib.redirect_stderr(warning):
+            invalid = channels._detect_host({"CREW_HOST": "wat"})
+            repeated = channels._detect_host({"CREW_HOST": "wat"})
+        expected_warning = (
+            "crew: CREW_HOST='wat' is not a known host (claude, codex); "
+            "treating the host as unknown (no native channel)\n"
+        )
+        check("invalid CREW_HOST -> unknown with exact one-time warning",
+              invalid == "unknown" and repeated == "unknown"
+              and warning.getvalue() == expected_warning,
+              repr(expected_warning), repr(warning.getvalue()))
+        check("Claude marker alone detects claude",
+              channels._detect_host({"CLAUDECODE": "1"}) == "claude",
+              "claude", repr(channels._detect_host({"CLAUDECODE": "1"})))
+        check("CLAUDE_CODE_ENTRYPOINT marker detects claude",
+              channels._detect_host({"CLAUDE_CODE_ENTRYPOINT": "cli"}) == "claude",
+              "claude", repr(channels._detect_host({"CLAUDE_CODE_ENTRYPOINT": "cli"})))
+        check("empty environment detects unknown",
+              channels._detect_host({}) == "unknown",
+              "unknown", repr(channels._detect_host({})))
+        check("CODEX_COMPANION marker does not masquerade as Codex",
+              channels._detect_host({
+                  "CODEX_COMPANION_SESSION_ID": "companion",
+                  "CLAUDECODE": "1",
+              }) == "claude",
+              "claude", repr(channels._detect_host({
+                  "CODEX_COMPANION_SESSION_ID": "companion",
+                  "CLAUDECODE": "1",
+              })))
+
+        markers = channels._CODEX_HOST_MARKERS
+        if not markers:
+            print("codex marker table empty (Phase 0 pending or contingency); "
+                  "markers-win case skipped")
+        else:
+            marker = markers[0]
+            check("Codex markers win over Claude markers",
+                  channels._detect_host({marker: "1", "CLAUDECODE": "1"}) == "codex",
+                  "codex", repr(channels._detect_host({marker: "1", "CLAUDECODE": "1"})))
+            check("empty-valued Codex marker counts as absent",
+                  channels._detect_host({marker: "", "CLAUDECODE": "1"}) == "claude",
+                  "claude", repr(channels._detect_host({marker: "", "CLAUDECODE": "1"})))
+
+        check("native_channel maps Claude only",
+              channels.native_channel("claude") == "claude"
+              and channels.native_channel("codex") is None
+              and channels.native_channel("unknown") is None,
+              "claude / None / None",
+              repr([channels.native_channel(host) for host in ("claude", "codex", "unknown")]))
+        check("codex channel table has no native channel",
+              not any(spec.native for spec in channels.channel_table("codex").values()),
+              "zero native channels", repr(channels.channel_table("codex")))
+        check("unknown channel table has no native channel",
+              not any(spec.native for spec in channels.channel_table("unknown").values()),
+              "zero native channels", repr(channels.channel_table("unknown")))
+    finally:
+        channels._warned.clear()
+        channels._warned.update(saved_warned)
+
+
 # =============================================================================
 # Registry
 # =============================================================================
@@ -1774,7 +2054,7 @@ def test_result_contract():
     import dataclasses
     _OPTIONAL = {
         "repaired_output", "run_id", "target_sha256",
-        "continuation", "continuation_id",
+        "channel", "continuation", "continuation_id",
     }
     check("to_dict equals asdict MINUS the None optional fields",
           d == {k: v for k, v in dataclasses.asdict(r).items() if k not in _OPTIONAL},
@@ -1800,6 +2080,20 @@ def test_result_contract():
           ProviderResult.from_dict({"name": "x", "ok": True}).run_id is None
           and ProviderResult.from_dict({"name": "x", "ok": True}).target_sha256 is None,
           "None defaults", "?")
+
+    channel_stamped = ProviderResult(
+        name="opus", model="opus", ok=True, output="x", error=None, elapsed=1.5,
+        channel="claude",
+    )
+    channel_dict = channel_stamped.to_dict()
+    channel_back = ProviderResult.from_dict(channel_dict)
+    check("channel provenance is additive and round-trips",
+          channel_dict.get("channel") == "claude"
+          and channel_back.channel == "claude",
+          "channel='claude'", repr(channel_dict))
+    check("channel None stays omitted for legacy result JSON",
+          "channel" not in d and ProviderResult.from_dict(d).channel is None,
+          "channel key absent and None on load", repr(d))
 
     # A REPAIRED seat carries the optional 7th field; it round-trips and does NOT
     # touch the original output.
@@ -3274,19 +3568,19 @@ def test_run_subcommand():
               proc.returncode == 0 and "RAN:DIRECT-PROMPT" in proc.stdout,
               "exit0 + RAN:DIRECT-PROMPT", f"{proc.returncode}: {proc.stdout!r} {proc.stderr!r}")
 
-        # --json emits the six-field shape, exit 0 even though ok is in the JSON.
+        # --json emits the six-field core plus resolved channel provenance.
         proc = _run_cli(["run", "codex", "X", "--json"], env=env, timeout=30)
         ok_json = False
         try:
             obj = json.loads(proc.stdout)
             ok_json = (set(obj.keys())
-                       == {"name", "model", "ok", "output", "error", "elapsed"}
+                       == {"name", "model", "ok", "output", "error", "elapsed", "channel"}
                        and obj["name"] == "codex" and obj["ok"] is True)
         except Exception:
             ok_json = False
-        check("run --json emits six-field object, exit 0",
+        check("run --json emits six-field core plus channel, exit 0",
               proc.returncode == 0 and ok_json,
-              "exit0 + six fields", f"{proc.returncode}: {proc.stdout!r}")
+              "exit0 + six fields + channel", f"{proc.returncode}: {proc.stdout!r}")
 
     # Task seat (orchestrator-owned) -> LOUD, specific failure: exit 2 with a
     # message naming "Task seat" + "orchestrator" (NOT the generic unknown one).
@@ -3302,11 +3596,29 @@ def test_run_subcommand():
     # A genuine typo (not a Task seat, not registered) still gets the GENERIC
     # unknown-seat message -> the Task-seat branch is scoped, not over-broad.
     proc = _run_cli(["run", "notaseat", "hi"], timeout=30)
-    check("run unknown/typo seat -> generic 'subprocess seat' error (NOT Task-seat msg)",
+    check("run unknown/typo seat -> generic registered-seat error (NOT Task-seat msg)",
           proc.returncode != 0
-          and "subprocess seat" in proc.stderr
+          and "registered seat" in proc.stderr
           and "Task seat" not in proc.stderr,
-          "nonzero + generic 'subprocess seat'", f"{proc.returncode}: {proc.stderr!r}")
+          "nonzero + generic registered-seat error",
+          f"{proc.returncode}: {proc.stderr!r}")
+
+    from multiagent import channels, cli
+    import contextlib
+    from io import StringIO
+    err = StringIO()
+    try:
+        channels.set_capabilities({})
+        with contextlib.redirect_stderr(err):
+            empty_cap_rc = cli.cmd_run(
+                cli.build_parser().parse_args(["run", "codex", "hi"])
+            )
+    finally:
+        channels.set_capabilities(None)
+    check("run refuses an external seat when its capability is missing",
+          empty_cap_rc == 2 and "Task seat" in err.getvalue(),
+          "exit2 through the existing refusal path",
+          f"rc={empty_cap_rc} stderr={err.getvalue()!r}")
 
     # REGRESSION GUARD: codex (a real subprocess seat) gets PAST the seat-validation
     # guard. We do NOT invoke/meter it — calling with no prompt source proves it
@@ -3355,12 +3667,16 @@ def test_run_subcommand():
         ok_json = False
         try:
             obj = json.loads(proc.stdout)
-            ok_json = obj["ok"] is False and bool(obj["error"])
+            ok_json = (obj["ok"] is False and bool(obj["error"])
+                       and obj["name"] == "codex"
+                       and obj["model"] == "gpt-5.6-sol"
+                       and obj["channel"] == "codex")
         except Exception:
             ok_json = False
-        check("run --json on failure -> exit 0 with ok=False in JSON",
+        check("run --json on failed provider stamps model and channel provenance",
               proc.returncode == 0 and ok_json,
-              "exit0 + ok=False JSON", f"{proc.returncode}: {proc.stdout!r}")
+              "exit0 + ok=False + model=gpt-5.6-sol + channel=codex",
+              f"{proc.returncode}: {proc.stdout!r}")
 
     # -------------------------------------------------------------------------
     # --session-id derivation: run DERIVES -f (prompt-seat.txt) and -o
@@ -3404,14 +3720,14 @@ def test_run_subcommand():
             try:
                 obj = json.loads(derived.read_text())
                 ok_json = (set(obj.keys())
-                           == {"name", "model", "ok", "output", "error", "elapsed"}
+                           == {"name", "model", "ok", "output", "error", "elapsed", "channel"}
                            and obj["name"] == "codex"
                            and "SHARED-PROMPT" in obj["output"])
             except Exception:
                 ok_json = False
         check("run --session-id derives BOTH -f (prompt-seat.txt) and -o (<seat>.json)",
               proc.returncode == 0 and ok_json and proc.stdout.strip() == "",
-              "exit0 + derived codex.json six-field + empty stdout",
+              "exit0 + derived codex.json six-field core + channel + empty stdout",
               f"{proc.returncode}: exists={derived.exists()} out={proc.stdout!r}")
 
     # Case 2: explicit -o OVERRIDES output derivation — writes <X>, NOT the
@@ -3463,11 +3779,11 @@ def test_run_subcommand():
         proc = _run_cli(["run", "../evil", "--session-id", "S"],
                         cwd=str(cwd), timeout=30)
         leaked = (cwd / ".crew" / "reviews" / "S").exists()
-        check("run ../evil --session-id S -> exit 2 via unknown-seat guard, no path derived",
+        check("run ../evil --session-id S -> exit 2 via unregistered-seat guard, no path derived",
               proc.returncode == 2
-              and "unknown or non-subprocess seat" in proc.stderr
+              and "unknown or unregistered seat" in proc.stderr
               and not leaked,
-              "exit2 + 'unknown or non-subprocess seat' + no .crew/reviews/S",
+              "exit2 + 'unknown or unregistered seat' + no .crew/reviews/S",
               f"{proc.returncode}: {proc.stderr!r} leaked={leaked}")
 
     # Case 5: literal placeholder session-id -> exit 2 with the placeholder message
@@ -3586,8 +3902,9 @@ def test_council_subcommand():
             ok_json = (
                 isinstance(arr, list) and len(arr) == 1
                 and set(arr[0].keys())
-                == {"name", "model", "ok", "output", "error", "elapsed"}
+                == {"name", "model", "ok", "output", "error", "elapsed", "channel"}
                 and arr[0]["name"] == "codex" and arr[0]["ok"] is True
+                and arr[0]["channel"] == "codex"
             )
         except Exception:
             ok_json = False
@@ -5906,11 +6223,11 @@ def test_review_prep():
               run_parent == seg, "run-dir parent basename == session_segment",
               f"parent={run_parent!r} seg={seg!r}")
 
-    # 2. Subprocess-seats-only + opaque task echo.
+    # 2. Host-resolved external seats + opaque task echo.
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         _write_plan(tdp)
-        # group `cursor` expands; opus/sonnet NEVER appear in subprocess_seats.
+        # group `cursor` expands; native Claude seats stay out of subprocess_seats.
         proc = _run_dispatcher(
             ["review-prep", "plan.md", "--seats", "codex,cursor,opus,sonnet",
              "--session-id", "s2", "--task-seats", "opus,sonnet"],
@@ -5919,10 +6236,10 @@ def test_review_prep():
         subs = obj["subprocess_seats"]
         from multiagent import seats as _seatcat  # noqa: E402
         _cursor = set(_seatcat.group_tokens()["cursor"])
-        check("review-prep subprocess_seats are registry seats only (no opus/sonnet)",
+        check("review-prep subprocess_seats are host-resolved external seats (no opus/sonnet)",
               proc.returncode == 0 and "opus" not in subs and "sonnet" not in subs
               and "codex" in subs and any(s in _cursor for s in subs),
-              "registry subprocess seats only", str(subs))
+              "host-resolved external seats only", str(subs))
         check("review-prep task_seats echoes --task-seats verbatim",
               obj["task_seats"] == ["opus", "sonnet"], "['opus','sonnet']",
               str(obj["task_seats"]))
@@ -6419,13 +6736,15 @@ def test_debate_panel_resolver():
     # 10. --json split: the SAME resolved panel, returned as review-prep's
     #     {subprocess_seats, task_seats, task_seat_models} instead of one per line —
     #     so debate.md consumes the split without classifying seat names itself.
-    def resolve_json(config_toml=None, extra_args=()):
+    def resolve_json(config_toml=None, extra_args=(), host=None):
         with tempfile.TemporaryDirectory() as td:
             if config_toml is not None:
                 crew = Path(td) / ".crew"
                 crew.mkdir(parents=True)
                 (crew / "config.toml").write_text(config_toml)
             env = {**_neutral_env(), "CLAUDE_PROJECT_DIR": td}
+            if host is not None:
+                env["CREW_HOST"] = host
             proc = _run_dispatcher(["seats", "--debate", "--json", *extra_args],
                                    env=env, cwd=td, timeout=30)
             try:
@@ -6448,6 +6767,15 @@ def test_debate_panel_resolver():
                   "opus": "claude", "sonnet": "claude",
               },
           }, "the three-field split with model pins", f"rc={rc} {payload}")
+
+    rc_codex, payload_codex, _ = resolve_json(None, host="codex")
+    check("seats --debate --json codex host keeps Claude seats as subprocess",
+          rc_codex == 0
+          and payload_codex["task_seats"] == []
+          and "opus" in payload_codex["subprocess_seats"]
+          and payload_codex["seat_channels"]["opus"] == "claude",
+          "opus in codex-host subprocess seats with claude channel",
+          f"rc={rc_codex} {payload_codex}")
 
     # The JSON split is the SAME panel the plain listing prints, just partitioned:
     # subprocess_seats + task_seats (in order) reconstructs the one-per-line output.
@@ -6569,14 +6897,17 @@ def test_panel_catalog():
               and len(seats.premium_off_seats()) == 5,
               "5 opt-in seats", str(seats.premium_off_seats()))
         # opt_in agreement: the derived sets tie back to the one flag.
-        _sub_opt = {n for n, s in catalog.items() if s.has_executor and s.opt_in}
+        _sub_opt = {
+            n for n, s in catalog.items()
+            if s.kind.model_rule == "free" and s.opt_in
+        }
         check("premium_off_seats() == {subprocess seats with opt_in=True}",
               set(seats.premium_off_seats()) == _sub_opt,
               "opt_in True set", str(sorted(set(seats.premium_off_seats()))))
         check("the built-in five minus agy == {subprocess seats with opt_in=False}",
               set(builtin_five) - {"agy"}
               == {n for n, s in catalog.items()
-                  if s.has_executor and not s.opt_in and n != "agy"},
+                  if s.kind.model_rule == "free" and not s.opt_in and n != "agy"},
               "opt_in False set", str(sorted(set(builtin_five) - {"agy"})))
 
         # The other panels, verbatim. cursor is the literal group TOKEN, NOT an
@@ -6673,27 +7004,22 @@ def test_catalog_cache_reset():
 
 
 def test_catalog_registry_disjoint():
-    log_section("Task seats ⟂ subprocess registry (the safety the catalog buys)")
+    log_section("Task roster is registry-backed; resolver owns native classification")
     from multiagent import seats  # noqa: E402
     from multiagent.providers import known_seat_names, get_provider  # noqa: E402
 
     task_names = set(seats.task_seats())
 
-    # The invariant: no Task-seat NAME is a registered subprocess seat.
-    check("task_seats() ∩ known_seat_names() == ∅ (disjoint)",
-          task_names & set(known_seat_names()) == set(),
-          "empty intersection",
-          str(task_names & set(known_seat_names())))
-
-    # Each Task-seat name fails to resolve through the executor registry.
-    for n in task_names:
-        raised = False
-        try:
-            get_provider(n)
-        except ValueError:
-            raised = True
-        check(f"get_provider({n!r}) raises ValueError (no executor)",
-              raised, "ValueError raised", "no exception")
+    # The roster remains Task-defined, while every catalog provider kind is
+    # registry-backed so the resolver can choose native or external execution.
+    check("task_seats() is a subset of known_seat_names()",
+          task_names <= set(known_seat_names()),
+          "Task roster registered", str(task_names - set(known_seat_names())))
+    opus = get_provider("opus")
+    check("get_provider('opus') returns ClaudeProvider pinned to opus",
+          type(opus).__name__ == "ClaudeProvider"
+          and opus._default_model == "opus",
+          "ClaudeProvider model opus", repr(opus))
 
     # CONVERSE guard: the SUBPROCESS entries of a preset (codex + cursor-*, i.e.
     # the non-Task-seat names) ARE registry seats and DO resolve. This proves the
@@ -7166,7 +7492,10 @@ def _roster_scan(root: Path, report):
     task_names = set(seats.task_seats())
     FULL = seats.merged_panels()["full"]
     known = known_seat_names()
-    OPT_SUB = [n for n, s in catalog.items() if s.has_executor and s.opt_in]
+    OPT_SUB = [
+        n for n, s in catalog.items()
+        if s.kind.model_rule == "free" and s.opt_in
+    ]
     OPT_TASK = sorted(task_names - set(FULL))
     ALL_SEATS = set(known) | task_names
     UNIVERSE = ALL_SEATS
@@ -7414,17 +7743,23 @@ def test_roster_doc_sync():
     root = _roster_repo_root()
     FULL = seats.merged_panels()["full"]
     known = known_seat_names()
-    OPT_SUB = [n for n, s in seats.merged_catalog().items()
-               if s.has_executor and s.opt_in]
+    OPT_SUB = [
+        n for n, s in seats.merged_catalog().items()
+        if s.kind.model_rule == "free" and s.opt_in
+    ]
     ALL_SEATS = set(known) | set(seats.task_seats())
 
     # --- Part 0: derivation self-checks (a wrong truth can't agree with a wrong
-    # doc). The opt-in subprocess set (has_executor ∧ opt_in) must equal the one
+    # doc). The opt-in free-model executor set must equal the one
     # derived from FULL (re-proving full's subprocess subset covers the builtin
     # fallback), and FULL must live inside the universe.
-    check("Part 0: OPT_SUB (opt-in subprocess seats) == known - FULL",
-          set(OPT_SUB) == set(known) - set(FULL),
-          str(sorted(set(known) - set(FULL))), str(sorted(set(OPT_SUB))))
+    free_known = {
+        n for n, s in seats.merged_catalog().items()
+        if s.kind.model_rule == "free" and n in set(known)
+    }
+    check("Part 0: OPT_SUB (opt-in subprocess seats) == free-known - FULL",
+          set(OPT_SUB) == free_known - set(FULL),
+          str(sorted(free_known - set(FULL))), str(sorted(set(OPT_SUB))))
     check("Part 0: set(FULL) <= ALL_SEATS",
           set(FULL) <= ALL_SEATS, "FULL subset of ALL_SEATS",
           f"{sorted(set(FULL) - ALL_SEATS)} outside ALL_SEATS")
@@ -9468,7 +9803,10 @@ def test_dispatch():
     with project_config('[dispatch]\nseat = "agy"\n'):
         check("[dispatch].seat=agy -> 'agy'", config.dispatch_seat() == "agy",
               "agy", repr(config.dispatch_seat()))
-    for bad in ("opus", "bogus", "cursor"):
+    with project_config('[dispatch]\nseat = "opus"\n'):
+        check("[dispatch].seat=opus -> 'opus'", config.dispatch_seat() == "opus",
+              "opus", repr(config.dispatch_seat()))
+    for bad in ("bogus", "cursor"):
         with project_config(f'[dispatch]\nseat = "{bad}"\n'):
             check(f"[dispatch].seat={bad} (task/unknown/group) -> None (warn once)",
                   config.dispatch_seat() is None, "None", repr(config.dispatch_seat()))
@@ -9761,7 +10099,7 @@ def test_dispatch():
 
         proc = _run_cli(["dispatch", "x", "--seat", "bogus", "--json"], env=env_d, cwd=str(repo), timeout=30)
         check("dispatch --seat bogus (unknown) -> exit 2, no path printed",
-              proc.returncode == 2 and "subprocess seat" in proc.stderr and not proc.stdout.strip(),
+              proc.returncode == 2 and "registered seat" in proc.stderr and not proc.stdout.strip(),
               "exit2 unknown, empty stdout", f"{proc.returncode}: {proc.stdout!r} {proc.stderr!r}")
 
         proc = _run_cli(["dispatch", "x", "--session-id", "<SID>", "--json"], env=env_d, cwd=str(repo), timeout=30)
@@ -9818,10 +10156,17 @@ def test_dispatch():
                     rc = cli.cmd_dispatch(
                         _dispatch_ns(seat="declared-native", task="x", json=True),
                     )
+            engine_names = ", ".join(
+                sorted(
+                    name for name, execution in
+                    cli._resolved_catalog_executions(channels.current_host()).items()
+                    if execution.engine_runnable
+                )
+            )
             expected = (
                 "error: 'declared-native' is a Task seat — owned by the orchestrator, "
-                "not runnable by the engine (engine runs subprocess seats only: "
-                f"{known})\n"
+                "not runnable by the engine (host-resolved external seats: "
+                f"{engine_names})\n"
             )
             check(
                 "dispatch declared native seat keeps the Task-seat diagnostic",
@@ -10175,13 +10520,12 @@ def test_dispatch_options():
 
     # --- declarations: registry parity + per-class explicitness + type set ----
     by_kind = dispatch_options_by_kind()
-    exec_kinds = {k for k, v in _seats.PROVIDER_KINDS.items() if v.has_executor}
-    check("dispatch_options_by_kind() keys == executor-bearing PROVIDER_KINDS (parity)",
-          set(by_kind) == exec_kinds, str(sorted(exec_kinds)), str(sorted(by_kind)))
-    # Checked classes derive from the same registry pairing dispatch_options_by_kind
-    # reads (its parity with executor-bearing PROVIDER_KINDS is asserted above), so a
-    # future provider cannot dodge this check via a stale hardcoded class list and
-    # silently inherit the ABC's shared empty dict.
+    registered_kinds = set(_seats.PROVIDER_KINDS)
+    check("dispatch_options_by_kind() keys == registered provider kinds (parity)",
+          set(by_kind) == registered_kinds,
+          str(sorted(registered_kinds)), str(sorted(by_kind)))
+    # Class declarations come from the registry; the seat catalog above supplies
+    # the independent kind inventory for this check.
     for _kind, (klass, _tunes) in sorted(_provider_classes().items()):
         check(f"{klass.__name__} declares DISPATCH_OPTIONS on its OWN class (not the shared ABC default)",
               "DISPATCH_OPTIONS" in klass.__dict__
@@ -10257,12 +10601,12 @@ def test_dispatch_options():
 
     res, err, _ = _opts("codex", project='[dispatch.codx]\nprofile = "x"\n')
     check("unknown table [dispatch.codx] warns: keyed by provider kind, names the kinds",
-          res == {} and "provider kind" in err and "agy, codex, cursor" in err,
+          res == {} and "provider kind" in err and "agy, claude-code, codex, cursor" in err,
           "kind-not-seat warn naming kinds", f"{res} err={err!r}")
 
     res, err, _ = _opts("codex", project='[dispatch.codex-luna]\nprofile = "x"\n')
     check("seat-name table [dispatch.codex-luna] warns: keyed by kind, NOT seat name",
-          res == {} and "not seat name" in err and "agy, codex, cursor" in err,
+          res == {} and "not seat name" in err and "agy, claude-code, codex, cursor" in err,
           "kind-not-seat warn", f"{res} err={err!r}")
 
     res, err, _ = _opts("cursor", project='[dispatch]\ncodex = "oops"\n')
@@ -10509,12 +10853,15 @@ def test_dispatch_options():
         check("--options exits 0", proc.returncode == 0, "0",
               f"{proc.returncode}: {proc.stderr[:200]}")
         outp = proc.stdout
-        ia, ic, iu = (outp.find("[dispatch.agy]"), outp.find("[dispatch.codex]"),
-                      outp.find("[dispatch.cursor]"))
-        check("--options lists every kind in sorted order (agy < codex < cursor)",
-              0 <= ia < ic < iu, "agy, codex, cursor in order", outp[:400])
+        ia, iclaude, ic, iu = (
+            outp.find("[dispatch.agy]"), outp.find("[dispatch.claude-code]"),
+            outp.find("[dispatch.codex]"), outp.find("[dispatch.cursor]"),
+        )
+        check("--options lists every kind in sorted order (agy < claude-code < codex < cursor)",
+              0 <= ia < iclaude < ic < iu,
+              "agy, claude-code, codex, cursor in order", outp[:500])
         check("--options: agy shows the no-options line; codex/cursor keys all present",
-              "(no dispatch options yet)" in outp[ia:ic]
+              "(no dispatch options yet)" in outp[ia:iclaude]
               and "profile" in outp and "force" in outp and "approve_mcps" in outp,
               "keys + no-options line", outp)
         check("--options spawned NO seat process (no sentinel marker)",
@@ -10988,6 +11335,7 @@ def test_doctor():
         except Exception as exc:
             payload = None
             check("doctor stdout parses as JSON", False, "valid json", f"{exc}: {proc.stdout[:200]}")
+        task_names = set(_seats.task_seats())
         if payload is not None:
             sub = payload.get("subprocess", {})
             check("doctor: codex detected available (present on PATH)",
@@ -11005,8 +11353,11 @@ def test_doctor():
                       for s in sub if s in _cursor),
                   "all cursor true", str({k: v for k, v in sub.items() if k in _cursor}))
             task = payload.get("task", {})
-            check("doctor: task block in sorted task-seat order (deterministic)",
-                  list(task.keys()) == sorted(_seats.task_seats()),
+            check("doctor Claude host: Claude seats are task-only",
+                  set(task) == task_names and not (task_names & set(sub)),
+                  "Claude seats only in task map", f"sub={sub} task={task}")
+            check("doctor: task block in sorted native-seat order (deterministic)",
+                  list(task.keys()) == sorted(task_names),
                   str(sorted(_seats.task_seats())), str(list(task.keys())))
             from multiagent import review_runs as _rr  # noqa: E402
             check("doctor: session_segment == session_segment('SES1') on the plain-id path",
@@ -11023,6 +11374,26 @@ def test_doctor():
         # codex was NEVER exec'd (is_available is which-only -> no billable run).
         check("doctor makes NO billable run (codex never exec'd; pure shutil.which)",
               not codex_calls.exists(), "codex not exec'd", "exec'd" if codex_calls.exists() else "ok")
+
+        # A non-Claude host resolves the Claude catalog rows to the external
+        # adapter, so doctor moves them to subprocess and reports the PATH probe.
+        env_codex = dict(env)
+        env_codex["CREW_HOST"] = "codex"
+        proc_codex = _run_cli(["doctor"], env=env_codex, cwd=str(proj), timeout=30)
+        codex_payload = json.loads(proc_codex.stdout)
+        codex_sub = codex_payload.get("subprocess", {})
+        codex_task = codex_payload.get("task", {})
+        check("doctor Codex host: Claude seats move to subprocess",
+              proc_codex.returncode == 0
+              and task_names <= set(codex_sub)
+              and not (task_names & set(codex_task)),
+              "Claude seats in subprocess only", f"sub={codex_sub} task={codex_task}")
+        check("doctor Codex host: Claude PATH probe is named",
+              all(codex_sub[name]["available"] is False
+                  and codex_sub[name]["diag"] == "claude not found on PATH"
+                  for name in task_names),
+              "claude not found on PATH for Claude seats",
+              str({name: codex_sub.get(name) for name in sorted(task_names)}))
         # session-scoped file written AND matches stdout.
         sess_file = proj / ".crew" / "reviews" / "SES1" / "doctor.json"
         check("doctor --session-id writes .crew/reviews/<id>/doctor.json",
@@ -11054,6 +11425,33 @@ def test_doctor():
               not (proj3 / ".crew").exists(), "no .crew dir", "created .crew")
         check("doctor (no session/-o) still prints JSON to stdout",
               proc.stdout.strip().startswith("{"), "JSON on stdout", proc.stdout[:120])
+
+        # A registered Claude row with no resolvable model/execution belongs in
+        # the diagnostic stream, not as a silent omission from both JSON maps.
+        import contextlib  # noqa: E402
+        import io  # noqa: E402
+        from unittest import mock  # noqa: E402
+        from multiagent import cli as _cli, channels as _channels  # noqa: E402
+        fake_spec = SimpleNamespace(provider="claude-code")
+        doctor_out, doctor_err = io.StringIO(), io.StringIO()
+        saved_session_id = os.environ.pop("CLAUDE_SESSION_ID", None)
+        try:
+            with mock.patch.object(_cli, "known_seat_names", return_value=["opus"]), \
+                 mock.patch.object(_seats, "seat_spec", return_value=fake_spec), \
+                 mock.patch.object(_channels, "resolve_seat", return_value=None), \
+                 contextlib.redirect_stdout(doctor_out), contextlib.redirect_stderr(doctor_err):
+                _cli.cmd_doctor(SimpleNamespace(out=None, session_id=None))
+        finally:
+            if saved_session_id is not None:
+                os.environ["CLAUDE_SESSION_ID"] = saved_session_id
+        unresolved_payload = json.loads(doctor_out.getvalue())
+        check(
+            "doctor names a registered Claude seat with no resolvable execution",
+            unresolved_payload == {"subprocess": {}, "task": {}, "session_segment": ""}
+            and "registered Claude seat 'opus' has no resolvable execution" in doctor_err.getvalue(),
+            "empty maps plus named stderr diagnostic",
+            f"payload={unresolved_payload} stderr={doctor_err.getvalue()!r}",
+        )
 
 
 def _doctor_isol_env(proj):
@@ -11193,6 +11591,25 @@ def test_probe():
             check("probe pass -> codex status pass",
                   payload.get("codex", {}).get("status") == "pass",
                   "pass", str(payload.get("codex")))
+        proc = _run_cli(["probe", "--all"], env=env_pass, timeout=30)
+        try:
+            all_payload = json.loads(proc.stdout)
+        except Exception as exc:
+            all_payload = None
+            check("probe --all stdout parses as JSON", False, "valid json",
+                  f"{exc}: {proc.stdout[:200]}")
+        expected_engine = [
+            "agy", "codex", "codex-luna", "codex-terra", "cursor-auto",
+            "cursor-composer", "cursor-gemini", "cursor-glm", "cursor-gpt",
+            "cursor-grok",
+        ]
+        if all_payload is not None:
+            check("probe --all filters native Claude seats and keeps engine seats in sorted order",
+                  proc.returncode == 0
+                  and list(all_payload) == expected_engine
+                  and not ({"opus", "sonnet", "fable"} & set(all_payload)),
+                  str(expected_engine),
+                  f"rc={proc.returncode} names={list(all_payload)}")
         # 7. stdout parses as JSON and contains ONLY the JSON (doctor's discipline).
         check("probe pass -> stdout is JSON-only (no extra lines)",
               proc.stdout.strip().startswith("{") and proc.stdout.strip().endswith("}"),
@@ -11330,6 +11747,21 @@ def test_probe():
             check("probe -o stdout carries codex status pass",
                   stdout_payload.get("codex", {}).get("status") == "pass",
                   "pass", str(stdout_payload.get("codex")))
+
+        env_codex = dict(env_empty)
+        env_codex["CREW_HOST"] = "codex"
+        proc = _run_cli(["probe", "opus"], env=env_codex, timeout=30)
+        try:
+            codex_payload = json.loads(proc.stdout)
+        except Exception:
+            codex_payload = None
+        check("probe opus on Codex host reaches the external probe path",
+              proc.returncode == 2
+              and codex_payload is not None
+              and codex_payload.get("opus", {}).get("status") == "skipped"
+              and "Task seat" not in proc.stderr,
+              "skipped external opus probe, not Task-seat refusal",
+              f"rc={proc.returncode} payload={codex_payload} stderr={proc.stderr!r}")
 
         # 8. Task seats (opus/sonnet/fable) named explicitly -> exit 2 with a
         # message saying Task seats are orchestrator-dispatched and cannot be
@@ -11504,6 +11936,31 @@ def test_scaffold_config():
               _opus_avail is False and not config._warned,
               "opus unavailable, no warnings", f"{_opus_avail} warned={config._warned}")
 
+    # --- Codex-host doctor input: PATH absence must not disable native Task seats.
+    with crew_config() as proj:
+        codex_detection = _ROSTER_FIXTURES / "detection-input-codex.json"
+        saved_host = os.environ.get("CREW_HOST")
+        os.environ["CREW_HOST"] = "codex"
+        try:
+            rc, out, err = run([
+                "scaffold-config", "--out", "-", "--detection", str(codex_detection),
+            ])
+        finally:
+            if saved_host is None:
+                os.environ.pop("CREW_HOST", None)
+            else:
+                os.environ["CREW_HOST"] = saved_host
+        codex_seats = _toml.loads(out).get("seats", {})
+        check(
+            "Codex-host detection does not emit PATH-based false for native Claude seats",
+            rc == 0
+            and all("available" not in codex_seats.get(name, {})
+                    for name in ("opus", "sonnet", "fable"))
+            and "available = false   # not found on PATH" not in out,
+            "all Claude seats omit detection-driven available=false",
+            f"rc={rc} seats={codex_seats}",
+        )
+
     # --- input validation rejects bad values (nonzero + stderr, no file) ------
     with crew_config() as proj:
         target = Path(proj) / "v.toml"
@@ -11512,7 +11969,6 @@ def test_scaffold_config():
             (["scaffold-config", "--out", str(target), "--disable-seat", "notaseat"], "bogus --disable-seat"),
             (["scaffold-config", "--out", str(target), "--add-seat", "notaseat"], "bogus --add-seat"),
             (["scaffold-config", "--out", str(target), "--disable-seat", "cursor"], "group token --disable-seat"),
-            (["scaffold-config", "--out", str(target), "--dispatch-seat", "opus"], "task --dispatch-seat (subprocess-only)"),
         ]:
             rc, out, err = run(argv)
             check(f"reject {label}: nonzero + stderr + no file",
@@ -12506,10 +12962,11 @@ def test_collect_grouped():
 def test_persist_seat():
     log_section("crew persist-seat (engine-owned Task-seat persistence)")
 
-    SIX = {"name", "model", "ok", "output", "error", "elapsed"}
+    SIX = {"name", "model", "ok", "output", "error", "elapsed", "channel"}
 
     # 1. Happy path: -f file with review text -> .crew/reviews/S/fable.json with
-    #    EXACTLY the six fields (no repaired_output); name/model=="fable"; ok True;
+    #    EXACTLY the six-field core plus channel (no repaired_output);
+    #    name/model=="fable"; ok True;
     #    output round-trips byte-identical; stdout.strip() == written path.
     with tempfile.TemporaryDirectory() as td:
         text = "## VERDICT\nAPPROVED\n\n## FINDINGS\n- [MINOR] a.py:1 — nit.\n"
@@ -12530,6 +12987,8 @@ def test_persist_seat():
               "fable", str(data.get("name")))
         check("persist happy: model == 'fable'", data.get("model") == "fable",
               "fable", str(data.get("model")))
+        check("persist happy: channel == 'claude'", data.get("channel") == "claude",
+              "claude", str(data.get("channel")))
         check("persist happy: ok is True", data.get("ok") is True, "True",
               str(data.get("ok")))
         check("persist happy: output round-trips byte-identical",
@@ -12537,6 +12996,106 @@ def test_persist_seat():
         check("persist happy: stdout.strip() == written path",
               proc.stdout.strip() == str(out_path.resolve()),
               str(out_path.resolve()), proc.stdout.strip())
+
+        repaired = Path(td) / "repaired.txt"
+        repaired.write_text(text, encoding="utf-8")
+        repair = _run_dispatcher(
+            ["repair-seat", "--seat", str(out_path), "-f", str(repaired)],
+            cwd=td, timeout=30)
+        repaired_data = json.loads(out_path.read_text(encoding="utf-8"))
+        check("repair-seat: existing channel provenance survives repair",
+              repair.returncode == 0
+              and repaired_data.get("channel") == "claude"
+              and repaired_data.get("repaired_output") == text,
+              "channel=claude and repaired_output recorded",
+              f"rc={repair.returncode} data={repaired_data}")
+
+    # 1b. A catalog Task seat keeps its resolved catalog channel even when the
+    # caller explicitly runs the persistence command under a Codex host.
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "r.txt"
+        src.write_text("## VERDICT\nAPPROVED\n", encoding="utf-8")
+        env = _clean_env(td)
+        env["CREW_HOST"] = "codex"
+        proc = _run_dispatcher(
+            ["persist-seat", "fable", "--session-id", "S", "--model", "fable",
+             "-f", str(src)],
+            cwd=td, env=env, timeout=30)
+        out_path = Path(td) / ".crew" / "reviews" / "S" / "fable.json"
+        data = json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else {}
+        check("Codex-host catalog persist stamps the catalog channel",
+              proc.returncode == 0 and data.get("channel") == "claude",
+              "channel=claude", f"rc={proc.returncode} data={data}")
+
+    # 1c. An opaque Task-seat override has no catalog resolution and therefore
+    # omits channel provenance rather than inventing a native channel.
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "r.txt"
+        src.write_text("## VERDICT\nAPPROVED\n", encoding="utf-8")
+        env = _clean_env(td)
+        env["CREW_HOST"] = "codex"
+        proc = _run_dispatcher(
+            ["persist-seat", "opaque-task-seat", "--session-id", "S", "--model", "fable",
+             "-f", str(src)],
+            cwd=td, env=env, timeout=30)
+        out_path = Path(td) / ".crew" / "reviews" / "S" / "opaque-task-seat.json"
+        data = json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else {}
+        check("opaque persist omits unknown channel provenance",
+              proc.returncode == 0 and "channel" not in data,
+              "no channel key", f"rc={proc.returncode} data={data}")
+
+    # 1d. Filename slugging must not change the catalog lookup key: a dotted
+    # catalog name resolves its channel from the raw argument, while its file
+    # still uses the sanitized slug.
+    with tempfile.TemporaryDirectory() as td:
+        from contextlib import redirect_stdout  # noqa: E402
+        from io import StringIO  # noqa: E402
+        from multiagent import cli as engine_cli  # noqa: E402
+        from multiagent import seats as engine_seats  # noqa: E402
+
+        src = Path(td) / "r.txt"
+        src.write_text("dotted catalog review", encoding="utf-8")
+        saved_project = os.environ.get("CLAUDE_PROJECT_DIR")
+        saved_home = os.environ.get("HOME")
+        original_spec = engine_seats.seat_spec
+        looked_up: list[str] = []
+
+        def dotted_spec(name: str):
+            looked_up.append(name)
+            if name == "opus-4.6":
+                return engine_seats.SeatSpec(
+                    name=name, via=("claude",), model="opus",
+                )
+            return original_spec(name)
+
+        try:
+            os.environ["CLAUDE_PROJECT_DIR"] = str(td)
+            os.environ["HOME"] = str(td)
+            engine_seats.seat_spec = dotted_spec
+            args = engine_cli.build_parser().parse_args(
+                ["persist-seat", "opus-4.6", "--session-id", "S",
+                 "--model", "opus", "-f", str(src)]
+            )
+            with redirect_stdout(StringIO()):
+                rc = engine_cli.cmd_persist_seat(args)
+        finally:
+            engine_seats.seat_spec = original_spec
+            if saved_project is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved_project
+            if saved_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = saved_home
+        dotted_path = Path(td) / ".crew" / "reviews" / "S" / "opus-46.json"
+        data = json.loads(dotted_path.read_text(encoding="utf-8")) \
+            if dotted_path.exists() else {}
+        check("dotted catalog persist looks up raw name and stamps channel",
+              rc == 0 and looked_up == ["opus-4.6"]
+              and dotted_path.exists() and data.get("channel") == "claude",
+              "raw lookup opus-4.6, slug opus-46, channel=claude",
+              f"rc={rc} looked_up={looked_up} data={data}")
 
     # 2. Dotted seat "x.9" -> file x9.json AND "name": "x9" (slug used for BOTH).
     with tempfile.TemporaryDirectory() as td:
@@ -12977,7 +13536,7 @@ def _isolated_capture(args, cwd, timeout=60):
 def test_seat_roster_drift_guard():
     log_section("seat-roster drift guard (roster + panels pinned, isolated config)")
     from multiagent import cli, seats  # noqa: E402
-    from multiagent.providers import get_provider  # noqa: E402
+    from multiagent.providers import get_provider, known_seat_names  # noqa: E402
 
     # --- 1. The subprocess roster, as a hand-written literal ------------------
     # name / provider class / model / opt_in, in fan-out ORDER. Hand-written
@@ -12994,6 +13553,9 @@ def test_seat_roster_drift_guard():
         ("cursor-grok",     "CursorProvider", "grok-4.5-xhigh",        True),
         ("cursor-auto",     "CursorProvider", "auto",                  False),
         ("cursor-composer", "CursorProvider", "composer-2.5",          False),
+        ("opus",             "ClaudeProvider",  "opus",                  False),
+        ("sonnet",           "ClaudeProvider",  "sonnet",                False),
+        ("fable",            "ClaudeProvider",  "fable",                 True),
     ]
     # The actual is read from the catalog loader (the deleted CODEX_SEATS /
     # CURSOR_SEATS dicts are gone); the EXPECTED above stays a hand-written literal
@@ -13132,12 +13694,11 @@ def test_seat_roster_drift_guard():
     # make the fixture red on any box with a different set. One seat is marked
     # unavailable so the `available = false` emission is actually exercised.
     det = json.loads((_ROSTER_FIXTURES / "detection-input.json").read_text())
-    _shipped = seats.shipped_catalog()  # config-independent (seats.toml alone)
-    _shipped_sub = {n for n, s in _shipped.items() if s.has_executor}
-    _shipped_task = {n for n, s in _shipped.items() if not s.has_executor}
+    _registry_names = set(known_seat_names())
+    _task_names = set(seats.task_seats())
     check("detection fixture covers every seat and exercises an unavailable one",
-          set(det["subprocess"]) == _shipped_sub
-          and set(det["task"]) == _shipped_task
+          set(det["subprocess"]) == _registry_names - _task_names
+          and set(det["task"]) == _task_names
           and any(not v["available"] for v in det["subprocess"].values()),
           "all seats, one unavailable",
           f"{sorted(det['subprocess'])} / {sorted(det['task'])}")
@@ -13183,23 +13744,26 @@ def test_config_declared_seats():
                   n in catalog and catalog[n].model == models[n],
                   models[n], str(catalog.get(n) and catalog[n].model))
 
-        # The three executor kinds are registered SUBPROCESS seats; the
-        # claude-code one is a Task seat the engine NEVER runs.
+        # Every provider kind is registry-backed; Claude seats remain the
+        # channel-defined Task roster while the resolver owns execution mode.
         known = set(known_seat_names())
         for n in ("demo-cursor", "codex-demo", "agy-demo"):
             check(f"{n!r} is a registered subprocess seat", n in known,
                   "in registry", "absent")
-        check("opus-demo is a Task seat, NOT in the subprocess registry",
-              "opus-demo" not in known and "opus-demo" in seats.task_seats(),
-              "task seat only",
+        check("opus-demo is registered and remains in the Task roster",
+              "opus-demo" in known and "opus-demo" in seats.task_seats(),
+              "registered Task seat",
               f"in_registry={'opus-demo' in known} task={'opus-demo' in seats.task_seats()}")
-        raised = False
+        opus_demo = None
         try:
-            get_provider("opus-demo")
+            opus_demo = get_provider("opus-demo")
         except ValueError:
-            raised = True
-        check("get_provider('opus-demo') raises (a Task seat is never engine-run)",
-              raised, "ValueError", "no raise")
+            pass
+        check("get_provider('opus-demo') returns ClaudeProvider pinned to haiku",
+              opus_demo is not None
+              and type(opus_demo).__name__ == "ClaudeProvider"
+              and opus_demo._default_model == "haiku",
+              "ClaudeProvider model haiku", repr(opus_demo))
 
         # demo-cursor joins the cursor GROUP by KIND, not by name (it is NOT cursor-*).
         group = seats.group_tokens()["cursor"]
@@ -14035,10 +14599,19 @@ def test_resolver():
         kind for kind, provider_kind in seats.PROVIDER_KINDS.items()
         if provider_kind.has_executor
     }
-    check("provider capability facts cover exactly executor-bearing kinds",
-          set(facts) == expected_kinds
-          and all(facts[kind].supports_workspace_write is True for kind in expected_kinds),
-          str(expected_kinds), str(facts))
+    expected_workspace_write = {
+        "codex": True,
+        "cursor": True,
+        "agy": True,
+        "claude-code": False,
+    }
+    check("provider capability facts cover executor kinds with pinned write support",
+          set(facts) == expected_kinds == set(expected_workspace_write)
+          and all(
+              facts[kind].supports_workspace_write == expected_workspace_write[kind]
+              for kind in expected_workspace_write
+          ),
+          str(expected_workspace_write), str(facts))
     saved_path = os.environ.get("PATH")
     os.environ["PATH"] = ""
     try:
@@ -14065,7 +14638,7 @@ def test_resolver():
             name: execution for name, execution in executions.items()
             if execution is not None
         }
-        external_names = set(known_seat_names())
+        external_names = set(known_seat_names()) - set(seats.task_seats())
         native_names = set(seats.task_seats())
         check("resolver engine/native membership matches the registry roster",
           set(name for name, execution in resolved_catalog.items()
@@ -14082,6 +14655,232 @@ def test_resolver():
                   for name, execution in resolved_catalog.items()
                   if execution.engine_runnable),
               "provider-class write capability", str(resolved_catalog))
+
+
+def test_codex_host_fail_closed():
+    log_section("Codex-host fail-closed review-prep and channel provenance")
+    from contextlib import redirect_stderr, redirect_stdout  # noqa: E402
+    from io import StringIO  # noqa: E402
+    from unittest import mock  # noqa: E402
+    from multiagent import channels, cli  # noqa: E402
+    from multiagent.providers import ProviderResult  # noqa: E402
+    from multiagent.providers import claude as claude_provider  # noqa: E402
+
+    def prep_direct(project: Path, session: str, capabilities: dict) -> tuple[int, dict, str]:
+        saved_env = {
+            key: os.environ.get(key)
+            for key in ("CREW_HOST", "CLAUDE_PROJECT_DIR", "HOME")
+        }
+        saved_warned = set(cli._warned)
+        cli._warned.clear()
+        try:
+            os.environ["CREW_HOST"] = "codex"
+            os.environ["CLAUDE_PROJECT_DIR"] = str(project)
+            os.environ["HOME"] = str(project)
+            channels.set_capabilities(capabilities)
+            out, err = StringIO(), StringIO()
+            args = cli.build_parser().parse_args([
+                "review-prep", str(project / "plan.md"),
+                "--seats", "opus", "--session-id", session,
+            ])
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = cli.cmd_review_prep(args)
+            payload = json.loads(out.getvalue()) if out.getvalue().strip() else {}
+            return rc, payload, err.getvalue()
+        finally:
+            channels.set_capabilities(None)
+            cli._warned.clear()
+            cli._warned.update(saved_warned)
+            for key, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def no_claude_env(project: Path) -> dict:
+        env = _clean_env(str(project))
+        env["CREW_HOST"] = "codex"
+        env["PATH"] = os.pathsep.join(
+            [os.path.dirname(sys.executable), "/usr/bin", "/bin"]
+        )
+        return env
+
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td)
+        _write_plan(project)
+        probe_calls = {"claude": 0}
+
+        def fail_probe() -> bool:
+            probe_calls["claude"] += 1
+            return False
+
+        failing = {
+            "claude": channels.ChannelCapability(False, fail_probe),
+        }
+        rc, prep, prep_err = prep_direct(project, "fail-closed", failing)
+        note = (
+            "crew review-prep: seat 'opus' (channel 'claude') has no CLI "
+            "installed on this host; it will land as a skipped ok=false seat result"
+        )
+        check("Codex-host review-prep keeps opus external and names missing Claude CLI",
+              rc == 0
+              and prep.get("host") == "codex"
+              and prep.get("subprocess_seats") == ["opus"]
+              and prep.get("pending_subprocess_seats") == ["opus"]
+              and prep.get("task_seats") == []
+              and prep.get("seat_channels") == {"opus": "claude"}
+              and probe_calls == {"claude": 1}
+              and note in prep_err,
+              "opus subprocess, task=[], channel=claude, one probe, pinned stderr note",
+              f"rc={rc} prep={prep} probes={probe_calls} stderr={prep_err!r}")
+
+        env = no_claude_env(project)
+        run = _run_dispatcher(
+            ["run", "opus", "--session-id", "fail-closed",
+             "--run-id", prep["run_id"], "--json"],
+            cwd=td, env=env, timeout=30,
+        )
+        run_file = project / prep["run_dir"] / "opus.json"
+        data = json.loads(run_file.read_text()) if run_file.exists() else {}
+        check("Codex-host missing Claude CLI lands a stamped skipped seat",
+              run.returncode == 0
+              and data.get("name") == "opus"
+              and data.get("model") == "opus"
+              and data.get("ok") is False
+              and data.get("error") == "skipped: claude not found on PATH"
+              and data.get("channel") == "claude",
+              "ok=false, model=opus, channel=claude, skipped diagnostic",
+              f"rc={run.returncode} data={data} stderr={run.stderr!r}")
+
+        collected = _run_dispatcher(
+            ["collect", "--session-id", "fail-closed",
+             "--run-id", prep["run_id"], "--seats", "opus"],
+            cwd=td, env=env, timeout=30,
+        )
+        check("collect renders the skipped Claude seat as SKIPPED",
+              collected.returncode == 0
+              and "SKIPPED" in collected.stdout
+              and "opus" in collected.stdout,
+              "SKIPPED block for opus", collected.stdout[:300])
+
+        flat = project / "flat.json"
+        flat_run = _run_dispatcher(
+            ["run", "opus", "flat prompt", "--model", "haiku",
+             "--json", "-o", str(flat)],
+            cwd=td, env=env, timeout=30,
+        )
+        flat_data = json.loads(flat.read_text()) if flat.exists() else {}
+        check("flat skipped override stamps the effective haiku model",
+              flat_run.returncode == 0
+              and flat_data.get("model") == "haiku"
+              and flat_data.get("channel") == "claude"
+              and flat_data.get("ok") is False,
+              "flat ok=false, model=haiku, channel=claude",
+              f"rc={flat_run.returncode} data={flat_data}")
+
+        passing = {
+            "claude": channels.ChannelCapability(True, lambda: True),
+        }
+        pass_rc, pass_prep, pass_err = prep_direct(project, "pass-through", passing)
+        pass_env = no_claude_env(project)
+        saved_env = {
+            key: os.environ.get(key)
+            for key in ("CREW_HOST", "CLAUDE_PROJECT_DIR", "HOME")
+        }
+        try:
+            os.environ["CREW_HOST"] = "codex"
+            os.environ["CLAUDE_PROJECT_DIR"] = str(project)
+            os.environ["HOME"] = str(project)
+            channels.set_capabilities(passing)
+            mocked = ProviderResult(
+                name="opus", model="opus", ok=True, output="CLAUDE OK",
+                error=None, elapsed=0.0,
+            )
+            run_args = cli.build_parser().parse_args([
+                "run", "opus", "--session-id", "pass-through",
+                "--run-id", pass_prep["run_id"], "--json",
+            ])
+            with mock.patch.object(claude_provider.shutil, "which", return_value="/claude"), \
+                 mock.patch.object(claude_provider.ClaudeProvider, "run", return_value=mocked):
+                with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                    pass_run_rc = cli.cmd_run(run_args)
+        finally:
+            channels.set_capabilities(None)
+            for key, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        pass_file = project / pass_prep["run_dir"] / "opus.json"
+        pass_data = json.loads(pass_file.read_text()) if pass_file.exists() else {}
+        check("passing Claude capability runs externally and stamps provenance",
+              pass_rc == 0 and not pass_err
+              and pass_run_rc == 0
+              and pass_data.get("name") == "opus"
+              and pass_data.get("model") == "opus"
+              and pass_data.get("channel") == "claude"
+              and pass_data.get("ok") is True,
+              "external success with name/model/channel provenance",
+              f"prep={pass_prep} prep_err={pass_err!r} data={pass_data}")
+
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td)
+        _write_plan(project)
+        disabled = [
+            "codex", "codex-luna", "agy", "cursor-auto", "cursor-composer",
+            "opus", "sonnet",
+        ]
+        crew = project / ".crew"
+        crew.mkdir()
+        (crew / "config.toml").write_text(
+            "".join(f"[seats.{seat}]\navailable = false\n" for seat in disabled),
+            encoding="utf-8",
+        )
+        env = _clean_env(td)
+        env["CREW_HOST"] = "codex"
+        proc = _run_dispatcher(
+            ["review-prep", "plan.md", "--panel", "full", "--session-id", "fallback"],
+            cwd=td, env=env, timeout=30,
+        )
+        payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
+        expected = [
+            "codex", "codex-luna", "agy", "cursor-auto", "cursor-composer",
+            "opus", "sonnet",
+        ]
+        check("Codex-host whole-panel availability fallback restores resolver output",
+              proc.returncode == 0
+              and payload.get("subprocess_seats") == expected
+              and payload.get("task_seats") == []
+              and set(payload.get("subprocess_seats", [])) <= set(expected),
+              "full resolver roster only, no native task list",
+              f"rc={proc.returncode} payload={payload}")
+
+
+def test_unknown_host_conservative():
+    log_section("unknown-host conservative external resolution")
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td)
+        _write_plan(project)
+        env = _clean_env(td)
+        env["CREW_HOST"] = "not-a-real-host"
+        proc = _run_dispatcher(
+            ["review-prep", "plan.md", "--panel", "full", "--session-id", "unknown-host"],
+            cwd=td, env=env, timeout=30,
+        )
+        payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
+        expected = [
+            "codex", "codex-luna", "agy", "cursor-auto", "cursor-composer",
+            "opus", "sonnet",
+        ]
+        check("unknown host resolves every full-panel seat externally",
+              proc.returncode == 0
+              and payload.get("host") == "unknown"
+              and payload.get("subprocess_seats") == expected
+              and payload.get("task_seats") == []
+              and all(channel in {"codex", "agy", "cursor", "claude"}
+                      for channel in payload.get("seat_channels", {}).values()),
+              "unknown host, all external, no task seats",
+              f"rc={proc.returncode} payload={payload}")
 
 
 def test_workplan_doc_sync():
@@ -14187,19 +14986,82 @@ def test_roster_channel_invariant():
     with tempfile.TemporaryDirectory() as td:
         project = Path(td)
         _write_plan(project)
-        proc = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "", "--task-seats", "codex",
-             "--session-id", "opaque-task"],
-            cwd=td, env=_clean_env(td), timeout=30,
-        )
+        saved_host = os.environ.get("CREW_HOST")
+        try:
+            os.environ["CREW_HOST"] = "claude"
+            proc = _run_dispatcher(
+                ["review-prep", "plan.md", "--seats", "", "--task-seats", "opaque-task-seat",
+                 "--session-id", "opaque-task"],
+                cwd=td, env=_clean_env(td), timeout=30,
+            )
+        finally:
+            if saved_host is None:
+                os.environ.pop("CREW_HOST", None)
+            else:
+                os.environ["CREW_HOST"] = saved_host
         payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
         check(
             "opaque --task-seats names map to the native channel",
             proc.returncode == 0
             and payload.get("subprocess_seats") == []
+            and payload.get("task_seats") == ["opaque-task-seat"]
+            and payload.get("seat_channels") == {"opaque-task-seat": "claude"},
+            "task_seats=['opaque-task-seat'], seat_channels={'opaque-task-seat': 'claude'}",
+            f"rc={proc.returncode} payload={payload} stderr={proc.stderr!r}",
+        )
+
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td)
+        _write_plan(project)
+        saved_host = os.environ.get("CREW_HOST")
+        try:
+            os.environ["CREW_HOST"] = "codex"
+            proc = _run_dispatcher(
+                ["review-prep", "plan.md", "--seats", "", "--task-seats", "opaque-task-seat",
+                 "--session-id", "opaque-task-codex"],
+                cwd=td, env=_clean_env(td), timeout=30,
+            )
+        finally:
+            if saved_host is None:
+                os.environ.pop("CREW_HOST", None)
+            else:
+                os.environ["CREW_HOST"] = saved_host
+        payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
+        check(
+            "opaque --task-seats names map to null without a native channel",
+            proc.returncode == 0
+            and payload.get("host") == "codex"
+            and payload.get("task_seats") == ["opaque-task-seat"]
+            and payload.get("seat_channels", {}).get("opaque-task-seat") is None,
+            "host=codex, opaque task seat channel is JSON null",
+            f"rc={proc.returncode} payload={payload} stderr={proc.stderr!r}",
+        )
+
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td)
+        _write_plan(project)
+        saved_host = os.environ.get("CREW_HOST")
+        try:
+            os.environ["CREW_HOST"] = "claude"
+            proc = _run_dispatcher(
+                ["review-prep", "plan.md", "--seats", "", "--task-seats", "codex",
+                 "--session-id", "catalog-task-codex"],
+                cwd=td, env=_clean_env(td), timeout=30,
+            )
+        finally:
+            if saved_host is None:
+                os.environ.pop("CREW_HOST", None)
+            else:
+                os.environ["CREW_HOST"] = saved_host
+        payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
+        # A catalog name uses its resolved catalog channel even when the override
+        # seats it as a Task voice.
+        check(
+            "catalog --task-seats name keeps its catalog channel",
+            proc.returncode == 0
             and payload.get("task_seats") == ["codex"]
-            and payload.get("seat_channels") == {"codex": "claude"},
-            "task_seats=['codex'], seat_channels={'codex': 'claude'}",
+            and payload.get("seat_channels") == {"codex": "codex"},
+            "task_seats=['codex'], seat_channels={'codex': 'codex'}",
             f"rc={proc.returncode} payload={payload} stderr={proc.stderr!r}",
         )
 
@@ -17496,8 +18358,30 @@ def test_build_executor_contract_freeze():
             f"rc={rc} payload={payload} stderr={err!r}",
         )
 
-    with project_config(""):
-        assert_source("builtin source", "builtin")
+    saved_host = os.environ.get("CREW_HOST")
+    try:
+        os.environ["CREW_HOST"] = "claude"
+        with project_config(""):
+            assert_source("builtin source on Claude host", "builtin")
+
+        os.environ["CREW_HOST"] = "codex"
+        with project_config(""):
+            rc, out, err = run_fresh()
+        off_claude = json.loads(out) if out.strip() else {}
+        check(
+            "builtin source on Codex host emits an explicit JSON null channel",
+            rc == 0
+            and off_claude.get("executor") == "crew:executor"
+            and "channel" in off_claude
+            and off_claude["channel"] is None,
+            "exit 0, executor=crew:executor, channel key present with null",
+            f"rc={rc} payload={off_claude} stderr={err!r}",
+        )
+    finally:
+        if saved_host is None:
+            os.environ.pop("CREW_HOST", None)
+        else:
+            os.environ["CREW_HOST"] = saved_host
     with project_config('[build]\nexecutor = "codex-luna"\n'):
         assert_source("config source", "config")
     with project_config(""):
@@ -17514,10 +18398,10 @@ def test_build_executor_contract_freeze():
             known = ", ".join(known_seat_names())
             rc, out, err = run_fresh()
         expected = (
-            f"error: build executor {executor!r} is not a known subprocess seat "
+            f"error: build executor {executor!r} is not an engine-runnable registered seat "
             f"(a Task seat like opus/sonnet is orchestrator-owned and unrunnable "
             f"by the engine; a group token like cursor names no single seat); "
-            f"valid subprocess seats: {known}\n"
+            f"registered seats: {known}\n"
         )
         check(
             f"{label} rejection keeps its exact diagnostic",
@@ -17533,10 +18417,10 @@ def test_build_executor_contract_freeze():
         known = ", ".join(known_seat_names())
         rc, out, err = run_fresh()
     expected = (
-        "error: build executor 'declared-native' is not a known subprocess seat "
+        "error: build executor 'declared-native' is not an engine-runnable registered seat "
         "(a Task seat like opus/sonnet is orchestrator-owned and unrunnable by "
-        "the engine; a group token like cursor names no single seat); valid "
-        f"subprocess seats: {known}\n"
+        "the engine; a group token like cursor names no single seat); registered "
+        f"seats: {known}\n"
     )
     check(
         "declared native seat keeps the shared not-subprocess diagnostic",
@@ -17726,8 +18610,10 @@ def test_channel_source_gates():
             literal_owners.append(enclosing_function(node))
     check(
         "native channel literals stay inside the channel resolver definitions",
-        set(literal_owners) <= {"channel_table", "native_channel", "current_host"},
-        "only channel_table/native_channel/current_host",
+        set(literal_owners) <= {
+            "channel_table", "native_channel", "current_host", "_detect_host",
+        },
+        "only channel_table/native_channel/current_host/_detect_host",
         repr(literal_owners),
     )
 
@@ -17786,6 +18672,7 @@ def main():
     test_discuss_and_modes()
     test_render_subcommand()
     test_cursor()
+    test_claude()
     test_from_dict_and_escaping()
     test_collect()
     test_findings_parser()
@@ -17808,7 +18695,10 @@ def main():
     test_config_split_seat_layers()
     test_via_migration()
     test_resolver()
+    test_host_detection()
     test_channel_source_gates()
+    test_codex_host_fail_closed()
+    test_unknown_host_conservative()
     test_catalog_cache_reset()
     test_seat_roster_drift_guard()
     test_catalog_registry_disjoint()

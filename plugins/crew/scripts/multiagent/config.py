@@ -278,7 +278,7 @@ def _extract_dispatch_seat(data: dict, layer: str) -> str | None:
     """Validate one layer's ``[dispatch].seat`` against the SEAT registry.
 
     ⚠ Mirrors ``_extract_debate_panel``'s SHAPE but NOT its validation TARGET:
-    dispatch resolves to ONE concrete registered subprocess seat, so the value is
+    dispatch resolves to ONE concrete registered seat for external execution, so the value is
     checked against ``known_seat_names()`` (the seat registry) — NOT
     ``_known_panel_names()``. A panel name or a group token like ``"cursor"`` is
     therefore INVALID here (warn once + ``None``), since dispatch is single-seat
@@ -297,7 +297,7 @@ def _extract_dispatch_seat(data: dict, layer: str) -> str | None:
     if not isinstance(val, str) or val not in known_seat_names():
         _warn_once(
             f"dispatch_seat:{layer}",
-            f"[dispatch].seat={val!r} is not a known subprocess seat "
+            f"[dispatch].seat={val!r} is not a known registered seat "
             f"({', '.join(known_seat_names())}); ignoring",
         )
         return None
@@ -459,9 +459,7 @@ def dispatch_provider_options(kind: str) -> dict:
     if kind not in by_kind:
         return {}
     specs = by_kind[kind]
-    # The executor-bearing kind set == the options map's keys (the registry
-    # parity test pins this against seats.PROVIDER_KINDS), so ONE lazy import
-    # serves both the specs and the hygiene scan's valid-kind set.
+    # Registered provider kinds supply the valid-kind set for this hygiene scan.
     exec_kinds = set(by_kind)
     repo_valid = _extract_dispatch_options(_load(), "repo", kind, specs, exec_kinds)
     global_valid = _extract_dispatch_options(

@@ -62,9 +62,11 @@ class ProviderKind:
     """What one kind of provider can do. Consumed by ``providers`` (which owns the
     classes) and by this loader (which validates rows against it).
 
-    has_executor: the kind drives an external CLI, so its seats are subprocess
-    seats the engine RUNS. A kind without one (``claude-code``) is a Task seat:
-    the orchestrator spawns it in-session, and the engine never executes it.
+    has_executor: the kind has an external provider adapter. This flag is
+    vestigial now; ``model_rule == "free"`` is the live kind discriminator. Host resolution
+    decides whether a seat uses that adapter or the native Task channel; every
+    provider kind is executor-capable, while native Claude execution remains
+    orchestrator-owned on a Claude host.
 
     model_rule: how a seat's model string is validated. ``free`` = any non-empty
     string the CLI accepts. ``alias`` = it must be a Task-tool model alias, which
@@ -72,6 +74,7 @@ class ProviderKind:
     pinning one could never be seated).
     """
     name: str
+    # Retained for registry/config compatibility; model_rule is the live kind discriminator.
     has_executor: bool
     model_rule: str
 
@@ -83,7 +86,7 @@ PROVIDER_KINDS: dict[str, ProviderKind] = {
     "codex":       ProviderKind("codex", has_executor=True, model_rule="free"),
     "cursor":      ProviderKind("cursor", has_executor=True, model_rule="free"),
     "agy":         ProviderKind("agy", has_executor=True, model_rule="free"),
-    "claude-code": ProviderKind("claude-code", has_executor=False, model_rule="alias"),
+    "claude-code": ProviderKind("claude-code", has_executor=True, model_rule="alias"),
 }
 
 # The public schema is channel-first. Keep the legacy provider spelling at this
@@ -216,7 +219,7 @@ def _shipped_panel_names() -> set[str]:
 def _shipped_group_tokens() -> set[str]:
     """The group tokens, from ``seats.toml`` ALONE.
 
-    STRUCTURAL: an executor-bearing kind mints a token named after it UNLESS a
+    STRUCTURAL: a free-model executor kind mints a token named after it UNLESS a
     shipped seat already bears that name (``codex`` and ``agy`` are seats, so they
     mint nothing; ``cursor`` is not, so it mints the ``cursor`` group).
 
@@ -227,7 +230,7 @@ def _shipped_group_tokens() -> set[str]:
     shipped_seats = set(_seat_tables(_shipped()))
     return {
         name for name, kind in PROVIDER_KINDS.items()
-        if kind.has_executor and name not in shipped_seats
+        if kind.has_executor and kind.model_rule == "free" and name not in shipped_seats
     }
 
 
@@ -598,7 +601,7 @@ def merged_panels() -> dict[str, list[str]]:
 def group_tokens() -> dict[str, list[str]]:
     """Each group token → the catalog seats it expands to, in catalog order.
 
-    A token names an executor-bearing provider KIND, so it grows with the catalog:
+    A token names a free-model executor provider KIND, so it grows with the catalog:
     declaring a new cursor seat puts it in the ``cursor`` group automatically.
     """
     catalog = merged_catalog()
@@ -609,9 +612,10 @@ def group_tokens() -> dict[str, list[str]]:
 
 
 def task_seats() -> list[str]:
-    """The catalog's Task (Claude) seats, in catalog order — the seats whose
-    provider kind has NO executor, so the orchestrator spawns them in-session."""
-    return [n for n, s in merged_catalog().items() if not s.has_executor]
+    """The catalog's Claude-subscription roster, in catalog order."""
+    # The roster is channel-defined; host resolution decides Task versus
+    # external execution for each seat.
+    return [n for n, s in merged_catalog().items() if s.provider == "claude-code"]
 
 
 def premium_off_seats() -> tuple[str, ...]:
@@ -623,6 +627,7 @@ def premium_off_seats() -> tuple[str, ...]:
     if _premium_off is None:
         _premium_off = tuple(
             n for n, s in merged_catalog().items()
-            if s.has_executor and s.opt_in and not s.declared
+            if s.has_executor and s.kind.model_rule == "free" and s.opt_in
+            and not s.declared
         )
     return _premium_off

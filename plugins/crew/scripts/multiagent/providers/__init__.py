@@ -1,8 +1,9 @@
 """Provider ABC, the normalized ProviderResult shape, and the seat registry.
 
-This module pins the Step 1.0 orchestration contract for SUBPROCESS seats:
-the six-field ``ProviderResult`` that BOTH seat kinds conform to. Task seats
-(opus/sonnet) are normalized to this same shape by the orchestrator markdown.
+This module pins the orchestration contract for registered seats resolved to
+external execution: the six-field ``ProviderResult`` that BOTH seat kinds
+conform to. Task seats (opus/sonnet) are normalized to this same shape by the
+orchestrator markdown.
 """
 
 from __future__ import annotations
@@ -44,10 +45,10 @@ class KindCapability:
 
 @dataclass
 class ProviderResult:
-    """Normalized per-seat result. Six fields, exact per spec.
+    """Normalized per-seat result with a six-field core and optional stamps.
 
     Subprocess seats emit this directly. Task seats are normalized to the same
-    six fields by the orchestrator (commands/review.md) before synthesis.
+    six-field core by the orchestrator (commands/review.md) before synthesis.
     """
 
     name: str            # seat name, e.g. "codex"
@@ -80,6 +81,10 @@ class ProviderResult:
     run_id: str | None = None
     target_sha256: str | None = None
 
+    # OPTIONAL channel provenance stamp. Providers stay channel-ignorant; a
+    # writer populates this when the resolved channel is known.
+    channel: str | None = None
+
     # OPTIONAL continuation fields.  The structured outcome is the classifier's
     # input; a chain-store PERSIST writes the classified
     # continuation.conversation_id, while the flat continuation_id is the
@@ -94,7 +99,7 @@ class ProviderResult:
 
         Mirrors the ``models.py`` convention (``asdict(self)``) BUT drops each
         optional field (``repaired_output``, ``run_id``, ``target_sha256``,
-        ``continuation``, ``continuation_id``) when
+        ``channel``, ``continuation``, ``continuation_id``) when
         it is None, so an un-repaired/un-stamped seat's JSON keeps the
         byte-identical SIX-field shape existing consumers expect. The CLI/render
         layer batches a list of these and calls ``json.dumps`` ONCE over the
@@ -105,7 +110,7 @@ class ProviderResult:
         d = dataclasses.asdict(self)
         for opt in (
             "repaired_output", "run_id", "target_sha256",
-            "continuation", "continuation_id",
+            "channel", "continuation", "continuation_id",
         ):
             if getattr(self, opt) is None:
                 d.pop(opt, None)
@@ -176,6 +181,8 @@ class ProviderResult:
         run_id = None if rid is None else str(rid)
         tsha = d.get("target_sha256")
         target_sha256 = None if tsha is None else str(tsha)
+        channel_value = d.get("channel")
+        channel = None if channel_value is None else str(channel_value)
 
         continuation_data = d.get("continuation")
         continuation = None
@@ -198,7 +205,7 @@ class ProviderResult:
         )
         return cls(name=name, model=model, ok=ok, output=output,
                    error=error, elapsed=elapsed, repaired_output=repaired_output,
-                   run_id=run_id, target_sha256=target_sha256,
+                   run_id=run_id, target_sha256=target_sha256, channel=channel,
                    continuation=continuation, continuation_id=continuation_id)
 
 
@@ -207,7 +214,7 @@ class ProviderResult:
 # =============================================================================
 
 class Provider(ABC):
-    """A subprocess seat (an external CLI driven by this engine).
+    """A registered seat resolved to external execution (an engine-driven CLI).
 
     ``timeout`` on ``run()`` is a GENERIC per-provider default, NOT a uniform
     cap. Subclasses MAY raise their effective wall-clock timeout above the
@@ -289,11 +296,11 @@ class Provider(ABC):
 
 
 # =============================================================================
-# Registry — every executor-bearing seat in the catalog, through ONE factory
+# Registry: registered provider kinds through ONE factory
 # =============================================================================
 
 def _provider_classes() -> dict:
-    """The executor classes, keyed by the kind they implement, PAIRED with the
+    """The registered provider classes, keyed by kind, PAIRED with the
     tunes each ctor binds: ``{kind: (provider_class, tunes_lambda)}``.
 
     The pairing is load-bearing: class and tunes binding live in ONE structure
@@ -303,6 +310,7 @@ def _provider_classes() -> dict:
     module for ProviderResult / Provider).
     """
     from .agy import AgyProvider
+    from .claude import ClaudeProvider
     from .codex import CodexProvider
     from .cursor import CursorProvider
 
@@ -312,11 +320,12 @@ def _provider_classes() -> dict:
         "codex": (CodexProvider, lambda spec: {"reasoning_effort": spec.reasoning_effort}),
         "cursor": (CursorProvider, lambda spec: {}),
         "agy": (AgyProvider, lambda spec: {"print_timeout": spec.print_timeout}),
+        "claude-code": (ClaudeProvider, lambda spec: {}),
     }
 
 
 def dispatch_options_by_kind() -> dict[str, dict]:
-    """kind -> its provider class's DISPATCH_OPTIONS (executor-bearing kinds only).
+    """kind -> its registered provider class's DISPATCH_OPTIONS.
 
     The ONE public map every options-consuming surface reads (the config getter,
     the ``crew dispatch --options`` listing, the scaffold-config comment blocks),
@@ -329,7 +338,7 @@ def dispatch_options_by_kind() -> dict[str, dict]:
 
 
 def executor_capabilities() -> dict[str, KindCapability]:
-    """Return capability facts for exactly the provider registry's executor kinds."""
+    """Return capability facts for every registered provider kind."""
     return {
         kind: KindCapability(
             supports_workspace_write=cls.supports_workspace_write,
@@ -358,8 +367,8 @@ def _build_registry() -> dict:
     return {
         name: _factory(spec)
         for name, spec in catalog.merged_catalog().items()
-        # A kind with no executor (the Claude Task seats) is orchestrator-owned:
-        # it has no CLI to drive, so it never enters the registry.
+        # A catalog kind with no executor remains orchestrator-owned and does
+        # not enter the registry.
         if spec.has_executor and spec.provider in classes
     }
 
@@ -381,13 +390,13 @@ def get_provider(name: str) -> Provider:
     if factory is None:
         known = ", ".join(sorted(registry))
         raise ValueError(
-            f"unknown subprocess seat {name!r}; known subprocess seats: {known}"
+            f"unknown registered seat {name!r}; known registered seats: {known}"
         )
     return factory()
 
 
 def available_seats(names: list[str]) -> list[Provider]:
-    """Return Provider instances for each requested subprocess seat name.
+    """Return Provider instances for each requested registered seat name.
 
     Unknown names raise (via get_provider) so a typo is loud, not silent.
     Availability/auth is NOT checked here — call ``is_available()`` per seat.
@@ -396,5 +405,5 @@ def available_seats(names: list[str]) -> list[Provider]:
 
 
 def known_seat_names() -> list[str]:
-    """Names of all registered subprocess seats (stable sorted order)."""
+    """Names of all registered seats (stable sorted order)."""
     return sorted(_registry())

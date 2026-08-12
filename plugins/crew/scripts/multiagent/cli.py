@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI entry point for the multi-model review engine (SUBPROCESS seats only).
+"""CLI entry point for the multi-model review engine.
 
 Invocation mechanism: the shipped command markdown reaches this via the
 plugin-root bare dispatcher ``"${CLAUDE_PLUGIN_ROOT}/crew" <sub> …`` (which
@@ -35,13 +35,13 @@ seat_channels``): it runs
 NOTHING; the per-seat
 ``run`` loop + the Task-seat dispatch stay in the command markdown).
 
-The engine EXECUTES only subprocess seats (codex-*/agy/cursor-*), but ``render`` BUILDS the
-prompt for ANY seat — including the Claude Task seats (opus/sonnet) the
-orchestrator dispatches — so every seat's prompt comes from the one builder
-(``prompts.build_prompt``/``council``) and the subprocess and Task paths can
-never drift. Multi-round context lives on disk (``rounds.py``: run-id, round-NN.md)
+The engine EXECUTES seats resolved external for the current host, while ``render`` BUILDS the
+prompt for ANY seat, including Claude Task seats the orchestrator dispatches on
+a Claude host. Every seat's prompt comes from the one builder
+(``prompts.build_prompt``/``council``), so the external and Task paths can never
+drift. Multi-round context lives on disk (``rounds.py``: run-id, round-NN.md)
 and is threaded into both paths the same way (``--run-id``/``--round`` →
-``prior_round``). Task seats are still DISPATCHED by the orchestrator, not here.
+``prior_round``). Native Task seats are still DISPATCHED by the orchestrator.
 """
 
 from __future__ import annotations
@@ -265,18 +265,31 @@ def _resolve_dispatch_timeout(arg: int | None) -> int:
 
 def _run_seat(name: str, prompt: str, timeout: int) -> ProviderResult:
     provider = available_seats([name])[0]
+    spec = seats.seat_spec(name)
+    resolved = (
+        channels.resolve_seat(
+            spec,
+            host=channels.current_host(),
+            capabilities=channels.active_capabilities(),
+        )
+        if spec is not None else None
+    )
+    effective_model = _subprocess_seat_model(name)
     avail, diag = provider.is_available()
     if not avail:
         # Skipped seats are surfaced as ok=False with a skip diagnostic; the
         # caller distinguishes skip vs fail by the diagnostic. (Renderer has a
         # dedicated skipped block; the CLI marks unavailable seats here.)
-        return ProviderResult(
-            name=name, model=None, ok=False, output="",
+        result = ProviderResult(
+            name=name, model=effective_model, ok=False, output="",
             error=f"skipped: {diag}", elapsed=0.0,
         )
-    # No model override: the registry bound each seat's resolved model (config over
-    # the catalog pin) when it built the provider.
-    return provider.run(prompt, timeout=timeout)
+    else:
+        # No model override: the registry bound each seat's resolved model (config over
+        # the catalog pin) when it built the provider.
+        result = provider.run(prompt, timeout=timeout)
+    result.channel = resolved.channel if resolved is not None else None
+    return result
 
 
 def _expand_seat_groups(names: list[str]) -> list[str]:
@@ -310,7 +323,7 @@ def _resolved_catalog_executions(
 
 
 def _resolve_seats(seats_arg: str | None) -> list[str]:
-    """Resolve the comma-separated --seats arg to subprocess seats only.
+    """Resolve the comma-separated --seats arg to host-resolved external seats.
 
     Accepts the ``cursor`` group token (expands to all cursor-* seats), so
     ``--seats cursor`` runs the whole Cursor panel and ``--seats cursor,codex``
@@ -327,11 +340,16 @@ def _resolve_seats(seats_arg: str | None) -> list[str]:
         raw = _panel_seat_list(config.default_panel() or "full")
         explicit = set()
     names = _expand_seat_groups(raw)
-    # Engine drives subprocess seats only — the allowlist is the registry.
-    # Filter to known seats, de-duplicating while preserving order.
-    known = set(known_seat_names())
+    # Engine drives only host-resolved, external seats.
+    engine_runnable = {
+        name for name, resolved in
+        _resolved_catalog_executions(channels.current_host()).items()
+        if resolved.engine_runnable
+    }
+    # Filter to resolved engine seats, de-duplicating while preserving order.
     seen: set[str] = set()
-    resolved = [s for s in names if s in known and not (s in seen or seen.add(s))]
+    resolved = [s for s in names
+                if s in engine_runnable and not (s in seen or seen.add(s))]
     return _filter_available(resolved, explicit)
 
 
@@ -380,7 +398,8 @@ def _resolve_debate_seats(panel_arg: str | None, seats_arg: str | None) -> list[
     Explicit ``--seats`` entries are VALIDATED after group expansion by EXACT
     membership in the fixed UNION allowlist ``known_seat_names() ∪
     seats.task_seats()``. The union is the key — it KEEPS the Task seats
-    (opus/sonnet/fable, which are NOT in the registry) while REJECTING garbage. Membership in
+    (opus/sonnet/fable, which are registry-backed external seats off-host and
+    native Task seats on a Claude host) while REJECTING garbage. Membership in
     this enumerated allowlist IS the path-safety guarantee (strictly stronger than
     a charset filter — no path-unsafe string can be a member), so no separate
     regex guard is needed here. An unknown name (e.g. ``cursor-../../x``, which is
@@ -558,9 +577,21 @@ def _fan_out(seats: list[str], prompt: str, timeout: int) -> list[ProviderResult
             try:
                 results_by_name[name] = fut.result()
             except Exception as exc:  # never let one seat sink the panel
+                from multiagent import seats as seat_catalog
+
+                spec = seat_catalog.seat_spec(name)
+                resolved = (
+                    channels.resolve_seat(
+                        spec,
+                        host=channels.current_host(),
+                        capabilities=channels.active_capabilities(),
+                    )
+                    if spec is not None else None
+                )
                 results_by_name[name] = ProviderResult(
                     name=name, model=None, ok=False, output="",
                     error=f"seat raised: {exc}", elapsed=0.0,
+                    channel=resolved.channel if resolved is not None else None,
                 )
     return [results_by_name[name] for name in seats]
 
@@ -836,7 +867,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     is dispatched through the SAME ``get_provider``/``Provider`` machinery as
     ``review`` so invocation shape, ANSI-strip, auth/error-banner detection,
     timeout floor, ARG_MAX guard, and config resolution all apply unchanged.
-    Valid seats are whatever the registry holds (codex-*, agy, cursor-*).
+    Valid seats are whatever the registry holds; the host resolver decides
+    whether a Claude seat is native or engine-runnable for this invocation.
 
     With a TRUTHY, non-blank ``--session-id <id>``, ``-f`` and ``-o`` are DERIVED
     from ``.crew/reviews/<id>/`` when omitted: ``-f`` defaults to the shared
@@ -845,19 +877,31 @@ def cmd_run(args: argparse.Namespace) -> int:
     so debate's explicit paths and ad-hoc stdout use are untouched.
     """
     seat = args.seat
-    if seat in seats.task_seats():
+    spec = seats.seat_spec(seat)
+    if spec is None or seat not in known_seat_names():
+        known = ", ".join(known_seat_names())
         print(
-            f"error: '{seat}' is a Task seat — owned by the orchestrator, not "
-            f"runnable by the engine (engine runs subprocess seats only: "
-            f"{', '.join(known_seat_names())})",
+            f"error: unknown or unregistered seat {seat!r}; "
+            f"valid registered seats: {known}",
             file=sys.stderr,
         )
         return 2
-    if seat not in known_seat_names():
-        known = ", ".join(known_seat_names())
+    resolved = channels.resolve_seat(
+        spec, host=channels.current_host(),
+        capabilities=channels.active_capabilities(),
+    )
+    if resolved is None or resolved.native or not resolved.engine_runnable:
+        engine_names = ", ".join(
+            sorted(
+                name for name, execution in
+                _resolved_catalog_executions(channels.current_host()).items()
+                if execution.engine_runnable
+            )
+        )
         print(
-            f"error: unknown or non-subprocess seat {seat!r}; "
-            f"valid subprocess seats: {known}",
+            f"error: '{seat}' is a Task seat — owned by the orchestrator, not "
+            f"runnable by the engine (host-resolved external seats: "
+            f"{engine_names})",
             file=sys.stderr,
         )
         return 2
@@ -1095,10 +1139,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     # run) and must execute here — re-filtering it would wrongly drop it. PATH-level
     # is_available() (below) is a different check (the CLI isn't installed).
     provider = get_provider(seat)
+    effective_model = args.model or _subprocess_seat_model(seat)
     avail, diag = provider.is_available()
     if not avail:
         result = ProviderResult(
-            name=seat, model=None, ok=False, output="",
+            name=seat, model=effective_model, ok=False, output="",
             error=f"skipped: {diag}", elapsed=0.0,
         )
     else:
@@ -1111,6 +1156,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             prompt, sandbox=args.sandbox or "read-only", model=args.model,
             timeout=timeout,
         )
+    # The resolved model is the deliberate run-identity stamp; it overrides
+    # any model string reported by the provider.
+    result.model = effective_model
+    result.channel = resolved.channel
 
     if args.json:
         if stamp_dir is not None and run_record is not None:
@@ -1416,8 +1465,8 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     if spec is None:
         known = ", ".join(known_seat_names())
         print(
-            f"error: unknown or non-subprocess seat {seat!r}; "
-            f"valid subprocess seats: {known}",
+            f"error: unknown or unregistered seat {seat!r}; "
+            f"valid registered seats: {known}",
             file=sys.stderr,
         )
         return 2
@@ -1425,24 +1474,31 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     if resolved is None:
         known = ", ".join(known_seat_names())
         print(
-            f"error: unknown or non-subprocess seat {seat!r}; "
-            f"valid subprocess seats: {known}",
+            f"error: unknown or unresolved seat {seat!r}; "
+            f"registered seats: {known}",
             file=sys.stderr,
         )
         return 2
     if resolved.native:
+        engine_names = ", ".join(
+            sorted(
+                name for name, execution in
+                _resolved_catalog_executions(channels.current_host()).items()
+                if execution.engine_runnable
+            )
+        )
         print(
             f"error: '{seat}' is a Task seat — owned by the orchestrator, not "
-            f"runnable by the engine (engine runs subprocess seats only: "
-            f"{', '.join(known_seat_names())})",
+            f"runnable by the engine (host-resolved external seats: "
+            f"{engine_names})",
             file=sys.stderr,
         )
         return 2
     if not resolved.engine_runnable:
         known = ", ".join(known_seat_names())
         print(
-            f"error: unknown or non-subprocess seat {seat!r}; "
-            f"valid subprocess seats: {known}",
+            f"error: seat {seat!r} is not engine-runnable on this host; "
+            f"registered seats: {known}",
             file=sys.stderr,
         )
         return 2
@@ -1965,10 +2021,10 @@ def cmd_build_executor(args: argparse.Namespace) -> int:
         spec = seats.seat_spec(executor)
         if spec is None:
             print(
-                f"error: build executor {executor!r} is not a known subprocess "
+                f"error: build executor {executor!r} is not an engine-runnable registered "
                 f"seat (a Task seat like opus/sonnet is orchestrator-owned and "
                 f"unrunnable by the engine; a group token like cursor names no "
-                f"single seat); valid subprocess seats: "
+                f"single seat); registered seats: "
                 f"{', '.join(known_seat_names())}",
                 file=sys.stderr,
             )
@@ -1983,10 +2039,10 @@ def cmd_build_executor(args: argparse.Namespace) -> int:
             return 2
         if resolved.native or not resolved.engine_runnable:
             print(
-                f"error: build executor {executor!r} is not a known subprocess "
+                f"error: build executor {executor!r} is not an engine-runnable registered "
                 f"seat (a Task seat like opus/sonnet is orchestrator-owned and "
                 f"unrunnable by the engine; a group token like cursor names no "
-                f"single seat); valid subprocess seats: "
+                f"single seat); registered seats: "
                 f"{', '.join(known_seat_names())}",
                 file=sys.stderr,
             )
@@ -3241,6 +3297,7 @@ def cmd_repair_seat(args: argparse.Namespace) -> int:
     candidate = ProviderResult(
         name=result.name, model=result.model, ok=result.ok,
         output=replacement, error=result.error, elapsed=result.elapsed,
+        channel=result.channel,
     )
     if not findings.parse_seat(candidate).findings_parsed:
         # No-op: the reformat still doesn't parse. Leave the seat UNCHANGED (no
@@ -3351,6 +3408,13 @@ def cmd_persist_seat(args: argparse.Namespace) -> int:
         name=slug, model=args.model, ok=not failed,
         output=output, error=error, elapsed=float(args.elapsed),
     )
+    spec = seats.seat_spec(args.seat)
+    if spec is not None:
+        resolved = channels.resolve_seat(
+            spec, host=channels.current_host(),
+            capabilities=channels.active_capabilities(),
+        )
+        result.channel = resolved.channel if resolved is not None else None
 
     if args.run_id is not None:
         # Run-scoped persist: land in the NAMED run's dir with its identity
@@ -3535,7 +3599,7 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     #    panel (subprocess + task TOGETHER) would be empty — so disabling a whole
     #    seat-KIND (e.g. both task seats in `full`) drops it for real instead of
     #    re-adding it because the other kind still has seats. A name classifies as
-    #    exactly one of: a registry subprocess seat (-> subprocess_seats), a
+    #    exactly one of: a host-resolved external seat (-> subprocess_seats), a
     #    catalog Task seat (-> task_seats), or NEITHER (silently DROPPED;
     #    never loud-error). A NAMED --panel's members are EXPLICIT (an unavailable one
     #    is skipped WITH a note); a default_panel's are silent drops (refinement 3).
@@ -3672,7 +3736,14 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
 
     seat_channels = {
         **{name: resolved_catalog[name].channel for name in subprocess_seats},
-        **{name: channels.native_channel(host) for name in task_seats},
+        **{
+            name: (
+                resolved_catalog[name].channel
+                if name in resolved_catalog
+                else channels.native_channel(host)
+            )
+            for name in task_seats
+        },
     }
 
     # Task-seat names double as run-dir FILENAMES (prompt-<seat>.txt,
@@ -3873,6 +3944,27 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    # Prep probes installation only. Cursor is excluded because its availability
+    # check invokes the CLI; review-prep remains a zero-spawn operation.
+    channel_available: dict[str, bool] = {}
+    capabilities = channels.active_capabilities()
+    for seat in pending_sub:
+        channel = seat_channels[seat]
+        if channel == "cursor":
+            continue
+        if channel not in channel_available:
+            capability = capabilities.get(channel)
+            channel_available[channel] = bool(
+                capability is not None and capability.probe_available()
+            )
+        if not channel_available[channel]:
+            _warn_once(
+                f"channel-unavailable:{seat}",
+                f"crew review-prep: seat '{seat}' (channel '{channel}') "
+                "has no CLI installed on this host; it will land as a "
+                "skipped ok=false seat result",
+            )
+
     # 8. Print the JSON contract, the ONLY stdout output. FIXED insertion key
     #    order IS the contract (the original four keys keep their order; the
     #    run-scoped keys append), so do NOT sort_keys. ensure_ascii=False (no
@@ -3927,12 +4019,14 @@ _TASK_SEAT_DIAGS = {
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Probe per-seat provider availability and emit a JSON detection map (D1).
 
-    Iterates ``known_seat_names()`` → ``get_provider(n).is_available()`` into a
-    ``subprocess`` map, then adds a static ``task`` map (the subscription-backed
-    Claude seats, in ``sorted(task_seats())`` order for deterministic JSON), plus a
-    top-level ``session_segment`` (the sanitized reviews-dir stem for the given
-    ``--session-id``, else ``""`` (empty string, the flat/sessionless layout)) so
-    the orchestrator can rebuild the written path.
+    Resolves each registered seat for the current host. External,
+    engine-runnable seats enter the ``subprocess`` map; natively resolved seats
+    enter the ``task`` map. A Claude seat therefore appears in ``task`` on a
+    Claude host and in ``subprocess`` on another host, where its external CLI
+    availability is probed. The top-level ``session_segment`` is the sanitized
+    reviews-dir stem for the given ``--session-id``, else ``""`` (empty string,
+    the flat/sessionless layout), so the orchestrator can rebuild the written
+    path.
 
     Availability is probed once per provider KIND, not once per seat: seats of one
     kind share a binary and answer identically, so the first seat's result is
@@ -3947,17 +4041,41 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     SANITIZED ``session_segment`` (``.crew/reviews/<session_segment>/doctor.json``),
     and the JSON is ALWAYS printed to stdout regardless.
     """
+    host = channels.current_host()
+    capabilities = channels.active_capabilities()
     subprocess_map: dict[str, dict] = {}
     avail_by_kind: dict[str, tuple[bool, str]] = {}
     for name in known_seat_names():
-        kind = seats.seat_spec(name).provider
+        spec = seats.seat_spec(name)
+        resolved = (
+            channels.resolve_seat(spec, host=host, capabilities=capabilities)
+            if spec is not None else None
+        )
+        if resolved is None:
+            if spec is not None and spec.provider == "claude-code":
+                print(
+                    f"crew doctor: registered Claude seat {name!r} has no "
+                    "resolvable execution; omitted from detection maps",
+                    file=sys.stderr,
+                )
+            continue
+        if resolved.native or not resolved.engine_runnable:
+            continue
+        kind = spec.provider
         if kind not in avail_by_kind:
             avail_by_kind[kind] = get_provider(name).is_available()
         avail, diag = avail_by_kind[kind]
         subprocess_map[name] = {"available": bool(avail), "diag": diag}
 
     task_map: dict[str, dict] = {}
-    for name in sorted(seats.task_seats()):
+    for name in sorted(known_seat_names()):
+        spec = seats.seat_spec(name)
+        resolved = (
+            channels.resolve_seat(spec, host=host, capabilities=capabilities)
+            if spec is not None else None
+        )
+        if resolved is None or not resolved.native:
+            continue
         task_map[name] = {
             "available": True,
             "diag": _TASK_SEAT_DIAGS.get(name, "Claude subscription (in-session)"),
@@ -4027,27 +4145,39 @@ def cmd_probe(args: argparse.Namespace) -> int:
     """Live end-to-end seat smoke test. BILLABLE (runs each seat's real CLI).
 
     doctor answers "is the CLI installed?"; probe answers "does the seat
-    actually return usable output?". Subprocess seats only — Task seats are
-    orchestrator-dispatched and rejected with the same loud message cmd_run
-    uses. Exit 0 = at least one seat passed and none failed/degraded;
+    actually return usable output?". Host-resolved external seats only; native
+    Task seats are orchestrator-dispatched and rejected with the same loud
+    message cmd_run uses. Exit 0 = at least one seat passed and none failed/degraded;
     1 = any fail/degraded; 2 = usage error OR every probed seat was skipped
     (nothing actually passed — an all-skipped probe must NOT masquerade as a
     healthy green to a scripted health check keying on the exit code).
     """
-    names = list(known_seat_names()) if args.all else args.seats
+    if args.all:
+        executions = _resolved_catalog_executions(channels.current_host())
+        names = sorted(
+            name for name, execution in executions.items()
+            if execution.engine_runnable
+        )
+    else:
+        names = args.seats
     if not names:
         print("error: name at least one seat, or pass --all", file=sys.stderr)
         return 2
     for n in names:
-        if n in seats.task_seats():
+        spec = seats.seat_spec(n)
+        if spec is None or n not in known_seat_names():
+            print(f"error: unknown seat {n!r}", file=sys.stderr)
+            return 2
+        resolved = channels.resolve_seat(
+            spec, host=channels.current_host(),
+            capabilities=channels.active_capabilities(),
+        )
+        if resolved is None or resolved.native or not resolved.engine_runnable:
             print(
                 f"error: {n!r} is a Task seat — orchestrator-dispatched, "
                 "not probeable by the engine",
                 file=sys.stderr,
             )
-            return 2
-        if n not in known_seat_names():
-            print(f"error: unknown seat {n!r}", file=sys.stderr)
             return 2
 
     # -o / session-path write matrix (D1, copied from cmd_doctor's exact
@@ -4161,7 +4291,12 @@ def _seat_avail(
         return None
     if detection is not None:
         det = _det_lookup(detection, seat)
-        if det is not None and det.get("available") is False:
+        spec = seats.seat_spec(seat)
+        if (
+            det is not None
+            and det.get("available") is False
+            and not (spec is not None and spec.provider == "claude-code")
+        ):
             return ("false", "not found on PATH")
         if seat in seats.premium_off_seats():
             return ("false", _OPT_IN_COMMENT)
@@ -4209,8 +4344,8 @@ def _render_config_template(
     L.append("# [debate]")
     L.append('# panel = "full"')
     L.append("")
-    L.append("# [dispatch].seat — /crew:dispatch's default WRITE seat (must be ONE known subprocess")
-    L.append("# seat: codex-*/agy/cursor-*; a panel name or the 'cursor' group token is rejected).")
+    L.append("# [dispatch].seat: /crew:dispatch's default WRITE seat (must be ONE registry-known")
+    L.append("# seat; read-only Claude seats validate here but are refused by dispatch at runtime).")
     L.append("[dispatch]")
     L.append(f"seat = {_toml_str(dispatch_seat)}")
     L.append("# timeout = 1800   # /crew:dispatch WORK wall-clock; provider floors raise")
@@ -4273,7 +4408,8 @@ def _render_config_template(
     # seats are emitted below by the premium_off_seats() loop, so they are skipped
     # here.
     for name, spec in seats.merged_catalog().items():
-        if not spec.has_executor or spec.declared or spec.opt_in:
+        if (not spec.has_executor or spec.kind.model_rule != "free"
+                or spec.declared or spec.opt_in):
             continue
         L.append(f"[seats.{name}]")
         a = av(name)
@@ -4630,9 +4766,9 @@ def cmd_scaffold_config(args: argparse.Namespace) -> int:
     known = set(known_seat_names())
     if dispatch_seat not in known:
         print(
-            f"error: --dispatch-seat {dispatch_seat!r} is not a known subprocess seat "
-            f"({', '.join(sorted(known))}); [dispatch].seat must be a subprocess WRITE "
-            "seat (a panel name or a Task seat is rejected)",
+            f"error: --dispatch-seat {dispatch_seat!r} is not a known registered seat "
+            f"({', '.join(sorted(known))}); [dispatch].seat must name one registry-known "
+            "seat; read-only seats are refused by dispatch at runtime",
             file=sys.stderr,
         )
         return 2
@@ -4940,18 +5076,24 @@ def cmd_swab(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multiagent",
-        description="Multi-model review engine (subprocess seats only).",
+        description="Multi-model review engine (host-resolved external seats).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    review = sub.add_parser("review", help="Run a review fan-out over subprocess seats.")
+    review = sub.add_parser(
+        "review", help="Run a review fan-out over registered external seats (host-resolved).",
+    )
     review.add_argument(
         "target",
         nargs="?",
         default="auto",
         help="plan .md path, working-tree, branch, commit:<sha>, a SHA, or auto",
     )
-    review.add_argument("--seats", default=None, help="comma-separated subprocess seats (e.g. codex,cursor-auto,cursor-composer)")
+    review.add_argument(
+        "--seats", default=None,
+        help="comma-separated registered external seats (host-resolved; e.g. "
+             "codex,cursor-auto,cursor-composer)",
+    )
     review.add_argument("--json", action="store_true", help="emit a JSON array of results")
     review.add_argument("--base", default="main", help="base ref for branch/auto diffs")
     review.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
@@ -4970,7 +5112,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     council = sub.add_parser(
         "council",
-        help="Fan a free-form question across subprocess seats (single round).",
+        help="Fan a free-form question across registered external seats "
+             "(host-resolved; single round).",
     )
     council.add_argument(
         "question",
@@ -4984,7 +5127,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="read the question from this file instead of the positional string "
              "(a relative path resolves against the project root, not the shell cwd)",
     )
-    council.add_argument("--seats", default=None, help="comma-separated subprocess seats (e.g. codex,cursor-auto,cursor-composer)")
+    council.add_argument(
+        "--seats", default=None,
+        help="comma-separated registered external seats (host-resolved; e.g. "
+             "codex,cursor-auto,cursor-composer)",
+    )
     council.add_argument("--json", action="store_true", help="emit a JSON array of results")
     council.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
     council.add_argument(
@@ -5044,15 +5191,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     seats_p = sub.add_parser(
         "seats",
-        help="print the resolved seat list (group tokens expanded), one per line "
-             "— for per-seat fan-out. Default: the subprocess panel. With "
+        help="print the host-resolved external seat list (group tokens expanded), "
+             "one per line for per-seat fan-out. Default: the external panel. With "
              "--debate: the FULL debate panel (subprocess AND Claude Task seats).",
     )
     seats_p.add_argument(
         "--seats", default=None,
         help="comma-separated seats / group tokens (e.g. 'cursor'); "
-             "default = the default subprocess panel. With --debate, explicit "
-             "entries are validated against known subprocess + Task seats and "
+             "default = the default external panel. With --debate, explicit "
+             "entries are validated against registered external + Task seats and "
              "path-unsafe/unknown names are rejected.",
     )
     seats_p.add_argument(
@@ -5380,13 +5527,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser(
         "run",
-        help="Run ONE subprocess seat (codex|agy|cursor-*) ad-hoc through the "
+        help="Run ONE registered seat resolved to external execution for the "
+             "current host through the "
              "engine. A seat name matching a reserved crew control filename "
              "stem (run/current-run/seat, case-folded) is rejected (exit 2) "
              "whenever the output path is DERIVED, flat and run-scoped alike; "
              "an explicit -o keeps ad-hoc freedom.",
     )
-    run.add_argument("seat", help="subprocess seat name (codex, agy, or a cursor-* seat)")
+    run.add_argument(
+        "seat", help="registered seat resolved to external execution for the current host",
+    )
     run.add_argument(
         "prompt",
         nargs="?",
@@ -5634,11 +5784,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     probe.add_argument(
         "seats", nargs="*", default=[],
-        help="subprocess seat name(s) to probe (codex, agy, or cursor-*)",
+        help="engine-runnable seat name(s) to probe for the current host",
     )
     probe.add_argument(
         "--all", action="store_true",
-        help="probe every registered subprocess seat (known_seat_names())",
+        help="probe every seat resolved external for the current host",
     )
     probe.add_argument("--timeout", type=int, default=None, help="wall-clock timeout (s)")
     probe.add_argument(
@@ -5684,8 +5834,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sc.add_argument(
         "--dispatch-seat", dest="dispatch_seat", default=None,
-        help="[dispatch].seat value (validated vs known_seat_names() — subprocess WRITE "
-             "seats only; default codex)",
+        help="[dispatch].seat value (validated vs known_seat_names(); read-only seats "
+             "are refused by dispatch at runtime; default codex)",
     )
     sc.add_argument(
         "--add-seat", dest="add_seat", action="append", default=None,

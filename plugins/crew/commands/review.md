@@ -55,10 +55,11 @@ results into the `APPROVED / REVISE / [BLOCKING] / [MINOR]` verdict. Two seat
 kinds: **subprocess seats** (external-CLI entries, via the engine) and **task
 seats** (seats resolved native for this run, each the single `crew:reviewer`
 agent spawned via the Task tool with a per-spawn `model` override; in-session
-on the subscription,
-no `claude -p`, no API key; read-only by convention). `review-prep`'s JSON is
-the roster of record; only fan out those seats. A failed/skipped seat NEVER
-aborts the review.
+on the subscription). On a Claude Code host, this native path uses no
+`claude -p` or API key; on other hosts, Claude seats resolve to the external
+`claude` CLI instead of being emulated by host-native subagents.
+`review-prep`'s JSON is the roster of record; only fan out those seats. A
+failed/skipped seat NEVER aborts the review.
 
 > **`allowed-tools` scopes THIS orchestrator only.** Seat tool access is
 > governed per-seat by the reviewer agent frontmatter and the engine's sandbox
@@ -137,9 +138,9 @@ DERIVES `-f`/`-o` from the run dir, so pass no paths:
 "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> --session-id <session-id> --run-id <run_id from the prep JSON> --json
 ```
 
-`run --json` exits 0 for every result it WRITES, the six-field shape
-(`name, model, ok, output, error, elapsed`); a failed/skipped seat lands as
-`ok=False` with a diagnostic, so per-seat never-choke is automatic and the
+`run --json` exits 0 for every result it WRITES, the six-field core plus the
+optional `channel` provenance field (`name, model, ok, output, error, elapsed`);
+a failed/skipped seat lands as `ok=False` with a diagnostic, so per-seat never-choke is automatic and the
 Step 5.5 collect renders a missing named seat as a labeled SKIPPED block.
 Run-scoped MISUSE (non-member seat, prompt/model/sandbox override) exits 2
 with nothing written; the templated call above never hits that path.
@@ -150,13 +151,13 @@ shells and move to Step 4.
 
 ## Step 4 — Fan out Task seats (parallel)
 
-> **Claude Code host ONLY.** Spawning Task seats applies only when the
-> running harness is Claude Code. In any other harness, do NOT emulate these
-> seats with host-native subagents (a lookalike persists a model that never
-> served the request); treat every entry in the native list as unspawnable,
-> persist each as a failed seat (`persist-seat <seat> ... --failed --error
-> "claude-native seat unavailable in this host"`), and continue with the
-> subprocess seats.
+> **Claude Code host ONLY.** Spawning Task seats applies when the running
+> harness is Claude Code. On another host, `review-prep` resolves
+> Claude seats into the external `subprocess_seats` list for the `claude` CLI;
+> do NOT emulate these
+> seats with host-native subagents. If that CLI is
+> missing, the engine records a named skipped result and continues with the
+> other seats.
 
 Spawn a reviewer **in parallel for each entry in `pending_task_seats`** (skip
 if empty). Do NOT hand-write or re-render any prompt: `review-prep` ALREADY
@@ -201,12 +202,13 @@ six-field `ok=False` shape (Step 5) and continue.
 
 ## Step 5 — Normalize Task-seat results to the six-field shape
 
-Normalize each spawned seat's return into the SAME six fields as the
+Normalize each spawned seat's return into the SAME six-field core as the
 subprocess results: `name` = the seat name (its own filename stem), `model` =
 `task_seat_models[<seat>]`, `ok` = True only if the returned result is a
 usable review block, `error` = a populated diagnostic when `ok=False` (never a
 fabricated `ok=True`), `elapsed` = best-effort, `output` = the review text. A
-failed Task seat renders exactly like a failed subprocess seat; a
+failed Task seat renders exactly like a failed subprocess seat; when the
+writer knows the resolved channel, it also stamps optional `channel` provenance; a
 skipped/unspawnable seat renders a clearly-marked skipped block and is
 excluded from the verdict math.
 
@@ -401,7 +403,8 @@ review — all seats failed: <per-seat diagnostics>`.
 
 ---
 
-Subscription safety: the engine drives only external-CLI subprocess seats;
-Claude-model seats resolved native for this run are in-session Task seats. No
-`claude -p`, no Anthropic API — a
-stray `ANTHROPIC_API_KEY` is irrelevant.
+Subscription safety: on a Claude Code host, Claude-model seats resolved native
+for this run are in-session Task seats, so the recipe uses no `claude -p` and no
+Anthropic API. On other hosts, the engine may drive the external `claude` CLI
+for those seats; a missing CLI is a named skipped result, never a host-native
+emulation. A stray `ANTHROPIC_API_KEY` is irrelevant to the native path.

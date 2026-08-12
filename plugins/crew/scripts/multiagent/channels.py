@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
@@ -40,20 +42,67 @@ class ResolvedExecution:
 
 _capabilities_override: Mapping[str, ChannelCapability] | None = None
 
+# The table remains empty until two independent Codex-host captures agree on an
+# exact, non-noisy marker. CODEX_COMPANION_* names are
+# deliberately not included: genuine Claude hosts carry those companion vars.
+_CODEX_HOST_MARKERS: tuple[str, ...] = ()
+
+_warned: set[str] = set()
+
+
+def codex_host_markers() -> tuple[str, ...]:
+    """Return the configured exact Codex-host marker names."""
+    return _CODEX_HOST_MARKERS
+
+
+def _warn_once(key: str, message: str) -> None:
+    """Emit one process-local warning for a malformed host override."""
+    if key in _warned:
+        return
+    _warned.add(key)
+    print(message, file=sys.stderr)
+
+
+def _detect_host(env: Mapping[str, str]) -> str:
+    """Detect the current harness from an environment mapping.
+
+    ``CREW_HOST`` is the explicit operator override. Exact Codex markers, when
+    the marker table is populated, outrank Claude compatibility markers.
+    Empty-valued markers are treated as absent.
+    """
+    known_hosts = ("claude", "codex")
+    override = env.get("CREW_HOST", "")
+    if override:
+        normalized = override.casefold()
+        if normalized in known_hosts:
+            return normalized
+        _warn_once(
+            "invalid-crew-host",
+            f"crew: CREW_HOST={override!r} is not a known host (claude, codex); "
+            "treating the host as unknown (no native channel)",
+        )
+        return "unknown"
+
+    if any(env.get(marker) for marker in _CODEX_HOST_MARKERS):
+        return "codex"
+    if env.get("CLAUDECODE") or env.get("CLAUDE_CODE_ENTRYPOINT"):
+        return "claude"
+    return "unknown"
+
 
 def current_host() -> str:
-    # Host detection remains dormant until a second host exists.
-    return "claude"
+    return _detect_host(os.environ)
 
 
-def native_channel(host: str) -> str:
-    # Extend this mapping when a second host exists.
-    return {"claude": "claude"}[host]
+def native_channel(host: str) -> str | None:
+    """Return the in-session channel, or ``None`` when every seat is external."""
+    return {"claude": "claude"}.get(host)
 
 
 def channel_table(host: str) -> dict[str, ChannelSpec]:
     """Return the capability-free static channel table for ``host``."""
     native = native_channel(host)
+    # A host with no native channel marks every channel external.
     return {
         channel: ChannelSpec(
             name=channel,

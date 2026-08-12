@@ -1,0 +1,18 @@
+{
+  "subprocess": {
+    "agy": {"available": true, "diag": ""},
+    "codex": {"available": true, "diag": ""},
+    "codex-luna": {"available": true, "diag": ""},
+    "codex-terra": {"available": true, "diag": ""},
+    "cursor-auto": {"available": true, "diag": ""},
+    "cursor-composer": {"available": true, "diag": ""},
+    "cursor-gemini": {"available": true, "diag": ""},
+    "cursor-glm": {"available": true, "diag": ""},
+    "cursor-gpt": {"available": true, "diag": ""},
+    "cursor-grok": {"available": true, "diag": ""},
+    "fable": {"available": false, "diag": "claude not found on PATH"},
+    "opus": {"available": false, "diag": "claude not found on PATH"},
+    "sonnet": {"available": false, "diag": "claude not found on PATH"}
+  },
+  "task": {}
+}
