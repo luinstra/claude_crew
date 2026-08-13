@@ -122,9 +122,9 @@ gloss lives here.
   path the orchestrator hands that returned text INLINE to a `crew:scribe`
   sub-agent (Write-only), which Writes it to the tmp-seat file inside its OWN
   transcript, so the persist-Write never renders back into orchestrator context.
-  The orchestrator keeps the landing authority. review.md calls `persist-seat
-  --verify` and gates on its exit code for the landed record. build.md and
-  measure-twice.md still use their own `test -s` plus a grep of the printed
+  The orchestrator keeps the landing authority. review.md and build.md call
+  `persist-seat --verify` and gate on its exit code for the landed record.
+  measure-twice.md still uses its own `test -s` plus a grep of the printed
   `<seat>.json` path. The scribe's self-reported line is never the gate. On any
   scribe failure it falls back to
   Writing a DISTINCT `-fallback` path itself and persisting that, so a timed-out
@@ -139,8 +139,8 @@ gloss lives here.
 
 - **Why `--verify` exists.** The old grep gate was markdown prose enforcing an
   engine-checkable fact. Exit codes are allowlistable and un-driftable, while
-  the grep string was neither, so review.md now gates the landed record through
-  the flag.
+  the grep string was neither, so review.md and build.md now gate the landed
+  record through the flag.
 
 ## Reviewer / panelist seat — maintainer hardening note (moved from the agents)
 

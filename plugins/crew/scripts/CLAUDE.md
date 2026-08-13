@@ -402,8 +402,8 @@ Key contracts (do NOT regress):
   not render into orchestrator context). In review.md, the orchestrator's landing gate is the
   `persist-seat --verify` exit code against the on-disk record: exit 0 is done; on the success path,
   exit 4 routes to the FALLBACK, the fixed missing-file exit 2 also routes to the FALLBACK, and any
-  other exit 2 is a hard stop. build.md and measure-twice.md still use their legacy `test -s` precheck plus a grep of
-  the printed `<seat>.json` path. In every doc, the scribe's self-reported line is not the landing
+  other exit 2 is a hard stop. Only measure-twice.md still uses its legacy `test -s` precheck plus a grep of
+  the printed `<seat>.json` path; review.md and build.md use `persist-seat --verify`. In every doc, the scribe's self-reported line is not the landing
   authority, and a fallback uses a DISTINCT `tmp-seat-<seat>-fallback.md` path so a timed-out
   scribe's late write to the original tmp cannot clobber the fallback bytes.
 

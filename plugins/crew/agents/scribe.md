@@ -57,7 +57,8 @@ convention-trusts:
 - Fidelity is NOT byte-guaranteed. A model in the write path can paraphrase or
   truncate; nothing in-band proves byte-identity. The mitigations are the
   verbatim instruction above, that any corruption renders visibly downstream
-  (`collect` shows whatever landed), and review.md's `persist-seat --verify`
-  gate, which catches every DETECTABLE failure and falls back. build.md and
-  measure-twice.md retain the legacy `test -s` plus printed-path grep gate. A
+  (`collect` shows whatever landed), and the `persist-seat --verify` gate in
+  review.md and build.md, which catches every DETECTABLE failure and falls
+  back. Only measure-twice.md retains the legacy `test -s` plus printed-path
+  grep gate. A
   same-length paraphrase is the accepted, disclosed residual.
