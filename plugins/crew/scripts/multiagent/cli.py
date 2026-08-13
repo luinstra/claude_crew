@@ -3329,6 +3329,58 @@ def cmd_repair_seat(args: argparse.Namespace) -> int:
     return 0
 
 
+def _verify_first_line(value: object) -> str:
+    """Return one diagnostic line from a read-back value."""
+    text = str(value)
+    lines = text.splitlines()
+    return lines[0] if lines else ""
+
+
+def _verify_persisted_seat(path: Path, slug: str) -> int:
+    """Verify the JSON record at the path persist-seat is about to print."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(
+            f"verify: cannot read landed seat {slug}: {_verify_first_line(exc)}",
+            file=sys.stderr,
+        )
+        return 4
+    except (UnicodeDecodeError, ValueError) as exc:
+        print(
+            f"verify: cannot decode landed seat {slug}: {_verify_first_line(exc)}",
+            file=sys.stderr,
+        )
+        return 4
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        print(
+            f"verify: landed seat {slug} has malformed JSON: {_verify_first_line(exc)}",
+            file=sys.stderr,
+        )
+        return 4
+    if not isinstance(data, dict):
+        print(f"verify: landed seat {slug} is not a JSON object", file=sys.stderr)
+        return 4
+    ok = data.get("ok")
+    if ok is True:
+        return 0
+    if ok is False:
+        error = data.get("error")
+        first_line = _verify_first_line(error) if isinstance(error, str) else ""
+        print(
+            f"verify: seat {slug} landed ok=false: {first_line[:200]}",
+            file=sys.stderr,
+        )
+        return 4
+    print(
+        f"verify: landed seat {slug} has missing or non-boolean ok",
+        file=sys.stderr,
+    )
+    return 4
+
+
 def cmd_persist_seat(args: argparse.Namespace) -> int:
     """Write ONE normalized Task-seat result to the session dir (engine-owned).
 
@@ -3382,9 +3434,21 @@ def cmd_persist_seat(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.verify and args.failed:
+        print("error: --verify cannot be combined with --failed", file=sys.stderr)
+        return 2
     if args.file:
         try:
             output = Path(args.file).read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            if args.verify:
+                print("verify: seat file missing, fall back", file=sys.stderr)
+            else:
+                print(f"error: cannot read {args.file!r}: {exc}", file=sys.stderr)
+            return 2
+        except (UnicodeDecodeError, ValueError) as exc:
+            print(f"error: cannot read {args.file!r}: {exc}", file=sys.stderr)
+            return 2
         except OSError as exc:
             print(f"error: cannot read {args.file!r}: {exc}", file=sys.stderr)
             return 2
@@ -3483,7 +3547,7 @@ def cmd_persist_seat(args: argparse.Namespace) -> int:
         if note:
             print(note, file=sys.stderr)
         print(str(path))
-        return 0
+        return _verify_persisted_seat(path, slug) if args.verify else 0
 
     out_dir = _reviews_subdir(session_id)
     if review_runs.pointer_exists(out_dir):
@@ -3504,7 +3568,7 @@ def cmd_persist_seat(args: argparse.Namespace) -> int:
         json.dumps(result.to_dict(), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8")
     print(str(path))
-    return 0
+    return _verify_persisted_seat(path, slug) if args.verify else 0
 
 
 def cmd_review_prep(args: argparse.Namespace) -> int:
@@ -5432,7 +5496,12 @@ def build_parser() -> argparse.ArgumentParser:
              "The engine owns slug derivation, "
              "the render-safe shape, and the path echo — no LLM hand-assembly. "
              "Task seats only — subprocess seats persist themselves via `run`. "
-             "Prints the seat path (exit 0); exit 2 on usage errors.",
+             "Prints the seat path (exit 0); exit 2 on usage errors. With "
+             "--verify, exit 0 means the landed JSON object has boolean "
+             "`ok=true`; exit 4 means the landed record is otherwise invalid "
+             "and is the fallback trigger. A missing -f file keeps exit 2 with "
+             "the fixed fallback diagnostic; existing read errors remain hard "
+             "exit 2. --verify cannot be combined with --failed.",
     )
     ps.add_argument("seat", help="seat/role name; its slug (the name itself for "
                                  "catalog seats) is BOTH the filename and the "
@@ -5448,6 +5517,13 @@ def build_parser() -> argparse.ArgumentParser:
                          "root, not the shell cwd.")
     ps.add_argument("--failed", dest="failed", action="store_true",
                     help="mark the seat failed: `ok` becomes false")
+    ps.add_argument(
+        "--verify", dest="verify", action="store_true",
+        help="read back the landed JSON: exit 0 only for an object with "
+             "boolean `ok=true`; exit 4 for any other landed record; a missing "
+             "-f file stays exit 2 with the fixed fallback diagnostic; cannot "
+             "be combined with --failed",
+    )
     ps.add_argument("--error", dest="error", default=None,
                     help="diagnostic recorded in `error` when --failed (default: a "
                          "generic 'Task seat failed' message)")

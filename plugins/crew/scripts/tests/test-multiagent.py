@@ -7266,59 +7266,89 @@ def test_persist_seat_doc_sync():
           panelist_line6.startswith("tools:") and "Write" not in panelist_line6,
           "tools line without Write", repr(panelist_line6))
 
-    # SCRIBE doc-sync: the success-path Task-seat persist now routes the tmp-seat
-    # Write through a crew:scribe sub-agent so the persist-Write does not render.
-    # Every load-bearing recipe string must read IDENTICALLY across all three
-    # docs, or the precheck / grep gate / quoted-absolute rm / fallback could
-    # drift out of one doc (and CI could green-light a reconstructed-path gate).
-    SCRIBE_SENTINELS = [
-        # the scribe spawn itself
+    # SCRIBE_CORE remains common to all three docs. The gate-form tables below
+    # are deliberately separate while only review.md uses --verify.
+    SCRIBE_CORE = [
         'subagent_type="crew:scribe"',
-        # the pinned per-seat sequence intro
         'Persist each SUCCESSFUL Task seat via a scribe (no terminal diff).',
-        # quoted-absolute rm pre-clear (fresh-create guarantee) for the
-        # pre-spawn scribe-target clear
         'rm -f "<project-root>/.crew/reviews/<session_segment>/<run_id>/tmp-seat-<seat>.md"',
-        # the test -s precheck on the tmp path BEFORE the persist
+        '<session_segment>/<run_id>/tmp-seat-<seat>-fallback.md',
+        'NONEMPTY PARTIAL file',
+        'Fallback: you persist the seat yourself',
+        "the scribe's return IS the persist-write completion",
+    ]
+    SCRIBE_GREP_GATE = [
         'test -s "<project-root>/.crew/reviews/<session_segment>/<run_id>/tmp-seat-<seat>.md"',
-        # the grep gate keyed on the PERSIST-SEAT-PRINTED path: the literal gate
-        # string PLUS the runnable literal-path grep (NO $(…) capture, NO prose;
-        # the orchestrator already holds the path persist-seat printed on stdout)
         "grep -q '\"ok\": *true'",
         'grep -q \'"ok": *true\' "<the exact seat-json path persist-seat printed on stdout>"',
         'grepping the path `persist-seat`',
-        # the fallback WRITES + persists a DISTINCT path the scribe never received,
-        # so a timed-out scribe's late write to the original tmp cannot clobber it;
-        # run-scoped so a lingering earlier-run scribe cannot cross-write it either
-        '<session_segment>/<run_id>/tmp-seat-<seat>-fallback.md',
-        # residual: a timed-out scribe can leave a NONEMPTY PARTIAL file, so
-        # branch on the scribe Task's own error/timeout, not just size
-        'NONEMPTY PARTIAL file',
-        # residual: the fallback persist is gated by the SAME ok=true predicate
         'GATE THE FALLBACK TOO',
-        # the fallback heading, DISTINCT from the never-choke sentinel
-        'Fallback: you persist the seat yourself',
-        # the exit-2-is-a-real-error rule (test -s already excluded the absent case)
         'persist-seat` exit 2 on a `test -s`-passing file is a REAL error',
-        # the completion-signal clarifier: reviewer return IS the review; scribe
-        # return IS the persist-write completion signal, not a landing gate
-        "the scribe's return IS the persist-write completion",
     ]
+    SCRIBE_VERIFY_GATE = [
+        "PIN-MAP: `--verify` exit 0 means the on-disk record landed `ok=true`: DONE. Exit 4 means it landed anything else (ok=false, missing or non-boolean ok, malformed JSON, unreadable read-back): FALLBACK.",
+        "PIN-EXIT2: An exit 2 carrying the `verify: seat file missing, fall back` diagnostic routes to the FALLBACK (the file never appeared); any OTHER exit 2, an existing-but-unreadable file included, is a REAL error: surface it loudly and stop.",
+        "PIN-FALLBACK: GATE THE FALLBACK TOO: fallback `--verify` exit 0 is DONE; exit 4 or ANY exit 2 is surfaced loudly, then the seat is persisted with `--failed --error` so it reaches `collect` labeled, never lost.",
+        "PIN-AUTHORITY: the `--verify` exit code is the ONLY landing authority, never the scribe's self-reported line.",
+    ]
+    # This product literal is kept in review.md even though the build recipe
+    # uses its own all-failed wording. Pin it locally so it cannot drift.
+    REVIEW_INHERITED_SENTINELS = ["could not review — all seats failed:"]
+
     for rel in docs:
         text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
         # Prose sentinels wrap across lines; collapse whitespace so a legit
         # line break inside a pinned phrase does not read as a drift.
         norm = " ".join(text.split())
-        for phrase in SCRIBE_SENTINELS:
-            check(f"{rel} contains scribe recipe sentinel: {phrase!r}",
+        for phrase in SCRIBE_CORE:
+            check(f"{rel} contains shared scribe sentinel: {phrase!r}",
                   phrase in text or phrase in norm, "present", "MISSING")
-        # The flat (run_id-omitting) grep target is named ONLY as the forbidden
-        # one; the pinned gate is the run-dir path persist-seat printed.
-        check(f"{rel} names the flat <session_segment>/<seat>.json only as the forbidden grep target",
-              'NEVER grep the\nflat `.../<session_segment>/<seat>.json`' in text
-              or 'NEVER grep the flat `.../<session_segment>/<seat>.json`' in text,
-              "flat form named only as the forbidden one",
-              "flat gate target not disclaimed")
+
+        if rel in ("commands/build.md", "commands/measure-twice.md"):
+            for phrase in SCRIBE_GREP_GATE:
+                check(f"{rel} contains legacy gate sentinel: {phrase!r}",
+                      phrase in text, "present", "MISSING")
+            # The flat (run_id-omitting) grep target is named ONLY as the
+            # forbidden one; preserve both historical line-break forms.
+            check(f"{rel} names the flat <session_segment>/<seat>.json only as the forbidden grep target",
+                  'NEVER grep the\nflat `.../<session_segment>/<seat>.json`' in text
+                  or 'NEVER grep the flat `.../<session_segment>/<seat>.json`' in text,
+                  "flat form named only as the forbidden one",
+                  "flat gate target not disclaimed")
+        elif rel == "commands/review.md":
+            for phrase in SCRIBE_VERIFY_GATE:
+                check(f"{rel} contains verify gate sentinel: {phrase!r}",
+                      phrase in text or phrase in norm, "present", "MISSING")
+            for phrase in REVIEW_INHERITED_SENTINELS:
+                check(f"{rel} keeps inherited report literal: {phrase!r}",
+                      phrase in text, "present", "MISSING")
+            verify_lines = _fence_lines("review.md")
+            verify_persist = [
+                line for line in verify_lines
+                if "persist-seat" in line and "-f" in line.split()
+            ]
+            success_verify = [
+                line for line in verify_persist
+                if 'tmp-seat-<seat>.md"' in line
+                and "-fallback" not in line
+            ]
+            fallback_verify = [
+                line for line in verify_persist
+                if 'tmp-seat-<seat>-fallback.md"' in line
+            ]
+            check(f"{rel} success persist fence carries --verify",
+                  len(success_verify) == 1 and " --verify -f " in success_verify[0],
+                  "one --verify success fence", str(verify_persist))
+            check(f"{rel} fallback persist fence carries --verify",
+                  len(fallback_verify) == 1 and " --verify -f " in fallback_verify[0],
+                  "one --verify fallback fence", str(verify_persist))
+            check(f"{rel} has no legacy test-s fence",
+                  not any("test -s" in line for line in verify_lines),
+                  "no test-s fence", str(verify_lines))
+            check(f"{rel} has no legacy ok=true grep gate",
+                  "grep -q '\"ok\": *true'" not in text,
+                  "no grep gate", "legacy grep gate present")
+
         # The never-choke sentinel and the scribe fallback heading stay DISTINCT
         # (the fallback must not shadow the never-choke phrase the guard pins).
         check(f"{rel} keeps the scribe fallback heading distinct from never-choke",
@@ -11063,11 +11093,13 @@ def test_command_fences_no_expansions():
         fallback_p = [l for l in persist if 'tmp-seat-<seat>-fallback.md"' in l]
         check(f"{name}: success persist-seat -f reads the quoted relative RUN-SCOPED tmp-seat spill",
               len(success_p) == 1
-              and '-f ".crew/reviews/<session_segment>/<run_id>/tmp-seat-<seat>.md"' in success_p[0],
+              and '-f ".crew/reviews/<session_segment>/<run_id>/tmp-seat-<seat>.md"' in success_p[0]
+              and (name != "review.md" or " --verify -f " in success_p[0]),
               "one quoted relative run-scoped tmp-seat -f", str(persist))
         check(f"{name}: fallback persist-seat -f reads the DISTINCT quoted relative RUN-SCOPED tmp-seat-<seat>-fallback spill",
               len(fallback_p) == 1
-              and '-f ".crew/reviews/<session_segment>/<run_id>/tmp-seat-<seat>-fallback.md"' in fallback_p[0],
+              and '-f ".crew/reviews/<session_segment>/<run_id>/tmp-seat-<seat>-fallback.md"' in fallback_p[0]
+              and (name != "review.md" or " --verify -f " in fallback_p[0]),
               "one quoted relative run-scoped tmp-seat-fallback -f", str(persist))
         repair = [l for l in lines if "repair-seat" in l]
         check(f"{name}: repair-seat uses the NAME form (engine derives the seat file; no --seat path)",
@@ -13290,10 +13322,9 @@ def test_ok_true_serialization_shape():
 
 def test_persist_seat_scribe_gate_inputs():
     """persist-seat's OWN behavior on the exact tmp-file states the recipe's
-    gate observes: present-valid, absent (exit 2), empty/whitespace (ok=false at
-    exit 0), and a REAL exit-2 error (a non-member seat with a valid -f file, to
-    prove exit 2 is not only the absent-file case). These do NOT drive the
-    orchestrator's control flow (that is markdown), they pin the engine leg."""
+    two gate forms observe: the legacy grep gate still used by build.md and
+    measure-twice.md, and review.md's --verify exit contract. These assertions
+    pin the engine leg and do NOT drive orchestrator control flow."""
     log_section("persist-seat gate inputs (present / absent / empty / real exit 2)")
 
     # present-valid -> ok=true, run-dir <seat>.json, printed path greppable.
@@ -13317,8 +13348,8 @@ def test_persist_seat_scribe_gate_inputs():
               and o["run_id"] in printed and pdata.get("ok") is True,
               "ok=true in printed run-dir json", f"rc={pv.returncode} printed={printed!r}")
 
-        # absent -> persist-seat -f a nonexistent file exits 2 (in the recipe this
-        # state never reaches persist; the test -s precheck falls back first).
+        # absent -> legacy build/measure-twice test-s gates fall back before
+        # persist; review's --verify path receives the fixed missing diagnostic.
         gone = tdp / "does-not-exist.md"
         ab = _run_dispatcher(
             ["persist-seat", "sonnet", "--session-id", "S", "--run-id", o["run_id"],
@@ -13328,8 +13359,8 @@ def test_persist_seat_scribe_gate_inputs():
               "exit 2 + stderr", f"rc={ab.returncode} err={ab.stderr[:150]!r}")
 
         # empty/whitespace (nonzero size) -> ok=false at exit 0, printed json reads
-        # "ok": false. This is the ONLY empty case test -s (nonzero size) lets
-        # through to persist, and the grep gate is what catches it -> fallback.
+        # "ok": false. The legacy test-s gate lets this through and grep catches
+        # it; review's --verify gate returns exit 4 for the same landed record.
         ws = tdp / "ws.md"
         ws.write_text("   \n", encoding="utf-8")
         ew = _run_dispatcher(
@@ -13343,8 +13374,8 @@ def test_persist_seat_scribe_gate_inputs():
               "exit 0 + ok=false bytes", f"rc={ew.returncode} raw={ewraw[:160]!r}")
 
         # REAL exit-2 error: a valid -f file but a NON-MEMBER seat (not in the run
-        # roster) exits 2. Proves exit 2 also fires for genuine run/manifest
-        # errors, so the recipe treats a test -s-passing file's exit 2 as REAL.
+        # roster) exits 2. This proves both gate forms surface genuine
+        # run/manifest errors instead of treating them as missing input.
         nm = _run_dispatcher(
             ["persist-seat", "fable", "--session-id", "S", "--run-id", o["run_id"],
              "--model", "fable", "-f", str(src)], cwd=td, timeout=30)
@@ -13352,6 +13383,258 @@ def test_persist_seat_scribe_gate_inputs():
               nm.returncode == 2 and nm.stderr.strip() != "",
               "exit 2 + stderr (not an absent-file case)",
               f"rc={nm.returncode} err={nm.stderr[:150]!r}")
+
+
+def test_persist_seat_verify():
+    """Pin the --verify exit tree, including its read-back failure routes."""
+    log_section("persist-seat --verify read-back taxonomy and exit tree")
+
+    from contextlib import redirect_stderr, redirect_stdout
+    from io import StringIO
+    from unittest import mock
+    from multiagent import cli as engine_cli
+
+    def persist_args(seat, source, *extra):
+        return [
+            "persist-seat", seat, "--session-id", "S", "--model", seat,
+            "-f", str(source), *extra,
+        ]
+
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        prep = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex",
+             "--task-seats", "opus,sonnet", "--session-id", "S"],
+            cwd=td, timeout=30)
+        prep_data = json.loads(prep.stdout) if prep.returncode == 0 else {}
+        run_id = prep_data.get("run_id", "")
+        valid = tdp / "valid.md"
+        valid.write_text("## VERDICT\nAPPROVED\n", encoding="utf-8")
+
+        passed = _run_dispatcher(
+            persist_args("opus", valid, "--run-id", run_id, "--verify"),
+            cwd=td, timeout=30)
+        passed_path = Path(passed.stdout.strip())
+        passed_data = json.loads(passed_path.read_text(encoding="utf-8")) \
+            if passed_path.is_file() else {}
+        check("verify-pass: exit 0, path printed, landed ok=true",
+              passed.returncode == 0 and passed_path.is_file()
+              and passed_data.get("ok") is True,
+              "exit 0 + printed path + ok=true",
+              f"rc={passed.returncode} out={passed.stdout!r}")
+
+        whitespace = tdp / "whitespace.md"
+        whitespace.write_text("   \n", encoding="utf-8")
+        failed = _run_dispatcher(
+            persist_args("sonnet", whitespace, "--run-id", run_id, "--verify"),
+            cwd=td, timeout=30)
+        failed_path = Path(failed.stdout.strip())
+        check("verify-fail: existing whitespace file is exit 4, not missing exit 2",
+              failed.returncode == 4 and failed_path.is_file()
+              and failed.stderr.strip()
+              == "verify: seat sonnet landed ok=false: empty seat output",
+              "exit 4 + pinned slug/error diagnostic",
+              f"rc={failed.returncode} err={failed.stderr!r}")
+
+        preserve_empty = tdp / "preserve-empty.md"
+        preserve_empty.write_text("\n", encoding="utf-8")
+        preserved = _run_dispatcher(
+            persist_args("opus", preserve_empty, "--run-id", run_id, "--verify"),
+            cwd=td, timeout=30)
+        preserved_data = json.loads(passed_path.read_text(encoding="utf-8")) \
+            if passed_path.is_file() else {}
+        check("verify preserve-valid: kept ok=true record remains exit 0",
+              preserved.returncode == 0 and preserved_data.get("ok") is True
+              and preserved_data.get("output") == "## VERDICT\nAPPROVED\n",
+              "exit 0 + original valid bytes",
+              f"rc={preserved.returncode} data={preserved_data}")
+
+        nonmember = _run_dispatcher(
+            persist_args("fable", valid, "--run-id", run_id, "--verify"),
+            cwd=td, timeout=30)
+        check("verify-real-exit-2: manifest error remains a hard stop",
+              nonmember.returncode == 2
+              and "not a task member" in nonmember.stderr
+              and "verify: seat file missing, fall back" not in nonmember.stderr,
+              "original exit-2 diagnostic without fixed fallback line",
+              f"rc={nonmember.returncode} err={nonmember.stderr!r}")
+
+        missing = tdp / "missing.md"
+        missing_verify = _run_dispatcher(
+            persist_args("fable", missing, "--verify"), cwd=td, timeout=30)
+        missing_path = tdp / ".crew" / "reviews" / "S" / "fable.json"
+        check("verify-missing: missing -f gets the fixed fallback diagnostic",
+              missing_verify.returncode == 2
+              and missing_verify.stderr.strip()
+              == "verify: seat file missing, fall back"
+              and not missing_path.exists(),
+              "exit 2 + exact fixed diagnostic + no write",
+              f"rc={missing_verify.returncode} err={missing_verify.stderr!r}")
+        legacy_missing = _run_dispatcher(
+            persist_args("fable", missing), cwd=td, timeout=30)
+        check("without verify: missing -f keeps the ordinary exit-2 diagnostic",
+              legacy_missing.returncode == 2
+              and "error: cannot read" in legacy_missing.stderr
+              and "verify: seat file missing, fall back" not in legacy_missing.stderr,
+              "ordinary exit-2 read diagnostic",
+              f"rc={legacy_missing.returncode} err={legacy_missing.stderr!r}")
+
+        failed_verify = _run_dispatcher(
+            ["persist-seat", "fable", "--session-id", "S", "--model", "fable",
+             "--verify", "--failed", "--error", "deliberate failure"],
+            cwd=td, timeout=30)
+        check("verify-failed: --verify --failed exits 2 before writing",
+              failed_verify.returncode == 2 and not missing_path.exists(),
+              "exit 2 and no seat file",
+              f"rc={failed_verify.returncode} err={failed_verify.stderr!r}")
+
+        legacy_empty = tdp / "legacy-empty.md"
+        legacy_empty.write_text(" \n", encoding="utf-8")
+        legacy = _run_dispatcher(
+            ["persist-seat", "fable", "--session-id", "F", "--model", "fable",
+             "-f", str(legacy_empty)], cwd=td, timeout=30)
+        legacy_path = Path(legacy.stdout.strip())
+        legacy_data = json.loads(legacy_path.read_text(encoding="utf-8")) \
+            if legacy_path.is_file() else {}
+        check("without verify: empty landing keeps exit 0 and ok=false",
+              legacy.returncode == 0 and legacy_data.get("ok") is False,
+              "exit 0 + ok=false",
+              f"rc={legacy.returncode} data={legacy_data}")
+
+        invalid_input = tdp / "invalid-input.md"
+        invalid_input.write_bytes(b"valid prefix\n\xff")
+        invalid_verify = _run_dispatcher(
+            persist_args("fable", invalid_input, "--verify"),
+            cwd=td, timeout=30)
+        invalid_path = tdp / ".crew" / "reviews" / "S" / "fable.json"
+        check("verify-invalid-input-utf8: existing -f decode error is exit 2",
+              invalid_verify.returncode == 2
+              and invalid_verify.stderr.startswith("error: cannot read")
+              and "Traceback" not in invalid_verify.stderr
+              and not invalid_path.exists(),
+              "exit 2 + ordinary input-read error + no write",
+              f"rc={invalid_verify.returncode} err={invalid_verify.stderr!r}")
+
+        invalid_plain = _run_dispatcher(
+            persist_args("fable", invalid_input), cwd=td, timeout=30)
+        check("plain-invalid-input-utf8: existing -f decode error is exit 2",
+              invalid_plain.returncode == 2
+              and invalid_plain.stderr.startswith("error: cannot read")
+              and "Traceback" not in invalid_plain.stderr
+              and not invalid_path.exists(),
+              "exit 2 + ordinary input-read error + no write",
+              f"rc={invalid_plain.returncode} err={invalid_plain.stderr!r}")
+
+        saved_project = os.environ.get("CLAUDE_PROJECT_DIR")
+        saved_home = os.environ.get("HOME")
+        try:
+            os.environ["CLAUDE_PROJECT_DIR"] = str(tdp)
+            os.environ["HOME"] = str(tdp)
+            parser = engine_cli.build_parser()
+            readback_path = tdp / ".crew" / "reviews" / "D" / "opaque-task-seat.json"
+            original_read_text = Path.read_text
+
+            def invoke_readback(raw=None, read_error=None, invalid_utf8=False):
+                source = tdp / "opaque.md"
+                source.write_text("valid body", encoding="utf-8")
+                args = parser.parse_args(
+                    ["persist-seat", "opaque-task-seat", "--session-id", "D",
+                     "--model", "opaque-task-seat", "-f", str(source), "--verify"])
+
+                def patched_read_text(path, *read_args, **read_kwargs):
+                    if path.name == readback_path.name:
+                        if read_error is not None:
+                            raise read_error
+                        if invalid_utf8:
+                            path.write_bytes(b"\xff")
+                            return original_read_text(path, *read_args, **read_kwargs)
+                        return raw
+                    return original_read_text(path, *read_args, **read_kwargs)
+
+                stdout = StringIO()
+                stderr = StringIO()
+                with mock.patch.object(Path, "read_text", new=patched_read_text):
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        rc = engine_cli.cmd_persist_seat(args)
+                return rc, stdout.getvalue(), stderr.getvalue()
+
+            long_error = "x" * 250
+            rc, out, err = invoke_readback(
+                json.dumps({"ok": False, "error": long_error + "\nsecond line"}))
+            expected_error = f"verify: seat opaque-task-seat landed ok=false: {long_error[:200]}"
+            check("verify-fail: stderr uses slug, first line, and 200-char error cap",
+                  rc == 4 and out.strip().endswith("opaque-task-seat.json")
+                  and err.strip() == expected_error,
+                  "exit 4 + normalized pinned diagnostic",
+                  f"rc={rc} err={err!r}")
+
+            for label, raw in (
+                ("malformed read-back", "{"),
+                ("missing ok", json.dumps({"name": "opaque-task-seat"})),
+                ("non-boolean ok", json.dumps({"ok": "true"})),
+            ):
+                rc, out, err = invoke_readback(raw)
+                check(f"verify-{label}: exit 4 with printed path and verify note",
+                      rc == 4 and out.strip().endswith("opaque-task-seat.json")
+                      and err.startswith("verify:"),
+                      "exit 4 + printed path + verify stderr",
+                      f"rc={rc} out={out!r} err={err!r}")
+
+            rc, out, err = invoke_readback(read_error=OSError("read-back lost"))
+            check("verify-oserror-readback: exit 4 with verify note and path",
+                  rc == 4 and out.strip().endswith("opaque-task-seat.json")
+                  and err.startswith("verify:"),
+                  "exit 4 + printed path + verify stderr",
+                  f"rc={rc} out={out!r} err={err!r}")
+
+            rc, out, err = invoke_readback(invalid_utf8=True)
+            check("verify-invalid-utf8-readback: exit 4 with decode note and path",
+                  rc == 4 and out.strip().endswith("opaque-task-seat.json")
+                  and err.startswith("verify: cannot decode landed seat"),
+                  "exit 4 + verify decode diagnostic",
+                  f"rc={rc} out={out!r} err={err!r}")
+
+            unreadable = tdp / "unreadable.md"
+            unreadable.write_text("valid body", encoding="utf-8")
+            unreadable_args = parser.parse_args(
+                ["persist-seat", "unreadable-seat", "--session-id", "D",
+                 "--model", "unreadable-seat", "-f", str(unreadable), "--verify"])
+
+            def deny_read(path, *read_args, **read_kwargs):
+                if path == unreadable:
+                    raise PermissionError("permission denied")
+                return original_read_text(path, *read_args, **read_kwargs)
+
+            stdout = StringIO()
+            stderr = StringIO()
+            with mock.patch.object(Path, "read_text", new=deny_read):
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    rc = engine_cli.cmd_persist_seat(unreadable_args)
+            unreadable_path = tdp / ".crew" / "reviews" / "D" / "unreadable-seat.json"
+            check("verify-unreadable: existing read error is hard exit 2",
+                  rc == 2 and "error: cannot read" in stderr.getvalue()
+                  and "verify: seat file missing, fall back" not in stderr.getvalue()
+                  and not unreadable_path.exists(),
+                  "ordinary exit 2 + no write",
+                  f"rc={rc} err={stderr.getvalue()!r}")
+        finally:
+            if saved_project is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved_project
+            if saved_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = saved_home
+
+    verify_literal = "verify: seat file missing, fall back"
+    review_text = (SCRIPT_DIR.parent / "commands/review.md").read_text(encoding="utf-8")
+    cli_text = (SCRIPT_DIR.parent / "scripts/multiagent/cli.py").read_text(encoding="utf-8")
+    check("cross-literal: review fallback diagnostic is also in cli.py",
+          verify_literal in review_text and verify_literal in cli_text,
+          "literal present in review.md and cli.py",
+          "missing from one of the two sources")
 
 
 def test_visible_if_corrupted():
@@ -18715,6 +18998,7 @@ def main():
     test_scribe_frontmatter()
     test_ok_true_serialization_shape()
     test_persist_seat_scribe_gate_inputs()
+    test_persist_seat_verify()
     test_visible_if_corrupted()
     test_review_runs()
     test_run_identity_freeze()

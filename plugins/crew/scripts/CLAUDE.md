@@ -159,6 +159,13 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   REFUSES (exit 2) rather than attribute a completed seat by mutable pointer;
   with neither, the flat session dir, which skips only the run-identity half
   (the reserved-stem guard and the empty-output refusal apply everywhere).
+  With `--verify`, exit 0 requires the landed JSON object to have boolean
+  `ok=true`; exit 4 covers every other landed record, including ok=false,
+  missing or non-boolean ok, malformed JSON, read-back OSError, and Unicode
+  decode failure. A missing `-f` file with `--verify` remains exit 2 with the
+  exact `verify: seat file missing, fall back` diagnostic. An existing-but-
+  unreadable input and other real read or usage errors remain hard exit 2.
+  `--verify` cannot be combined with `--failed`.
 - `doctor` — `/crew:init` provider probe (NON-billable: installed-CLI detection).
 - `probe` — opt-in BILLABLE live seat smoke test (doctor proves the CLI is installed; probe proves it returns usable output).
 - `scaffold-config` — `/crew:init` commented-config generator.
@@ -386,16 +393,19 @@ Key contracts (do NOT regress):
   opaque echo the commands ignored.)
 - After the fan-out, the orchestrator persists EACH normalized Task seat (opus/sonnet/fable) via `crew
   persist-seat <seat> --session-id <id> --run-id <run_id> --model <pin> -f <text>` (or `--failed
-  --error <diag>` for a seat that errored) — the engine owns the `<seat>.json` filename (the seat name
+  --error <diag>` for a seat that errored). The engine owns the `<seat>.json` filename (the seat name
   itself; catalog names are their own slug), the six-field core shape, the run-identity stamps, and the
   preserve-valid write, so the command markdown no longer hand-assembles the `<seat>.json` with the
   Write tool. Without `--run-id` while the session pointer exists, `persist-seat` exits 2 naming the
   fix (completion-time attribution by mutable pointer is the TOCTOU bug this closes).
   On the SUCCESS path a `crew:scribe` sub-agent does the tmp-seat `Write` (so the persist-Write does
-  not render into orchestrator context); the orchestrator still owns the landing gate — its OWN `test
-  -s` plus a grep of the printed `<seat>.json` path, never the scribe's self-reported line — and falls
-  back to Writing a DISTINCT `tmp-seat-<seat>-fallback.md` path itself if the scribe path fails (a
-  timed-out scribe's late write to the original tmp cannot clobber the fallback bytes).
+  not render into orchestrator context). In review.md, the orchestrator's landing gate is the
+  `persist-seat --verify` exit code against the on-disk record: exit 0 is done; on the success path,
+  exit 4 routes to the FALLBACK, the fixed missing-file exit 2 also routes to the FALLBACK, and any
+  other exit 2 is a hard stop. build.md and measure-twice.md still use their legacy `test -s` precheck plus a grep of
+  the printed `<seat>.json` path. In every doc, the scribe's self-reported line is not the landing
+  authority, and a fallback uses a DISTINCT `tmp-seat-<seat>-fallback.md` path so a timed-out
+  scribe's late write to the original tmp cannot clobber the fallback bytes.
 
 ### Repair & collect
 
