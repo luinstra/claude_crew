@@ -15,19 +15,14 @@ $ARGUMENTS
 ## Conventions (stated once, apply throughout)
 
 - **No shell expansions in recipes.** No `${…}`, `$(…)`, or backticks on any
-  Bash line (they defeat permission allowlisting); the `${CLAUDE_PLUGIN_ROOT}`
-  prefix is exempt (the harness substitutes it). The ENGINE anchors a relative
-  `.crew/...` path arg to the project root (`crew_base()`), never the shell
-  cwd, so recipes carry plain relative paths; never paste an absolute dir into
-  a Bash arg (a project root can carry `$(…)`/backticks). Write-tool and Task
-  `Read` references take the printed ABSOLUTE paths verbatim (no shell).
-- **Reference code, don't paste it.** Every seat runs in the repo: if the
-  question is about a diff/branch/files, point seats at it ("run `git diff
-  main...HEAD` and read the changed files") rather than inlining a big diff.
+  Bash line; the `${CLAUDE_PLUGIN_ROOT}` prefix is exempt. The ENGINE anchors
+  relative `.crew/...` args to the project root, and Write-tool / Task `Read`
+  references use the printed ABSOLUTE paths verbatim.
+- **Reference code, don't paste it.** Every seat runs in the repo: point seats
+  at a diff, branch, or file instead of inlining a large diff.
 - **The one prompt source.** Every seat's prompt, subprocess AND task, every
   round, is built by the engine's `render` subcommand. NEVER hand-write a
-  seat's prompt: render it, so all seats see byte-identical material and
-  prior-round context.
+  seat's prompt: render it so all seats see byte-identical material.
 
 ## Options (all optional; flags go at the START of `$ARGUMENTS`)
 
@@ -55,8 +50,9 @@ $ARGUMENTS
 Resolve the flags to the **roster split**, strip them from `$ARGUMENTS` (the
 remainder is the question/target). **When the user named NEITHER `--panel` NOR
 `--seats`, do NOT assume `full`**: ask the engine for the config-aware split.
-`--json` returns the panel ALREADY split, the same shape `review-prep` prints,
-so this command never classifies a seat name or hardcodes a model pin:
+`--json` returns the panel ALREADY split, the same split fields the review
+flows consume, so this command never classifies a seat name or hardcodes a
+model pin:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --json
@@ -69,28 +65,21 @@ When the user DID name a panel, pass it through so the explicit choice wins:
 "${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --seats <list> --json     # explicit seat list
 ```
 
-The split: **`subprocess_seats`** (external-CLI entries; fan out one
-`crew run <seat>` per seat), **`task_seats`** (seats resolved native for this
-run, `crew:panelist` for discuss / `crew:reviewer` for review, via the Task
-tool; in-session on the subscription). On a Claude Code host, this native path
-uses no `claude -p` or API key; on other hosts, Claude seats resolve to the
-external `claude` CLI instead of being emulated by host-native subagents.
-**`task_seat_models`** (each Task seat's model pin FROM the catalog; spawn with
-`model = task_seat_models[<seat>]`, NEVER assume the seat name is its model).
-
+The split: **`subprocess_seats`** (external CLI; one `crew run <seat>` each),
+**`task_seats`** (native via Task, `crew:panelist`/`crew:reviewer`), and
+**`task_seat_models`** (catalog pin; spawn with `model =
+task_seat_models[<seat>]`). Native Claude seats use subscription; other hosts
+resolve Claude seats to external `subprocess_seats`.
 PRINTS `{subprocess_seats, task_seats, task_seat_models, host, seat_channels}` as one-line JSON.
 
 Seat only the models in this split. For `--panel cursor`, `task_seats` is
 empty and the Task-seats step is SKIPPED. A failed/skipped seat NEVER sinks
 the debate (see "Never choke"); only an all-empty panel aborts.
 
-> **Question-file naming:** both paths write the question to **`question.md`**
-> inside the debate dir. Single-round (A) uses the engine `debate` subcommand,
-> which is **ALWAYS scaffold-only** (it writes `question.md` + an empty
-> `subprocess.json` and NEVER runs subprocess seats internally, regardless of
-> `--seats`; A2 fans them out per-seat in visible, killable shells).
-> Multi-round (B) writes `question.md` into a `run-<id>/` dir, the layout the
-> `rounds.py` reader (`render --run-id`) expects.
+> **Question-file naming:** both paths write the question to **`question.md`**.
+> The `debate` subcommand is **ALWAYS scaffold-only**: it writes `question.md`;
+> it writes empty `subprocess.json`; it never runs subprocess seats; A2 visibly
+> fans them out. Multi-round writes `question.md` in `run-<id>/` for `rounds.py`.
 
 ---
 
@@ -108,25 +97,22 @@ none`** (one allowlistable call, no `mkdir`/heredoc/redirect):
 ```
 
 **Always `--seats none` here**: `debate` is scaffold-only regardless of
-`--seats` (a non-empty value just prints a stderr advisory), so `none` is the
-explicit, advisory-free form; a Claude-only panel uses the identical call and
-simply skips A2. `--consume` deletes the staging file once the question is
-safely copied in; the unlink is best-effort and SILENT here (unlike `state
-init --consume`, which warns when its delete fails), so a leftover staging
-file is cosmetic, not an error.
+`--seats`; a non-empty value prints a stderr advisory, so `none` is the
+advisory-free form. A Claude-only panel uses the identical call and simply skips A2.
+`--consume` deletes the staging file; the unlink is best-effort and silent,
+so a leftover staging file is cosmetic.
 
-The subcommand creates `.crew/debates/<timestamp>-<slug>/`, writes
-`question.md` (plus an always-empty `subprocess.json`), and prints a JSON
-summary with **`dir`** (ABSOLUTE, engine-anchored). Use that printed path
-VERBATIM as `<dir>` in Write-tool and Task `Read` references; Bash recipes
-instead use the RELATIVE `.crew/debates/<dir-name>/...`, where `<dir-name>` is
-the basename of the printed `dir` (a safe engine-minted `<timestamp>-<slug>`).
+The subcommand creates `.crew/debates/<timestamp>-<slug>/`, writes `question.md`
+plus empty `subprocess.json`, and prints JSON with **`dir`** (ABSOLUTE,
+engine-anchored). Use the printed ABSOLUTE `dir` verbatim as `<dir>` for
+Write/Task `Read`; its basename is `<dir-name>`, which Bash uses as the RELATIVE
+`.crew/debates/<dir-name>/...`.
 
 ## A2 — Fan out subprocess seats (one visible shell PER SEAT)
 
-**Skip this step if the resolved panel has no subprocess seat** (e.g.
-`--panel lite`/`solo`). `subprocess_seats` from the split is ALREADY
-group-expanded and concrete: just loop over it.
+**Skip this step if the resolved panel has no subprocess seat** (e.g. `--panel
+lite`/`solo`). `subprocess_seats` from the split is ALREADY group-expanded:
+just loop over it.
 
 **A2.1 — render each seat's prompt.** Discuss-mode council prompts carry a
 per-seat label ("acting as the **<seat>** seat"), so render ONE prompt per
@@ -138,28 +124,23 @@ seat from the single builder (for a review-mode debate, render
 ```
 
 **A2.2 — run EACH seat in its own parallel shell.** One SEPARATE `crew run
-<seat>` Bash call per seat, all concurrently (e.g. background calls), so they
-are distinct shells you can watch and kill individually:
+<seat>` Bash call per seat, all concurrently:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f ".crew/debates/<dir-name>/.prompt-<seat>.txt" --json -o ".crew/debates/<dir-name>/<seat>.json"
 ```
 
 `run --json` ALWAYS exits 0 and writes the six-field core plus optional
-`channel` provenance (`name, model, ok, output, error, elapsed`); a failed/skipped seat lands as
-`ok=False` with a diagnostic, so per-seat never-choke is automatic.
-
-**A2.3 — collect.** WAIT for every A2.2 shell to exit first (a seat whose
-`-o` file hasn't appeared is still running, not failed), then read each
-`<dir>/<seat>.json` and carry them into A4.
+`channel` provenance; a failed/skipped seat lands as `ok=False` with a
+diagnostic. WAIT for every shell (a seat whose `-o` file hasn't appeared is
+still running, not failed), then read each `<seat>.json` into A4.
 
 ## A3 — Fan out task seats (parallel)
 
-> **Claude Code host ONLY.** Spawning Task seats applies only when the running
-> harness is Claude Code. On another host, `review-prep` resolves Claude seats
-> into the external `subprocess_seats` list for the `claude` CLI; do NOT emulate
-> these seats with host-native subagents. If that CLI is missing, the engine records
-> a named skipped result and continues with the other seats.
+> **Claude Code host ONLY.** Native Task seats apply on Claude Code. On another
+> host, `seats --debate` resolves Claude seats into external `subprocess_seats`;
+> do NOT emulate these seats with host-native subagents. A missing external CLI
+> becomes a named skipped result and the other seats continue.
 
 **Skip this step if `task_seats` is empty** (e.g. `--panel cursor`). For EACH
 `<seat>` in `task_seats`, render its prompt (one render line per Task seat),
@@ -181,73 +162,54 @@ Task(subagent_type="crew:panelist", model="<task_seat_models[<seat>]>", prompt="
 (Review mode: render `--mode review <target>` and dispatch `crew:reviewer`
 instead. Most debates are discuss.)
 
-> **Why `-o` here, not review-prep staging:** debate keeps its own
-> `.crew/debates/...` dir (question, per-seat results, synthesis), and
-> debate's OWN run-id threads prior rounds through `render --run-id`, a
-> debate-round mechanism unrelated to the review engine's run scoping. The
-> two staging schemes are intentional, not an inconsistency to "fix".
+> Why `-o`: debate's `.crew/debates/...` dir holds question, per-seat results,
+> and synthesis; its OWN run-id threads prior rounds through `render --run-id`.
+> The two staging schemes are intentional, not an inconsistency to "fix".
 
 ## A4 — Normalize + synthesize + log
 
-> **Spawn EXACTLY as written: a bare one-shot `Task(...)`, NO `name` argument.**
-> A named spawn creates a long-lived TEAMMATE instead, and a teammate delivers
-> ONLY by calling `SendMessage`: its plain final message reaches nobody, so a
-> finished take is stranded in its own transcript and the seat reads as idle
-> forever. (Seen live: opus seats strand every time while sonnet happens to call
-> `SendMessage`, so the loss masquerades as a model bug and costs a day.) A
-> one-shot Task is resumable by its returned id if a follow-up is ever needed,
-> so a name buys the panel nothing. This governs BOTH dispatch sites above
-> (single-round and per-round).
+> Spawn EXACTLY as written: a bare one-shot `Task(...)`, NO `name` argument.
+> (A named Task delivers only via `SendMessage` and strands the debate.)
+> **The Task RESULT is the only completion signal.** Each `Task(...)` RETURNS the
+> seat's final message; that returned text IS the seat's take. **NEVER judge a
+> seat by a proxy** (output-file byte size, transcript length, notification, or
+> elapsed time).
+> A seat that has not returned is still running, not failed. A Task error, timeout,
+> or unusable block is a failed seat, never a reason to abort the debate.
 
-> **The Task RESULT is the only completion signal.** Each `Task(...)` RETURNS
-> the seat's final message; that returned text IS the seat's take *and* the
-> proof it finished. Take `ok`/`output` from it. **NEVER judge a seat by a
-> proxy** (output-file byte size, transcript length, a missed notification,
-> elapsed time): those race the transcript flush and have falsely declared a
-> finished seat "dead". A seat that has not returned is still running, not
-> failed: wait for it. `ok=False` ONLY when the Task itself errors, returns
-> no usable block, or the harness reports it failed.
-
-Gather every seat into the six-field core shape: subprocess seats from their
-`<dir>/<seat>.json` (IGNORE the empty `subprocess.json` scaffold), Task seats
-normalized from their returned results. A failed/skipped seat renders with
-its diagnostic and never suppresses the others. Render the panel
-side-by-side, then synthesize: **Areas of agreement / Key disagreements /
-Recommendation** (discuss), or the `APPROVED`/`REVISE` +
-`[BLOCKING]`/`[MINOR]` verdict (review). With the **Write tool**, log the
-seat outputs and `synthesis.md` into the debate `dir`. Tell the user the path.
+Gather every seat into the six-field core shape
+(`name, model, ok, output, error, elapsed`): subprocess seats from their
+`<dir>/<seat>.json` (**IGNORE the empty `subprocess.json` scaffold**), Task
+seats normalized from returned results. A failed/skipped seat renders with its
+diagnostic and never suppresses the others. Render the panel side-by-side,
+then synthesize: **Areas of agreement / Key disagreements / Recommendation**
+(discuss), or the `APPROVED`/`REVISE` + `[BLOCKING]`/`[MINOR]` verdict (review).
+With the Write tool, log each seat's output (at least one logged file per
+Task-seat take) plus `synthesis.md` into the debate `dir`. Tell the user the path.
 
 ---
 
 # B) Multi-round (`--rounds N`, N > 1) — discuss mode
 
-Multi-round composes `render` (which folds the prior round in as
-injection-guarded DATA) + `run` + the run-dir convention + the Write tool; no
-new engine call.
+Multi-round composes render/run, run-dir, and Write; no new engine call.
 
 ## B1 — Open the run
 
 Pick a run-id `run-<short-slug>` matching `^run-[A-Za-z0-9_-]+$` (any other
-character makes the first `render --run-id` fail with a `RoundError`, the
-traversal guard). Define ONE absolute run dir for every read, write, and Task
-reference in this section:
+character makes the first `render --run-id` fail with a `RoundError`). Define
+ONE absolute run dir for every read, write, and Task reference:
 
 ```
 <run-dir> = <project-root>/.crew/debates/<run-id>
 ```
 
-Bash recipes spell it as the RELATIVE `.crew/debates/<run-id>/...`; the
-engine's `render --run-id` resolves prior rounds from the SAME anchored root
-(`crew_base()/.crew/debates`), so orchestrator writes and engine reads land in
-one tree. Write the question once with the **Write tool** to
-`<run-dir>/question.md` (creates the run dir).
+Bash uses relative `.crew/debates/<run-id>/...`; engine resolves prior
+rounds from that root. Write question with **Write** to `<run-dir>/question.md`.
 
 ## B2 — For each round n = 1 … N
 
-**Render each seat's prompt** (the engine reads rounds `1…n-1` from the run
-dir; round 1 has no prior). Render EVERY seat in the panel, subprocess AND
-task; omit `--base-dir` (the anchored default is the same dir every other
-`.crew` consumer resolves):
+**Render each seat's prompt** (the engine reads rounds `1…n-1`; round 1 has no
+prior). Render EVERY seat in the panel, subprocess AND task; omit `--base-dir`:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role <seat> \
@@ -263,21 +225,19 @@ Then run the round's seats (in parallel where possible):
   "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f ".crew/debates/<run-id>/.prompt-<seat>-r<n>.txt" --json -o ".crew/debates/<run-id>/<seat>-r<n>.json"
   ```
 - **Task seats**: one `crew:panelist` per seat, **pinned from
-  `task_seat_models[<seat>]`** (the Task tool validates the model value), by
-  reference, exactly as A3. A Task seat appears in this list only when the
-  current host resolves it native; on another host, prep places it in the
-  external subprocess list instead. Never emulate an external seat with a
-  host-native subagent:
+  `task_seat_models[<seat>]`**, by reference, exactly as A3. A Task seat appears
+  only when the current host resolves it native; on another host, the
+  `seats --debate` split places it in the external subprocess list instead.
+  Never emulate an external seat with a host-native subagent:
   ```
   # for each <seat> in task_seats:
   Task(subagent_type="crew:panelist", model="<task_seat_models[<seat>]>", prompt="You are the <seat> seat. Read <run-dir>/.prompt-<seat>-r<n>.txt and follow it exactly.")
   ```
   Use each Task's RETURNED result as its take and completion signal (see A4).
 
-**Record the round.** Wait for every seat (a seat still running is not a
-failed seat), normalize to the six-field core plus optional channel provenance,
-then with the **Write tool**
-write all seats' positions, labeled by seat name, into:
+**Record the round.** Wait for every seat, normalize to the six-field core plus
+optional channel provenance; use **Write** to write all seats' positions,
+labeled by seat name, into:
 
 ```
 <run-dir>/round-<NN>.md      (zero-padded: round-01.md, round-02.md, …)
@@ -300,15 +260,15 @@ disagreements / Recommendation**. Tell the user the run-dir path.
 
 ## Never choke (both modes)
 
-A failed/skipped seat, subprocess OR task, any round, NEVER aborts the debate
+A failed/skipped seat, subprocess OR task, in any round, NEVER aborts the debate
 and is NEVER silently dropped:
 
-- Subprocess seats run one-per-seat via `run --json` (always exit 0,
-  six-field core plus optional channel provenance); a failed seat lands as `ok=False`, the others are
-  unaffected. Read whichever `<seat>.json` files appear.
-- A `crew:panelist`/`crew:reviewer` Task that errors, times out, or returns
-  no usable block is normalized to `ok=False` and rendered with its
-  diagnostic; the other seats proceed.
+- Subprocess seats run one-per-seat via `run --json` (always exit 0, six-field
+  core plus optional channel provenance); a failed seat lands as `ok=False`,
+  the others are unaffected. Read whichever `<seat>.json` files appear.
+- A `crew:panelist`/`crew:reviewer` Task that errors, times out, or returns no
+  usable block is normalized to `ok=False` and rendered with its diagnostic;
+  the other seats proceed.
 - In multi-round, a seat that failed in round n can still participate in
   round n+1 (re-rendered + re-dispatched fresh).
 - ONLY when **zero** seats produced usable output, skip the synthesis and
@@ -316,10 +276,10 @@ and is NEVER silently dropped:
 
 ---
 
-Subscription safety: on a Claude Code host, Claude voices resolved native are
-in-session Task seats, so that path uses no `claude -p` or Anthropic API. On
-other hosts, the engine may drive the external `claude` CLI; a missing CLI is a
-named skipped result, never a host-native emulation. A stray
-`ANTHROPIC_API_KEY` is irrelevant to the native path. This council is fully
-self-contained in crew: NEVER call `agy -p` / `codex exec` / `cursor-agent`
-directly, and NEVER hand off to any external debate plugin/shell.
+Subscription safety: on a Claude Code host, native Claude voices are in-session
+Task seats, using no `claude -p` or Anthropic API. On other hosts, the engine
+may drive external `claude` CLI; a missing CLI is a named skipped result, never
+a host-native emulation. A stray `ANTHROPIC_API_KEY` is irrelevant to the NATIVE path.
+This council is fully self-contained in crew: NEVER call `agy -p` / `codex exec`
+/ `cursor-agent` directly, and NEVER hand off to any external debate
+plugin/shell.

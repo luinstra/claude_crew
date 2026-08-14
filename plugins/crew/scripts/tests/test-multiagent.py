@@ -7400,6 +7400,235 @@ def test_measure_twice_md_loop_sentinels():
     )
 
 
+def test_debate_md_mode_sentinels():
+    log_section("debate.md mode sentinels")
+    raw = (SCRIPT_DIR.parent / "commands" / "debate.md").read_text(encoding="utf-8")
+    # 73 "debate.md mode:" checks: 33 literals + 6 anchors + 26 ordering
+    # + 8 fence/argv pins. Deliberately not asserted in code; keep this
+    # number in sync when adding a check.
+    stripped_lines = []
+    for line in raw.splitlines():
+        if line.startswith(">"):
+            line = line[1:]
+            if line.startswith(" "):
+                line = line[1:]
+        stripped_lines.append(line)
+    norm = " ".join("\n".join(stripped_lines).split())
+
+    pins = [
+        ("literal 1", "**Mode**: inferred, not flagged."),
+        ("literal 2", "A free-form **question** = **discuss** mode (seats give a take; dispatch `crew:panelist`)."),
+        ("literal 3", "A **diff / branch / plan `.md`** = **review** mode (seats score it; dispatch `crew:reviewer`; single-round only; use `/crew:review` for the full review verdict). When in doubt it's discuss."),
+        ("literal 4", "**When the user named NEITHER `--panel` NOR `--seats`, do NOT assume `full`**: ask the engine for the config-aware split."),
+        ("literal 5", "`--rounds N` (1-5, default **1**)"),
+        ("literal 6", "**Always `--seats none` here**: `debate` is scaffold-only regardless of `--seats`"),
+        ("literal 7", "both paths write the question to **`question.md`**"),
+        # Literal 8 is plain in the post-rewrite A4 rendering; bold markers are omitted.
+        ("literal 8", "Spawn EXACTLY as written: a bare one-shot `Task(...)`, NO `name` argument."),
+        ("literal 9", "The Task RESULT is the only completion signal"),
+        # Literal 10 is blockquote-resident before the rewrite; the stripped norm handles its wrap.
+        ("literal 10", "NEVER judge a seat by a proxy"),
+        ("literal 11", "IGNORE the empty `subprocess.json` scaffold"),
+        # This is the post-rewrite guard rendering; the host-CLI qualifier is intentionally absent.
+        ("literal 12", "On another host, `seats --debate` resolves Claude seats into external `subprocess_seats`; do NOT emulate these seats with host-native subagents."),
+        ("literal 13", "**Claude Code host ONLY.**"),
+        ("literal 14", "Pick a run-id `run-<short-slug>` matching `^run-[A-Za-z0-9_-]+$`"),
+        ("literal 15", "(zero-padded: round-01.md, round-02.md, …)"),
+        ("literal 16", "a seat that failed in round n can still participate in round n+1 (re-rendered + re-dispatched fresh)."),
+        ("literal 17", "report: `could not convene — all seats failed: <per-seat diagnostics>`."),
+        ("literal 18", "This council is fully self-contained in crew: NEVER call `agy -p` / `codex exec` / `cursor-agent` directly, and NEVER hand off to any external debate plugin/shell."),
+        # Literal 19 is blockquote-resident before the rewrite; the stripped norm handles its wrap.
+        ("literal 19", "The two staging schemes are intentional, not an inconsistency to \"fix\"."),
+        ("literal 20", "**Skip this step if the resolved panel has no subprocess seat**"),
+        ("literal 21", "**Skip this step if `task_seats` is empty**"),
+        ("literal 22", "stop if positions have converged"),
+        # This is the post-rewrite B2 echo, with the resolver named explicitly.
+        ("literal 23", "on another host, the `seats --debate` split places it in the external subprocess list instead"),
+        # This is the post-rewrite continuation clause inside the guard block.
+        ("literal 24", "A missing external CLI becomes a named skipped result and the other seats continue."),
+        ("literal 25", "Gather every seat into the six-field core shape"),
+        ("literal 26", "**Areas of agreement / Key disagreements / Recommendation** (discuss)"),
+        ("literal 27", "the `APPROVED`/`REVISE` + `[BLOCKING]`/`[MINOR]` verdict (review)"),
+        ("literal 28", "**How positions evolved / Areas of agreement / Remaining disagreements / Recommendation**"),
+        # This is the post-rewrite replacement wording for the old resolver echo.
+        ("literal 29", "the same split fields the review flows consume"),
+        # This is the post-rewrite A4 wording, with debate replacing review.
+        ("literal 30", "never a reason to abort the debate"),
+        ("literal 31", "Review mode: render `--mode review <target>` and dispatch `crew:reviewer` instead."),
+        ("literal 32", "(for a review-mode debate, render `--mode review <target>` instead)"),
+        # Literal 33 is a post-rewrite frozen quote; matching uses whitespace normalization.
+        ("literal 33", "log each seat's output (at least one logged file per Task-seat take) plus `synthesis.md` into the debate `dir`"),
+    ]
+    offsets = {}
+    for label, phrase in pins:
+        normalized = " ".join(phrase.split())
+        offsets[label] = norm.find(normalized)
+        present = offsets[label] >= 0
+        check(
+            f"debate.md mode: {label} is present",
+            present,
+            "literal present in the required text space",
+            phrase,
+        )
+
+    anchors = [
+        ("A", "# A) Single round (`--rounds 1`, the default)"),
+        ("A2", "## A2 — Fan out subprocess seats (one visible shell PER SEAT)"),
+        ("A3", "## A3 — Fan out task seats (parallel)"),
+        ("A4", "## A4 — Normalize + synthesize + log"),
+        ("B", "# B) Multi-round (`--rounds N`, N > 1) — discuss mode"),
+        ("Never-choke", "## Never choke (both modes)"),
+    ]
+    anchor_offsets = {}
+    for label, phrase in anchors:
+        normalized = " ".join(phrase.split())
+        anchor_offsets[label] = norm.find(normalized)
+        check(
+            f"debate.md mode: {label} section anchor is present",
+            anchor_offsets[label] >= 0,
+            "normalized section anchor present",
+            phrase,
+        )
+
+    def offsets_present(*labels):
+        return all(
+            (offsets if label.startswith("literal") else anchor_offsets)[label] >= 0
+            for label in labels
+        )
+
+    for label in ("literal 1", "literal 3", "literal 29"):
+        check(
+            f"debate.md mode: {label} is before A",
+            offsets_present(label, "A") and offsets[label] < anchor_offsets["A"],
+            "literal offset before A anchor",
+            f"literal={offsets[label]} A={anchor_offsets['A']}",
+        )
+    for label in ("literal 6",):
+        check(
+            f"debate.md mode: {label} is between A and A2",
+            offsets_present("A", label, "A2")
+            and anchor_offsets["A"] < offsets[label] < anchor_offsets["A2"],
+            "literal offset between A and A2",
+            f"A={anchor_offsets['A']} literal={offsets[label]} A2={anchor_offsets['A2']}",
+        )
+    for label in ("literal 20", "literal 32"):
+        check(
+            f"debate.md mode: {label} is between A2 and A3",
+            offsets_present("A2", label, "A3")
+            and anchor_offsets["A2"] < offsets[label] < anchor_offsets["A3"],
+            "literal offset between A2 and A3",
+            f"A2={anchor_offsets['A2']} literal={offsets[label]} A3={anchor_offsets['A3']}",
+        )
+    for label in ("literal 13", "literal 12", "literal 24", "literal 21", "literal 31"):
+        check(
+            f"debate.md mode: {label} is between A3 and A4",
+            offsets_present("A3", label, "A4")
+            and anchor_offsets["A3"] < offsets[label] < anchor_offsets["A4"],
+            "literal offset between A3 and A4",
+            f"A3={anchor_offsets['A3']} literal={offsets[label]} A4={anchor_offsets['A4']}",
+        )
+    for label in ("literal 8", "literal 9", "literal 30", "literal 11",
+                  "literal 25", "literal 26", "literal 27", "literal 33"):
+        check(
+            f"debate.md mode: {label} is between A4 and B",
+            offsets_present("A4", label, "B")
+            and anchor_offsets["A4"] < offsets[label] < anchor_offsets["B"],
+            "literal offset between A4 and B",
+            f"A4={anchor_offsets['A4']} literal={offsets[label]} B={anchor_offsets['B']}",
+        )
+    for label in ("literal 14", "literal 15", "literal 23", "literal 28"):
+        check(
+            f"debate.md mode: {label} is between B and Never-choke",
+            offsets_present("B", label, "Never-choke")
+            and anchor_offsets["B"] < offsets[label] < anchor_offsets["Never-choke"],
+            "literal offset between B and Never-choke",
+            f"B={anchor_offsets['B']} literal={offsets[label]} Never-choke={anchor_offsets['Never-choke']}",
+        )
+    for label in ("literal 16", "literal 17"):
+        check(
+            f"debate.md mode: {label} is after Never-choke",
+            offsets_present(label, "Never-choke")
+            and offsets[label] > anchor_offsets["Never-choke"],
+            "literal offset after Never-choke",
+            f"literal={offsets[label]} Never-choke={anchor_offsets['Never-choke']}",
+        )
+    check(
+        "debate.md mode: literal 18 follows literal 17",
+        offsets_present("literal 18", "literal 17")
+        and offsets["literal 18"] > offsets["literal 17"],
+        "literal 18 offset after literal 17",
+        f"literal17={offsets['literal 17']} literal18={offsets['literal 18']}",
+    )
+
+    fence_lines = _fence_lines("debate.md")
+    check(
+        "debate.md mode: eight bash openers are present",
+        raw.count("```bash") == 8,
+        "eight unanchored bash openers",
+        str(raw.count("```bash")),
+    )
+    # Three-line count depends on the Options bullet's inline mention staying prose; the unanchored count counts ALL opener lines.
+    seats_lines = [line for line in fence_lines if "seats --debate" in line]
+    check(
+        "debate.md mode: three seats resolver lines carry json",
+        len(seats_lines) == 3 and all("--json" in line for line in seats_lines),
+        "three resolver lines and json on each",
+        str(seats_lines),
+    )
+    scaffold_marker = '"${CLAUDE_PLUGIN_ROOT}/crew" debate -f'
+    scaffold_lines = [line for line in fence_lines if scaffold_marker in line]
+    check(
+        "debate.md mode: scaffold argv is pinned once",
+        len(scaffold_lines) == 1
+        and all(token in scaffold_lines[0] for token in ("--slug", "--seats none", "--consume")),
+        "one full debate scaffold argv with its three flags",
+        str(scaffold_lines),
+    )
+    run_lines = [line for line in fence_lines if " run <seat> " in line]
+    check(
+        "debate.md mode: two run argv lines are pinned",
+        len(run_lines) == 2
+        and all("--json" in line and " -o " in line for line in run_lines)
+        and any('".crew/debates/<dir-name>/<seat>.json"' in line for line in run_lines)
+        and any('".crew/debates/<run-id>/<seat>-r<n>.json"' in line for line in run_lines),
+        "single-round and round-scoped run argv lines",
+        str(run_lines),
+    )
+    render_lines = [
+        line for line in fence_lines
+        if 'render --mode discuss --seat-role <seat> -f ".crew/debates/<dir-name>/question.md"' in line
+    ]
+    check(
+        "debate.md mode: two discuss render argv lines are pinned",
+        len(render_lines) == 2,
+        "two A2 and A3 discuss render lines",
+        str(render_lines),
+    )
+    fence_norm = " ".join(" ".join(fence_lines).split())
+    run_id_pin = "--run-id <run-id> --round <n>"
+    check(
+        "debate.md mode: round render carries run and round",
+        fence_norm.count(run_id_pin) == 1,
+        "one normalized run-id and round pin",
+        fence_norm,
+    )
+    prompt_pin = '-o ".crew/debates/<run-id>/.prompt-<seat>-r<n>.txt"'
+    check(
+        "debate.md mode: round render carries prompt output",
+        fence_norm.count(prompt_pin) == 1,
+        "one normalized prompt output pin",
+        fence_norm,
+    )
+    spawn_lines = [line for line in raw.splitlines() if "subagent_type=" in line]
+    check(
+        "debate.md mode: only panelist Task spawns are present",
+        len(spawn_lines) == 2
+        and all('subagent_type="crew:panelist"' in line for line in spawn_lines),
+        "every subagent_type is crew:panelist",
+        str(spawn_lines),
+    )
+
+
 def test_persist_seat_doc_sync():
     log_section("persist-seat: the three review-bearing docs use the engine call")
     # DOC-SYNC guard: the review/build/measure-twice command markdown must route
@@ -19182,6 +19411,7 @@ def main():
     test_no_dotkept_staged_filename()
     test_build_md_executor_fork_sentinels()
     test_measure_twice_md_loop_sentinels()
+    test_debate_md_mode_sentinels()
     test_persist_seat_doc_sync()
     test_roster_doc_sync()
     test_doctor()
