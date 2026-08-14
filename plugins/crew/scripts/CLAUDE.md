@@ -399,11 +399,11 @@ Key contracts (do NOT regress):
   Write tool. Without `--run-id` while the session pointer exists, `persist-seat` exits 2 naming the
   fix (completion-time attribution by mutable pointer is the TOCTOU bug this closes).
   On the SUCCESS path a `crew:scribe` sub-agent does the tmp-seat `Write` (so the persist-Write does
-  not render into orchestrator context). In review.md, the orchestrator's landing gate is the
-  `persist-seat --verify` exit code against the on-disk record: exit 0 is done; on the success path,
-  exit 4 routes to the FALLBACK, the fixed missing-file exit 2 also routes to the FALLBACK, and any
-  other exit 2 is a hard stop. Only measure-twice.md still uses its legacy `test -s` precheck plus a grep of
-  the printed `<seat>.json` path; review.md and build.md use `persist-seat --verify`. In every doc, the scribe's self-reported line is not the landing
+  not render into orchestrator context). In review.md, build.md, and measure-twice.md, the
+  orchestrator's landing gate is the `persist-seat --verify` exit code against the on-disk
+  record: exit 0 is done; on the success path, exit 4 routes to the FALLBACK, the fixed
+  missing-file exit 2 also routes to the FALLBACK, and any other exit 2 is a hard stop.
+  All three review-bearing docs use `persist-seat --verify`. In every doc, the scribe's self-reported line is not the landing
   authority, and a fallback uses a DISTINCT `tmp-seat-<seat>-fallback.md` path so a timed-out
   scribe's late write to the original tmp cannot clobber the fallback bytes.
 

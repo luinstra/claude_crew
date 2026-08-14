@@ -7254,6 +7254,152 @@ def test_build_md_executor_fork_sentinels():
     )
 
 
+def test_measure_twice_md_loop_sentinels():
+    log_section("measure-twice.md loop sentinels")
+    raw = (SCRIPT_DIR.parent / "commands" / "measure-twice.md").read_text(encoding="utf-8")
+    norm = " ".join(raw.split())
+
+    pins = [
+        ("literal 1", "**If `$ARGUMENTS` contains a file path**"),
+        ("literal 2", "Do NOT re-interview the user."),
+        ("literal 3", "**Skip this phase if a design doc was referenced above.**"),
+        ("literal 4", "Then get the state to find the plan file path:"),
+        ("literal 5", 'subagent_type="crew:advisor"'),
+        ("literal 6", "Save the plan to: [plan_file from state]"),
+        ("literal 7", "No `--base`: a plan-file target ignores it."),
+        ("literal 8", "**Leave the plan file untouched until the verdict is recorded**"),
+        ("literal 9", "`record-verdict mt REVISE --minor-only`, then complete the loop"),
+        ("literal 10", "**`--force` is the HUMAN's authorization, carried out by you; you never originate it.**"),
+        ("literal 11", "REVISE and REJECT advance `revision_round`, the loop's only honest iteration count."),
+        ("literal 12", "FAILED is only for a panel that returned nothing usable; a SECOND consecutive FAILED ends the loop itself (stamps it inactive; no deactivate follows)."),
+        ("literal 13", "**On REVISE, diagnose the CLASS before revising.**"),
+        ("literal 14", "`--reason \"Completion forced over advisories\"`"),
+        ("literal 15", "could not verify quorum without the user's explicit --force:"),
+        ("literal 16", "could not review — all seats failed:"),
+        (
+            "literal 17",
+            "resolve a RELATIVE path against the project root "
+            "(`<project-root>/.crew/plans/bar.md`, per Conventions), never a bare "
+            "cwd-relative path a divergent cwd would resolve against the wrong "
+            "tree; an ABSOLUTE path is read as-is.",
+        ),
+    ]
+    offsets = {}
+    for label, phrase in pins:
+        normalized = " ".join(phrase.split())
+        offsets[label] = norm.find(normalized)
+        check(
+            f"measure-twice.md loop: {label} is present",
+            offsets[label] >= 0,
+            "normalized literal present",
+            phrase,
+        )
+
+    anchors = [
+        ("phase 2", "## Phase 2: Plan Generation"),
+        ("phase 3", "## Phase 3: Review Loop"),
+        ("3d", "#### 3d — Synthesize the verdict"),
+        ("step 4", "### Step 4: Handle Verdict"),
+        ("completing", "## Completing the Loop"),
+    ]
+    anchor_offsets = {}
+    for label, phrase in anchors:
+        anchor_offsets[label] = norm.find(phrase)
+        check(
+            f"measure-twice.md loop: {label} section anchor is present",
+            anchor_offsets[label] >= 0,
+            "normalized section anchor present",
+            phrase,
+        )
+
+    check(
+        "measure-twice.md loop: literal 2 precedes plan generation",
+        offsets["literal 2"] < anchor_offsets["phase 2"],
+        "literal 2 before phase 2",
+        f"literal={offsets['literal 2']} anchor={anchor_offsets['phase 2']}",
+    )
+    check(
+        "measure-twice.md loop: literal 5 lies in plan generation",
+        anchor_offsets["phase 2"] < offsets["literal 5"] < anchor_offsets["phase 3"],
+        "literal 5 between phases 2 and 3",
+        f"phase2={anchor_offsets['phase 2']} literal={offsets['literal 5']} phase3={anchor_offsets['phase 3']}",
+    )
+    for label in ("literal 15", "literal 16"):
+        check(
+            f"measure-twice.md loop: {label} is bounded in synthesis",
+            anchor_offsets["3d"] < offsets[label] < anchor_offsets["step 4"],
+            f"{label} between 3d and step 4",
+            f"3d={anchor_offsets['3d']} literal={offsets[label]} step4={anchor_offsets['step 4']}",
+        )
+    for label in ("literal 9", "literal 10"):
+        check(
+            f"measure-twice.md loop: {label} is bounded in verdict handling",
+            anchor_offsets["step 4"] < offsets[label] < anchor_offsets["completing"],
+            f"{label} between step 4 and completing",
+            f"step4={anchor_offsets['step 4']} literal={offsets[label]} completing={anchor_offsets['completing']}",
+        )
+    check(
+        "measure-twice.md loop: literal 14 follows completion anchor",
+        offsets["literal 14"] > anchor_offsets["completing"],
+        "literal 14 after completing",
+        f"literal={offsets['literal 14']} completing={anchor_offsets['completing']}",
+    )
+
+    fence_lines = _fence_lines("measure-twice.md")
+    state_specs = [
+        ("await", "state await mt --session-id", ()),
+        ("init", "state init mt", ("-f", "--session-id", "--auto-plan", "--consume")),
+        ("show", "state show mt --session-id", ()),
+        ("begin-review", "state begin-review mt --session-id", ()),
+        (
+            "record-verdict",
+            "state record-verdict mt",
+            ("<APPROVED|REVISE|REJECT|FAILED>", "[--minor-only]"),
+        ),
+        ("deactivate", "state deactivate mt --reason", ()),
+    ]
+    state_lines = {}
+    for label, verb, tokens in state_specs:
+        matches = [line for line in fence_lines if verb in line]
+        state_lines[label] = matches[0] if len(matches) == 1 else ""
+        check(
+            f"measure-twice.md loop: {label} argv appears once",
+            len(matches) == 1,
+            "one matching state fence",
+            str(matches),
+        )
+        for token in tokens:
+            check(
+                f"measure-twice.md loop: {label} argv includes {token}",
+                len(matches) == 1 and token in matches[0],
+                f"{token} is present on the state fence",
+                str(matches),
+            )
+
+    state_order = [
+        "await",
+        "init",
+        "show",
+        "begin-review",
+        "record-verdict",
+        "deactivate",
+    ]
+    positions = [fence_lines.index(state_lines[label]) if state_lines[label] else -1 for label in state_order]
+    check(
+        "measure-twice.md loop: every state argv position is present",
+        all(position >= 0 for position in positions),
+        "all state argv positions are nonnegative",
+        str(positions),
+    )
+    check(
+        "measure-twice.md loop: state verbs stay in loop order",
+        all(position >= 0 for position in positions)
+        and all(left < right for left, right in zip(positions, positions[1:])),
+        "await < init < show < begin-review < record-verdict < deactivate",
+        str(positions),
+    )
+
+
 def test_persist_seat_doc_sync():
     log_section("persist-seat: the three review-bearing docs use the engine call")
     # DOC-SYNC guard: the review/build/measure-twice command markdown must route
@@ -7337,9 +7483,8 @@ def test_persist_seat_doc_sync():
           panelist_line6.startswith("tools:") and "Write" not in panelist_line6,
           "tools line without Write", repr(panelist_line6))
 
-    # SCRIBE_CORE remains common to all three docs. The gate-form tables below
-    # are deliberately separate: measure-twice.md keeps the legacy form, while
-    # review.md and build.md use --verify.
+    # SCRIBE_CORE remains common to all three docs. Every review-bearing doc
+    # uses the same --verify gate.
     SCRIBE_CORE = [
         'subagent_type="crew:scribe"',
         'Persist each SUCCESSFUL Task seat via a scribe (no terminal diff).',
@@ -7348,14 +7493,6 @@ def test_persist_seat_doc_sync():
         'NONEMPTY PARTIAL file',
         'Fallback: you persist the seat yourself',
         "the scribe's return IS the persist-write completion",
-    ]
-    SCRIBE_GREP_GATE = [
-        'test -s "<project-root>/.crew/reviews/<session_segment>/<run_id>/tmp-seat-<seat>.md"',
-        "grep -q '\"ok\": *true'",
-        'grep -q \'"ok": *true\' "<the exact seat-json path persist-seat printed on stdout>"',
-        'grepping the path `persist-seat`',
-        'GATE THE FALLBACK TOO',
-        'persist-seat` exit 2 on a `test -s`-passing file is a REAL error',
     ]
     SCRIBE_VERIFY_GATE = [
         "PIN-MAP: `--verify` exit 0 means the on-disk record landed `ok=true`: DONE. Exit 4 means it landed anything else (ok=false, missing or non-boolean ok, malformed JSON, unreadable read-back): FALLBACK.",
@@ -7376,52 +7513,40 @@ def test_persist_seat_doc_sync():
             check(f"{rel} contains shared scribe sentinel: {phrase!r}",
                   phrase in text or phrase in norm, "present", "MISSING")
 
-        if rel == "commands/measure-twice.md":
-            for phrase in SCRIBE_GREP_GATE:
-                check(f"{rel} contains legacy gate sentinel: {phrase!r}",
+        for phrase in SCRIBE_VERIFY_GATE:
+            check(f"{rel} contains verify gate sentinel: {phrase!r}",
+                  phrase in text or phrase in norm, "present", "MISSING")
+        if rel == "commands/review.md":
+            for phrase in REVIEW_INHERITED_SENTINELS:
+                check(f"{rel} keeps inherited report literal: {phrase!r}",
                       phrase in text, "present", "MISSING")
-            # The flat (run_id-omitting) grep target is named ONLY as the
-            # forbidden one; preserve both historical line-break forms.
-            check(f"{rel} names the flat <session_segment>/<seat>.json only as the forbidden grep target",
-                  'NEVER grep the\nflat `.../<session_segment>/<seat>.json`' in text
-                  or 'NEVER grep the flat `.../<session_segment>/<seat>.json`' in text,
-                  "flat form named only as the forbidden one",
-                  "flat gate target not disclaimed")
-        elif rel in ("commands/review.md", "commands/build.md"):
-            for phrase in SCRIBE_VERIFY_GATE:
-                check(f"{rel} contains verify gate sentinel: {phrase!r}",
-                      phrase in text or phrase in norm, "present", "MISSING")
-            if rel == "commands/review.md":
-                for phrase in REVIEW_INHERITED_SENTINELS:
-                    check(f"{rel} keeps inherited report literal: {phrase!r}",
-                          phrase in text, "present", "MISSING")
-            name = rel.split("/")[-1]
-            verify_lines = _fence_lines(name)
-            verify_persist = [
-                line for line in verify_lines
-                if "persist-seat" in line and "-f" in line.split()
-            ]
-            success_verify = [
-                line for line in verify_persist
-                if 'tmp-seat-<seat>.md"' in line
-                and "-fallback" not in line
-            ]
-            fallback_verify = [
-                line for line in verify_persist
-                if 'tmp-seat-<seat>-fallback.md"' in line
-            ]
-            check(f"{rel} success persist fence carries --verify",
-                  len(success_verify) == 1 and " --verify -f " in success_verify[0],
-                  "one --verify success fence", str(verify_persist))
-            check(f"{rel} fallback persist fence carries --verify",
-                  len(fallback_verify) == 1 and " --verify -f " in fallback_verify[0],
-                  "one --verify fallback fence", str(verify_persist))
-            check(f"{rel} has no legacy test-s fence",
-                  not any("test -s" in line for line in verify_lines),
-                  "no test-s fence", str(verify_lines))
-            check(f"{rel} has no legacy ok=true grep gate",
-                  "grep -q '\"ok\": *true'" not in text,
-                  "no grep gate", "legacy grep gate present")
+        name = rel.split("/")[-1]
+        verify_lines = _fence_lines(name)
+        verify_persist = [
+            line for line in verify_lines
+            if "persist-seat" in line and "-f" in line.split()
+        ]
+        success_verify = [
+            line for line in verify_persist
+            if 'tmp-seat-<seat>.md"' in line
+            and "-fallback" not in line
+        ]
+        fallback_verify = [
+            line for line in verify_persist
+            if 'tmp-seat-<seat>-fallback.md"' in line
+        ]
+        check(f"{rel} success persist fence carries --verify",
+              len(success_verify) == 1 and " --verify -f " in success_verify[0],
+              "one --verify success fence", str(verify_persist))
+        check(f"{rel} fallback persist fence carries --verify",
+              len(fallback_verify) == 1 and " --verify -f " in fallback_verify[0],
+              "one --verify fallback fence", str(verify_persist))
+        check(f"{rel} has no legacy test-s fence",
+              not any("test -s" in line for line in verify_lines),
+              "no test-s fence", str(verify_lines))
+        check(f"{rel} has no legacy ok=true grep gate",
+              "grep -q '\"ok\": *true'" not in text,
+              "no grep gate", "legacy grep gate present")
 
         # The never-choke sentinel and the scribe fallback heading stay DISTINCT
         # (the fallback must not shadow the never-choke phrase the guard pins).
@@ -11168,12 +11293,12 @@ def test_command_fences_no_expansions():
         check(f"{name}: success persist-seat -f reads the quoted relative RUN-SCOPED tmp-seat spill",
               len(success_p) == 1
               and '-f ".crew/reviews/<session_segment>/<run_id>/tmp-seat-<seat>.md"' in success_p[0]
-              and (name == "measure-twice.md" or " --verify -f " in success_p[0]),
+              and " --verify -f " in success_p[0],
               "one quoted relative run-scoped tmp-seat -f", str(persist))
         check(f"{name}: fallback persist-seat -f reads the DISTINCT quoted relative RUN-SCOPED tmp-seat-<seat>-fallback spill",
               len(fallback_p) == 1
               and '-f ".crew/reviews/<session_segment>/<run_id>/tmp-seat-<seat>-fallback.md"' in fallback_p[0]
-              and (name == "measure-twice.md" or " --verify -f " in fallback_p[0]),
+              and " --verify -f " in fallback_p[0],
               "one quoted relative run-scoped tmp-seat-fallback -f", str(persist))
         repair = [l for l in lines if "repair-seat" in l]
         check(f"{name}: repair-seat uses the NAME form (engine derives the seat file; no --seat path)",
@@ -13363,9 +13488,9 @@ def test_scribe_frontmatter():
 
 
 def test_ok_true_serialization_shape():
-    """The recipe's grep gate keys on the LITERAL bytes `"ok": true` in the
-    printed <seat>.json (json.dumps indent=2, top-level field). Pin that shape
-    here so a future serialization change fails CI rather than the live gate."""
+    """The --verify gate keys on the top-level boolean `ok` in the printed
+    <seat>.json (json.dumps indent=2). Pin that shape here so a future
+    serialization change fails CI at the engine contract."""
     log_section("persist-seat: top-level ok serializes as the literal '\"ok\": true'")
     with tempfile.TemporaryDirectory() as td:
         src = Path(td) / "review.txt"
@@ -13380,25 +13505,19 @@ def test_ok_true_serialization_shape():
               '"ok": true present', raw[:200])
         # Parse the persisted bytes too: the top-level `ok` must be boolean True,
         # so a future serialization change (a stringified "true", a nested move)
-        # fails CI here rather than only at the live grep.
+        # fails CI here rather than only at the live --verify read-back path.
         try:
             parsed_ok = json.loads(raw).get("ok")
         except (ValueError, AttributeError):
             parsed_ok = "<unparseable>"
         check("ok=true seat parses to a top-level boolean ok is True",
               parsed_ok is True, "obj['ok'] is True", repr(parsed_ok))
-        # The recipe's exact gate (grep -q '"ok": *true') matches the real bytes.
-        import re as _re
-        check("the recipe gate regex '\"ok\": *true' matches the persisted bytes",
-              bool(_re.search(r'"ok": *true', raw)),
-              "gate regex matches", raw[:200])
 
 
 def test_persist_seat_scribe_gate_inputs():
     """persist-seat's OWN behavior on the exact tmp-file states the recipe's
-    two gate forms observe: measure-twice.md's legacy grep gate, and review.md
-    and build.md's --verify exit contract. These assertions
-    pin the engine leg and do NOT drive orchestrator control flow."""
+    --verify gate observes. These assertions pin the engine leg and do NOT
+    drive orchestrator control flow."""
     log_section("persist-seat gate inputs (present / absent / empty / real exit 2)")
 
     # present-valid -> ok=true, run-dir <seat>.json, printed path greppable.
@@ -13422,21 +13541,19 @@ def test_persist_seat_scribe_gate_inputs():
               and o["run_id"] in printed and pdata.get("ok") is True,
               "ok=true in printed run-dir json", f"rc={pv.returncode} printed={printed!r}")
 
-        # absent -> measure-twice.md's legacy test-s gate falls back before
-        # persist; review.md and build.md's --verify path receives the fixed
-        # missing diagnostic.
+        # absent -> the engine rejects the missing input with exit 2 and a
+        # diagnostic; this covers the direct persist-seat branch without --verify.
         gone = tdp / "does-not-exist.md"
         ab = _run_dispatcher(
             ["persist-seat", "sonnet", "--session-id", "S", "--run-id", o["run_id"],
              "--model", "sonnet", "-f", str(gone)], cwd=td, timeout=30)
-        check("absent -f file: persist-seat exits 2 (never reached in the recipe)",
+        check("absent -f file: persist-seat exits 2",
               ab.returncode == 2 and ab.stderr.strip() != "",
               "exit 2 + stderr", f"rc={ab.returncode} err={ab.stderr[:150]!r}")
 
-        # empty/whitespace (nonzero size) -> ok=false at exit 0, printed json reads
-        # "ok": false. The measure-twice.md legacy test-s gate lets this through
-        # and grep catches it; review.md and build.md's --verify gate returns
-        # exit 4 for the same landed record.
+        # empty/whitespace (nonzero size) -> ok=false at exit 0, printed JSON
+        # reads "ok": false. The --verify contract returns exit 4 for the
+        # same landed record.
         ws = tdp / "ws.md"
         ws.write_text("   \n", encoding="utf-8")
         ew = _run_dispatcher(
@@ -13450,7 +13567,7 @@ def test_persist_seat_scribe_gate_inputs():
               "exit 0 + ok=false bytes", f"rc={ew.returncode} raw={ewraw[:160]!r}")
 
         # REAL exit-2 error: a valid -f file but a NON-MEMBER seat (not in the run
-        # roster) exits 2. This proves both gate forms surface genuine
+        # roster) exits 2. This proves the engine contract surfaces genuine
         # run/manifest errors instead of treating them as missing input.
         nm = _run_dispatcher(
             ["persist-seat", "fable", "--session-id", "S", "--run-id", o["run_id"],
@@ -19064,6 +19181,7 @@ def main():
     test_catalog_call_graph_invariant()
     test_no_dotkept_staged_filename()
     test_build_md_executor_fork_sentinels()
+    test_measure_twice_md_loop_sentinels()
     test_persist_seat_doc_sync()
     test_roster_doc_sync()
     test_doctor()
