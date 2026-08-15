@@ -101,15 +101,15 @@ SK_PLUGIN_JSON = """{
 
 CURSOR_MARKETPLACE_JSON = """{
   "name": "claude-crew",
-  "description": "test marketplace",
   "metadata": {
+    "description": "test marketplace",
     "version": "0.19.2",
     "pluginRoot": "./plugins"
   },
   "plugins": [
     {
       "name": "crew",
-      "source": "./plugins/crew"
+      "source": "crew"
     }
   ]
 }
@@ -478,10 +478,13 @@ def test_cursor_manifest_parity():
     cursor_crew = json.loads(
         (REPO_ROOT / "plugins" / "crew" / ".cursor-plugin" / "plugin.json").read_text()
     )
-    marketplace_keys = ("name", "owner", "metadata")
-    marketplace_common = all(
-        cursor_marketplace.get(key) == claude_marketplace.get(key)
-        for key in marketplace_keys
+    marketplace_common = (
+        cursor_marketplace.get("name") == claude_marketplace.get("name")
+        and cursor_marketplace.get("owner") == claude_marketplace.get("owner")
+        and cursor_marketplace["metadata"].get("version")
+        == claude_marketplace["metadata"].get("version")
+        and cursor_marketplace["metadata"].get("pluginRoot")
+        == claude_marketplace["metadata"].get("pluginRoot")
     )
     claude_crew_entry = next(
         entry for entry in claude_marketplace["plugins"] if entry["name"] == "crew"
@@ -496,15 +499,26 @@ def test_cursor_manifest_parity():
     cursor_description = cursor_crew.get("description") == (
         "Persistence, specialized agents, and workflow commands"
     )
-    cursor_marketplace_description = cursor_marketplace.get("description") == (
-        "Persistence, specialized agents, and workflow commands"
+    # Cursor's marketplace schema has no top-level description (it lives in
+    # metadata), and its pluginRoot is a PREFIX on every source, so the cursor
+    # twin's source is relative to it while Claude's stays repo-relative.
+    cursor_marketplace_description = (
+        "description" not in cursor_marketplace
+        and cursor_marketplace["metadata"].get("description")
+        == "Persistence, specialized agents, and workflow commands"
     )
-    entry_common = cursor_crew_entry == claude_crew_entry
+    entry_common = (
+        cursor_crew_entry.get("name") == claude_crew_entry.get("name")
+        and cursor_crew_entry.get("description")
+        == claude_crew_entry.get("description")
+        and claude_crew_entry.get("source") == "./plugins/crew"
+        and cursor_crew_entry.get("source") == "crew"
+    )
     check("Cursor marketplace mirrors shared metadata and only lists crew",
           marketplace_common and cursor_marketplace_description
           and len(cursor_marketplace["plugins"]) == 1
           and entry_common,
-          "shared marketplace metadata, cursor description, and crew entry",
+          "shared marketplace metadata, metadata description, and crew entry",
           repr(cursor_marketplace))
     check("Cursor crew manifest mirrors shared plugin identity and version",
           plugin_common and cursor_description,
