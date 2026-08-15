@@ -99,6 +99,32 @@ SK_PLUGIN_JSON = """{
 }
 """
 
+CURSOR_MARKETPLACE_JSON = """{
+  "name": "claude-crew",
+  "description": "test marketplace",
+  "metadata": {
+    "version": "0.19.2",
+    "pluginRoot": "./plugins"
+  },
+  "plugins": [
+    {
+      "name": "crew",
+      "source": "./plugins/crew"
+    }
+  ]
+}
+"""
+
+CURSOR_CREW_PLUGIN_JSON = """{
+  "name": "crew",
+  "description": "test cursor crew",
+  "version": "0.40.0",
+  "commands": "./commands",
+  "agents": "./agents-cursor",
+  "hooks": "./hooks/cursor-hooks.json"
+}
+"""
+
 
 def _git(repo: Path, *args, env=None):
     return subprocess.run(
@@ -118,7 +144,7 @@ def _repo_env():
 
 
 def make_repo(tmp: Path, marketplace=MARKETPLACE_JSON,
-              crew=CREW_PLUGIN_JSON, sk=SK_PLUGIN_JSON) -> Path:
+              crew=CREW_PLUGIN_JSON, sk=SK_PLUGIN_JSON, twins=False) -> Path:
     """Build a repo with the three json files + a README, one root commit."""
     repo = tmp / "repo"
     repo.mkdir()
@@ -131,6 +157,12 @@ def make_repo(tmp: Path, marketplace=MARKETPLACE_JSON,
         d.mkdir(parents=True)
         (d / "plugin.json").write_text(body)
         (repo / "plugins" / name / "src.txt").write_text("v0\n")
+    if twins:
+        (repo / ".cursor-plugin").mkdir(parents=True)
+        (repo / ".cursor-plugin" / "marketplace.json").write_text(CURSOR_MARKETPLACE_JSON)
+        cursor_dir = repo / "plugins" / "crew" / ".cursor-plugin"
+        cursor_dir.mkdir(parents=True)
+        (cursor_dir / "plugin.json").write_text(CURSOR_CREW_PLUGIN_JSON)
     (repo / "README.md").write_text("# test\n")
     (repo / "docs").mkdir()
     (repo / "docs" / "guide.md").write_text("doc\n")
@@ -432,6 +464,249 @@ def test_only_changed_plugin_bumps():
               "0.19.3", mp_v)
 
 
+def test_cursor_manifest_parity():
+    log_section("Cursor manifest parity")
+    claude_marketplace = json.loads(
+        (REPO_ROOT / ".claude-plugin" / "marketplace.json").read_text()
+    )
+    cursor_marketplace = json.loads(
+        (REPO_ROOT / ".cursor-plugin" / "marketplace.json").read_text()
+    )
+    claude_crew = json.loads(
+        (REPO_ROOT / "plugins" / "crew" / ".claude-plugin" / "plugin.json").read_text()
+    )
+    cursor_crew = json.loads(
+        (REPO_ROOT / "plugins" / "crew" / ".cursor-plugin" / "plugin.json").read_text()
+    )
+    marketplace_keys = ("name", "owner", "metadata")
+    marketplace_common = all(
+        cursor_marketplace.get(key) == claude_marketplace.get(key)
+        for key in marketplace_keys
+    )
+    claude_crew_entry = next(
+        entry for entry in claude_marketplace["plugins"] if entry["name"] == "crew"
+    )
+    cursor_crew_entry = next(
+        entry for entry in cursor_marketplace["plugins"] if entry["name"] == "crew"
+    )
+    plugin_common = all(
+        cursor_crew.get(key) == claude_crew.get(key)
+        for key in ("name", "version", "author", "repository", "keywords")
+    )
+    cursor_description = cursor_crew.get("description") == (
+        "Persistence, specialized agents, and workflow commands"
+    )
+    cursor_marketplace_description = cursor_marketplace.get("description") == (
+        "Persistence, specialized agents, and workflow commands"
+    )
+    entry_common = cursor_crew_entry == claude_crew_entry
+    check("Cursor marketplace mirrors shared metadata and only lists crew",
+          marketplace_common and cursor_marketplace_description
+          and len(cursor_marketplace["plugins"]) == 1
+          and entry_common,
+          "shared marketplace metadata, cursor description, and crew entry",
+          repr(cursor_marketplace))
+    check("Cursor crew manifest mirrors shared plugin identity and version",
+          plugin_common and cursor_description,
+          "shared plugin fields and cursor description", repr(cursor_crew))
+
+
+def test_cursor_mirror_bump_behavior():
+    log_section("Cursor version mirrors")
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = make_repo(Path(td))
+        (repo / "plugins" / "crew" / "src.txt").write_text("v1\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "fix: crew without cursor mirror")
+        proc = run_hook(repo)
+        check("missing Cursor twins remain a silent no-op",
+              proc.returncode == 0
+              and read_version(repo / "plugins" / "crew" / ".claude-plugin" / "plugin.json") == "0.40.1"
+              and not (repo / ".cursor-plugin").exists()
+              and not (repo / "plugins" / "crew" / ".cursor-plugin").exists(),
+              "original bump only and no Cursor paths", f"rc={proc.returncode}")
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = make_repo(Path(td), twins=True)
+        (repo / "plugins" / "crew" / "src.txt").write_text("v1\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "fix: crew source")
+        proc = run_hook(repo)
+        check("crew source change bumps both plugin manifests",
+              proc.returncode == 0
+              and read_version(repo / "plugins" / "crew" / ".claude-plugin" / "plugin.json") == "0.40.1"
+              and read_version(repo / "plugins" / "crew" / ".cursor-plugin" / "plugin.json") == "0.40.1",
+              "both crew versions at 0.40.1", f"rc={proc.returncode}")
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = make_repo(Path(td), twins=True)
+        cursor_plugin = repo / "plugins" / "crew" / ".cursor-plugin" / "plugin.json"
+        cursor_plugin.write_text(cursor_plugin.read_text().replace(
+            '"description": "test cursor crew"',
+            '"description": "hand-edited cursor crew"',
+        ))
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "fix: cursor plugin metadata")
+        proc = run_hook(repo)
+        check("Cursor-only plugin metadata change bumps both crew manifests",
+              proc.returncode == 0
+              and read_version(repo / "plugins" / "crew" / ".claude-plugin" / "plugin.json") == "0.40.1"
+              and read_version(cursor_plugin) == "0.40.1",
+              "both crew versions at 0.40.1", f"rc={proc.returncode}")
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = make_repo(Path(td), twins=True)
+        cursor_marketplace = repo / ".cursor-plugin" / "marketplace.json"
+        cursor_marketplace.write_text(cursor_marketplace.read_text().replace(
+            '"description": "test marketplace"',
+            '"description": "hand-edited cursor marketplace"',
+        ))
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "fix: cursor marketplace metadata")
+        proc = run_hook(repo)
+        check("Cursor-only marketplace metadata change bumps both marketplace manifests",
+              proc.returncode == 0
+              and read_version(repo / ".claude-plugin" / "marketplace.json") == "0.19.3"
+              and read_version(cursor_marketplace) == "0.19.3",
+              "both marketplace versions at 0.19.3", f"rc={proc.returncode}")
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = make_repo(Path(td), twins=True)
+        cursor_plugin = repo / "plugins" / "crew" / ".cursor-plugin" / "plugin.json"
+        cursor_plugin.write_text(cursor_plugin.read_text().replace(
+            '"version": "0.40.0"', '"version": "0.40.1"'
+        ))
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "fix: cursor mirror write")
+        before_head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        proc = run_hook(repo)
+        after_head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        check("version-only Cursor mirror hand-write does not re-bump",
+              proc.returncode == 0 and before_head == after_head
+              and read_version(repo / "plugins" / "crew" / ".claude-plugin" / "plugin.json") == "0.40.0"
+              and read_version(cursor_plugin) == "0.40.1",
+              "no bump commit and original remains 0.40.0", f"rc={proc.returncode}")
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = make_repo(Path(td), twins=True)
+        cursor_plugin = repo / "plugins" / "crew" / ".cursor-plugin" / "plugin.json"
+        before_head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        cursor_plugin.write_text(cursor_plugin.read_text().replace(
+            '"description": "test cursor crew"',
+            '"description": "dirty cursor crew"',
+        ))
+        proc = run_hook(repo)
+        check("dirty Cursor twin edit does not trigger a bump",
+              proc.returncode == 0
+              and _git(repo, "rev-parse", "HEAD").stdout.strip() == before_head
+              and read_version(repo / "plugins" / "crew" / ".claude-plugin" / "plugin.json") == "0.40.0"
+              and read_version(cursor_plugin) == "0.40.0",
+              "dirty tree ignored and versions unchanged", f"rc={proc.returncode}")
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = make_repo(Path(td))
+        (repo / "plugins" / "crew" / "src.txt").write_text("v1\n")
+        (repo / "README.md").write_text("# changed\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "fix: source and readme")
+        cursor_marketplace = repo / ".cursor-plugin" / "marketplace.json"
+        cursor_plugin = repo / "plugins" / "crew" / ".cursor-plugin" / "plugin.json"
+        cursor_marketplace.parent.mkdir(parents=True)
+        cursor_plugin.parent.mkdir(parents=True)
+        cursor_marketplace.write_text(CURSOR_MARKETPLACE_JSON)
+        cursor_plugin.write_text(CURSOR_CREW_PLUGIN_JSON)
+        marketplace_bytes = cursor_marketplace.read_bytes()
+        plugin_bytes = cursor_plugin.read_bytes()
+        proc = run_hook(repo)
+        staged = _git(repo, "diff", "--cached", "--name-only").stdout.strip()
+        check("untracked Cursor twins are not rewritten or staged by a bump",
+              proc.returncode == 0
+              and cursor_marketplace.read_bytes() == marketplace_bytes
+              and cursor_plugin.read_bytes() == plugin_bytes
+              and _git(repo, "ls-files", "--error-unmatch", ".cursor-plugin/marketplace.json").returncode != 0
+              and _git(repo, "ls-files", "--error-unmatch", "plugins/crew/.cursor-plugin/plugin.json").returncode != 0
+              and staged == ""
+              and read_version(repo / ".claude-plugin" / "marketplace.json") == "0.19.3"
+              and read_version(repo / "plugins" / "crew" / ".claude-plugin" / "plugin.json") == "0.40.1",
+              "originals bumped, untracked twins unchanged and unstaged",
+              f"rc={proc.returncode} staged={staged!r}")
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = make_repo(Path(td))
+        cursor_marketplace = repo / ".cursor-plugin" / "marketplace.json"
+        cursor_plugin = repo / "plugins" / "crew" / ".cursor-plugin" / "plugin.json"
+        cursor_marketplace.parent.mkdir(parents=True)
+        cursor_plugin.parent.mkdir(parents=True)
+        cursor_marketplace.write_text(CURSOR_MARKETPLACE_JSON)
+        cursor_plugin.write_text(CURSOR_CREW_PLUGIN_JSON)
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "fix: add cursor mirrors")
+        proc = run_hook(repo)
+        check("new Cursor twins count as substantive changes",
+              proc.returncode == 0
+              and read_version(repo / ".claude-plugin" / "marketplace.json") == "0.19.3"
+              and read_version(cursor_marketplace) == "0.19.3"
+              and read_version(repo / "plugins" / "crew" / ".claude-plugin" / "plugin.json") == "0.40.1"
+              and read_version(cursor_plugin) == "0.40.1",
+              "new twins and originals bumped", f"rc={proc.returncode}")
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = make_repo(Path(td), twins=True)
+        (repo / ".cursor-plugin" / "marketplace.json").unlink()
+        (repo / "plugins" / "crew" / ".cursor-plugin" / "plugin.json").unlink()
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "fix: remove cursor mirrors")
+        proc = run_hook(repo)
+        check("deleted Cursor twins count as substantive changes",
+              proc.returncode == 0
+              and read_version(repo / ".claude-plugin" / "marketplace.json") == "0.19.3"
+              and read_version(repo / "plugins" / "crew" / ".claude-plugin" / "plugin.json") == "0.40.1"
+              and not (repo / ".cursor-plugin" / "marketplace.json").exists()
+              and not (repo / "plugins" / "crew" / ".cursor-plugin" / "plugin.json").exists(),
+              "originals bumped after both twin deletions", f"rc={proc.returncode}")
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = make_repo(Path(td), twins=True)
+        cursor_plugin = repo / "plugins" / "crew" / ".cursor-plugin" / "plugin.json"
+        cursor_plugin.write_text("{not-json\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "fix: malformed cursor mirror")
+        proc = run_hook(repo)
+        check("malformed Cursor twin counts as substantive and is named",
+              proc.returncode != 0
+              and "cannot parse twin" in proc.stderr
+              and "plugins/crew/.cursor-plugin/plugin.json" in proc.stderr
+              and read_version(repo / "plugins" / "crew" / ".claude-plugin" / "plugin.json") == "0.40.0"
+              and cursor_plugin.read_text() == "{not-json\n",
+              "parse note, nonzero rollback, and unchanged original", f"rc={proc.returncode}")
+
+
+def test_cursor_snapshot_rollback():
+    log_section("Cursor mirror rollback")
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        repo = make_repo(tmp, twins=True)
+        (repo / "plugins" / "crew" / "src.txt").write_text("v1\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "fix: rollback mirrors")
+        paths = (
+            repo / ".claude-plugin" / "marketplace.json",
+            repo / ".cursor-plugin" / "marketplace.json",
+            repo / "plugins" / "crew" / ".claude-plugin" / "plugin.json",
+            repo / "plugins" / "crew" / ".cursor-plugin" / "plugin.json",
+        )
+        before = {path: path.read_bytes() for path in paths}
+        proc = run_hook(repo, env=env_with_fake_git(make_fake_git_dir(tmp)))
+        after = {path: path.read_bytes() for path in paths}
+        staged = _git(repo, "diff", "--cached", "--name-only").stdout.strip()
+        check("Cursor mirror commit failure restores all four JSON snapshots",
+              proc.returncode != 0 and before == after,
+              "nonzero and all four files byte-identical", f"rc={proc.returncode}")
+        check("Cursor mirror rollback leaves the index clean", staged == "",
+              "empty staged path list", repr(staged))
+
+
 def test_format_stability_synthetic():
     log_section("format stability: only the version line changes")
     with tempfile.TemporaryDirectory() as td:
@@ -518,6 +793,9 @@ def main():
     test_malformed_version_aborts()
     test_snapshot_restore_and_no_staging()
     test_only_changed_plugin_bumps()
+    test_cursor_manifest_parity()
+    test_cursor_mirror_bump_behavior()
+    test_cursor_snapshot_rollback()
     test_format_stability_synthetic()
     test_real_repo_inputs()
 

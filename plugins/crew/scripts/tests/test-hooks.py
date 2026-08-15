@@ -768,6 +768,72 @@ def main():
         log_fail("persistent-mode recorder runs once when the hook body raises",
                  "one recorder call", repr(_recorder_calls))
 
+    log_section("Cursor hook configuration and probe fixtures")
+    _cursor_hooks_path = PROJECT_DIR / "hooks" / "cursor-hooks.json"
+    try:
+        _cursor_hooks = json.loads(_cursor_hooks_path.read_text(encoding="utf-8"))
+        _session_hooks = _cursor_hooks["hooks"]["sessionStart"]
+        _stop_hooks = _cursor_hooks["hooks"]["stop"]
+        _hook_config_ok = (
+            _cursor_hooks.get("version") == 1
+            and set(_cursor_hooks.get("hooks", {})) == {"sessionStart", "stop"}
+            and len(_session_hooks) == 1
+            and _session_hooks[0] == {
+                "command": "python3 ./scripts/session-start.py",
+                "timeout": 10,
+            }
+            and len(_stop_hooks) == 1
+            and _stop_hooks[0] == {
+                "command": "python3 ./scripts/persistent-mode.py",
+                "timeout": 5,
+                "loop_limit": 3,
+            }
+            and all(not hook["command"].startswith("${CLAUDE_PLUGIN_ROOT}")
+                    for hook in (_session_hooks + _stop_hooks))
+        )
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as _exc:
+        _hook_config_ok = False
+        _cursor_hooks = repr(_exc)
+    if _hook_config_ok:
+        log_pass("Cursor hook manifest pins python3 commands and 10/5 second timeouts")
+    else:
+        log_fail("Cursor hook manifest pins python3 commands and 10/5 second timeouts",
+                 "sessionStart=10, stop=5, loop_limit=3", repr(_cursor_hooks))
+
+    def _frontmatter(path: Path):
+        _lines = path.read_text(encoding="utf-8").splitlines()
+        if not _lines or _lines[0] != "---":
+            return None
+        try:
+            _end = _lines.index("---", 1)
+        except ValueError:
+            return None
+        _fields = {}
+        for _line in _lines[1:_end]:
+            if ":" not in _line:
+                return None
+            _key, _value = _line.split(":", 1)
+            _fields[_key.strip()] = _value.strip()
+        return _fields
+
+    _reviewer_frontmatter = _frontmatter(PROJECT_DIR / "agents-cursor" / "cursor-reviewer.md")
+    _formatter_frontmatter = _frontmatter(PROJECT_DIR / "agents-cursor" / "cursor-formatter.md")
+    # Delete this assertion together with the temporary agents-cursor fixtures.
+    if (_reviewer_frontmatter is not None
+            and _formatter_frontmatter is not None
+            and set(_reviewer_frontmatter) == {"name", "description", "model", "readonly"}
+            and set(_formatter_frontmatter) == {"name", "description", "model", "readonly"}
+            and _reviewer_frontmatter.get("model") == "inherit"
+            and _formatter_frontmatter.get("model") == "composer-2.5"
+            and _reviewer_frontmatter.get("readonly") == "true"
+            and _formatter_frontmatter.get("readonly") == "true"
+            and (PROJECT_DIR / "agents-cursor" / ".gitkeep").is_file()):
+        log_pass("Cursor reviewer/formatter fixtures pin inherit and composer-2.5 seats")
+    else:
+        log_fail("Cursor reviewer/formatter fixtures pin inherit and composer-2.5 seats",
+                 "reviewer inherit, formatter composer-2.5, readonly fixtures",
+                 repr((_reviewer_frontmatter, _formatter_frontmatter)))
+
     # Global-state isolation: every subprocess env pins HOME to _NEUTRAL_HOME
     # (see _neutral_env), so the scripts under test can never read from — or
     # clean up — the developer's real ~/.claude. This replaces the old

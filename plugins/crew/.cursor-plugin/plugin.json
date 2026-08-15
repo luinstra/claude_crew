@@ -1,0 +1,14 @@
+{
+  "name": "crew",
+  "description": "Persistence, specialized agents, and workflow commands",
+  "version": "0.69.0",
+  "author": {
+    "name": "Jeremy Luinstra",
+    "email": "luinstra@gmail.com"
+  },
+  "repository": "https://github.com/luinstra/claude_crew",
+  "keywords": ["agents", "persistence", "build-loop", "planning", "session"],
+  "commands": "./commands",
+  "agents": "./agents-cursor",
+  "hooks": "./hooks/cursor-hooks.json"
+}

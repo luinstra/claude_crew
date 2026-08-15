@@ -1,0 +1,19 @@
+{
+  "name": "claude-crew",
+  "description": "Persistence, specialized agents, and workflow commands",
+  "owner": {
+    "name": "Jeremy Luinstra",
+    "email": "luinstra@gmail.com"
+  },
+  "metadata": {
+    "version": "0.32.0",
+    "pluginRoot": "./plugins"
+  },
+  "plugins": [
+    {
+      "name": "crew",
+      "source": "./plugins/crew",
+      "description": "Specialized agents, slash commands, multi-model review panels, build loops, and session persistence"
+    }
+  ]
+}

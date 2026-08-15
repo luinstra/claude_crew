@@ -62,8 +62,8 @@ Use scopes to indicate what changed:
 ### What Gets Bumped
 
 The workflow is smart about what it bumps:
-- **Marketplace version** — Only if `.claude-plugin/marketplace.json`, `README.md`, or `docs/` changed
-- **Plugin versions** — Only plugins with actual file changes get bumped
+- **Marketplace version:** Only if `.claude-plugin/marketplace.json`, a substantive `.cursor-plugin/marketplace.json`, `README.md`, or `docs/` changed
+- **Plugin versions:** Only plugins with actual file changes, including a substantive `plugins/crew/.cursor-plugin/plugin.json` change, get bumped
 
 ### Examples
 
@@ -106,11 +106,15 @@ This enables automatic version bumping after each commit based on conventional c
 
 ```
 .claude-plugin/marketplace.json     ← Marketplace registry
+.cursor-plugin/marketplace.json     ← Cursor marketplace registry
 plugins/
 ├── crew/                           ← Core plugin
 │   ├── agents/                     ← execution contexts
+│   ├── agents-cursor/              ← Cursor probe agents
 │   ├── commands/                   ← slash commands
 │   ├── hooks/hooks.json            ← Lifecycle integration
+│   ├── hooks/cursor-hooks.json     ← Cursor lifecycle integration
+│   ├── .cursor-plugin/plugin.json  ← Cursor plugin manifest
 │   └── scripts/                    ← Python state machine
 └── sk/                             ← Tech-stack plugin
     ├── hooks/hooks.json            ← Lifecycle integration

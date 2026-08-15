@@ -209,6 +209,64 @@ has_substantive_changes() {
     [ -n "$diff" ]
 }
 
+# Check a translated manifest while ignoring only its mirrored version field.
+has_twin_substantive_changes() {
+    local file="$1"
+    local last_bump="$2"
+    local scope="$3"
+
+    python3 - "$last_bump" "$file" "$scope" <<'PY'
+import json
+import subprocess
+import sys
+
+last_bump, file, scope = sys.argv[1:]
+
+def show(ref):
+    proc = subprocess.run(["git", "show", f"{ref}:{file}"], capture_output=True)
+    return proc.stdout if proc.returncode == 0 else None
+
+before_bytes = show(last_bump)
+after_bytes = show("HEAD")
+if before_bytes is None and after_bytes is None:
+    raise SystemExit(1)
+if after_bytes is None:
+    raise SystemExit(0)
+try:
+    after = json.loads(after_bytes.decode("utf-8"))
+except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    print(f"version-bump: cannot parse twin {file} at HEAD: {exc}", file=sys.stderr)
+    raise SystemExit(0)
+if before_bytes is None:
+    raise SystemExit(0)
+try:
+    before = json.loads(before_bytes.decode("utf-8"))
+except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    print(f"version-bump: cannot parse twin {file} at {last_bump}: {exc}", file=sys.stderr)
+    raise SystemExit(0)
+
+if scope == "plugin":
+    before.pop("version", None)
+    after.pop("version", None)
+elif scope == "marketplace":
+    before_metadata = before.get("metadata")
+    after_metadata = after.get("metadata")
+    if isinstance(before_metadata, dict):
+        before_metadata.pop("version", None)
+    if isinstance(after_metadata, dict):
+        after_metadata.pop("version", None)
+
+raise SystemExit(0 if before != after else 1)
+PY
+}
+
+is_tracked_at_head() {
+    local file="$1"
+    # Cursor twins can exist in the working tree before their mirror is tracked;
+    # a bump must not rewrite or git add a file git does not yet track.
+    git cat-file -e "HEAD:$file" 2>/dev/null
+}
+
 # Check if directory has changes
 has_directory_changes() {
     local dir="$1"
@@ -217,13 +275,19 @@ has_directory_changes() {
     local changes
     changes=$(git diff --name-only "$last_bump"..HEAD -- "$dir" 2>/dev/null || echo "")
 
-    # Filter out version-only changes to plugin.json
+    # Filter out version-only changes to the original plugin manifest.
     if [ -n "$changes" ]; then
-        if echo "$changes" | grep -q 'plugin.json'; then
-            local plugin_json="$dir/.claude-plugin/plugin.json"
-            if [ -f "$plugin_json" ] && ! has_substantive_changes "$plugin_json" "$last_bump"; then
-                changes=$(echo "$changes" | grep -v 'plugin.json' || true)
-            fi
+        local plugin_json="$dir/.claude-plugin/plugin.json"
+        local cursor_json="$dir/.cursor-plugin/plugin.json"
+        if [ -f "$plugin_json" ] && ! has_substantive_changes "$plugin_json" "$last_bump"; then
+            changes=$(echo "$changes" | grep -F -x -v "$plugin_json" || true)
+        fi
+        # Crew's call site ORs has_twin_substantive_changes, so this strip is
+        # safe here. A plugin without that OR would miss a twin-only change.
+        # The [ -f ] gate only filters tracked-range output; untracked files
+        # never appear in that diff.
+        if [ -f "$cursor_json" ]; then
+            changes=$(echo "$changes" | grep -F -x -v "$cursor_json" || true)
         fi
     fi
 
@@ -258,7 +322,7 @@ snapshot_file() {
 
 # Restore every snapshotted file from its byte-snapshot (NOT git checkout, so an
 # unrelated pre-existing unstaged edit in these files is preserved) AND un-stage
-# the three json paths so a failed bump leaves nothing staged.
+# the five json paths so a failed bump leaves nothing staged.
 rollback() {
     local i
     for ((i = 0; i < ${#SNAP_FILES[@]}; i++)); do
@@ -266,7 +330,9 @@ rollback() {
     done
     git reset -q HEAD -- \
         .claude-plugin/marketplace.json \
+        .cursor-plugin/marketplace.json \
         plugins/crew/.claude-plugin/plugin.json \
+        plugins/crew/.cursor-plugin/plugin.json \
         plugins/sk/.claude-plugin/plugin.json 2>/dev/null || true
 }
 
@@ -294,11 +360,14 @@ main() {
     local do_marketplace=false do_crew=false do_sk=false
     local mp_current="" mp_new="" crew_current="" crew_new="" sk_current="" sk_new=""
     local mp_json=".claude-plugin/marketplace.json"
+    local mp_cursor_json=".cursor-plugin/marketplace.json"
     local crew_json="plugins/crew/.claude-plugin/plugin.json"
+    local crew_cursor_json="plugins/crew/.cursor-plugin/plugin.json"
     local sk_json="plugins/sk/.claude-plugin/plugin.json"
 
     # marketplace: substantive marketplace.json change OR README/docs change
     if has_substantive_changes "$mp_json" "$last_bump" \
+       || has_twin_substantive_changes "$mp_cursor_json" "$last_bump" marketplace \
        || git diff --name-only "$last_bump"..HEAD -- 'README.md' 'docs/' 2>/dev/null | grep -q .; then
         do_marketplace=true
         mp_current=$(read_version "$mp_json") || fail "cannot read version from $mp_json"
@@ -307,7 +376,8 @@ main() {
         info "No marketplace-level changes"
     fi
 
-    if has_directory_changes "plugins/crew" "$last_bump"; then
+    if has_directory_changes "plugins/crew" "$last_bump" \
+       || has_twin_substantive_changes "$crew_cursor_json" "$last_bump" plugin; then
         do_crew=true
         crew_current=$(read_version "$crew_json") || fail "cannot read version from $crew_json"
         crew_new=$(bump_version "$crew_current" "$bump_type") || fail "cannot bump non-semver crew version '$crew_current'"
@@ -332,9 +402,15 @@ main() {
     local commit_parts=""
     if [ "$do_marketplace" = true ] && [ "$mp_current" != "$mp_new" ]; then
         snapshot_file "$mp_json" || fail "cannot snapshot $mp_json"
+        if is_tracked_at_head "$mp_cursor_json"; then
+            snapshot_file "$mp_cursor_json" || fail "cannot snapshot $mp_cursor_json"
+        fi
     fi
     if [ "$do_crew" = true ] && [ "$crew_current" != "$crew_new" ]; then
         snapshot_file "$crew_json" || fail "cannot snapshot $crew_json"
+        if is_tracked_at_head "$crew_cursor_json"; then
+            snapshot_file "$crew_cursor_json" || fail "cannot snapshot $crew_cursor_json"
+        fi
     fi
     if [ "$do_sk" = true ] && [ "$sk_current" != "$sk_new" ]; then
         snapshot_file "$sk_json" || fail "cannot snapshot $sk_json"
@@ -349,6 +425,10 @@ main() {
         success "Marketplace: $mp_current -> $mp_new"
         commit_parts="marketplace $mp_current -> $mp_new"
         bumped_paths+=("$mp_json")
+        if is_tracked_at_head "$mp_cursor_json"; then
+            write_version "$mp_cursor_json" "$mp_new" || fail "cannot write version to $mp_cursor_json"
+            bumped_paths+=("$mp_cursor_json")
+        fi
     fi
     if [ "$do_crew" = true ] && [ "$crew_current" != "$crew_new" ]; then
         write_version "$crew_json" "$crew_new" || fail "cannot write version to $crew_json"
@@ -359,6 +439,10 @@ main() {
             commit_parts="crew $crew_current -> $crew_new"
         fi
         bumped_paths+=("$crew_json")
+        if is_tracked_at_head "$crew_cursor_json"; then
+            write_version "$crew_cursor_json" "$crew_new" || fail "cannot write version to $crew_cursor_json"
+            bumped_paths+=("$crew_cursor_json")
+        fi
     fi
     if [ "$do_sk" = true ] && [ "$sk_current" != "$sk_new" ]; then
         write_version "$sk_json" "$sk_new" || fail "cannot write version to $sk_json"
