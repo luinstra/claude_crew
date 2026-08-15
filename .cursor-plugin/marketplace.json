@@ -5,7 +5,7 @@
     "email": "luinstra@gmail.com"
   },
   "metadata": {
-    "description": "Persistence, specialized agents, and workflow commands",
+    "description": "Persistence, specialized agents, workflow commands, and tech-stack skills",
     "version": "0.32.0",
     "pluginRoot": "./plugins"
   },
@@ -14,6 +14,11 @@
       "name": "crew",
       "source": "crew",
       "description": "Specialized agents, slash commands, multi-model review panels, build loops, and session persistence"
+    },
+    {
+      "name": "sk",
+      "source": "sk",
+      "description": "Tech-stack skills: Kotlin, Exposed, Gradle, Python patterns"
     }
   ]
 }

@@ -282,8 +282,8 @@ has_directory_changes() {
         if [ -f "$plugin_json" ] && ! has_substantive_changes "$plugin_json" "$last_bump"; then
             changes=$(echo "$changes" | grep -F -x -v "$plugin_json" || true)
         fi
-        # Crew's call site ORs has_twin_substantive_changes, so this strip is
-        # safe here. A plugin without that OR would miss a twin-only change.
+        # Both plugin call sites OR has_twin_substantive_changes, so this strip
+        # is safe: a substantive twin-only change still bumps through that OR.
         # The [ -f ] gate only filters tracked-range output; untracked files
         # never appear in that diff.
         if [ -f "$cursor_json" ]; then
@@ -322,7 +322,7 @@ snapshot_file() {
 
 # Restore every snapshotted file from its byte-snapshot (NOT git checkout, so an
 # unrelated pre-existing unstaged edit in these files is preserved) AND un-stage
-# the five json paths so a failed bump leaves nothing staged.
+# the six json paths so a failed bump leaves nothing staged.
 rollback() {
     local i
     for ((i = 0; i < ${#SNAP_FILES[@]}; i++)); do
@@ -333,7 +333,8 @@ rollback() {
         .cursor-plugin/marketplace.json \
         plugins/crew/.claude-plugin/plugin.json \
         plugins/crew/.cursor-plugin/plugin.json \
-        plugins/sk/.claude-plugin/plugin.json 2>/dev/null || true
+        plugins/sk/.claude-plugin/plugin.json \
+        plugins/sk/.cursor-plugin/plugin.json 2>/dev/null || true
 }
 
 fail() {
@@ -364,6 +365,7 @@ main() {
     local crew_json="plugins/crew/.claude-plugin/plugin.json"
     local crew_cursor_json="plugins/crew/.cursor-plugin/plugin.json"
     local sk_json="plugins/sk/.claude-plugin/plugin.json"
+    local sk_cursor_json="plugins/sk/.cursor-plugin/plugin.json"
 
     # marketplace: substantive marketplace.json change OR README/docs change
     if has_substantive_changes "$mp_json" "$last_bump" \
@@ -385,7 +387,8 @@ main() {
         info "No crew plugin changes"
     fi
 
-    if has_directory_changes "plugins/sk" "$last_bump"; then
+    if has_directory_changes "plugins/sk" "$last_bump" \
+       || has_twin_substantive_changes "$sk_cursor_json" "$last_bump" plugin; then
         do_sk=true
         sk_current=$(read_version "$sk_json") || fail "cannot read version from $sk_json"
         sk_new=$(bump_version "$sk_current" "$bump_type") || fail "cannot bump non-semver sk version '$sk_current'"
@@ -414,6 +417,9 @@ main() {
     fi
     if [ "$do_sk" = true ] && [ "$sk_current" != "$sk_new" ]; then
         snapshot_file "$sk_json" || fail "cannot snapshot $sk_json"
+        if is_tracked_at_head "$sk_cursor_json"; then
+            snapshot_file "$sk_cursor_json" || fail "cannot snapshot $sk_cursor_json"
+        fi
     fi
 
     # Apply the rewrites; ANY failure rolls every snapshot back + un-stages.
@@ -453,6 +459,10 @@ main() {
             commit_parts="sk $sk_current -> $sk_new"
         fi
         bumped_paths+=("$sk_json")
+        if is_tracked_at_head "$sk_cursor_json"; then
+            write_version "$sk_cursor_json" "$sk_new" || fail "cannot write version to $sk_cursor_json"
+            bumped_paths+=("$sk_cursor_json")
+        fi
     fi
 
     if [ -z "$commit_parts" ] || [ ${#bumped_paths[@]} -eq 0 ]; then

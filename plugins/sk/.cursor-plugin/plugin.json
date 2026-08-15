@@ -1,0 +1,6 @@
+{
+  "name": "sk",
+  "description": "Tech-stack skills: Kotlin, Exposed, Gradle, Python patterns",
+  "version": "0.4.0",
+  "skills": "./skills"
+}

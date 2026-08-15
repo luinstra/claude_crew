@@ -110,8 +110,20 @@ CURSOR_MARKETPLACE_JSON = """{
     {
       "name": "crew",
       "source": "crew"
+    },
+    {
+      "name": "sk",
+      "source": "sk"
     }
   ]
+}
+"""
+
+SK_CURSOR_PLUGIN_JSON = """{
+  "name": "sk",
+  "description": "test cursor sk",
+  "version": "0.3.0",
+  "skills": "./skills"
 }
 """
 
@@ -160,9 +172,11 @@ def make_repo(tmp: Path, marketplace=MARKETPLACE_JSON,
     if twins:
         (repo / ".cursor-plugin").mkdir(parents=True)
         (repo / ".cursor-plugin" / "marketplace.json").write_text(CURSOR_MARKETPLACE_JSON)
-        cursor_dir = repo / "plugins" / "crew" / ".cursor-plugin"
-        cursor_dir.mkdir(parents=True)
-        (cursor_dir / "plugin.json").write_text(CURSOR_CREW_PLUGIN_JSON)
+        for name, body in (("crew", CURSOR_CREW_PLUGIN_JSON),
+                           ("sk", SK_CURSOR_PLUGIN_JSON)):
+            cursor_dir = repo / "plugins" / name / ".cursor-plugin"
+            cursor_dir.mkdir(parents=True)
+            (cursor_dir / "plugin.json").write_text(body)
     (repo / "README.md").write_text("# test\n")
     (repo / "docs").mkdir()
     (repo / "docs" / "guide.md").write_text("doc\n")
@@ -505,7 +519,7 @@ def test_cursor_manifest_parity():
     cursor_marketplace_description = (
         "description" not in cursor_marketplace
         and cursor_marketplace["metadata"].get("description")
-        == "Persistence, specialized agents, and workflow commands"
+        == "Persistence, specialized agents, workflow commands, and tech-stack skills"
     )
     entry_common = (
         cursor_crew_entry.get("name") == claude_crew_entry.get("name")
@@ -514,15 +528,43 @@ def test_cursor_manifest_parity():
         and claude_crew_entry.get("source") == "./plugins/crew"
         and cursor_crew_entry.get("source") == "crew"
     )
-    check("Cursor marketplace mirrors shared metadata and only lists crew",
+    claude_sk_entry = next(
+        entry for entry in claude_marketplace["plugins"] if entry["name"] == "sk"
+    )
+    cursor_sk_entry = next(
+        entry for entry in cursor_marketplace["plugins"] if entry["name"] == "sk"
+    )
+    claude_sk = json.loads(
+        (REPO_ROOT / "plugins" / "sk" / ".claude-plugin" / "plugin.json").read_text()
+    )
+    cursor_sk = json.loads(
+        (REPO_ROOT / "plugins" / "sk" / ".cursor-plugin" / "plugin.json").read_text()
+    )
+    sk_entry_common = (
+        claude_sk_entry.get("source") == "./plugins/sk"
+        and cursor_sk_entry.get("source") == "sk"
+    )
+    # The sk cursor twin exposes skills ONLY: no hooks key, so Cursor never
+    # loads sk's Claude-shaped hooks.json, and no "Claude Code" wording.
+    sk_twin_common = (
+        cursor_sk.get("name") == claude_sk.get("name")
+        and cursor_sk.get("version") == claude_sk.get("version")
+        and cursor_sk.get("skills") == "./skills"
+        and "hooks" not in cursor_sk
+        and "Claude Code" not in cursor_sk.get("description", "")
+    )
+    check("Cursor marketplace mirrors shared metadata and lists crew and sk",
           marketplace_common and cursor_marketplace_description
-          and len(cursor_marketplace["plugins"]) == 1
-          and entry_common,
-          "shared marketplace metadata, metadata description, and crew entry",
+          and len(cursor_marketplace["plugins"]) == 2
+          and entry_common and sk_entry_common,
+          "shared marketplace metadata, metadata description, crew and sk entries",
           repr(cursor_marketplace))
     check("Cursor crew manifest mirrors shared plugin identity and version",
           plugin_common and cursor_description,
           "shared plugin fields and cursor description", repr(cursor_crew))
+    check("Cursor sk manifest mirrors identity, skills-only, no hooks",
+          sk_twin_common,
+          "sk name/version parity, skills path, hookless", repr(cursor_sk))
 
 
 def test_cursor_mirror_bump_behavior():
@@ -552,6 +594,34 @@ def test_cursor_mirror_bump_behavior():
               and read_version(repo / "plugins" / "crew" / ".claude-plugin" / "plugin.json") == "0.40.1"
               and read_version(repo / "plugins" / "crew" / ".cursor-plugin" / "plugin.json") == "0.40.1",
               "both crew versions at 0.40.1", f"rc={proc.returncode}")
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = make_repo(Path(td), twins=True)
+        (repo / "plugins" / "sk" / "src.txt").write_text("v1\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "fix: sk source")
+        proc = run_hook(repo)
+        check("sk source change bumps both sk manifests",
+              proc.returncode == 0
+              and read_version(repo / "plugins" / "sk" / ".claude-plugin" / "plugin.json") == "0.3.1"
+              and read_version(repo / "plugins" / "sk" / ".cursor-plugin" / "plugin.json") == "0.3.1",
+              "both sk versions at 0.3.1", f"rc={proc.returncode}")
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = make_repo(Path(td), twins=True)
+        cursor_sk = repo / "plugins" / "sk" / ".cursor-plugin" / "plugin.json"
+        cursor_sk.write_text(cursor_sk.read_text().replace(
+            '"description": "test cursor sk"',
+            '"description": "hand-edited cursor sk"',
+        ))
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "fix: cursor sk metadata")
+        proc = run_hook(repo)
+        check("Cursor-only sk twin change bumps both sk manifests",
+              proc.returncode == 0
+              and read_version(repo / "plugins" / "sk" / ".claude-plugin" / "plugin.json") == "0.3.1"
+              and read_version(cursor_sk) == "0.3.1",
+              "both sk versions at 0.3.1", f"rc={proc.returncode}")
 
     with tempfile.TemporaryDirectory() as td:
         repo = make_repo(Path(td), twins=True)
