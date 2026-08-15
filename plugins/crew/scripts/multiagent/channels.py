@@ -52,12 +52,24 @@ _CODEX_HOST_MARKERS: tuple[str, ...] = (
     "CODEX_SANDBOX_NETWORK_DISABLED",
 )
 
+_CURSOR_HOST_MARKERS: tuple[str, ...] = ()
+
+_CLAUDE_HOST_MARKERS: tuple[str, ...] = (
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+)
+
 _warned: set[str] = set()
 
 
 def codex_host_markers() -> tuple[str, ...]:
     """Return the configured exact Codex-host marker names."""
     return _CODEX_HOST_MARKERS
+
+
+def cursor_host_markers() -> tuple[str, ...]:
+    """Return the configured exact Cursor-host marker names."""
+    return _CURSOR_HOST_MARKERS
 
 
 def _warn_once(key: str, message: str) -> None:
@@ -72,10 +84,11 @@ def _detect_host(env: Mapping[str, str]) -> str:
     """Detect the current harness from an environment mapping.
 
     ``CREW_HOST`` is the explicit operator override. Exact Codex markers, when
-    the marker table is populated, outrank Claude compatibility markers.
+    the marker table is populated, outrank the cursor and Claude compatibility
+    marker tiers.
     Empty-valued markers are treated as absent.
     """
-    known_hosts = ("claude", "codex")
+    known_hosts = ("claude", "codex", "cursor")
     override = env.get("CREW_HOST", "")
     if override:
         normalized = override.casefold()
@@ -83,14 +96,16 @@ def _detect_host(env: Mapping[str, str]) -> str:
             return normalized
         _warn_once(
             "invalid-crew-host",
-            f"crew: CREW_HOST={override!r} is not a known host (claude, codex); "
+            f"crew: CREW_HOST={override!r} is not a known host (claude, codex, cursor); "
             "treating the host as unknown (no native channel)",
         )
         return "unknown"
 
     if any(env.get(marker) for marker in _CODEX_HOST_MARKERS):
         return "codex"
-    if env.get("CLAUDECODE") or env.get("CLAUDE_CODE_ENTRYPOINT"):
+    if any(env.get(marker) for marker in _CURSOR_HOST_MARKERS):
+        return "cursor"
+    if any(env.get(marker) for marker in _CLAUDE_HOST_MARKERS):
         return "claude"
     return "unknown"
 

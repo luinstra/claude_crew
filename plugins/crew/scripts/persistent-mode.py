@@ -9,6 +9,7 @@ Generic todo continuation is handled by Claude Code natively.
 # Anything below the marketplace's 3.11 floor is UNSUPPORTED, but must be
 # GRACEFUL: allow + loud diagnostic, never a silent crash and never
 # functional persistence. Diagnostic channels: stderr + systemMessage (allow-side).
+# The systemMessage fallback is Claude-shaped and inert on Cursor by design; stderr remains the carrier there.
 import json
 import sys
 
@@ -52,10 +53,31 @@ from models import (
     LOAD_FUTURE_SCHEMA,
 )
 from state_discovery import find_session_state_file, is_active_value
+from host_detect import detect_host
 
 # The parsed Stop payload, for the fail-open handler (which runs outside main()
 # and would otherwise have nothing to say about the fire that failed).
 _HOOK_INPUT: StopInput = StopInput()
+_LAST_EMIT: str | None = None
+
+
+def _emit(result: HookResult) -> bool:
+    """Emit one host-specific result, defaulting to Claude on detector errors."""
+    global _LAST_EMIT
+    # "followup" names the stop-coercion decision; Claude serializes it as decision:block, while the value is host-neutral and the shape is not.
+    _LAST_EMIT = "allow" if result.continue_ else "followup"
+    try:
+        is_cursor = detect_host() == "cursor"
+    except Exception:
+        is_cursor = False
+    print(result.to_cursor_json() if is_cursor else result.to_json())
+    return is_cursor
+
+
+def _emit_allow_diagnostic(diagnostic: str) -> None:
+    """Emit an allow-side diagnostic on stdout and, for Cursor, stderr."""
+    if _emit(HookResult.allow_with_diagnostic(diagnostic)):
+        print(diagnostic, file=sys.stderr)
 
 
 def _corrupt_block_message(loop_file: Path, disposition: str) -> str:
@@ -115,13 +137,13 @@ def _handle_load_status(loop_file: Path, status: str):
                 loop_file.unlink()
                 disposition = "deleted"
             except OSError:
-                print(HookResult.allow_with_diagnostic(_corrupt_block_message(loop_file, "stuck")).to_json())
+                _emit_allow_diagnostic(_corrupt_block_message(loop_file, "stuck"))
                 return True
-        print(HookResult.block(_corrupt_block_message(loop_file, disposition)).to_json())
+        _emit(HookResult.block(_corrupt_block_message(loop_file, disposition)))
         return True
     if status == LOAD_FUTURE_SCHEMA:
         # Refuse to touch: bytes untouched, loud diagnostic, allow stop.
-        print(HookResult.allow_with_diagnostic(_future_schema_diagnostic(loop_file)).to_json())
+        _emit_allow_diagnostic(_future_schema_diagnostic(loop_file))
         return True
     return False
 
@@ -365,14 +387,14 @@ def _handle_loop(loop_file, state, parked, banner, task_text, detail_lines, reci
     reason = None if completed else _termination_reason(state)
     if reason:
         if _force_exit(loop_file, state, reason):
-            print(HookResult.block(
+            _emit(HookResult.block(
                 f"""[{banner} - Safety Limit Reached]
 
 Loop deactivated: {reason}.
 
 Do NOT re-init the loop. Report where the work actually stands: what completed,
 what did not, and what you were waiting on."""
-            ).to_json())
+            ))
             return True
         # The bound tripped against the pre-lock read, but the loop reached a
         # terminal or completing state before the lock took, so nothing was
@@ -398,7 +420,7 @@ what did not, and what you were waiting on."""
             # turn with nothing to do, so it polled, which burned the counter and
             # flooded the context until compaction wiped its memory of the panel.
             _persist_fires(loop_file, state, parked="bump")
-            print(HookResult.allow().to_json())
+            _emit(HookResult.allow())
             return True
         # Past the cap, this Stop is treated as an ordinary one (nudge + a
         # stop_fire). The park signal cannot tell crew's own seats from an
@@ -450,48 +472,52 @@ what did not, and what you were waiting on."""
     lines = [f"[{banner}]", _elapsed_note(state), "", f"Task: {task_text}"]
     lines.extend(detail_lines)
     lines.append(body)
-    print(HookResult.block("\n".join(lines)).to_json())
+    _emit(HookResult.block("\n".join(lines)))
     return True
 
 
 def main():
-    global _HOOK_INPUT
-    data = read_hook_input()
-    record_hook_payload_keys("Stop", data)
-    hook_input = StopInput.from_dict(data)
-    _HOOK_INPUT = hook_input
-    directory = hook_input.directory_path
-    session_id = hook_input.session_id
+    global _HOOK_INPUT, _LAST_EMIT
+    data = {}
+    armed_state = None
+    _LAST_EMIT = None
+    try:
+        data = read_hook_input()
+        hook_input = StopInput.from_dict(data)
+        _HOOK_INPUT = hook_input
+        directory = hook_input.directory_path
+        session_id = hook_input.session_id
 
-    crew_dir = directory / ".crew"
+        crew_dir = directory / ".crew"
 
-    # Rendered inside copy-pasteable shell commands: only emit the flag when
-    # there is a value (no trailing bare `--session-id`), and shell-quote it.
-    session_flag = f" --session-id {shlex.quote(session_id)}" if session_id else ""
+        # Rendered inside copy-pasteable shell commands: only emit the flag when
+        # there is a value (no trailing bare `--session-id`), and shell-quote it.
+        session_flag = f" --session-id {shlex.quote(session_id)}" if session_id else ""
 
-    # Priority 1: Build Loop (session-scoped lookup)
-    loop_file = find_session_state_file(crew_dir, "build-state", session_id)
-    if loop_file:
-        loop_state, status = LoopState.load_with_status(loop_file)
-        if _handle_load_status(loop_file, status):
-            return
+        # Priority 1: Build Loop (session-scoped lookup)
+        loop_file = find_session_state_file(crew_dir, "build-state", session_id)
+        if loop_file:
+            loop_state, status = LoopState.load_with_status(loop_file)
+            if _handle_load_status(loop_file, status):
+                return
 
-        if loop_state.active:
-            # adoption stamp: claim an unowned legacy file for this session
-            # before the save (the fire already saves, zero extra writes).
-            # Closes the co-adoption window at first touch. A schema-1 file's
-            # missing started_at is stamped by _normalize_bounds, with every other
-            # unusable value of that field.
-            if not loop_state.session_id and session_id:
-                loop_state.session_id = session_id
-            _handle_loop(
-                loop_file,
-                loop_state,
-                hook_input.is_parked,
-                banner="Build Loop",
-                task_text=truncate(loop_state.task, 120),
-                detail_lines=[],
-                recipe=f"""
+            if loop_state.active:
+                armed_state = loop_state
+                # adoption stamp: claim an unowned legacy file for this session
+                # before the save (the fire already saves, zero extra writes).
+                # Closes the co-adoption window at first touch. A schema-1 file's
+                # missing started_at is stamped by _normalize_bounds, with every other
+                # unusable value of that field.
+                if not loop_state.session_id and session_id:
+                    loop_state.session_id = session_id
+                _handle_loop(
+                    loop_file,
+                    loop_state,
+                    hook_input.is_parked,
+                    banner="Build Loop",
+                    task_text=truncate(loop_state.task, 120),
+                    detail_lines=[],
+                    recipe=f"""
 Continue working. When complete, verify via the multi-model panel
 (/crew:build Step 2):
 1. "${{CLAUDE_PLUGIN_ROOT}}/crew" review-prep working-tree{session_flag}
@@ -511,33 +537,34 @@ If you are WAITING on seats that are still running, just wait. Do NOT re-run
 the panel and do NOT clear seat files that already landed.
 
 To exit early: `/crew:cancel-build`""",
-                done_body=_done_body(
-                    "bl", session_flag,
-                    "Then summarize what was accomplished.",
-                    "/crew:cancel-build", loop_state),
-                cancel_cmd="/crew:cancel-build",
-            )
-            return
+                    done_body=_done_body(
+                        "bl", session_flag,
+                        "Then summarize what was accomplished.",
+                        "/crew:cancel-build", loop_state),
+                    cancel_cmd="/crew:cancel-build",
+                )
+                return
 
-    # Priority 2: Measure-Twice Loop (session-scoped lookup)
-    measure_file = find_session_state_file(crew_dir, "measure-twice-state", session_id)
-    if measure_file:
-        measure_state, status = LoopState.load_with_status(measure_file)
-        if _handle_load_status(measure_file, status):
-            return
+        # Priority 2: Measure-Twice Loop (session-scoped lookup)
+        measure_file = find_session_state_file(crew_dir, "measure-twice-state", session_id)
+        if measure_file:
+            measure_state, status = LoopState.load_with_status(measure_file)
+            if _handle_load_status(measure_file, status):
+                return
 
-        if measure_state.active:
-            # adoption stamp (see build loop above).
-            if not measure_state.session_id and session_id:
-                measure_state.session_id = session_id
-            _handle_loop(
-                measure_file,
-                measure_state,
-                hook_input.is_parked,
-                banner="Measure-Twice Loop",
-                task_text=truncate(measure_state.task, 120),
-                detail_lines=[f"Plan: {measure_state.plan_file}"],
-                recipe=f"""
+            if measure_state.active:
+                armed_state = measure_state
+                # adoption stamp (see build loop above).
+                if not measure_state.session_id and session_id:
+                    measure_state.session_id = session_id
+                _handle_loop(
+                    measure_file,
+                    measure_state,
+                    hook_input.is_parked,
+                    banner="Measure-Twice Loop",
+                    task_text=truncate(measure_state.task, 120),
+                    detail_lines=[f"Plan: {measure_state.plan_file}"],
+                    recipe=f"""
 Continue refining the plan. Verify via the multi-model panel
 (/crew:measure-twice Phase 3):
 1. If you just received panel feedback, revise the plan to address [BLOCKING] issues
@@ -552,20 +579,29 @@ If you are WAITING on seats that are still running, just wait. Do NOT re-run
 the panel and do NOT clear seat files that already landed.
 
 To exit early: `/crew:cancel-measure-twice`""",
-                done_body=_done_body(
-                    "mt", session_flag,
-                    "Then present the final plan.",
-                    "/crew:cancel-measure-twice", measure_state),
-                cancel_cmd="/crew:cancel-measure-twice",
-            )
-            return
+                    done_body=_done_body(
+                        "mt", session_flag,
+                        "Then present the final plan.",
+                        "/crew:cancel-measure-twice", measure_state),
+                    cancel_cmd="/crew:cancel-measure-twice",
+                )
+                return
 
-    # No active loop — allow stop
-    print(HookResult.allow().to_json())
+        # No active loop, allow stop.
+        _emit(HookResult.allow())
+    finally:
+        extra = None
+        if armed_state is not None:
+            extra = {
+                "crew.stop_fires": armed_state.stop_fires,
+                "crew.parked_fires": armed_state.parked_fires,
+                "crew.emit": _LAST_EMIT or "allow",
+            }
+        record_hook_payload_keys("Stop", data, extra=extra)
 
 
 def _fail_open(diag: str) -> None:
-    """Allow the stop, LOUDLY (stderr + systemMessage), never silently.
+    """Allow the stop with a host-appropriate loud diagnostic.
 
     `stop_hook_active` is the one fact the payload carries about the failing fire:
     it says whether this Stop was already being continued by a hook, i.e. whether
@@ -573,7 +609,7 @@ def _fail_open(diag: str) -> None:
     """
     if _HOOK_INPUT.stop_hook_active:
         diag += " This Stop was already being continued by a hook (a loop was blocking)."
-    print(HookResult.allow_with_diagnostic(diag).to_json())
+    _emit(HookResult.allow_with_diagnostic(diag))
     print(diag, file=sys.stderr)
     sys.exit(0)
 

@@ -485,6 +485,28 @@ def test_claude():
           marker_name not in marker_env.get("env", {}),
           f"{marker_name} absent", repr(marker_env.get("env", {})))
 
+    cursor_marker_name = "FAKE_CURSOR_HOST_MARKER"
+    original_cursor_marker_accessor = channels.cursor_host_markers
+    saved_cursor_marker_value = os.environ.get(cursor_marker_name)
+    channels.cursor_host_markers = lambda: (cursor_marker_name,)
+    os.environ[cursor_marker_name] = "cursor-marker"
+    cursor_marker_env: dict = {}
+    claude_module.run_reaped = lambda argv, **kwargs: (
+        cursor_marker_env.update(kwargs) or (0, "review", "")
+    )
+    try:
+        provider.run("P")
+    finally:
+        claude_module.run_reaped = original_run_reaped
+        channels.cursor_host_markers = original_cursor_marker_accessor
+        if saved_cursor_marker_value is None:
+            os.environ.pop(cursor_marker_name, None)
+        else:
+            os.environ[cursor_marker_name] = saved_cursor_marker_value
+    check("claude child env also scrubs populated Cursor markers",
+          cursor_marker_name not in cursor_marker_env.get("env", {}),
+          f"{cursor_marker_name} absent", repr(cursor_marker_env.get("env", {})))
+
     workspace_write = provider.run("P", sandbox="workspace-write")
     check("claude workspace-write is refused explicitly",
           workspace_write.ok is False
@@ -1579,6 +1601,9 @@ def test_host_detection():
         check("CREW_HOST=CODEX override is case-insensitive",
               channels._detect_host({"CREW_HOST": "CoDeX"}) == "codex",
               "codex", repr(channels._detect_host({"CREW_HOST": "CoDeX"})))
+        check("CREW_HOST=CURSOR override is case-insensitive",
+              channels._detect_host({"CREW_HOST": "CuRsOr"}) == "cursor",
+              "cursor", repr(channels._detect_host({"CREW_HOST": "CuRsOr"})))
 
         import contextlib
         import io
@@ -1587,7 +1612,7 @@ def test_host_detection():
             invalid = channels._detect_host({"CREW_HOST": "wat"})
             repeated = channels._detect_host({"CREW_HOST": "wat"})
         expected_warning = (
-            "crew: CREW_HOST='wat' is not a known host (claude, codex); "
+            "crew: CREW_HOST='wat' is not a known host (claude, codex, cursor); "
             "treating the host as unknown (no native channel)\n"
         )
         check("invalid CREW_HOST -> unknown with exact one-time warning",
@@ -1626,15 +1651,36 @@ def test_host_detection():
                   channels._detect_host({marker: "", "CLAUDECODE": "1"}) == "claude",
                   "claude", repr(channels._detect_host({marker: "", "CLAUDECODE": "1"})))
 
+        cursor_markers = channels._CURSOR_HOST_MARKERS
+        if not cursor_markers:
+            print("cursor marker table empty; marker-win case skipped")
+        else:
+            cursor_marker = cursor_markers[0]
+            check("Cursor markers win over Claude markers",
+                  channels._detect_host({cursor_marker: "1", "CLAUDECODE": "1"}) == "cursor",
+                  "cursor", repr(channels._detect_host({cursor_marker: "1", "CLAUDECODE": "1"})))
+            check("empty-valued Cursor marker counts as absent",
+                  channels._detect_host({cursor_marker: "", "CLAUDECODE": "1"}) == "claude",
+                  "claude", repr(channels._detect_host({cursor_marker: "", "CLAUDECODE": "1"})))
+
+        check("Codex and Cursor marker tables are disjoint when populated",
+              not set(channels._CODEX_HOST_MARKERS) & set(channels._CURSOR_HOST_MARKERS),
+              "disjoint marker names",
+              repr((channels._CODEX_HOST_MARKERS, channels._CURSOR_HOST_MARKERS)))
+
         check("native_channel maps Claude only",
               channels.native_channel("claude") == "claude"
               and channels.native_channel("codex") is None
+              and channels.native_channel("cursor") is None
               and channels.native_channel("unknown") is None,
-              "claude / None / None",
-              repr([channels.native_channel(host) for host in ("claude", "codex", "unknown")]))
+              "claude / None / None / None",
+              repr([channels.native_channel(host) for host in ("claude", "codex", "cursor", "unknown")]))
         check("codex channel table has no native channel",
               not any(spec.native for spec in channels.channel_table("codex").values()),
               "zero native channels", repr(channels.channel_table("codex")))
+        check("cursor channel table has no native channel",
+              not any(spec.native for spec in channels.channel_table("cursor").values()),
+              "zero native channels", repr(channels.channel_table("cursor")))
         check("unknown channel table has no native channel",
               not any(spec.native for spec in channels.channel_table("unknown").values()),
               "zero native channels", repr(channels.channel_table("unknown")))
@@ -6258,6 +6304,32 @@ def test_review_prep():
         obj = json.loads(proc.stdout)
         check("review-prep omitted --task-seats -> []",
               obj["task_seats"] == [], "[]", str(obj["task_seats"]))
+
+    # Cursor is a host with no native seat channel, so every resolved seat stays
+    # external and its provenance is cursor for cursor-provider rows.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        env_cursor = _neutral_env()
+        env_cursor["CREW_HOST"] = "cursor"
+        proc = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "cursor-auto,opus",
+             "--session-id", "cursor-host"],
+            cwd=td, env=env_cursor, timeout=30)
+        obj = json.loads(proc.stdout)
+        check("review-prep Cursor host reports host=cursor and no native Task seats",
+              proc.returncode == 0
+              and obj["host"] == "cursor"
+              and obj["task_seats"] == []
+              and "opus" in obj["subprocess_seats"]
+              and obj["seat_channels"].get("opus") == "claude",
+              "host cursor, opus externally resolved on the Claude channel",
+              str(obj))
+        check("review-prep Cursor host preserves cursor channel provenance",
+              obj["seat_channels"].get("cursor-auto") == "cursor"
+              and "cursor-auto" in obj["subprocess_seats"],
+              "cursor-auto subprocess seat with cursor channel",
+              str(obj))
 
     # 3. Reference mode: prep's staged prompt names the run dir's SNAPSHOT as the
     #    reviewed content (render --stage still names the live plan). Inline mode:
@@ -11854,6 +11926,21 @@ def test_doctor():
                   for name in task_names),
               "claude not found on PATH for Claude seats",
               str({name: codex_sub.get(name) for name in sorted(task_names)}))
+
+        env_cursor = dict(env)
+        env_cursor["CREW_HOST"] = "cursor"
+        proc_cursor = _run_cli(["doctor"], env=env_cursor, cwd=str(proj), timeout=30)
+        cursor_payload = json.loads(proc_cursor.stdout)
+        cursor_sub = cursor_payload.get("subprocess", {})
+        check("doctor Cursor host: Claude seats are external",
+              proc_cursor.returncode == 0
+              and task_names <= set(cursor_sub)
+              and cursor_payload.get("task", {}) == {},
+              "Claude seats in subprocess map, empty task map",
+              str(cursor_payload))
+        check("doctor Cursor host: cursor seats are external",
+              set(_seats.group_tokens()["cursor"]) <= set(cursor_sub),
+              "all cursor seats in subprocess map", str(cursor_sub))
         # session-scoped file written AND matches stdout.
         sess_file = proj / ".crew" / "reviews" / "SES1" / "doctor.json"
         check("doctor --session-id writes .crew/reviews/<id>/doctor.json",

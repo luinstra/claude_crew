@@ -23,7 +23,7 @@ from ._proc import TIMEOUT, run_reaped
 # preserving authentication and PATH inputs. Exclude CLAUDE_PLUGIN_ROOT and
 # CODEX_COMPANION_* names because they are not identity markers for this child.
 # Re-derive this list when the host-owned marker contract changes; the exact
-# Codex marker table is unioned at call time below.
+# non-Claude marker tables are unioned at call time below.
 _SCRUBBED_ENV_NAMES = (
     "AI_AGENT",
     "CLAUDECODE",
@@ -55,7 +55,11 @@ def strip_ansi(text: str) -> str:
 def _child_env() -> dict[str, str]:
     """Build a child environment without inherited harness identity markers."""
     env = dict(os.environ)
-    scrubbed = set(_SCRUBBED_ENV_NAMES) | set(channels.codex_host_markers())
+    scrubbed = (
+        set(_SCRUBBED_ENV_NAMES)
+        | set(channels.codex_host_markers())
+        | set(channels.cursor_host_markers())
+    )
     for name in scrubbed:
         env.pop(name, None)
     return env

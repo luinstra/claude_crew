@@ -212,6 +212,14 @@ class HookResult:
             result["systemMessage"] = self.system_message
         return json.dumps(result)
 
+    def to_cursor_json(self) -> str:
+        """Serialize this result using Cursor's stop-hook contract."""
+        # Dropping systemMessage is deliberate: Cursor has no documented equivalent.
+        result: dict[str, Any] = {}
+        if not self.continue_ and self.reason is not None:
+            result["followup_message"] = self.reason
+        return json.dumps(result)
+
     @classmethod
     def allow(cls, message: Optional[str] = None) -> "HookResult":
         """Create a result that allows the action to continue."""
@@ -245,6 +253,13 @@ class SessionStartResult:
                 "hookEventName": "SessionStart",
                 "additionalContext": self.additional_context,
             }
+        return json.dumps(result)
+
+    def to_cursor_json(self) -> str:
+        """Serialize this result using Cursor's session-start contract."""
+        result: dict[str, Any] = {}
+        if self.additional_context:
+            result["additional_context"] = self.additional_context
         return json.dumps(result)
 
     @classmethod
@@ -837,8 +852,27 @@ def truncate(text: str, max_length: int = 120) -> str:
     return text[:max_length - 3] + "..."
 
 
-def record_hook_payload_keys(event, payload) -> None:
-    """Debug aid: log which TOP-LEVEL KEYS a hook payload carried, never values.
+_STOP_PAYLOAD_VALUE_KEYS = ("loop_count", "status")
+_STOP_EXTRA_VALUE_KEYS = ("crew.stop_fires", "crew.parked_fires", "crew.emit")
+
+
+def _render_debug_keys(mapping, value_keys) -> list[str]:
+    parts = []
+    for key in sorted(mapping, key=str):
+        value = mapping[key]
+        empty = value is None or (value == "" or value == [] or value == {})
+        if empty:
+            parts.append(f"{key}(empty)")
+        elif key in value_keys and isinstance(value, (int, str)) \
+                and (not isinstance(value, str) or len(value) <= 32):
+            parts.append(f"{key}={value}")
+        else:
+            parts.append(str(key))
+    return parts
+
+
+def record_hook_payload_keys(event, payload, extra=None) -> None:
+    """Debug aid: log top-level keys, except whitelisted stop values.
 
     Gated on CREW_HOOK_DEBUG (unset/empty: pure no-op, no file access). When on,
     appends one line per hook fire to `<crew_base()>/.crew/hook-payload-keys.txt`:
@@ -847,8 +881,9 @@ def record_hook_payload_keys(event, payload) -> None:
 
     The `(empty)` suffix marks a key whose value is None or an empty
     string/list/dict, so "is session_id present AND non-empty" is answerable
-    without recording the id. Values are NEVER written: hook payloads can carry
-    transcript paths and prompts, and a values file is one `git add` from an
+    without recording the id. Values are names only, except the stop event's
+    whitelisted scalar loop-state values. Hook payloads can carry transcript
+    paths and prompts, and an unrestricted values file is one `git add` from an
     accident.
 
     Silent on ANY failure: hooks own stdout (their JSON result), so this aid
@@ -858,11 +893,13 @@ def record_hook_payload_keys(event, payload) -> None:
     try:
         if not os.environ.get("CREW_HOOK_DEBUG"):
             return
-        parts = []
-        for key in sorted(payload, key=str):
-            value = payload[key]
-            empty = value is None or (value == "" or value == [] or value == {})
-            parts.append(f"{key}(empty)" if empty else str(key))
+        is_stop = event.casefold() == "stop"
+        parts = _render_debug_keys(
+            payload,
+            _STOP_PAYLOAD_VALUE_KEYS if is_stop else (),
+        )
+        if is_stop and extra:
+            parts.extend(_render_debug_keys(extra, _STOP_EXTRA_VALUE_KEYS))
         line = f"{utc_now_iso()} {event}: {','.join(parts)}\n"
         target = crew_base() / ".crew" / "hook-payload-keys.txt"
         target.parent.mkdir(parents=True, exist_ok=True)

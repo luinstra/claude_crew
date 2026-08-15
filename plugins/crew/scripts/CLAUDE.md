@@ -21,6 +21,7 @@ scripts/
 ├── models.py            # Dataclasses for all JSON structures
 ├── persistent-mode.py   # Stop hook: enforces continuation
 ├── session-start.py     # SessionStart hook: restores state
+├── host_detect.py       # Stdlib host detector for hooks and command guards
 ├── artifact_prune.py    # ENUMERATE-only stale-artifact finder (single source shared by `crew swab` + the session-start reporter); never deletes
 ├── tests/               # Unit tests (test-hooks.py, test-multiagent.py, fixtures/)
 └── multiagent/          # Multi-model review/council engine (see below)
@@ -37,11 +38,12 @@ and the orchestrator normalizes native Task results into the same six-field core
 the engine returns. A missing external CLI produces a named skipped result.
 
 Host selection is explicit when needed: `CREW_HOST=claude` selects the native
-Claude Task channel, while `CREW_HOST=codex` selects the Codex-host external
-fallback. With no override, detection uses the shipped exact marker table and
-Claude compatibility markers; an unknown host has no native channel and keeps
-Claude seats external. The override is process-local and is scrubbed before an
-external Claude child is launched so nested crew calls re-detect their host.
+Claude Task channel, `CREW_HOST=codex` selects the Codex-host external fallback,
+and `CREW_HOST=cursor` selects the Cursor-host external route. With no override,
+detection uses the shipped exact marker table and Claude compatibility markers;
+an unknown host has no native channel and keeps Claude seats external. The
+override is process-local and is scrubbed before an external Claude child is
+launched so nested crew calls re-detect their host.
 
 ```
 multiagent/
@@ -634,7 +636,8 @@ Run its tests with `python plugins/crew/scripts/tests/test-multiagent.py`.
 
 ### Hook I/O Pattern
 
-All hooks follow the same pattern:
+All hooks follow the same logical pattern, with the entry scripts routing the
+final output through a host-conditional `_emit` seam:
 
 ```python
 #!/usr/bin/env python3
@@ -655,14 +658,17 @@ def main():
     else:
         result = HookResult.allow()
 
-    # 4. Output JSON
-    print(result.to_json())
+    # 4. Output through the host-aware entry-script seam
+    _emit(result)
 
 if __name__ == "__main__":
     main()
 ```
 
-Debug aid: both hook entries call `models.record_hook_payload_keys(<event>, data)` right after the stdin parse; with `CREW_HOOK_DEBUG` set non-empty it appends the payload's top-level KEY NAMES (never values; an `(empty)` suffix marks an empty/null value) to `.crew/hook-payload-keys.txt`, which grows unbounded while the gate is set and is swept by neither session-start cleanup nor `crew swab` (truncate it manually).
+`to_json()` is the Claude output shape. The shipped entry scripts' `_emit`
+helpers select it or the Cursor shape after host detection.
+
+Debug aid: session-start calls `models.record_hook_payload_keys("SessionStart", data)` right after the stdin parse. The Stop entry calls it exactly once in `main()`'s `finally` after mutation; with `CREW_HOOK_DEBUG` set non-empty it appends top-level KEY NAMES, plus the stop event's whitelisted payload values and post-mutation `crew.*` values, to `.crew/hook-payload-keys.txt`. An `(empty)` suffix marks an empty/null value. The file grows unbounded while the gate is set and is swept by neither session-start cleanup nor `crew swab` (truncate it manually).
 
 ### State File Pattern
 
@@ -711,7 +717,8 @@ result = SessionStartResult.with_context("""
 [Previous session context restored]
 You were working on: fixing the auth bug
 """)
-print(result.to_json())
+# The entry script routes through its host-conditional _emit helper.
+_emit(result)  # to_json() is the Claude output shape
 ```
 
 ### build_plugin_guidance: CREW_VERBOSE gating, and what does NOT belong here
@@ -953,6 +960,14 @@ HookResult.allow_with_diagnostic("…") # {"systemMessage": "..."} (loud allow)
 HookResult.block("Must continue")    # {"decision": "block", "reason": "..."}
 ```
 
+On a Cursor host, the corresponding output adapters are:
+
+```python
+HookResult.block("Must continue")    # {"followup_message": "..."}
+HookResult.allow_with_diagnostic("…") # {} plus the diagnostic on stderr
+SessionStartResult.with_context("...") # {"additional_context": "..."}
+```
+
 > **Do NOT emit `{"continue": false}` to block a Stop.** A two-layer live
 > smoke proved it INERT for blocking — Claude Code honors it as a
 > HARD-STOP directive (the child session terminated at the first stop
@@ -1126,7 +1141,8 @@ print(json.dumps({"message": "You were working on X"}))
 ✅ **Use `additionalContext` via SessionStartResult**
 ```python
 result = SessionStartResult.with_context("You were working on X")
-print(result.to_json())
+# The entry script routes through its host-conditional _emit helper.
+_emit(result)  # to_json() is the Claude output shape
 ```
 
 ---

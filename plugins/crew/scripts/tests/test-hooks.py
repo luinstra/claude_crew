@@ -202,6 +202,152 @@ def main():
                  '{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "restored context"}}',
                  _ctx_json)
 
+    _cursor_block = json.loads(HookResult.block("stop reason").to_cursor_json())
+    _cursor_allow = json.loads(HookResult.allow_with_diagnostic("diagnostic").to_cursor_json())
+    _cursor_context = json.loads(
+        SessionStartResult.with_context("cursor context").to_cursor_json()
+    )
+    if (_cursor_block == {"followup_message": "stop reason"}
+            and _cursor_allow == {}
+            and _cursor_context == {"additional_context": "cursor context"}):
+        log_pass("Cursor serializers emit followup, allow, and additional_context shapes")
+    else:
+        log_fail(
+            "Cursor serializers emit followup, allow, and additional_context shapes",
+            "Cursor-native JSON shapes",
+            repr((_cursor_block, _cursor_allow, _cursor_context)),
+        )
+
+    import host_detect as _host_detect
+    from host_detect import (
+        _CLAUDE_HOST_MARKERS,
+        _CODEX_HOST_MARKERS,
+        _CURSOR_HOST_MARKERS,
+        _detect_host,
+    )
+    from multiagent import channels as _channels
+    _host_matrix = (
+        ({"CREW_HOST": "CuRsOr"}, "cursor"),
+        ({"CREW_HOST": "CoDeX"}, "codex"),
+        ({"CREW_HOST": "claude"}, "claude"),
+        ({"CREW_HOST": "invalid"}, "unknown"),
+        ({"CODEX_THREAD_ID": "1", "CLAUDECODE": "1"}, "codex"),
+        ({"CLAUDECODE": "1"}, "claude"),
+        ({}, "unknown"),
+    )
+    if all(_detect_host(env) == _channels._detect_host(env) == expected
+           for env, expected in _host_matrix):
+        log_pass("host_detect agrees with channels across the precedence matrix")
+    else:
+        log_fail("host_detect agrees with channels across the precedence matrix",
+                 "matching host names", repr([(_detect_host(env), _channels._detect_host(env))
+                                                for env, _ in _host_matrix]))
+    if (_CODEX_HOST_MARKERS == _channels._CODEX_HOST_MARKERS
+            and _CURSOR_HOST_MARKERS == _channels._CURSOR_HOST_MARKERS
+            and _CLAUDE_HOST_MARKERS == _channels._CLAUDE_HOST_MARKERS
+            and "import multiagent" not in (SCRIPT_DIR / "host_detect.py").read_text()
+            and "from multiagent" not in (SCRIPT_DIR / "host_detect.py").read_text()):
+        log_pass("host_detect marker tuples are literal-equal and engine-free")
+    else:
+        log_fail("host_detect marker tuples are literal-equal and engine-free",
+                 "matching marker tuples and no multiagent import",
+                 repr((_CODEX_HOST_MARKERS, _channels._CODEX_HOST_MARKERS,
+                       _CURSOR_HOST_MARKERS, _channels._CURSOR_HOST_MARKERS,
+                       _CLAUDE_HOST_MARKERS, _channels._CLAUDE_HOST_MARKERS)))
+
+    _saved_host_cursor_markers = _host_detect._CURSOR_HOST_MARKERS
+    _saved_channels_cursor_markers = _channels._CURSOR_HOST_MARKERS
+    try:
+        _host_detect._CURSOR_HOST_MARKERS = ("CURSOR_SESSION_MARKER",)
+        _channels._CURSOR_HOST_MARKERS = ("CURSOR_SESSION_MARKER",)
+        _cursor_marker_env = {"CURSOR_SESSION_MARKER": "1"}
+        _cursor_marker_ok = (
+            _host_detect._detect_host(_cursor_marker_env) == "cursor"
+            and _channels._detect_host(_cursor_marker_env) == "cursor"
+        )
+    finally:
+        _host_detect._CURSOR_HOST_MARKERS = _saved_host_cursor_markers
+        _channels._CURSOR_HOST_MARKERS = _saved_channels_cursor_markers
+    if _cursor_marker_ok:
+        log_pass("host detectors agree when cursor markers are populated")
+    else:
+        log_fail("host detectors agree when cursor markers are populated",
+                 "both detectors return cursor", repr(_cursor_marker_env))
+
+    _session_start_script = SCRIPT_DIR / "session-start.py"
+    _persistent_script = SCRIPT_DIR / "persistent-mode.py"
+    with tempfile.TemporaryDirectory() as _cursor_emit_dir:
+        _cursor_emit_root = Path(_cursor_emit_dir)
+        _cursor_emit_crew = _cursor_emit_root / ".crew"
+        _cursor_emit_crew.mkdir()
+        (_cursor_emit_crew / "build-state.json").write_text(
+            '{"active": true, "task": "cursor emit", "schema": 3}'
+        )
+        _session_cursor = run_script(
+            _session_start_script,
+            json.dumps({"directory": str(_cursor_emit_root)}),
+            extra_env={"CREW_HOST": "cursor"},
+        )
+        _stop_cursor = run_script(
+            _persistent_script,
+            json.dumps({"directory": str(_cursor_emit_root), "session_id": "s1"}),
+            extra_env={"CREW_HOST": "cursor"},
+        )
+        try:
+            _session_cursor_obj = json.loads(_session_cursor)
+            _stop_cursor_obj = json.loads(_stop_cursor)
+        except json.JSONDecodeError:
+            _session_cursor_obj = {}
+            _stop_cursor_obj = {}
+        if ("additional_context" in _session_cursor_obj
+                and "hookSpecificOutput" not in _session_cursor_obj
+                and "followup_message" in _stop_cursor_obj
+                and "decision" not in _stop_cursor_obj):
+            log_pass("both hook entry scripts emit Cursor shapes under CREW_HOST=cursor")
+        else:
+            log_fail("both hook entry scripts emit Cursor shapes under CREW_HOST=cursor",
+                     "additional_context and followup_message only",
+                     repr((_session_cursor_obj, _stop_cursor_obj)))
+
+    with tempfile.TemporaryDirectory() as _claude_emit_dir:
+        _claude_emit_root = Path(_claude_emit_dir)
+        _claude_emit_crew = _claude_emit_root / ".crew"
+        _claude_emit_crew.mkdir()
+        (_claude_emit_crew / "build-state.json").write_text(
+            '{"active": true, "task": "claude emit", "schema": 3}'
+        )
+        _session_claude = run_script(
+            _session_start_script,
+            json.dumps({"directory": str(_claude_emit_root)}),
+            extra_env={"CREW_HOST": "claude"},
+        )
+        _stop_claude = run_script(
+            _persistent_script,
+            json.dumps({"directory": str(_claude_emit_root), "session_id": "s1"}),
+            extra_env={"CREW_HOST": "claude"},
+        )
+        try:
+            _session_claude_obj = json.loads(_session_claude)
+            _stop_claude_obj = json.loads(_stop_claude)
+        except json.JSONDecodeError:
+            _session_claude_obj = {}
+            _stop_claude_obj = {}
+        if ("hookSpecificOutput" in _session_claude_obj
+                and "additional_context" not in _session_claude_obj
+                and _stop_claude_obj.get("decision") == "block"
+                and "followup_message" not in _stop_claude_obj
+                and _session_claude == SessionStartResult.with_context(
+                    _session_claude_obj["hookSpecificOutput"]["additionalContext"]
+                ).to_json()
+                and _stop_claude == HookResult.block(
+                    _stop_claude_obj["reason"]
+                ).to_json()):
+            log_pass("Claude host hook stdout keeps the existing JSON bytes")
+        else:
+            log_fail("Claude host hook stdout keeps the existing JSON bytes",
+                     "Claude serializer bytes and legacy keys",
+                     repr((_session_claude_obj, _stop_claude_obj)))
+
     # =========================================================================
     # MODELS: StopInput parses the live Stop payload's parking signal.
     # `background_tasks` is the ONE honest signal separating "parked, waiting on
@@ -336,10 +482,11 @@ def main():
 
     # =========================================================================
     # MODELS: record_hook_payload_keys, the CREW_HOOK_DEBUG payload-key capture
-    # aid both hook entries call right after their stdin parse. Three contracts:
-    # gated-off touches nothing, gated-on writes KEY NAMES only (never values),
-    # and a write failure is swallowed (it must never raise into a hook or
-    # pollute the hook's stdout JSON).
+    # aid for both hook entries. SessionStart records after parsing; Stop records
+    # once in main()'s finally after mutation. Three contracts: gated-off touches
+    # nothing, gated-on writes key names plus only the Stop whitelist values and
+    # post-mutation crew extras, and a write failure is swallowed (it must never
+    # raise into a hook or pollute the hook's stdout JSON).
     # =========================================================================
     log_section("models.record_hook_payload_keys (CREW_HOOK_DEBUG capture aid)")
     import contextlib
@@ -415,6 +562,211 @@ def main():
             os.environ.pop("CLAUDE_PROJECT_DIR", None)
         else:
             os.environ["CLAUDE_PROJECT_DIR"] = _saved_proj
+
+    with tempfile.TemporaryDirectory() as _value_dir:
+        os.environ["CLAUDE_PROJECT_DIR"] = _value_dir
+        os.environ["CREW_HOOK_DEBUG"] = "1"
+        record_hook_payload_keys(
+            "Stop",
+            {"loop_count": 3, "status": "blocked", "crew.stop_fires": 99,
+             "transcript_path": "/private/path"},
+            extra={"crew.stop_fires": 2, "crew.parked_fires": 0, "crew.emit": "followup"},
+        )
+        record_hook_payload_keys("Stop", {}, extra={"crew.emit": True})
+        record_hook_payload_keys(
+            "SessionStart",
+            {"status": "blocked", "loop_count": 3},
+        )
+        _value_lines = (
+            Path(_value_dir) / ".crew" / "hook-payload-keys.txt"
+        ).read_text(encoding="utf-8").splitlines()
+        _value_ok = (
+            len(_value_lines) == 3
+            and "loop_count=3" in _value_lines[0]
+            and "status=blocked" in _value_lines[0]
+            and "crew.stop_fires=2" in _value_lines[0]
+            and "crew.parked_fires=0" in _value_lines[0]
+            and "crew.emit=followup" in _value_lines[0]
+            and "crew.stop_fires=99" not in _value_lines[0]
+            and "crew.emit=True" in _value_lines[1]
+            and "status" in _value_lines[2]
+            and "status=blocked" not in _value_lines[2]
+            and "loop_count=3" not in _value_lines[2]
+            and "/private/path" not in "\n".join(_value_lines)
+        )
+        if _value_ok:
+            log_pass("record_hook_payload_keys: stop whitelist values and extra mapping are scoped")
+        else:
+            log_fail("record_hook_payload_keys: stop whitelist values and extra mapping are scoped",
+                     "stop values rendered, other events names-only",
+                     repr(_value_lines))
+        os.environ.pop("CREW_HOOK_DEBUG", None)
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+
+    # The recorder is called once for each normal and early-return path. The
+    # exception path is checked through the module directly because its outer
+    # entry-point handler owns the final allow payload.
+    def _capture_lines(state_text=None, payload=None):
+        with tempfile.TemporaryDirectory() as _capture_dir:
+            _capture_root = Path(_capture_dir)
+            if state_text is not None:
+                (_capture_root / ".crew").mkdir()
+                (_capture_root / ".crew" / "build-state.json").write_text(state_text)
+            _payload = payload or {"directory": str(_capture_root), "session_id": "s1"}
+            _output = run_script(
+                SCRIPT_DIR / "persistent-mode.py",
+                json.dumps(_payload),
+                extra_env={"CREW_HOOK_DEBUG": "1"},
+            )
+            _keys = _capture_root / ".crew" / "hook-payload-keys.txt"
+            return _output, (_keys.read_text().splitlines() if _keys.exists() else [])
+
+    _unarmed_output, _unarmed_lines = _capture_lines()
+    _armed_output, _armed_lines = _capture_lines(
+        '{"active": true, "task": "record", "schema": 3}'
+    )
+    # The parked case uses a payload rooted at its temporary directory.
+    with tempfile.TemporaryDirectory() as _park_dir:
+        _park_root = Path(_park_dir)
+        (_park_root / ".crew").mkdir()
+        (_park_root / ".crew" / "build-state.json").write_text(
+            '{"active": true, "task": "park", "schema": 3}'
+        )
+        _parked_output = run_script(
+            SCRIPT_DIR / "persistent-mode.py",
+            json.dumps({"directory": str(_park_root), "session_id": "s1",
+                         "background_tasks": [{"status": "running"}]}),
+            extra_env={"CREW_HOOK_DEBUG": "1"},
+        )
+        _parked_file = _park_root / ".crew" / "hook-payload-keys.txt"
+        _parked_lines = _parked_file.read_text().splitlines()
+    _corrupt_output, _corrupt_lines = _capture_lines("not-json")
+    _future_output, _future_lines = _capture_lines(
+        '{"active": true, "schema": 999}'
+    )
+    if (all(len(lines) == 1 for lines in
+            (_unarmed_lines, _armed_lines, _parked_lines, _corrupt_lines, _future_lines))
+            and "crew.stop_fires=" not in _unarmed_lines[0]
+            and "crew.stop_fires=1" in _armed_lines[0]
+            and "crew.emit=followup" in _armed_lines[0]
+            and "crew.parked_fires=1" in _parked_lines[0]
+            and "crew.emit=allow" in _parked_lines[0]
+            and "crew.stop_fires" not in _corrupt_lines[0]
+            and "crew.stop_fires" not in _future_lines[0]):
+        log_pass("persistent-mode records exactly once across unarmed/armed/parked/corrupt/future state matrix")
+    else:
+        log_fail("persistent-mode records exactly once across unarmed/armed/parked/corrupt/future state matrix",
+                 "one line per fire with post-mutation crew values only when armed",
+                 repr((_unarmed_lines, _armed_lines, _parked_lines, _corrupt_lines, _future_lines)))
+
+    import importlib.util
+    _persistent_spec = importlib.util.spec_from_file_location(
+        "persistent_mode_recorder_test", SCRIPT_DIR / "persistent-mode.py"
+    )
+    _persistent_module = importlib.util.module_from_spec(_persistent_spec)
+    _persistent_spec.loader.exec_module(_persistent_module)
+    _session_spec = importlib.util.spec_from_file_location(
+        "session_start_fail_open_test", SCRIPT_DIR / "session-start.py"
+    )
+    _session_module = importlib.util.module_from_spec(_session_spec)
+    _session_spec.loader.exec_module(_session_module)
+
+    def _raise_detect_host():
+        raise RuntimeError("host detection failed")
+
+    _saved_persistent_detect = _persistent_module.detect_host
+    _saved_session_detect = _session_module.detect_host
+    _fail_stop_stdout = io.StringIO()
+    _fail_session_stdout = io.StringIO()
+    try:
+        _persistent_module.detect_host = _raise_detect_host
+        _session_module.detect_host = _raise_detect_host
+        with contextlib.redirect_stdout(_fail_stop_stdout):
+            _persistent_module._emit(HookResult.block("fallback reason"))
+        with contextlib.redirect_stdout(_fail_session_stdout):
+            _session_module._emit(SessionStartResult.with_context("fallback context"))
+    finally:
+        _persistent_module.detect_host = _saved_persistent_detect
+        _session_module.detect_host = _saved_session_detect
+    _fail_stop_obj = json.loads(_fail_stop_stdout.getvalue())
+    _fail_session_obj = json.loads(_fail_session_stdout.getvalue())
+    _fail_open_ok = (
+        _fail_stop_obj == {"decision": "block", "reason": "fallback reason"}
+        and "followup_message" not in _fail_stop_obj
+        and _fail_session_obj == {
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": "fallback context",
+            }
+        }
+        and "additional_context" not in _fail_session_obj
+    )
+    if _fail_open_ok:
+        log_pass("host detector failure falls back to Claude shapes in both hook entries")
+    else:
+        log_fail("host detector failure falls back to Claude shapes in both hook entries",
+                 "Claude decision/reason and hookSpecificOutput.additionalContext",
+                 repr((_fail_stop_obj, _fail_session_obj)))
+
+    class _StuckStatePath:
+        name = "build-state.json"
+
+        def with_name(self, _name):
+            return self
+
+        def replace(self, _target):
+            raise OSError("rename blocked")
+
+        def unlink(self):
+            raise OSError("delete blocked")
+
+    _cursor_diag_stdout = io.StringIO()
+    _cursor_diag_stderr = io.StringIO()
+    _saved_detect = _persistent_module.detect_host
+    try:
+        _persistent_module.detect_host = lambda: "cursor"
+        with (contextlib.redirect_stdout(_cursor_diag_stdout),
+              contextlib.redirect_stderr(_cursor_diag_stderr)):
+            _persistent_module._handle_load_status(
+                _StuckStatePath(), _persistent_module.LOAD_CORRUPT
+            )
+            _persistent_module._handle_load_status(
+                Path("future-schema.json"), _persistent_module.LOAD_FUTURE_SCHEMA
+            )
+    finally:
+        _persistent_module.detect_host = _saved_detect
+    _cursor_diag_ok = (
+        _cursor_diag_stdout.getvalue() == "{}\n{}\n"
+        and "corrupt JSON" in _cursor_diag_stderr.getvalue()
+        and "newer crew version" in _cursor_diag_stderr.getvalue()
+    )
+    if _cursor_diag_ok:
+        log_pass("Cursor allow diagnostics stay in stderr for corrupt and future state")
+    else:
+        log_fail("Cursor allow diagnostics stay in stderr for corrupt and future state",
+                 "two {} stdout results and both diagnostics on stderr",
+                 repr((_cursor_diag_stdout.getvalue(), _cursor_diag_stderr.getvalue())))
+
+    _recorder_calls = []
+    _saved_read_hook_input = _persistent_module.read_hook_input
+    _saved_record_hook_payload_keys = _persistent_module.record_hook_payload_keys
+    try:
+        _persistent_module.read_hook_input = lambda: (_ for _ in ()).throw(RuntimeError("capture"))
+        _persistent_module.record_hook_payload_keys = lambda *args, **kwargs: _recorder_calls.append(
+            (args, kwargs)
+        )
+        try:
+            _persistent_module.main()
+        except RuntimeError:
+            pass
+    finally:
+        _persistent_module.read_hook_input = _saved_read_hook_input
+        _persistent_module.record_hook_payload_keys = _saved_record_hook_payload_keys
+    if len(_recorder_calls) == 1:
+        log_pass("persistent-mode recorder runs once when the hook body raises")
+    else:
+        log_fail("persistent-mode recorder runs once when the hook body raises",
+                 "one recorder call", repr(_recorder_calls))
 
     # Global-state isolation: every subprocess env pins HOME to _NEUTRAL_HOME
     # (see _neutral_env), so the scripts under test can never read from — or

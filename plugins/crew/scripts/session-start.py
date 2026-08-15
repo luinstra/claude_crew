@@ -13,6 +13,7 @@ Restores persistent mode states and injects crew's own agent guidance.
 # intentional split from the post-import crash handler at the bottom of
 # the module, which CAN build a SessionStartResult and therefore emits via
 # SessionStart's documented hookSpecificOutput.additionalContext channel.
+# The systemMessage fallback is Claude-shaped and inert on Cursor by design; stderr remains the carrier there.
 import json
 import sys
 
@@ -53,12 +54,22 @@ from models import (
     LOAD_OK,
 )
 from state_discovery import crew_base, is_loop_state_file, is_active_state_file, is_active_value
+from host_detect import detect_host
 
 
 MAX_AGE_DAYS = 7
 MAX_AGE_SECONDS = MAX_AGE_DAYS * 86400
 STALE_INACTIVE_DAYS = 1
 STALE_INACTIVE_SECONDS = STALE_INACTIVE_DAYS * 86400
+
+
+def _emit(result: SessionStartResult) -> None:
+    """Emit Cursor's shape when detected, with Claude as the safe fallback."""
+    try:
+        is_cursor = detect_host() == "cursor"
+    except Exception:
+        is_cursor = False
+    print(result.to_cursor_json() if is_cursor else result.to_json())
 
 
 def cleanup_stale_files(directory: Path) -> None:
@@ -583,7 +594,7 @@ def main():
     full_context = "\n\n".join(context_parts)
 
     # Output using SessionStartResult for proper context injection
-    print(SessionStartResult.with_context(full_context).to_json())
+    _emit(SessionStartResult.with_context(full_context))
 
 
 if __name__ == "__main__":
@@ -601,6 +612,6 @@ if __name__ == "__main__":
         # hookSpecificOutput.additionalContext (systemMessage is honored on the
         # Stop allow-side, not here), so emit the diagnostic the same way this
         # hook emits its normal payload, plus stderr.
-        print(SessionStartResult.with_context(_diag).to_json())
+        _emit(SessionStartResult.with_context(_diag))
         print(_diag, file=sys.stderr)
         sys.exit(0)
