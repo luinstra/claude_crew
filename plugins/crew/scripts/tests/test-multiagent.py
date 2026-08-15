@@ -11619,6 +11619,40 @@ def test_command_fences_no_expansions():
               "quoted relative -o/--full, session_segment stem", str(coll))
 
 
+def test_cursor_loop_guard_markdown():
+    log_section("cursor loop guard markdown contract")
+    cmd_dir = SCRIPT_DIR.parent / "commands"
+    stop_text = (
+        'Loops are unproven on the cursor\n'
+        'host, so this loop will not arm here. Use the one-shot flows\n'
+        '(/crew:review, /crew:dispatch, /crew:debate) instead.'
+    )
+    for name, init_token, spill_token in (
+        ("build.md", "state init bl", "task-bl-<session-id>.txt"),
+        ("measure-twice.md", "state init mt", "task-mt-<session-id>.txt"),
+    ):
+        text = (cmd_dir / name).read_text(encoding="utf-8")
+        guard_at = text.find("**Cursor host check (tier-1 closed; fail-open only past it).**")
+        write_at = text.find(f"Write the raw `$ARGUMENTS` to `<project-root>/.crew/{spill_token}`")
+        check(f"{name}: cursor guard is present before the spill Write",
+              guard_at >= 0 and write_at > guard_at,
+              "guard before spill Write", f"guard={guard_at} write={write_at}")
+        check(f"{name}: tier-one cursor check and ordered candidates are pinned",
+              text.count('python3 - <<\'PY\'') == 1
+              and 'os.environ.get("CREW_HOST", "").casefold() == "cursor"' in text
+              and '_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")' in text
+              and 'os.path.join(_root, "scripts")' in text
+              and text.index('os.path.join(_root, "scripts")')
+                  < text.index('os.path.join(os.getcwd(), "plugins", "crew", "scripts")')
+              and '"${CLAUDE_PLUGIN_ROOT}/scripts"' not in text,
+              "one heredoc, tier one, environment root then repository candidate", "guard text")
+        check(f"{name}: stop message and cursor condition are pinned",
+              'STOP iff one output line equals exactly `host=cursor`.' in text
+              and stop_text in text
+              and text.count(init_token) == 1,
+              "stop text and one state init", "guard text")
+
+
 def test_path_arg_anchoring():
     """Relative path ARGS resolve against crew_base (CLAUDE_PROJECT_DIR), never
     the shell cwd; absolute paths pass through byte-unchanged. This is the engine
@@ -19451,6 +19485,7 @@ def main():
     test_build_md_executor_task_anchoring()
     test_init_md_detection_fence_anchoring()
     test_command_fences_no_expansions()
+    test_cursor_loop_guard_markdown()
     test_path_arg_anchoring()
     test_repair_seat_name_form()
     test_build_executor()
