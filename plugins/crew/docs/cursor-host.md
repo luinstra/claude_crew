@@ -29,8 +29,8 @@ without a verified tag are expectations, not guarantees.
 ## Loops
 
 - Whether Cursor honors a `followup_message` stop-coercion response is UNVERIFIED on this host (unverified, 2026-08-17)
-- Applied scope, per that gap: persistence loops stay guarded off on this host WHEN THE HOST IS IDENTIFIED. The build and measure-twice command markdown carries the guard, which stopped with its named message instead of arming a loop in a session bound via `CREW_HOST=cursor` (verified live, 2026-08-17)
-- Honest residual: unaided detection currently reads `unknown` (the Cursor marker table ships empty pending the two-capture fill), and the guard deliberately fails open past its host check, so an UNBOUND Cursor session can still arm a loop whose stop coercion is unverified. Until the marker fill lands, the guard is only as good as the `CREW_HOST=cursor` binding from the launch shell (verified live, 2026-08-17)
+- Loops are ENABLED on this host by operator decision (2026-08-18): the build and measure-twice commands arm loops on Cursor exactly as on other hosts. A cursor-host guard that refused to arm shipped briefly and was removed by that decision
+- Honest caveat, unchanged by the enablement: whether Cursor honors `followup_message` stop coercion is unverified, and the Stop hook was observed NOT firing on a pure-text turn end, so loop persistence on this host is best-effort. Loop state, budgets, and the panel gates all work; what is unproven is the hook's ability to drag a stopping session back (unverified, 2026-08-18)
 
 ## Seat execution
 
@@ -38,7 +38,7 @@ without a verified tag are expectations, not guarantees.
 - The full `/crew:review` pipeline ran live end to end: review-prep, per-seat engine runs, collect digest. Quorum was MET at 5/6 usable seats; the one failure was the known cursor-auto empty-output flake, not a host defect (verified live, 2026-08-17)
 - All three external channels authenticate inside Cursor: the codex CLI, the cursor-agent CLI, and the claude CLI. Opus and fable ran as external Claude-channel seats with truthful channel provenance stamps (verified live, 2026-08-17)
 - Panel prep is host-truthful under `unknown` detection: with no native Claude channel on this host, every seat, including Claude voices, routes external through the `claude` CLI, and that routing is correct regardless of the marker-table gap above (verified live, 2026-08-17)
-- Commands whose recipes spawn Claude Task agents (`analyze`, `code-search`, `execute`, `deepinit`) run with SILENT SUBSTITUTION: a Cursor-native agent answers in the role instead of the named crew agent. This is documented-unsupported, not guarded (verified live, 2026-08-18)
+- Commands whose recipes spawn Claude Task agents (`analyze`, `code-search`, `execute`, `deepinit`, and the loop commands' default executor and advisor steps) run with SILENT SUBSTITUTION: a Cursor-native agent answers in the role instead of the named crew agent. This is documented-unsupported, not guarded (verified live, 2026-08-18)
 
 ## Subagents
 

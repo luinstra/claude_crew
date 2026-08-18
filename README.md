@@ -18,7 +18,7 @@ A Claude Code plugin for persistence, specialized agents, and tech-stack guidanc
 
 - **Claude Code** is the full experience: 8 agents, Stop-enforced persistence loops, and sk stack detection.
 - **Codex** is supported; see [`plugins/crew/docs/codex-host.md`](plugins/crew/docs/codex-host.md).
-- **Cursor** is supported for the one-shot flows (review, dispatch, debate; commands import and hooks deliver). Persistence loops are guarded off whenever the host is identified as Cursor (stop-coercion there is unproven); until automatic Cursor detection ships, that guard relies on the `CREW_HOST=cursor` binding from the launch shell, and an unbound session reads as an unknown host and is NOT guarded. Subagent-dependent commands are unsupported. See [`plugins/crew/docs/cursor-host.md`](plugins/crew/docs/cursor-host.md).
+- **Cursor** is supported: commands import, hooks deliver, and the one-shot flows (review, dispatch, debate) run end to end. Persistence loops are enabled, with two caveats: stop-coercion is unverified on this host, so a loop's Stop-hook enforcement is best-effort there, and the hooks only emit Cursor-shaped output when the host is bound (export `CREW_HOST=cursor` in the shell that launches Cursor, until automatic detection ships). Subagent-dependent commands are unsupported. See [`plugins/crew/docs/cursor-host.md`](plugins/crew/docs/cursor-host.md).
 
 ## The Workflow
 

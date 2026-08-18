@@ -21,7 +21,7 @@ scripts/
 ├── models.py            # Dataclasses for all JSON structures
 ├── persistent-mode.py   # Stop hook: enforces continuation
 ├── session-start.py     # SessionStart hook: restores state
-├── host_detect.py       # Stdlib host detector for hooks and command guards
+├── host_detect.py       # Stdlib host detector for the hook entry points
 ├── artifact_prune.py    # ENUMERATE-only stale-artifact finder (single source shared by `crew swab` + the session-start reporter); never deletes
 ├── tests/               # Unit tests (test-hooks.py, test-multiagent.py, fixtures/)
 └── multiagent/          # Multi-model review/council engine (see below)

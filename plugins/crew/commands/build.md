@@ -115,38 +115,6 @@ is consulted.
 
 ## MANDATORY: Activate the Loop
 
-**Cursor host check (tier-1 closed; fail-open only past it).** Run:
-
-```bash
-python3 - <<'PY'
-import os, sys
-if os.environ.get("CREW_HOST", "").casefold() == "cursor":
-    print("host=cursor")
-    raise SystemExit(0)
-_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
-candidates = ([os.path.join(_root, "scripts")] if _root else []) + [
-    os.path.join(os.getcwd(), "plugins", "crew", "scripts"),
-]
-sys.path[:0] = [c for c in candidates if os.path.isdir(c)]
-try:
-    from host_detect import detect_host
-    print("host=" + detect_host())
-except Exception as exc:
-    print("host-check-inconclusive: " + str(exc))
-PY
-```
-
-STOP iff one output line equals exactly `host=cursor`. On that match, do not run
-`state init`; tell the user exactly: "Loops are unproven on the cursor
-host, so this loop will not arm here. Use the one-shot flows
-(/crew:review, /crew:dispatch, /crew:debate) instead." Then end
-the turn. ANY other output (`host=claude`, `host=codex`,
-`host=unknown`, `host-check-inconclusive: ...`, or no output at all)
-proceeds to arming: past the inline tier-1 line the check fails OPEN
-by design, so a broken DETECTOR can never break loops on a supported
-host, while a broken import can never bypass an explicit cursor
-binding (the tier-1 line has already STOPped it).
-
 Write the raw `$ARGUMENTS` to `<project-root>/.crew/task-bl-<session-id>.txt`
 with the **Write tool** (exact bytes; creates `.crew/`), then init. Pass the
 resolved executor settings into init. `--consume` deletes the spill after a

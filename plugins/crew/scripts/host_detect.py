@@ -1,4 +1,4 @@
-"""Stdlib-only host detection for hook entry points and command guards."""
+"""Stdlib-only host detection for the hook entry points."""
 
 from collections.abc import Mapping
 import os
