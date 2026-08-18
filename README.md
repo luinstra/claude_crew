@@ -14,6 +14,12 @@ A Claude Code plugin for persistence, specialized agents, and tech-stack guidanc
 - **Tech-Stack Skills** — Auto-injected guidance for Kotlin, Exposed, Gradle, Python (via `sk` plugin)
 - **Session Restoration** — Resume where you left off after restarts
 
+## Hosts
+
+- **Claude Code** is the full experience: 8 agents, Stop-enforced persistence loops, and sk stack detection.
+- **Codex** is supported; see [`plugins/crew/docs/codex-host.md`](plugins/crew/docs/codex-host.md).
+- **Cursor** is supported for the one-shot flows (review, dispatch, debate; commands import and hooks deliver). Persistence loops are guarded off whenever the host is identified as Cursor (stop-coercion there is unproven); until automatic Cursor detection ships, that guard relies on the `CREW_HOST=cursor` binding from the launch shell, and an unbound session reads as an unknown host and is NOT guarded. Subagent-dependent commands are unsupported. See [`plugins/crew/docs/cursor-host.md`](plugins/crew/docs/cursor-host.md).
+
 ## The Workflow
 
 The intended path for real work, in order:
@@ -38,10 +44,10 @@ Not every task earns all four. A one-line fix earns none of them: just make the 
 /plugin marketplace add luinstra/claude_crew
 
 # Install crew plugin (agents, commands, hooks)
-/plugin install crew@luinstra-claude_crew
+/plugin install crew@claude-crew
 
 # Install tech-stack skills (optional)
-/plugin install sk@luinstra-claude_crew
+/plugin install sk@claude-crew
 ```
 
 ### From Local Directory (Development)
@@ -649,8 +655,8 @@ inactive files after a day.
 ## Uninstallation
 
 ```bash
-# Remove the plugin
-claude plugins remove crew
+# Remove the plugin (the sk plugin, if installed, is a separate uninstall: claude plugin uninstall sk@claude-crew)
+claude plugin uninstall crew@claude-crew
 
 # Clean up project state (optional, per-project). Substitute the project's
 # absolute path for <project-root>, keeping it a double-quoted literal (the

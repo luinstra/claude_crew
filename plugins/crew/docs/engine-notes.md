@@ -157,3 +157,14 @@ crew is ever pointed at untrusted / external-contributor diffs, these seats
 
 A `readonly: true` frontmatter key is NOT real — Claude Code ignores unknown
 fields, so it's a no-op, not enforcement.
+
+## Cursor host: all-external seat execution, native subagent channel deferred
+
+Cursor-host seat execution ships ALL-EXTERNAL: every seat, including Claude
+seats, runs as a subprocess CLI (Claude voices via the external `claude` CLI),
+with no native Cursor-subagent channel. A native channel was considered and
+deferred: the observed per-file model frontmatter for Cursor subagents is
+static, and crew's seats need a per-spawn model pin (e.g. distinct `opus` vs
+`sonnet` Task seats from one agent definition), which static frontmatter
+cannot express. Adopting a native channel would need its own design pass
+backed by live evidence, not a mechanical port of the Claude Task path.
