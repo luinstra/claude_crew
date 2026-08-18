@@ -768,7 +768,7 @@ def main():
         log_fail("persistent-mode recorder runs once when the hook body raises",
                  "one recorder call", repr(_recorder_calls))
 
-    log_section("Cursor hook configuration and probe fixtures")
+    log_section("Cursor hook configuration and agents dir")
     _cursor_hooks_path = PROJECT_DIR / "hooks" / "cursor-hooks.json"
     try:
         _cursor_hooks = json.loads(_cursor_hooks_path.read_text(encoding="utf-8"))
@@ -800,39 +800,16 @@ def main():
         log_fail("Cursor hook manifest pins python3 commands and 10/5 second timeouts",
                  "sessionStart=10, stop=5, loop_limit=3", repr(_cursor_hooks))
 
-    def _frontmatter(path: Path):
-        _lines = path.read_text(encoding="utf-8").splitlines()
-        if not _lines or _lines[0] != "---":
-            return None
-        try:
-            _end = _lines.index("---", 1)
-        except ValueError:
-            return None
-        _fields = {}
-        for _line in _lines[1:_end]:
-            if ":" not in _line:
-                return None
-            _key, _value = _line.split(":", 1)
-            _fields[_key.strip()] = _value.strip()
-        return _fields
-
-    _reviewer_frontmatter = _frontmatter(PROJECT_DIR / "agents-cursor" / "cursor-reviewer.md")
-    _formatter_frontmatter = _frontmatter(PROJECT_DIR / "agents-cursor" / "cursor-formatter.md")
-    # Delete this assertion together with the temporary agents-cursor fixtures.
-    if (_reviewer_frontmatter is not None
-            and _formatter_frontmatter is not None
-            and set(_reviewer_frontmatter) == {"name", "description", "model", "readonly"}
-            and set(_formatter_frontmatter) == {"name", "description", "model", "readonly"}
-            and _reviewer_frontmatter.get("model") == "inherit"
-            and _formatter_frontmatter.get("model") == "composer-2.5"
-            and _reviewer_frontmatter.get("readonly") == "true"
-            and _formatter_frontmatter.get("readonly") == "true"
+    # The probe fixtures were temporary: the manifest's agents dir must exist
+    # (its .gitkeep) and ship NO subagent definitions.
+    _agents_cursor_md = sorted((PROJECT_DIR / "agents-cursor").glob("*.md"))
+    if (not _agents_cursor_md
             and (PROJECT_DIR / "agents-cursor" / ".gitkeep").is_file()):
-        log_pass("Cursor reviewer/formatter fixtures pin inherit and composer-2.5 seats")
+        log_pass("agents-cursor ships no subagent definitions (dir retained via .gitkeep)")
     else:
-        log_fail("Cursor reviewer/formatter fixtures pin inherit and composer-2.5 seats",
-                 "reviewer inherit, formatter composer-2.5, readonly fixtures",
-                 repr((_reviewer_frontmatter, _formatter_frontmatter)))
+        log_fail("agents-cursor ships no subagent definitions (dir retained via .gitkeep)",
+                 "empty agents-cursor with .gitkeep",
+                 repr(_agents_cursor_md))
 
     def _guard_body(command_path: Path) -> str:
         _guard_text = command_path.read_text(encoding="utf-8")

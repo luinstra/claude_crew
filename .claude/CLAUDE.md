@@ -110,7 +110,7 @@ This enables automatic version bumping after each commit based on conventional c
 plugins/
 ├── crew/                           ← Core plugin
 │   ├── agents/                     ← execution contexts
-│   ├── agents-cursor/              ← Cursor probe agents
+│   ├── agents-cursor/              ← Cursor agents dir (ships empty)
 │   ├── commands/                   ← slash commands
 │   ├── hooks/hooks.json            ← Lifecycle integration
 │   ├── hooks/cursor-hooks.json     ← Cursor lifecycle integration
