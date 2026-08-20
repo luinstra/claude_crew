@@ -196,8 +196,10 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   because the resolver's re-anchored artifact root is only a guess; dry-run still
   lists the candidates. A review run is protected while an active loop OR a
   current-run or current-standalone-review pointer names it, or while a
-  standalone workflow is nonterminal/ambiguous (no age threshold); debates
-  prune by the existing staleness rule. Protection is fail-closed.
+  standalone workflow is nonterminal (no age threshold). A standalone workflow
+  that fails validation is protected for a 1-day grace window and then becomes
+  reclaimable; a transient I/O or import failure stays fail-closed at every age.
+  Debates prune by the existing staleness rule.
 
 **RESOLVED: all `.crew` paths anchor to CLAUDE_PROJECT_DIR via one resolver.**
 Every `.crew` root in the codebase now derives from the single `crew_base()`

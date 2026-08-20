@@ -20656,6 +20656,89 @@ def test_swab():
         check("drop_dangling_pointer removes the standalone pointer",
               not pointer.exists(), "removed", "present")
 
+    # --- an unvalidatable workflow.json is protected only inside the grace window ---
+    # Corrupt/obsolete-schema records used to be protected FOREVER, which hid them
+    # from both swab and the session-start orphan count with no way to reclaim them.
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        reviews = td / ".crew" / "reviews" / "sessU"
+        reviews.mkdir(parents=True)
+
+        def _unvalidatable(name):
+            run = reviews / name
+            run.mkdir()
+            (run / "run.json").write_text(json.dumps({"run_id": name}))
+            # Not parseable by the standalone engine: classification raises.
+            (run / "workflow.json").write_text("{not json at all")
+            return run
+
+        fresh = _unvalidatable("run-111122223333")
+        aged = _unvalidatable("run-444455556666")
+        _old_mtime(aged / "workflow.json")
+        _old_mtime(aged)
+
+        rc, out, err = _swab_run(td, as_json=True)
+        names = {i["name"] for i in json.loads(out)["prunable"]}
+        check("fresh unvalidatable workflow record is protected (may be mid-write)",
+              "run-111122223333" not in names, "protected", str(names))
+        check("aged unvalidatable workflow record IS reclaimable",
+              "run-444455556666" in names, "prunable", str(names))
+
+        rc, out, err = _swab_run(td, yes=True)
+        check("--yes keeps the fresh unvalidatable record", fresh.exists(),
+              "present", "deleted")
+        check("--yes removes the aged unvalidatable record", not aged.exists(),
+              "gone", "present")
+
+    # --- the grace window is scoped: only a validation failure ages out ---
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        reviews = td / ".crew" / "reviews" / "sessG"
+        reviews.mkdir(parents=True)
+        import artifact_prune as _apg
+
+        # (a) An aged run whose workflow.json is corrupt only because a TRANSIENT
+        # failure was raised stays protected: the error says nothing about the
+        # record, so ageing it out would let an internal fault delete live data.
+        transient = reviews / "run-aaaa1111bbbb"
+        transient.mkdir()
+        (transient / "run.json").write_text(json.dumps({"run_id": transient.name}))
+        (transient / "workflow.json").write_text("{not json at all")
+        _old_mtime(transient / "workflow.json")
+        _old_mtime(transient)
+        from multiagent import review_workflow as _rw
+        _saved = _rw._standalone_run_terminal_for_prune
+        try:
+            def _boom(run, segment):
+                raise OSError("transient disk failure")
+            _rw._standalone_run_terminal_for_prune = _boom
+            terminal = _apg._standalone_workflow_terminal(
+                transient, "sessG", time.time())
+        finally:
+            _rw._standalone_run_terminal_for_prune = _saved
+        check("aged run stays protected when the failure is transient, not a "
+              "validation error", terminal is False, "False (protected)",
+              repr(terminal))
+        # Non-vacuity: the SAME aged run does age out on a real WorkflowError.
+        terminal = _apg._standalone_workflow_terminal(
+            transient, "sessG", time.time())
+        check("the same aged run DOES age out on a validation error",
+              terminal is True, "True (prunable)", repr(terminal))
+
+        # (b) The grace clock reads workflow.json's OWN mtime, not the run dir's:
+        # an in-place rewrite never touches the parent dir, so an old run holding a
+        # freshly corrupted record must still be protected.
+        rewritten = reviews / "run-cccc2222dddd"
+        rewritten.mkdir()
+        (rewritten / "run.json").write_text(json.dumps({"run_id": rewritten.name}))
+        (rewritten / "workflow.json").write_text("{not json at all")
+        _old_mtime(rewritten)  # aged DIR, freshly written record
+        terminal = _apg._standalone_workflow_terminal(
+            rewritten, "sessG", time.time())
+        check("an aged run with a freshly corrupted record is still protected",
+              terminal is False, "False (protected)", repr(terminal))
+
+
     # --- flat current-run.json protects a flat sessionless run ---
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)

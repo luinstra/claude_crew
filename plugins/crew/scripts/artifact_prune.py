@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,6 +59,17 @@ DEBATE_DIR_RE = re.compile(r"^(run-|\d{8}-\d{6})")
 # Review runs carry NO age (the human reads the orphan list); debates keep this
 # 1-day age contract.
 DEBATE_STALE_SECONDS = 86400
+
+# Grace window (1 day) for a standalone workflow record that FAILS VALIDATION.
+# Review runs otherwise carry NO age, but this one path needs it: a half-written
+# `workflow.json` can be a LIVE run caught mid-write, so a young one stays
+# protected. Past the window the record is permanently unvalidatable, and
+# protecting it forever would hide it from both `crew swab` and the session-start
+# orphan count with no way to ever reclaim it. Scope is deliberately narrow: only a
+# WorkflowError ages out. A transient I/O or import failure says nothing about the
+# record and stays protected at every age, and a live run is protected by its
+# pointer regardless of age (see pointer_protected_keys).
+UNVALIDATABLE_WORKFLOW_GRACE_SECONDS = 86400
 
 REVIEWS_SUBDIR = "reviews"
 DEBATES_SUBDIR = "debates"
@@ -242,11 +254,30 @@ def pointer_protected_keys(reviews_root: Path) -> set:
     return keys
 
 
-def _standalone_workflow_terminal(run: Path, segment: str) -> bool | None:
+def _within_grace(stamp: Path, now: float) -> bool:
+    """True while ``stamp``'s own mtime is inside the unvalidatable grace window.
+
+    Reads the path's OWN timestamp (``lstat``, no symlink follow): an in-place
+    rewrite of a file does not touch its parent dir's mtime, so timing the run dir
+    instead would treat a freshly corrupted record inside an old run as expired.
+    An unreadable timestamp protects the run.
+    """
+    try:
+        age = now - stamp.lstat().st_mtime
+    except OSError:
+        return True
+    return age <= UNVALIDATABLE_WORKFLOW_GRACE_SECONDS
+
+
+def _standalone_workflow_terminal(run: Path, segment: str, now: float) -> bool | None:
     """Delegate pruning classification to the canonical standalone engine.
 
-    ``None`` means there is no standalone workflow. Every exception means the
-    record is malformed or ambiguous and therefore must remain protected.
+    ``None`` means there is no standalone workflow here at all. A validation error
+    (``WorkflowError``) means the record is genuinely malformed or of an obsolete
+    schema: protect it while it is young enough to be a live run mid-write, then
+    let a permanently unvalidatable one become reclaimable. Any OTHER exception is
+    a transient runtime failure (I/O, import, interpreter) that says nothing about
+    the record, so it stays fail-closed and protected at every age.
     """
     workflow_path = run / "workflow.json"
     try:
@@ -258,12 +289,15 @@ def _standalone_workflow_terminal(run: Path, segment: str) -> bool | None:
             return False
         from multiagent import review_workflow
 
-        return review_workflow._standalone_run_terminal_for_prune(run, segment)
+        try:
+            return review_workflow._standalone_run_terminal_for_prune(run, segment)
+        except review_workflow.WorkflowError:
+            return False if _within_grace(workflow_path, now) else True
     except Exception:
         return False
 
 
-def standalone_workflow_protected_keys(reviews_root: Path) -> set:
+def standalone_workflow_protected_keys(reviews_root: Path, now: float) -> set:
     """Protect every active or conservatively unreadable standalone workflow."""
     protected = set()
 
@@ -271,7 +305,7 @@ def standalone_workflow_protected_keys(reviews_root: Path) -> set:
         for run in session_dir.glob("run-*"):
             if not own_dir(run) or MINTED_RUN_DIR_RE.fullmatch(run.name) is None:
                 continue
-            terminal = _standalone_workflow_terminal(run, segment)
+            terminal = _standalone_workflow_terminal(run, segment, now)
             if terminal is False:
                 protected.add((segment, run.name))
 
@@ -338,13 +372,19 @@ def _review_runs_under(
     return out
 
 
-def prunable_review_runs(crew_dir: Path, with_sizes: bool = True) -> list[Prunable]:
+def prunable_review_runs(
+    crew_dir: Path, with_sizes: bool = True, now: float | None = None
+) -> list[Prunable]:
     """Every prunable review-run dir under ``.crew/reviews/``.
 
     Covers BOTH the flat/sessionless ``.crew/reviews/<run-id>/`` and the
-    ``.crew/reviews/<session>/<run-id>/`` layouts. There is NO age logic: the human
-    reads the orphan list and decides. ``with_sizes`` is passed straight to the
-    per-dir enumerator (False skips the sizing walk, keeps every safety check).
+    ``.crew/reviews/<session>/<run-id>/`` layouts. Enumeration carries no age
+    threshold: the human reads the orphan list and decides. The one exception is
+    the grace window on an unvalidatable standalone workflow record
+    (UNVALIDATABLE_WORKFLOW_GRACE_SECONDS), which is why ``now`` is threaded here;
+    it defaults to the current clock for a direct caller. ``with_sizes`` is passed
+    straight to the per-dir enumerator (False skips the sizing walk, keeps every
+    safety check).
     """
     # A symlinked (or non-dir) `.crew` root means this is not the tree crew created.
     # own_dir refuses a symlinked reviews_root BELOW, but not a symlinked `.crew`
@@ -361,7 +401,9 @@ def prunable_review_runs(crew_dir: Path, with_sizes: bool = True) -> list[Prunab
     protected = (
         live_run_keys(crew_dir)
         | pointer_protected_keys(reviews_root)
-        | standalone_workflow_protected_keys(reviews_root)
+        | standalone_workflow_protected_keys(
+            reviews_root, time.time() if now is None else now
+        )
     )
 
     out = _review_runs_under(reviews_root, "", protected, reviews_root, with_sizes)
@@ -467,7 +509,7 @@ def collect_prunable(
     so the count-only session-start reporter does no unbounded per-dir sizing.
     """
     return _drop_nested(
-        prunable_review_runs(crew_dir, with_sizes)
+        prunable_review_runs(crew_dir, with_sizes, now)
     ) + prunable_debate_dirs(crew_dir, now, with_sizes)
 
 

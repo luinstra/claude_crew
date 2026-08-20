@@ -5163,9 +5163,10 @@ def cmd_swab(args: argparse.Namespace) -> int:
     DRY-RUN BY DEFAULT, modelled on ``git clean -n``: the read-the-list moment IS
     the safety mechanism. Prunes two artifact families under the project ``.crew/``:
     ORPHANED review-run dirs (no active loop, no current-run or
-    current-standalone-review pointer names them, and no nonterminal or ambiguous
-    standalone workflow protects them; there is deliberately no review-run age
-    threshold) and stale debate dirs (past the 1-day threshold, no synthesis).
+    current-standalone-review pointer names them, and no nonterminal standalone
+    workflow protects them; there is deliberately no review-run age threshold
+    beyond the 1-day grace given to a standalone workflow that fails validation)
+    and stale debate dirs (past the 1-day threshold, no synthesis).
     Signal markers are deliberately left
     untouched: they carry no clean orphan signal at an attended moment, so this
     command does not delete them (session-start's aged sweep still reaps them).

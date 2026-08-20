@@ -462,8 +462,10 @@ also REFUSES (exit 2, deletes nothing) when run from a terminal `.crew` cwd with
 `CLAUDE_PROJECT_DIR` unset: the project root is only a guess there, so cd back to
 the project root or set the env var (the dry-run listing still works). A review
 run is protected while an active loop, a current-run/current-standalone-review
-pointer, or a nonterminal/ambiguous standalone workflow names or protects it;
-protection is fail-closed. Plans and loop state are never in scope, so swab only ever removes stale
+pointer, or a nonterminal standalone workflow names or protects it. A standalone
+workflow that FAILS VALIDATION (corrupt or obsolete schema) is protected for a
+1-day grace window and then becomes reclaimable, so a permanently unreadable
+record cannot pin disk forever; every other error stays fail-closed. Plans and loop state are never in scope, so swab only ever removes stale
 review/debate debris. `--json` emits the machine payload (`prunable`, `removed`,
 `failed`, `total_bytes`).
 
