@@ -81,6 +81,12 @@ class ProviderResult:
     run_id: str | None = None
     target_sha256: str | None = None
 
+    # OPTIONAL standalone workflow action stamps.  These are additive to the
+    # retained six-field/provider identity contract and let the workflow
+    # reconcile an external result against the exact attempt that issued it.
+    action_id: str | None = None
+    attempt_id: str | None = None
+
     # OPTIONAL channel provenance stamp. Providers stay channel-ignorant; a
     # writer populates this when the resolved channel is known.
     channel: str | None = None
@@ -99,7 +105,8 @@ class ProviderResult:
 
         Mirrors the ``models.py`` convention (``asdict(self)``) BUT drops each
         optional field (``repaired_output``, ``run_id``, ``target_sha256``,
-        ``channel``, ``continuation``, ``continuation_id``) when
+        ``action_id``, ``attempt_id``, ``channel``, ``continuation``,
+        ``continuation_id``) when
         it is None, so an un-repaired/un-stamped seat's JSON keeps the
         byte-identical SIX-field shape existing consumers expect. The CLI/render
         layer batches a list of these and calls ``json.dumps`` ONCE over the
@@ -110,7 +117,7 @@ class ProviderResult:
         d = dataclasses.asdict(self)
         for opt in (
             "repaired_output", "run_id", "target_sha256",
-            "channel", "continuation", "continuation_id",
+            "action_id", "attempt_id", "channel", "continuation", "continuation_id",
         ):
             if getattr(self, opt) is None:
                 d.pop(opt, None)
@@ -181,6 +188,10 @@ class ProviderResult:
         run_id = None if rid is None else str(rid)
         tsha = d.get("target_sha256")
         target_sha256 = None if tsha is None else str(tsha)
+        aid = d.get("action_id")
+        action_id = None if aid is None else str(aid)
+        atid = d.get("attempt_id")
+        attempt_id = None if atid is None else str(atid)
         channel_value = d.get("channel")
         channel = None if channel_value is None else str(channel_value)
 
@@ -206,6 +217,7 @@ class ProviderResult:
         return cls(name=name, model=model, ok=ok, output=output,
                    error=error, elapsed=elapsed, repaired_output=repaired_output,
                    run_id=run_id, target_sha256=target_sha256, channel=channel,
+                   action_id=action_id, attempt_id=attempt_id,
                    continuation=continuation, continuation_id=continuation_id)
 
 
@@ -393,6 +405,29 @@ def get_provider(name: str) -> Provider:
             f"unknown registered seat {name!r}; known registered seats: {known}"
         )
     return factory()
+
+
+def get_provider_for_channel(name: str, channel: str) -> Provider:
+    """Construct ``name`` on one already-selected execution channel.
+
+    The ordinary registry intentionally follows a seat's first configured
+    channel for legacy callers. Standalone workflow actions freeze the channel
+    selected by the host resolver, which can be a later entry in a multi-via
+    seat. This constructor preserves that selection while still applying the
+    seat's provider-specific tuning; callers must validate live route identity
+    before invoking it.
+    """
+    from multiagent import seats as catalog
+
+    spec = catalog.seat_spec(name)
+    kind = catalog.CHANNEL_TO_LEGACY_KIND.get(channel)
+    classes = _provider_classes()
+    if spec is None or kind not in classes or channel not in spec.via:
+        raise ValueError(
+            f"seat {name!r} has no provider for selected channel {channel!r}"
+        )
+    cls, tunes = classes[kind]
+    return cls(spec.name, spec.model, **tunes(spec))
 
 
 def available_seats(names: list[str]) -> list[Provider]:

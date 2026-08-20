@@ -56,7 +56,7 @@ class Target:
     # branch-name ranges are normalized BEFORE anything persists the spec
     # (never a labeled/descriptor form, never ``auto``).
     replay_spec: str = ""
-    # Set by review-prep ONLY (never by a resolver): the run dir's frozen
+    # Set by review-prep or the standalone review workflow (never by a resolver): the run dir's frozen
     # snapshot of ``content``. When set, the prompt builder makes the snapshot
     # the reviewed content and demotes ``ref_path``/``diff_cmd`` (still the
     # LIVE target) to supplementary context.
@@ -179,6 +179,11 @@ def _is_dirty(cwd: str | None = None) -> bool:
         return True
     included, _ = _untracked_partition(cwd)
     return bool(included)
+
+
+def is_dirty(cwd: str | None = None) -> bool:
+    """Return whether the canonical working-tree review target has content."""
+    return _is_dirty(str(crew_base()) if cwd is None else cwd)
 
 
 def _untracked_diff(included: list[str], cwd: str | None = None) -> str:

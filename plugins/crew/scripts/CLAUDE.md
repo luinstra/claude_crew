@@ -23,19 +23,20 @@ scripts/
 ├── session-start.py     # SessionStart hook: restores state
 ├── host_detect.py       # Stdlib host detector for the hook entry points
 ├── artifact_prune.py    # ENUMERATE-only stale-artifact finder (single source shared by `crew swab` + the session-start reporter); never deletes
-├── tests/               # Unit tests (test-hooks.py, test-multiagent.py, fixtures/)
+├── tests/               # Unit tests (test-review-workflow.py, test-hooks.py, test-multiagent.py, fixtures/)
 └── multiagent/          # Multi-model review/council engine (see below)
 ```
 
 ## Multi-Model Review Engine (`multiagent/`)
 
-The engine that powers `/crew:review`, `/crew:debate`, and the review steps of
-`/crew:build` and `/crew:measure-twice`. It resolves each catalog seat against
-the current host: Claude seats are native Task seats on a Claude host and
-external `claude` CLI seats elsewhere; codex, agy, and cursor rows remain
-external provider seats. `review-prep` is the source of truth for that split,
-and the orchestrator normalizes native Task results into the same six-field core
-the engine returns. A missing external CLI produces a named skipped result.
+The engine powers `/crew:review`, `/crew:debate`, and the review steps of
+`/crew:build` and `/crew:measure-twice`. Standalone review is owned by
+`review_workflow.py`; its Markdown is only a host transport for issued actions.
+Build and measure-twice still use `review-prep`. Both paths resolve each catalog
+seat against the current host: Claude seats are native Task seats on a Claude
+host and external `claude` CLI seats elsewhere; codex, agy, and cursor rows
+remain external provider seats. A missing external CLI produces a named skipped
+result.
 
 Host selection is explicit when needed: `CREW_HOST=claude` selects the native
 Claude Task channel, `CREW_HOST=codex` selects the Codex-host external fallback,
@@ -47,7 +48,8 @@ launched so nested crew calls re-detect their host.
 
 ```
 multiagent/
-├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher); subcommands: review | council | debate | run | dispatch | build-executor | render (incl. --stage-all) | seats (incl. --debate) | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | wait (incl. --signal) | signal | doctor | probe | scaffold-config | swab
+├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher); subcommands: review | review-next | review-claim | review-execute | review-submit | review-recover | review-retry | council | debate | run | dispatch | build-executor | render (incl. --stage-all) | seats (incl. --debate) | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | wait (incl. --signal) | signal | doctor | probe | scaffold-config | swab
+├── review_workflow.py   # standalone review authority: exact schema transport, snapshot, lock/advance transaction, attempt history, repair, retry, and synthesis readiness
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
@@ -68,12 +70,26 @@ multiagent/
 ```
 
 Per-subcommand one-liners (do NOT regress the behavior each names):
-- `review` / `council` — ad-hoc one-shot fan-out across subprocess seats (`_fan_out`).
+- `review` — start or resume the Python-owned standalone review workflow; it
+  requires a harness session id and returns a schema-1 step. Its raw timeout is
+  CLI `--timeout` > per-repo/global `[tuning].timeout` > builtin 600 seconds;
+  external work is capped at 540 seconds, reserving 60 seconds for settlement.
+  An Agy floor is accepted only at or below 540; above that the start fails. A
+  fresh over-cap resolve warns once on stderr. When `--timeout` is omitted, a
+  matching-pointer resume adopts the frozen timeout without warning. An explicit
+  timeout re-resolves normally and may re-warn; only a different effective value
+  creates a new identity. Council/run/probe keep the
+  ordinary `[tuning].timeout` wall clock.
+- `review-retry` — retry pending reviewer seats from a terminal attempt. An
+  identical `review` start after `synthesis_failed` is the separate,
+  intentional attempt-local synthesis restart and does not rerun seats.
+- `council` — ad-hoc one-shot fan-out across subprocess seats (`_fan_out`).
 - `debate` — scaffold-only (see below); the round loop lives in debate.md.
 - `run <seat>`: run ONE host-resolved external seat; `--json` always exits 0 with the six-field core
   plus optional channel and identity stamps for every result it WRITES.
   Run-scoped MISUSE (non-member seat, prompt/model/sandbox override) exits 2 before any result is
-  written, and a seat name matching a reserved control filename stem (run/current-run/seat,
+  written, and a seat name matching a reserved control filename stem
+  (run/current-run/current-standalone-review/seat,
   case-folded) is rejected on EVERY derived destination, flat and run-scoped alike (an explicit
   `-o` keeps ad-hoc freedom).
 - `dispatch` — write-mode single-seat WORK delegation (see below).
@@ -142,8 +158,9 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   it. A forgotten signal is indistinguishable from an agent still working: `wait`'s timeout is what
   makes that failure bounded and loud rather than a poll that never ends. The standing rule lives in
   `agents/executor.md` (signal LAST, always, blocked included, iff the prompt named a tag). The
-  review-bearing flows (`review`/`build`/`measure-twice`) do NOT use this: they delegate via one-shot
-  Tasks whose returns already signal, so a signal step there would be pure ceremony.
+  build/measure review Task seats do NOT use this because their returns already
+  signal. Standalone `review` instead uses claimed workflow actions and explicit
+  settlement/recovery; it never uses this long-lived-teammate signal protocol.
 - `repair-seat` — writes the haiku repair to a seat's SEPARATE `repaired_output` field, never
   overwriting `output`. Two mutually exclusive addressing forms (both named → exit 2, neither →
   exit 2): a positional seat NAME + `--session-id`/`--run-id` (the recipes' form: the engine
@@ -178,8 +195,9 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   `--yes` from a terminal `.crew` cwd with no `CLAUDE_PROJECT_DIR` is refused
   because the resolver's re-anchored artifact root is only a guess; dry-run still
   lists the candidates. A review run is protected while an active loop OR a
-  current-run pointer names it (no age threshold); debates prune by the existing
-  staleness rule.
+  current-run or current-standalone-review pointer names it, or while a
+  standalone workflow is nonterminal/ambiguous (no age threshold); debates
+  prune by the existing staleness rule. Protection is fail-closed.
 
 **RESOLVED: all `.crew` paths anchor to CLAUDE_PROJECT_DIR via one resolver.**
 Every `.crew` root in the codebase now derives from the single `crew_base()`
@@ -216,7 +234,9 @@ Key contracts (do NOT regress):
   `repaired_output` precedent (serialized by `to_dict` only when set, coerced by
   `from_dict`, round-tripping through `repair-seat` untouched, ignored by `render`):
   `repaired_output` (the haiku repair) plus the run-identity stamps `run_id` /
-  `target_sha256`, and `channel`. `channel` comes from host resolution; `run` and
+  `target_sha256`, `action_id`, `attempt_id`, and `channel`. Standalone review
+  requires the action/attempt stamps on every accepted reviewer artifact so one
+  attempt's evidence cannot satisfy another. `channel` comes from host resolution; `run` and
   `persist-seat` stamp the run-identity fields from the run dir's own `run.json`
   whenever a result lands in a run-scoped review dir (never from the pointer, so
   a stamp always describes the dir the file physically sits in). An ad-hoc flat
@@ -256,8 +276,10 @@ Key contracts (do NOT regress):
 
 ### Presets & config precedence
 
-- **Panel selection** — the commands accept `--panel full|lite|solo|cursor|quick` / `--seats <subset>`
-  and pass them STRAIGHT to `crew review-prep`, which OWNS the resolution (`seats.merged_panels()`
+- **Panel selection** — build and measure-twice accept `--panel full|lite|solo|cursor|quick` / `--seats <subset>`
+  and pass them STRAIGHT to `crew review-prep`. Standalone review passes both
+  options independently to `review_workflow`, which uses the same shared
+  resolver. The Python engine OWNS the resolution (`seats.merged_panels()`
   for the roster + the host-aware channel resolver for each seat's resolved execution): it splits the preset/`--seats` into `subprocess_seats` (the
   external-CLI entries), `task_seats` (seats resolved native for this run), `task_seat_models` (each Task
   seat's model pin), `host`, and `seat_channels`, and the orchestrator just reads that JSON — it no longer classifies seat names,
@@ -290,7 +312,7 @@ Key contracts (do NOT regress):
 - Panel-NAME resolution AND the `available` filter funnel through ONE shared point in `cli.py`
   (`_panel_seat_list` resolves via `seats.merged_panels()`, which merges a configured `[panels]` entry over the shipped one).
 - Two availability shapes share the same `available=false` drop + explicit-name skip-note: the
-  single-list chokepoint `_resolve_seats` (ad-hoc `crew review`/`council`/`seats` + the debate resolver)
+  legacy single-list chokepoint `_resolve_seats` (`council`/`seats` + the debate resolver)
   uses `_filter_available`, which falls back to the unfiltered panel if the one list would empty;
   `review-prep` uses the lower-level `_drop_unavailable` per split (subprocess vs task) and applies a
   WHOLE-PANEL fallback ONCE — restoring the unfiltered panel only if the ENTIRE resolved panel
@@ -308,8 +330,9 @@ Key contracts (do NOT regress):
   `[panels]` rosters) expands to every registered `cursor-*` seat via `_expand_seat_groups`, so it grows
   with the cursor rows of the catalog (`seats.group_tokens()` supplies the expansion members).
 - `render --stage --session-id <id>` stages a seat prompt to the FLAT
-  `.crew/reviews/<session-id>/prompt-<seat-role>.txt`, pointer or no pointer: only `review-prep` may
-  write a run dir's frozen prompt files (session resolved in Python — arg →
+  `.crew/reviews/<session-id>/prompt-<seat-role>.txt`, pointer or no pointer:
+  only the Python run owners (`review-prep` for loops and `review_workflow` for
+  standalone review) may write a run dir's frozen prompt files (session resolved in Python — arg →
   `CLAUDE_SESSION_ID` env — so the command carries no `${…}` expansion).
 - **Plugin-root `crew` dispatcher (canonical invocation).** Commands invoke the
   engine via the bare `"${CLAUDE_PLUGIN_ROOT}/crew" <sub> …` dispatcher (a thin
@@ -366,9 +389,12 @@ Key contracts (do NOT regress):
 
 ### Subprocess fan-out
 
-- **Per-seat fan-out (visibility).** The review-bearing commands (`review`/`build`/`measure-twice`) fan
-  subprocess seats out ONE `crew run <seat>` call PER seat — each a separate, visible, killable shell —
-  rather than one opaque `crew review --seats <all>` call that hides them in the `_fan_out` thread pool.
+- **Per-seat fan-out (visibility).** Build and measure-twice fan subprocess seats
+  out ONE `crew run <seat>` call PER seat — each a separate, visible, killable
+  shell. Standalone review is workflow-only: it issues one external `WorkItem`
+  per seat and the thin host adapter invokes `review-execute` once per item; it
+  never enters `_fan_out`. `council` remains the ad-hoc one-shot `_fan_out`
+  command.
 - The orchestrator then iterates `pending_subprocess_seats`, running each via `run <seat> --session-id
   <id> --run-id <run_id> --json` — `run` DERIVES `-f` (`prompt-seat.txt`) and `-o` (`<seat>.json`) from
   the run dir (explicit `--run-id` > the session pointer > the flat session dir; resolved ONCE at
@@ -390,7 +416,7 @@ Key contracts (do NOT regress):
 ### Task-seat dispatch & persist
 
 - (`review-prep` resolves BOTH seat kinds but EXECUTES neither — the Claude Task seats stay
-  orchestrator-DISPATCHED; the commands spawn each PENDING Task seat over its prep-staged prompt
+  orchestrator-DISPATCHED; build and measure-twice spawn each PENDING Task seat over its prep-staged prompt
   (`task_prompt_paths[seat]`) with `model = task_seat_models[seat]`, so it is no longer the
   opaque echo the commands ignored.)
 - After the fan-out, the orchestrator persists EACH normalized Task seat (opus/sonnet/fable) via `crew
@@ -401,11 +427,11 @@ Key contracts (do NOT regress):
   Write tool. Without `--run-id` while the session pointer exists, `persist-seat` exits 2 naming the
   fix (completion-time attribution by mutable pointer is the TOCTOU bug this closes).
   On the SUCCESS path a `crew:scribe` sub-agent does the tmp-seat `Write` (so the persist-Write does
-  not render into orchestrator context). In review.md, build.md, and measure-twice.md, the
+  not render into orchestrator context). In build.md and measure-twice.md, the
   orchestrator's landing gate is the `persist-seat --verify` exit code against the on-disk
   record: exit 0 is done; on the success path, exit 4 routes to the FALLBACK, the fixed
   missing-file exit 2 also routes to the FALLBACK, and any other exit 2 is a hard stop.
-  All three review-bearing docs use `persist-seat --verify`. In every doc, the scribe's self-reported line is not the landing
+  Both loop docs use `persist-seat --verify`. In each, the scribe's self-reported line is not the landing
   authority, and a fallback uses a DISTINCT `tmp-seat-<seat>-fallback.md` path so a timed-out
   scribe's late write to the original tmp cannot clobber the fallback bytes.
 
@@ -436,9 +462,10 @@ Key contracts (do NOT regress):
     header, `PANEL: <N> launched · <usable> usable · quorum <N//2+1>: MET|NOT MET` (N = distinct
     manifest names from `run.json`; usable = the success-only `result_valid` tier; NOT MET adds
     "an APPROVED verdict is not backed by quorum from this panel", a capability-NEUTRAL statement
-    of fact, since this digest is SHARED with standalone `/crew:review`, which has no override verb;
-    the `--force` guidance lives only in build.md / measure-twice.md). The command markdowns HONOR this
-    header at synthesis time: a NOT MET digest must not certify an APPROVED (nor a
+    of fact, since this rubric is SHARED with standalone `/crew:review`, which has no override verb;
+    the `--force` guidance lives only in build.md / measure-twice.md). The loop
+    command markdown and standalone Python workflow HONOR this header at
+    synthesis time: a NOT MET digest must not certify an APPROVED (nor a
     REVISE-minor-only completion) without the user's explicit `--force`. The header is ADVISORY (a
     digest reader's summary); `crew state
     record-verdict` recounts usable seats itself against the identity frozen in loop state, and that
@@ -479,8 +506,9 @@ Key contracts (do NOT regress):
   `run` repeats the subprocess clear at launch as the backstop for a re-prep-free relaunch; one derived
   file per seat, no globs). `collect` gains `--run-id` (fallback: the session pointer; with
   neither, the flat dir, byte-identical no-flag behavior). The orchestrator WAITS
-  for BOTH every subprocess run shell AND every Task-seat persist before collecting. The `review`
-  subcommand still exists for ad-hoc one-shot fan-out; the commands just don't use it. (`/crew:debate`
+  for BOTH every subprocess run shell AND every Task-seat persist before collecting. The `council`
+  subcommand remains the ad-hoc one-shot `_fan_out` entry point; `review` is workflow-owned and
+  never uses `_fan_out`. (`/crew:debate`
   fans out per-seat in BOTH paths now — its multi-round path always did, and the single-round path
   scaffolds via `debate --seats none` then runs each subprocess seat with `run <seat>`, same as the
   commands above. Debate does NOT use `collect`.)
@@ -492,8 +520,9 @@ Key contracts (do NOT regress):
   `--timeout` > `[dispatch].timeout` > builtin 1800, except where a provider's own
   print-timeout floor raises the effective timeout only when the resolved value is
   below the floor; agy's floor is its print timeout plus grace, about 8 minutes by
-  default, so the 1800-second default is not floored. `[tuning].timeout` belongs to
-  NON-DISPATCH (review/council/run/probe) seats. It opts into the existing
+  default, so the 1800-second default is not floored. `[tuning].timeout` supplies
+  standalone review's raw value and the ordinary council/run/probe wall clock.
+  It opts into the existing
   `run -s workspace-write` plumbing, so review/debate (which never pass `-s`) stay `read-only` and
   byte-for-byte unchanged. Per-provider write-mode tuning lives under
   `[dispatch.<kind>]` in config (keys declared by each provider class's
@@ -539,9 +568,10 @@ Key contracts (do NOT regress):
   uses this scaffold-only mode, then fans seats out per-seat into individual
   `<seat>.json` files — the scaffold's `subprocess.json` stays empty and unused.
   (It also still lets a Claude-only `lite`/`solo` council get its log dir.)
-  `review`/`council` are unchanged — they still fan out via `_fan_out` and
-  intentionally do NOT support empty seats (they're pure fan-out; the orchestrator
-  skips them). (WHY scaffold-only → engine-notes.)
+  `council` remains the ad-hoc one-shot `_fan_out` command and intentionally does NOT
+  support empty seats (the orchestrator skips it). `review` is separately owned
+  by `review_workflow`, is workflow-only, and never enters `_fan_out`. (WHY scaffold-only →
+  engine-notes.)
 - Two-tier config (env retired): tuning lives in TWO TOML files — per-repo
   `.crew/config.toml` and global `~/.crew-config.toml` (`config.py`, two memoized
   loaders). Knobs: `default_panel`, `[debate].panel`, `[dispatch].seat`
@@ -559,7 +589,7 @@ Key contracts (do NOT regress):
   OR declares a brand-new first-class seat by giving `via = ["<channel>"]` +
   `model` (`provider` remains the accepted legacy spelling), plus
   optional `opt_in` to keep it out of the built-in panels), `[tuning].timeout`
-  (NON-DISPATCH review/council/run/probe seat wall clock),
+  (standalone-review raw value and ordinary council/run/probe seat wall clock),
   `[tuning].deadline_minutes` (the persistence loops' wall clock, read by `crew
   state init` when `--deadline-minutes` is not passed; validated 1..1440, plus
   exactly 0 as the deliberate no-deadline opt-out for remote or
@@ -630,7 +660,8 @@ Key contracts (do NOT regress):
     vs `known_seat_names() ∪ task_seats()` (task seats correctable); `--dispatch-seat`
     vs `known_seat_names()` only.
 
-Run its tests with `python plugins/crew/scripts/tests/test-multiagent.py`.
+Run standalone workflow contracts with `python plugins/crew/scripts/tests/test-review-workflow.py`,
+then the compatibility suite with `python plugins/crew/scripts/tests/test-multiagent.py`.
 
 ## Key Patterns
 
@@ -1220,8 +1251,10 @@ longer `rmtree`s review-run dirs (`.crew/reviews/<session>/run-*`) or stale deba
 dirs (`.crew/debates/`): destructive removal of the user's disk from an unattended
 hook was the wrong venue. Instead `report_stale_artifacts` enumerates the orphans
 through the ONE shared `artifact_prune.collect_prunable` finder (the same list
-`crew swab` acts on, with the same active-loop / current-run-pointer protections
-and mint-grammar/symlink guards) and RETURNS a single terse line that `main()`
+`crew swab` acts on, with the same active-loop / current-run and
+current-standalone-review pointer protections plus nonterminal/ambiguous
+standalone-workflow fail-closed guards and mint-grammar/symlink guards) and
+RETURNS a single terse line that `main()`
 rides on the SessionStart `additionalContext` channel (a successful hook's only
 reliably-delivered carrier, not stderr). It enumerates count-only
 (`with_sizes=False`), so the notice names the orphan COUNT + the `crew swab` hint

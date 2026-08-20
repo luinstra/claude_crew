@@ -54,13 +54,20 @@ RUN_JSON_NAME = "run.json"
 
 # Seat names double as run-dir filename stems (<seat>.json, prompt-<seat>.txt),
 # so a seat named after a control file would let an ordinary seat write DESTROY
-# the identity record or shadow the pointer, and a Task seat named "seat" would
-# stage prompt-seat.txt ONTO the shared subprocess prompt. Only review-prep may
-# create or modify a run dir's control files; every seat-name intake and every
-# DERIVED seat write checks this set through is_reserved_stem, which
+# the identity record or shadow either pointer, and a Task seat named "seat" would
+# stage prompt-seat.txt ONTO the shared subprocess prompt. Only the Python run
+# owners may create or modify control files: review-prep owns retained loop run
+# controls, while the standalone workflow owns its session pointer and run
+# controls. Every seat-name intake and every DERIVED seat write checks this set
+# through is_reserved_stem, which
 # case-folds: on a case-insensitive filesystem (macOS APFS, Windows) `Run.json`
 # IS `run.json`, so a mixed-case stem would alias a control file.
-RESERVED_STEMS = frozenset({"run", "current-run", "seat"})
+RESERVED_STEMS = frozenset({
+    "run",
+    "current-run",
+    "current-standalone-review",
+    "seat",
+})
 
 
 def is_reserved_stem(name: str) -> bool:
@@ -135,6 +142,7 @@ def mint_identity(
     target_spec: str,
     target_base: str,
     seat_signatures: dict,
+    workflow_identity: dict | None = None,
 ) -> tuple[str, str]:
     """Mint the content-addressed identity: ``(run_id, identity_digest)``.
 
@@ -158,6 +166,8 @@ def mint_identity(
         "target_base": target_base,
         "seats": seat_signatures,
     }
+    if workflow_identity is not None:
+        spec["workflow_identity"] = workflow_identity
     canonical = json.dumps(
         spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
@@ -185,6 +195,7 @@ def recompute_identity(record: dict) -> tuple[str, str]:
         target_spec=record.get("target_spec") or "",
         target_base=record.get("target_base") or "",
         seat_signatures=sigs,
+        workflow_identity=record.get("workflow_identity"),
     )
 
 
@@ -428,14 +439,20 @@ def seat_landed_valid(d: Path, seat: str, run_id: str, target_sha256: str) -> bo
 # ---------------------------------------------------------------------------
 
 @contextmanager
-def _seat_write_lock(path: Path):
-    """Exclusive lock on a sibling ``.<seat>.json.lock`` across the whole
-    read-check-write, so two concurrent duplicate launches of one seat cannot
-    race the preserve-valid check. Without ``fcntl`` (non-POSIX) the write
-    proceeds unlocked: last-writer-wins beats wedging every seat write."""
+def _sibling_write_lock(path: Path, *, required: bool = False):
+    """Hold an exclusive lock at ``.<path.name>.lock`` beside ``path``.
+
+    Retained seat writes may degrade to unlocked only when ``fcntl`` is absent.
+    Standalone workflow transitions pass ``required=True`` and fail closed.
+    Lock-file and acquisition failures always surface as ``ReviewRunError``.
+    """
     try:
         import fcntl
-    except ImportError:
+    except ImportError as exc:
+        if required:
+            raise ReviewRunError(
+                f"required sibling write lock is unavailable for {path}"
+            ) from exc
         yield
         return
     lock_path = path.parent / f".{path.name}.lock"
@@ -449,11 +466,21 @@ def _seat_write_lock(path: Path):
             f"could not take the seat write lock {lock_path}: {exc}"
         ) from exc
     with lf:
-        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        except OSError as exc:
+            raise ReviewRunError(
+                f"could not acquire the sibling write lock {lock_path}: {exc}"
+            ) from exc
         try:
             yield
         finally:
-            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+            try:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+            except OSError as exc:
+                raise ReviewRunError(
+                    f"could not release the sibling write lock {lock_path}: {exc}"
+                ) from exc
 
 
 def clear_stale_result(d: Path, seat: str, run_id: str, target_sha256: str) -> None:
@@ -475,7 +502,7 @@ def clear_stale_result(d: Path, seat: str, run_id: str, target_sha256: str) -> N
     concurrent duplicate launch cannot be deleted between them.
     """
     p = d / f"{seat}.json"
-    with _seat_write_lock(p):
+    with _sibling_write_lock(p, required=False):
         if p.is_file() and not seat_landed_valid(d, seat, run_id, target_sha256):
             try:
                 p.unlink(missing_ok=True)
@@ -500,7 +527,7 @@ def preserve_valid_write(
     per-seat lock, so the rule holds even for concurrent duplicate launches of
     the same seat.
     """
-    with _seat_write_lock(path):
+    with _sibling_write_lock(path, required=False):
         if not incoming_ok and path.is_file():
             try:
                 existing = json.loads(path.read_text(encoding="utf-8"))

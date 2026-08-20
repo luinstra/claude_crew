@@ -2100,7 +2100,7 @@ def test_result_contract():
     import dataclasses
     _OPTIONAL = {
         "repaired_output", "run_id", "target_sha256",
-        "channel", "continuation", "continuation_id",
+        "action_id", "attempt_id", "channel", "continuation", "continuation_id",
     }
     check("to_dict equals asdict MINUS the None optional fields",
           d == {k: v for k, v in dataclasses.asdict(r).items() if k not in _OPTIONAL},
@@ -3434,137 +3434,119 @@ def _run_dispatcher(args, env=None, cwd=None, timeout=60):
 
 
 def test_production_invocation_and_fanout():
-    log_section("production invocation path + fan-out (bare-script cli.py)")
+    log_section("production invocation path + standalone workflow transport")
 
     with tempfile.TemporaryDirectory() as td:
-        d = Path(td)
-        repo = d / "repo"
-        repo.mkdir()
+        repo = Path(td)
         _init_repo(str(repo))
-        (repo / "a.txt").write_text("hello\nchanged\n")
-
-        bins = d / "bin"
-        bins.mkdir()
-        # fake codex: succeed
-        make_fake_bin(bins, "codex", """
-        import sys
-        out = None
-        a = sys.argv[1:]
-        for i, x in enumerate(a):
-            if x == "-o":
-                out = a[i+1]
-        sys.stdin.read()
-        with open(out, "w") as f:
-            f.write("CODEX OK APPROVED")
-        sys.exit(0)
-        """)
-        # fake agy: hang (to test it doesn't block codex's result)
-        make_fake_bin(bins, "agy", """
-        import time
-        time.sleep(30)
-        """)
-
-        # agy print_timeout via per-repo config (env retired); cwd=repo so the
-        # loader resolves repo/.crew/config.toml. Keeps the hung agy fake from
-        # waiting the 8m default and hanging the suite.
-        (repo / ".crew").mkdir(parents=True, exist_ok=True)
-        (repo / ".crew" / "config.toml").write_text('[seats.agy]\nprint_timeout = "1s"\n')
-        env = path_with(bins)
-
-        # production path: bare-script cli.py, must not ModuleNotFoundError
+        plan = repo / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        env = _neutral_env()
+        env["CREW_HOST"] = "codex"
         proc = _run_cli(
-            ["review", "working-tree", "--seats", "codex,agy", "--json", "--timeout", "2"],
-            env=env, cwd=str(repo), timeout=60,
+            ["review", "plan.md", "--seats", "codex,agy", "--session-id", "S", "--timeout", "2"],
+            env=env, cwd=str(repo), timeout=30,
         )
         check("cli.py bare-script runs without ModuleNotFoundError",
               "ModuleNotFoundError" not in proc.stderr, "no ModuleNotFoundError", proc.stderr[:200])
-        check("cli.py exits 0", proc.returncode == 0, "0", f"{proc.returncode}: {proc.stderr[:200]}")
-        try:
-            arr = json.loads(proc.stdout)
-        except Exception as exc:
-            arr = None
-            check("cli.py emits JSON array", False, "valid json", f"{exc}: {proc.stdout[:200]}")
-        if arr is not None:
-            check("cli.py JSON: one entry per requested seat",
-                  len(arr) == 2, "2 entries", str(len(arr)))
-            by_name = {r["name"]: r for r in arr}
-            check("fan-out: codex result collected despite hung agy",
-                  by_name.get("codex", {}).get("ok") is True,
-                  "codex ok=True", str(by_name.get("codex")))
-            check("fan-out: hung agy seat -> ok=False (timed out), didn't sink panel",
-                  by_name.get("agy", {}).get("ok") is False,
-                  "agy ok=False", str(by_name.get("agy")))
+        payload = json.loads(proc.stdout) if proc.returncode == 0 else {}
+        check("crew review emits schema-1 work_batch",
+              proc.returncode == 0 and payload.get("schema") == 1
+              and payload.get("type") == "work_batch",
+              "schema-1 work_batch", f"rc={proc.returncode} out={proc.stdout[:200]}")
+        work = payload.get("work_items", [])
+        check("standalone work_batch exposes each external seat",
+              [item.get("seat") for item in work] == ["codex", "agy"]
+              and all(item.get("driver") == "external" for item in work),
+              "codex,agy external actions", str(work))
 
-        # unavailable seat skipped with diagnostic, no hang.
-        # Provide a PATH that has git (so target resolution works) but NOT
-        # codex, so the seat is genuinely unavailable.
-        gitonly = d / "gitonly"
-        gitonly.mkdir()
-        import shutil as _sh
-        real_git = _sh.which("git")
-        if real_git:
-            os.symlink(real_git, gitonly / "git")
-        env2 = dict(os.environ)
-        env2["PATH"] = str(gitonly)
-        proc2 = _run_cli(
-            ["review", "working-tree", "--seats", "codex", "--json"],
-            env=env2, cwd=str(repo), timeout=30,
+        # The host adapter places all supplied options before a literal `--`
+        # and carries the target as one final argv item. This is executable
+        # coverage for option-like filenames plus spaces/apostrophes; the
+        # second call also proves panel and seats remain independent axes.
+        dash_plan = repo / "--plan.md"
+        dash_plan.write_text("# dash plan\n", encoding="utf-8")
+        dash_proc = _run_cli(
+            ["review", "--session-id", "S-dash", "--", "--plan.md"],
+            env=env, cwd=str(repo), timeout=30,
         )
-        ok_json = False
-        try:
-            arr2 = json.loads(proc2.stdout)
-            ok_json = (len(arr2) == 1 and arr2[0]["ok"] is False
-                       and "skipped" in (arr2[0]["error"] or ""))
-        except Exception:
-            ok_json = False
-        check("cli.py: unavailable seat skipped with diagnostic (no hang)",
-              ok_json, "ok=False skipped diag", proc2.stdout[:200])
+        dash_payload = json.loads(dash_proc.stdout) if dash_proc.stdout.strip() else {}
+        check("canonical review argv accepts a bare option-like target after --",
+              dash_proc.returncode == 0
+              and dash_payload.get("type") == "work_batch"
+              and dash_payload.get("resolved_target", {}).get("scope") == "--plan.md",
+              "work_batch resolving scope --plan.md",
+              f"rc={dash_proc.returncode} payload={dash_payload}")
 
-    # ALL seats fail -> all ok=False, nonzero exit, clear all-failed message,
-    # no traceback. Use a codex+agy panel where BOTH fakes fail (nonzero exit).
-    with tempfile.TemporaryDirectory() as td:
-        d = Path(td)
-        repo = d / "repo"
-        repo.mkdir()
-        _init_repo(str(repo))
-        (repo / "a.txt").write_text("hello\nchanged\n")
-
-        bins = d / "bin"
-        bins.mkdir()
-        make_fake_bin(bins, "codex", """
-        import sys
-        sys.stderr.write("codex boom")
-        sys.exit(1)
-        """)
-        make_fake_bin(bins, "agy", """
-        import sys
-        sys.stderr.write("agy boom")
-        sys.exit(1)
-        """)
-        # agy print_timeout via per-repo config (env retired); cwd=repo resolves it.
-        (repo / ".crew").mkdir(parents=True, exist_ok=True)
-        (repo / ".crew" / "config.toml").write_text('[seats.agy]\nprint_timeout = "1s"\n')
-        env = path_with(bins)
-        proc = _run_cli(
-            ["review", "working-tree", "--seats", "codex,agy", "--json", "--timeout", "5"],
-            env=env, cwd=str(repo), timeout=60,
+        hostile_plan = repo / "path with space 'quote'.md"
+        hostile_plan.write_text("# hostile path plan\n", encoding="utf-8")
+        hostile_rel = hostile_plan.relative_to(repo).as_posix()
+        all_options = _run_cli(
+            ["review", "--session-id", "S-all", "--base", "main",
+             "--panel", "full", "--seats", "codex,agy", "--timeout", "2",
+             "--inline-diff", "--", hostile_rel],
+            env=env, cwd=str(repo), timeout=30,
         )
-        check("all-seats-fail: no traceback",
-              "Traceback" not in proc.stderr, "no traceback", proc.stderr[:200])
-        check("all-seats-fail: nonzero exit",
-              proc.returncode != 0, "nonzero", str(proc.returncode))
-        check("all-seats-fail: clear 'all N seats failed' message on stderr",
-              "all 2 seats failed" in proc.stderr, "all 2 seats failed", proc.stderr[:200])
-        try:
-            arr = json.loads(proc.stdout)
-        except Exception as exc:
-            arr = None
-            check("all-seats-fail: still emits JSON array (no crash)", False,
-                  "valid json", f"{exc}: {proc.stdout[:200]}")
-        if arr is not None:
-            check("all-seats-fail: one entry per seat, all ok=False",
-                  len(arr) == 2 and all(r["ok"] is False for r in arr),
-                  "2 entries all ok=False", str(arr))
+        all_payload = json.loads(all_options.stdout) if all_options.stdout.strip() else {}
+        all_work = all_payload.get("work_items", [])
+        check("canonical review argv preserves hostile path bytes and panel/seats axes",
+              all_options.returncode == 0
+              and all_payload.get("type") == "work_batch"
+              and all_payload.get("resolved_target", {}).get("scope") == hostile_rel
+              and [item.get("seat") for item in all_work] == ["codex", "agy"]
+              and all(item.get("driver") == "external" for item in all_work),
+              "hostile target path plus independent codex,agy seat selection",
+              f"rc={all_options.returncode} payload={all_payload}")
+
+        missing_session = _run_cli(["review", "plan.md"], env=env, cwd=str(repo), timeout=30)
+        check("legacy review grammar without --session-id is rejected",
+              missing_session.returncode == 2 and "--session-id" in missing_session.stderr,
+              "argparse exit 2 naming --session-id", missing_session.stderr[:200])
+        legacy_json = _run_cli(
+            ["review", "plan.md", "--session-id", "S", "--json"],
+            env=env, cwd=str(repo), timeout=30,
+        )
+        check("legacy review --json option is rejected",
+              legacy_json.returncode == 2 and "unrecognized arguments" in legacy_json.stderr,
+              "argparse exit 2", legacy_json.stderr[:200])
+
+        bad_submission = repo / "bad-submission.json"
+        bad_submission.write_text("[]\n", encoding="utf-8")
+        malformed_submission = _run_cli(
+            ["review-submit", "-f", str(bad_submission), "--consume"],
+            env=env,
+            cwd=str(repo),
+            timeout=30,
+        )
+        submission_body = (
+            json.loads(malformed_submission.stdout)
+            if malformed_submission.stdout.strip()
+            else {}
+        )
+        check("review-submit rejects a non-object at the CLI boundary",
+              malformed_submission.returncode == 2
+              and submission_body.get("schema") == 1
+              and submission_body.get("code") == "invalid_submission"
+              and bad_submission.exists(),
+              "typed exit 2 and unconsumed input",
+              f"rc={malformed_submission.returncode} body={submission_body}")
+
+        bad_ref_args = ["--session-segment", "S", "--run-id", "not-a-run",
+                        "--attempt-id", "attempt-0001", "--target-sha256", "0" * 64]
+        for command, tail in (
+            ("review-next", []),
+            ("review-claim", ["--action-id", "attempt-0001:reviewer:0001"]),
+            ("review-execute", ["--action-id", "attempt-0001:reviewer:0001"]),
+            ("review-recover", ["--action-id", "attempt-0001:reviewer:0001",
+                                "--confirm-not-running", "--diagnostic-code", "native_task_lost"]),
+            ("review-retry", []),
+        ):
+            malformed = _run_cli([command, *bad_ref_args, *tail], env=env, cwd=str(repo), timeout=30)
+            body = json.loads(malformed.stdout) if malformed.stdout.strip() else {}
+            check(f"{command} malformed ref returns typed exit-2 envelope",
+                  malformed.returncode == 2 and body.get("schema") == 1
+                  and body.get("code") == "invalid_ref",
+                  "schema-1 invalid_ref", f"rc={malformed.returncode} body={body}")
 
     # -m invocation also works (PYTHONPATH = scripts dir)
     env3 = dict(os.environ)
@@ -7730,6 +7712,214 @@ def test_persist_seat_doc_sync():
 
     for rel in docs:
         text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
+        if rel == "commands/review.md":
+            from multiagent import review_workflow as _review_workflow
+            import shlex
+            normalized_text = " ".join(text.split())
+
+            check("commands/review.md uses the standalone workflow adapter",
+                  "review-next --session-segment" in text
+                  and "review-submit -f" in text
+                  and "--run-id '<run-id>' --attempt-id '<attempt-id>' --target-sha256 '<target-sha256>'" in text
+                  and "REF_ARGS" not in text and "Q(" not in text,
+                  "standalone protocol markers", "missing standalone protocol marker")
+            fences = re.findall(r"```bash\n(.*?)```", text, flags=re.DOTALL)
+            fence_text = "\n".join(fences)
+            expansions = re.findall(r"\$\{[^}]+\}|\$\([^)]*\)|\$[A-Za-z_][A-Za-z0-9_]*", fence_text)
+            check("commands/review.md executable fences contain no pseudocode or compound shell",
+                  bool(fences) and "REF_ARGS" not in fence_text and "Q(" not in fence_text
+                  and "[--" not in fence_text and "$(" not in fence_text and "`" not in fence_text
+                  and " &" not in fence_text and "&&" not in fence_text,
+                  "finite simple commands", fence_text[:300])
+            check("commands/review.md fences expand only CLAUDE_PLUGIN_ROOT",
+                  expansions and set(expansions) == {"${CLAUDE_PLUGIN_ROOT}"},
+                  "only ${CLAUDE_PLUGIN_ROOT}", str(expansions))
+            check("commands/review.md defines exact hostile-safe POSIX quoting",
+                  "reject NUL" in text and "replace every single quote" in text
+                  and "wrap the whole value in single quotes" in text,
+                  "exact quoting algorithm", "missing quoting rule")
+            hostile = ["two words", "single'quote", "$dollar", "`backtick`"]
+            check("commands/review.md quoting algorithm round-trips hostile argv",
+                  all(shlex.split(_review_workflow.quote_argv(value)) == [value]
+                      for value in hostile),
+                  "all hostile argv round-trip", str(hostile))
+            target_hostile = [
+                "--plan.md",
+                "path with space 'quote'.md",
+                "$target `backtick`.md",
+            ]
+            check("commands/review.md quoting preserves option-like and hostile targets",
+                  all(shlex.split(_review_workflow.quote_argv(value)) == [value]
+                      for value in target_hostile),
+                  "target argv values round-trip byte-for-byte", str(target_hostile))
+            start_lines = [
+                line.strip() for line in fence_text.splitlines()
+                if line.strip().startswith('"${CLAUDE_PLUGIN_ROOT}/crew" review ')
+            ]
+            no_options = (
+                '"${CLAUDE_PLUGIN_ROOT}/crew" review '
+                "--session-id '<session-id>' -- '<target>'"
+            )
+            all_options = (
+                '"${CLAUDE_PLUGIN_ROOT}/crew" review '
+                "--session-id '<session-id>' --base '<base>' --panel '<panel>' "
+                "--seats '<seats>' --timeout '<seconds>' --inline-diff -- '<target>'"
+            )
+            check("commands/review.md pins no-option start with target after --",
+                  no_options in start_lines,
+                  no_options, str(start_lines))
+            check("commands/review.md pins all supplied options before --",
+                  all_options in start_lines
+                  and all(" -- " in line and line.rsplit(" -- ", 1)[-1] == "'<target>'"
+                          for line in start_lines),
+                  all_options, str(start_lines))
+            check("commands/review.md keeps panel and seats as independent options",
+                  all_options in start_lines
+                  and "--panel '<panel>'" in all_options
+                  and "--seats '<seats>'" in all_options,
+                  "both panel and seats before separator", str(start_lines))
+            ref_flags = (
+                "--session-segment '<session-segment>' --run-id '<run-id>' "
+                "--attempt-id '<attempt-id>' --target-sha256 '<target-sha256>'"
+            )
+            ref_commands = [
+                line for line in fence_text.splitlines()
+                if any(f" review-{name} " in line
+                       for name in ("next", "claim", "execute", "recover", "retry"))
+            ]
+            check("commands/review.md expands every reference in every executable command",
+                  len(ref_commands) == 6 and all(ref_flags in line for line in ref_commands),
+                  "six commands with four literal ref flags", str(ref_commands))
+            check("commands/review.md owns exact argument extraction and needs-input/display flow",
+                  "$ARGUMENTS" in text
+                  and all(flag in text for flag in (
+                      "`--panel VALUE`", "`--seats VALUE`", "`--base VALUE`",
+                      "`--timeout VALUE`", "`--inline-diff`",
+                  ))
+                  and "Use the empty string as the target" in normalized_text
+                  and "ask the returned `question` verbatim" in normalized_text
+                  and "print `display` verbatim" in normalized_text,
+                  "exact extraction plus needs_input/display", "missing adapter flow")
+            check("commands/review.md distinguishes primary scribe and fallback transport",
+                  "replace its one exact `{{REVIEWER_RETURN_DATA}}` marker" in normalized_text
+                  and "fresh bare `crew:scribe` Task" in normalized_text
+                  and "never run the scribe against the fallback path" in normalized_text
+                  and "replace BOTH" in normalized_text
+                  and "return_transport.fallback.ingress_path" in normalized_text
+                  and "Never pair fallback bytes with the unchanged primary path" in normalized_text,
+                  "exact primary substitution and distinct fallback", "missing scribe transport")
+            check("commands/review.md documents fail-closed synthesis and host failures",
+                  "unmodified null judgment is deliberately rejected" in normalized_text
+                  and "`failed`, `timeout`, or `cancelled`" in text
+                  and "artifact and judgment to null" in text,
+                  "explicit judgment replacement and null failure form", "missing HostResult rule")
+            check("commands/review.md maps host failures and delegates content admission to Python",
+                  "an execution error becomes `status=failed`" in normalized_text
+                  and "an explicit timeout becomes `status=timeout`" in normalized_text
+                  and "a cancellation becomes `status=cancelled`" in normalized_text
+                  and "every reviewer, formatter, or synthesis Task/parent-context execution" in normalized_text
+                  and "primary scribe or landing fails, follow the host-write fallback rule" in normalized_text
+                  and "do not classify its textual content" in normalized_text
+                  and "The Python workflow owns unusable-content admission" in normalized_text
+                  and "ordinary failed action" in normalized_text
+                  and "path, hash, ref, schema, state, or other integrity rejection" in normalized_text
+                  and "surfaced and stopped" in normalized_text
+                  and "nonempty unstructured reviewer response remains a valid `ok` result" in normalized_text,
+                  "three host mappings, Python content admission, hard-error stop",
+                  "missing host failure/Python admission protocol")
+            reviewer_task = (
+                'Task(subagent_type="<work_item.role>", model="<work_item.model>", '
+                'prompt="You are the <work_item.seat> seat. Read <work_item.prompt_path> '
+                'and follow it exactly.")'
+            )
+            formatter_task = (
+                'Task(subagent_type="<work_item.role>", model="<work_item.model>", '
+                'prompt="Read <work_item.prompt_path> and follow it exactly.")'
+            )
+            scribe_task = (
+                'Task(subagent_type="<return_transport.primary.role>", '
+                'model="<return_transport.primary.model>", '
+                'prompt="<fully substituted primary prompt contents>")'
+            )
+            native_tasks = (reviewer_task, formatter_task, scribe_task)
+            forbidden_task_args = (
+                "name=", "team_name=", "background=", "resume=", "continuation=",
+            )
+            check("commands/review.md pins exact standalone native Task calls",
+                  all(text.count(f"`{task}`") == 1 for task in native_tasks)
+                  and all(forbidden not in task
+                          for task in native_tasks for forbidden in forbidden_task_args),
+                  "one exact reviewer, formatter, and substituted-scribe call",
+                  "missing or altered native Task call")
+            check("commands/review.md keeps reviewer/formatter reference-only and scribe inline",
+                  "For native reviewer and native formatter Tasks only" in normalized_text
+                  and "must not Read or inline the prompt contents" in normalized_text
+                  and "those Tasks receive the issued path by reference" in normalized_text
+                  and "scribe is the required exception because it lacks Read" in normalized_text
+                  and "bare foreground one-shot" in normalized_text
+                  and "The Task RESULT is the sole completion signal" in text
+                  and "landed file and hash remain the result authority" in normalized_text
+                  and "requested model pins" in text
+                  and "do not infer, substitute, or report them as proof" in normalized_text,
+                  "reference reviewer/formatter, inline scribe, foreground completion contract",
+                  "missing exact standalone Task mechanics")
+            check("commands/review.md performs parent formatter in host context",
+                  "`driver=parent`" in text
+                  and "`access=parent-context`" in text
+                  and "do not spawn or emulate a formatter Task" in normalized_text
+                  and "Read exactly `work_item.prompt_path`" in normalized_text
+                  and "perform that formatter work in the current host context" in normalized_text
+                  and "Write the transformed text only to `work_item.ingress_path`" in text
+                  and "land, hash, and submit the issued HostResult" in normalized_text
+                  and "parent must not Read or inline the reviewer or formatter prompt contents" not in normalized_text,
+                  "parent formatter read/perform/ingress without Task",
+                  "missing exact parent formatter mechanics")
+            check("commands/review.md treats typed errors separately from steps",
+                  "top-level object containing `error` is a typed error envelope" in normalized_text
+                  and "not a `ReviewStep`" in normalized_text
+                  and "single post-batch `review-next`" in normalized_text
+                  and "`stale_ref` from any other command" in normalized_text
+                  and "every other typed error" in normalized_text,
+                  "one bounded stale-ref recovery", "missing typed-error rule")
+            recovery_pairs = (
+                "native reviewer → `native_task_lost`",
+                "external reviewer → `external_process_lost`",
+                "native formatter → `formatter_task_lost`",
+                "parent formatter → `parent_formatter_lost`",
+                "parent synthesis → `parent_synthesis_lost`",
+            )
+            check("commands/review.md pins exactly five recovery mappings",
+                  all(pair in text for pair in recovery_pairs)
+                  and text.count("_lost`") == 5,
+                  "five exact action/driver diagnostics", "missing recovery mapping")
+            check("commands/review.md separates seat retry from synthesis restart",
+                  "Retry pending reviewer seats only on explicit user request" in text
+                  and "repeating the identical start after `synthesis_failed`" in normalized_text
+                  and "without inventing a seat retry" in normalized_text,
+                  "explicit seats plus identical-start synthesis", "missing retry distinction")
+            sha_recipe = (
+                "python3 -c 'import hashlib, pathlib, sys; "
+                "print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "
+                "'<artifact-path>'"
+            )
+            check("commands/review.md pins the portable artifact SHA recipe",
+                  text.count(sha_recipe) == 1
+                  and "Immediately after the artifact Write and before the HostResult Write" in normalized_text
+                  and "Accept exactly one stdout line matching `[0-9a-f]{64}`" in normalized_text
+                  and "artifact_sha256_failed" in text,
+                  "one exact recipe plus fail-closed stdout contract",
+                  "missing or duplicated SHA recipe contract")
+            check("commands/review.md owns all four terminal presentation branches",
+                  all(f"- `{status}`:" in text for status in (
+                      "complete", "quorum_not_met", "all_failed", "synthesis_failed",
+                  ))
+                  and text.count("returned `synthesis_path` contents") == 2
+                  and text.count("returned `panel_path`") == 2
+                  and text.count("do not invent or request synthesis") == 2
+                  and "labeled explicitly as non-certifying" in text
+                  and "same presentation rules apply after compaction" in normalized_text,
+                  "four exact terminal branches and resume rule", "missing terminal presentation rule")
+            continue
         for phrase in SENTINEL_PHRASES:
             check(f"{rel} contains sentinel: {phrase!r}",
                   phrase in text, "present", "MISSING")
@@ -7745,6 +7935,8 @@ def test_persist_seat_doc_sync():
     REF_SPAWN = "Read <run_dir>/prompt-"
     for rel in docs:
         text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
+        if rel == "commands/review.md":
+            continue
         check(f"{rel} spawns Task seats BY REFERENCE: {REF_SPAWN!r}",
               REF_SPAWN in text, "present", "MISSING (drifted back to inline paste?)")
         # CONVERSE: no inline-paste spawn survives.
@@ -7766,6 +7958,8 @@ def test_persist_seat_doc_sync():
     ]
     for rel in docs:
         text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
+        if rel == "commands/review.md":
+            continue
         for marker in RETURN_FILE_MARKERS:
             check(f"{rel} has NO reverted RETURN-FILE flow: {marker!r}",
                   marker not in text, "absent", "STILL PRESENT (return-file flow crept back?)")
@@ -7801,12 +7995,10 @@ def test_persist_seat_doc_sync():
         "PIN-FALLBACK: GATE THE FALLBACK TOO: fallback `--verify` exit 0 is DONE; exit 4 or ANY exit 2 is surfaced loudly, then the seat is persisted with `--failed --error` so it reaches `collect` labeled, never lost.",
         "PIN-AUTHORITY: the `--verify` exit code is the ONLY landing authority, never the scribe's self-reported line.",
     ]
-    # This product literal is kept in review.md even though the build recipe
-    # uses its own all-failed wording. Pin it locally so it cannot drift.
-    REVIEW_INHERITED_SENTINELS = ["could not review — all seats failed:"]
-
     for rel in docs:
         text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
+        if rel == "commands/review.md":
+            continue
         # Prose sentinels wrap across lines; collapse whitespace so a legit
         # line break inside a pinned phrase does not read as a drift.
         norm = " ".join(text.split())
@@ -7817,10 +8009,6 @@ def test_persist_seat_doc_sync():
         for phrase in SCRIBE_VERIFY_GATE:
             check(f"{rel} contains verify gate sentinel: {phrase!r}",
                   phrase in text or phrase in norm, "present", "MISSING")
-        if rel == "commands/review.md":
-            for phrase in REVIEW_INHERITED_SENTINELS:
-                check(f"{rel} keeps inherited report literal: {phrase!r}",
-                      phrase in text, "present", "MISSING")
         name = rel.split("/")[-1]
         verify_lines = _fence_lines(name)
         verify_persist = [
@@ -11584,6 +11772,8 @@ def test_command_fences_no_expansions():
     # The run-dir reconstructions keep the sanitized <session_segment> stem
     # (never the raw <session-id>) and the relative .crew/reviews/ root.
     for name in ("review.md", "build.md", "measure-twice.md"):
+        if name == "review.md":
+            continue
         lines = _fence_lines(name)
         persist = [l for l in lines if "persist-seat" in l and "-f" in l.split()]
         # Two persist -f fences now: the success path reads the scribe's tmp-seat
@@ -11794,7 +11984,16 @@ def test_repair_seat_name_form():
         # (current-run/seat likewise shadow control filenames).
         run_json = run_dir / "run.json"
         manifest_before = run_json.read_bytes()
-        for stem in ("run", "current-run", "seat", "Run", "CURRENT-RUN"):
+        for stem in (
+            "run",
+            "current-run",
+            "current-standalone-review",
+            "Current-Standalone-Review",
+            "CURRENT-STANDALONE-REVIEW",
+            "seat",
+            "Run",
+            "CURRENT-RUN",
+        ):
             proc = _run_cli(
                 ["repair-seat", stem, "--session-id", "S", "--run-id", run_id,
                  "-f", str(reform)], env=env, cwd=td, timeout=30)
@@ -11805,6 +12004,20 @@ def test_repair_seat_name_form():
         check("repair-seat reserved-stem refusals left run.json byte-untouched",
               run_json.read_bytes() == manifest_before,
               "run.json identical", "run.json changed")
+
+        # The explicit path form remains ad-hoc: reserved NAME semantics do not
+        # reinterpret a caller-owned path that merely has the same basename.
+        explicit_reserved = tdp / "current-standalone-review.json"
+        explicit_reserved.write_bytes(seat_file.read_bytes())
+        explicit = _run_cli(
+            ["repair-seat", "--seat", str(explicit_reserved),
+             "-f", str(reform)], env=env, cwd=td, timeout=30)
+        explicit_data = json.loads(explicit_reserved.read_text(encoding="utf-8"))
+        check("repair-seat explicit --seat path preserves ad-hoc reserved-basename semantics",
+              explicit.returncode == 0
+              and explicit_data.get("repaired_output") == fix.output,
+              "exit 0 + explicit file repaired",
+              f"rc={explicit.returncode} err={explicit.stderr[:150]}")
 
         # --seat <path> plus a scope flag is contradictory routing (mirrors
         # run's --run-id + -o refusal): exit 2, bytes untouched, never a
@@ -12418,8 +12631,9 @@ def test_scaffold_config():
               out[out.find("[tuning]"):][:200] if "[tuning]" in out else out[:120])
         check("scaffold [dispatch] documents the independent WORK timeout",
               "# timeout = 1800" in out
-              and "NON-DISPATCH (review/council/run/probe) seats use [tuning].timeout." in out,
-              "commented dispatch timeout 1800 and tuning distinction",
+              and "NON-DISPATCH [tuning].timeout is the raw standalone-review input;" in out
+              and "standalone external work is capped at 540s + 60s settlement" in out,
+              "commented dispatch timeout 1800 and standalone tuning distinction",
               out[out.find("[dispatch]"):][:300] if "[dispatch]" in out else out[:120])
         check("scaffold [build] documents default-ON resume_executor",
               "# resume_executor: resume the external executor's provider conversation across" in out
@@ -13668,7 +13882,7 @@ def test_persist_seat():
         proc = subprocess.run(
             [str(CREW_DISPATCHER), "persist-seat", "opus", "--session-id", "S",
              "--model", "opus"],
-            input="piped review body", capture_output=True, text=True,
+            input="piped review body", capture_output=True, text=True, env=_neutral_env(),
             cwd=td, timeout=30)
         opus_path = Path(td) / ".crew" / "reviews" / "S" / "opus.json"
         data = json.loads(opus_path.read_text(encoding="utf-8")) if opus_path.exists() else {}
@@ -13697,7 +13911,7 @@ def test_persist_seat():
         proc = subprocess.run(
             [str(CREW_DISPATCHER), "persist-seat", "sonnet", "--session-id", "S",
              "--model", "sonnet", "--failed"],
-            input="", capture_output=True, text=True, cwd=td, timeout=30)
+            input="", capture_output=True, text=True, env=_neutral_env(), cwd=td, timeout=30)
         p = Path(td) / ".crew" / "reviews" / "S" / "sonnet.json"
         data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
         check("failed no --error: default diagnostic",
@@ -14140,6 +14354,8 @@ def test_persist_seat_verify():
     verify_literal = "verify: seat file missing, fall back"
     review_text = (SCRIPT_DIR.parent / "commands/review.md").read_text(encoding="utf-8")
     cli_text = (SCRIPT_DIR.parent / "scripts/multiagent/cli.py").read_text(encoding="utf-8")
+    if "review-submit" in review_text:
+        verify_literal = "review-submit"
     check("cross-literal: review fallback diagnostic is also in cli.py",
           verify_literal in review_text and verify_literal in cli_text,
           "literal present in review.md and cli.py",
@@ -15695,6 +15911,13 @@ def test_workplan_doc_sync():
     }
     for filename, keys in expected.items():
         raw = (PLUGIN_ROOT / "commands" / filename).read_text(encoding="utf-8")
+        if filename == "review.md":
+            check("review.md documents the standalone workflow JSON/ref contract",
+                  "review-next --session-segment" in raw
+                  and "review-submit -f" in raw
+                  and "host_result_template" in raw,
+                  "standalone ref protocol", "missing standalone protocol")
+            continue
         found = []
         for body in re.findall(r"`\{(.*?)\}`", raw, flags=re.DOTALL):
             fields = tuple(field.strip() for field in body.replace("\n", " ").split(",")
@@ -15703,6 +15926,30 @@ def test_workplan_doc_sync():
                 found.append(fields)
         check(f"{filename} documents the exact current JSON field order",
               found == [keys], str(keys), str(found))
+
+    codex_host = " ".join(
+        (PLUGIN_ROOT / "docs" / "codex-host.md").read_text(encoding="utf-8").split()
+    )
+    coupled_docs = {
+        "root README": PLUGIN_ROOT.parent.parent / "README.md",
+        "plugin README": PLUGIN_ROOT / "README.md",
+        "engine notes": PLUGIN_ROOT / "docs" / "engine-notes.md",
+    }
+    check("codex-host.md distinguishes deterministic protocol evidence from app exposure",
+          "deterministic source-level tests" in codex_host
+          and "not an app-native command workflow" in codex_host
+          and "migrated command skills do not register standalone `/crew:review`" in codex_host
+          and "first-class Codex adapter remains deferred" in codex_host,
+          "source-level evidence, no registered command, adapter deferred",
+          "Codex exposure boundary missing")
+    for label, path in coupled_docs.items():
+        raw = " ".join(path.read_text(encoding="utf-8").split())
+        check(f"{label} does not claim a shipped Codex standalone review adapter",
+              "Codex-host all-external protocol compatibility" in raw
+              and "Codex plugin does not yet expose standalone `/crew:review`" in raw
+              and "app-native adapter remains deferred" in raw,
+              "CLI compatibility plus deferred app-native adapter",
+              "Codex exposure boundary missing")
 
 
 def test_roster_channel_invariant():
@@ -16599,10 +16846,9 @@ def test_run_scoped_reviews():
               and not (tdp / ".crew").exists(),
               "exit 2 + nothing written", f"rc={col.returncode} err={col.stderr[:150]!r}")
         # Reserved filename stems: a seat named run/current-run would write
-        # its <seat>.json ONTO run.json / the pointer name, and a Task seat
-        # named "seat" would stage prompt-seat.txt ONTO the shared subprocess
-        # prompt.
-        for stem in ("run", "current-run", "seat"):
+        # its <seat>.json ONTO run.json / a pointer name, and a Task seat named
+        # "seat" would stage prompt-seat.txt ONTO the shared subprocess prompt.
+        for stem in ("run", "current-run", "current-standalone-review", "seat"):
             res = _run_dispatcher(
                 ["review-prep", "plan.md", "--seats", "codex",
                  "--task-seats", stem, "--session-id", "S"], cwd=td, timeout=30)
@@ -16611,18 +16857,32 @@ def test_run_scoped_reviews():
                   and not (tdp / ".crew").exists(),
                   "exit 2 + nothing written",
                   f"rc={res.returncode} err={res.stderr[:150]!r}")
-        # Case variants never slip past: task-seat names get the registry's
-        # lowercase rule (on a case-insensitive filesystem `Run.json` IS
+        # Case variants of reserved stems never slip past the canonical
+        # case-folded guard (on a case-insensitive filesystem `Run.json` IS
         # `run.json`, so a mixed-case stem would alias the control file).
-        for cased in ("Run", "Current-Run", "SEAT", "Opus"):
+        for cased in (
+            "Run",
+            "Current-Run",
+            "Current-Standalone-Review",
+            "CURRENT-STANDALONE-REVIEW",
+            "SEAT",
+        ):
             res = _run_dispatcher(
                 ["review-prep", "plan.md", "--seats", "codex",
                  "--task-seats", cased, "--session-id", "S"], cwd=td, timeout=30)
-            check(f"non-lowercase task seat {cased!r} exits 2 with nothing written",
-                  res.returncode == 2 and "lowercase" in res.stderr
+            check(f"case-variant reserved task seat {cased!r} exits 2 with nothing written",
+                  res.returncode == 2 and "reserved" in res.stderr
                   and not (tdp / ".crew").exists(),
-                  "exit 2 lowercase + nothing written",
+                  "exit 2 reserved + nothing written",
                   f"rc={res.returncode} err={res.stderr[:150]!r}")
+        cased = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex",
+             "--task-seats", "Opus", "--session-id", "S"], cwd=td, timeout=30)
+        check("ordinary non-lowercase task seat 'Opus' exits 2 with nothing written",
+              cased.returncode == 2 and "lowercase" in cased.stderr
+              and not (tdp / ".crew").exists(),
+              "exit 2 lowercase + nothing written",
+              f"rc={cased.returncode} err={cased.stderr[:150]!r}")
         # Discuss never preps: a discuss prep would collide with the review
         # run's identity and overwrite its staged prompts.
         disc = _run_dispatcher(
@@ -16633,6 +16893,186 @@ def test_run_scoped_reviews():
               and not (tdp / ".crew").exists(),
               "exit 2 + render pointer + nothing written",
               f"rc={disc.returncode} err={disc.stderr[:150]!r}")
+
+    # `workflow` is intentionally NOT global: retained review-prep accepts it
+    # as an ordinary Task label while standalone review reserves it for
+    # workflow.json.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        workflow_task = _run_dispatcher(
+            ["review-prep", "plan.md", "--seats", "codex",
+             "--task-seats", "workflow", "--session-id", "workflow-local"],
+            cwd=td, timeout=30)
+        workflow_payload = (
+            json.loads(workflow_task.stdout)
+            if workflow_task.returncode == 0
+            else {}
+        )
+        check("retained review-prep accepts standalone-local stem 'workflow'",
+              workflow_task.returncode == 0
+              and workflow_payload.get("task_seats") == ["workflow"],
+              "exit 0 + workflow task seat",
+              f"rc={workflow_task.returncode} err={workflow_task.stderr[:150]!r}")
+
+    # Configured subprocess intake rejects the global standalone-pointer stem
+    # before prep writes a run. Config seat names are lowercase-only, so the
+    # case variants fail even earlier as unknown/invalid explicit seats.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        crew_dir = tdp / ".crew"
+        crew_dir.mkdir()
+        (crew_dir / "config.toml").write_text(
+            '[seats.current-standalone-review]\n'
+            'provider = "codex"\n'
+            'model = "gpt-5.6-sol"\n',
+            encoding="utf-8",
+        )
+        env = _neutral_env()
+        env["CLAUDE_PROJECT_DIR"] = td
+        for stem in (
+            "current-standalone-review",
+            "Current-Standalone-Review",
+            "CURRENT-STANDALONE-REVIEW",
+        ):
+            prepared = _run_dispatcher(
+                ["review-prep", "plan.md", "--seats", stem,
+                 "--task-seats", "", "--session-id", "reserved-subprocess"],
+                cwd=td, env=env, timeout=30)
+            check(f"review-prep subprocess intake rejects pointer stem {stem!r} before mutation",
+                  prepared.returncode == 2
+                  and not (crew_dir / "reviews").exists(),
+                  "exit 2 + no reviews tree",
+                  f"rc={prepared.returncode} err={prepared.stderr[:150]!r}")
+
+    # `run` keeps explicit -o ad-hoc, but every derived destination rejects the
+    # case-folded pointer stem before provider construction or invocation.
+    with tempfile.TemporaryDirectory() as td:
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        from unittest import mock
+        from multiagent import cli as engine_cli
+
+        tdp = Path(td)
+        session_dir = tdp / ".crew" / "reviews" / "S"
+        session_dir.mkdir(parents=True)
+        pointer = session_dir / "current-standalone-review.json"
+        pointer_bytes = b'{"schema":1,"sentinel":"keep"}'
+        pointer.write_bytes(pointer_bytes)
+        execution = SimpleNamespace(
+            native=False,
+            engine_runnable=True,
+            channel="codex",
+        )
+
+        class _RunProvider:
+            def __init__(self):
+                self.availability_calls = 0
+                self.run_calls = 0
+
+            def is_available(self):
+                self.availability_calls += 1
+                return True, ""
+
+            def run(self, prompt, *, sandbox="read-only", model=None, timeout=300):
+                self.run_calls += 1
+                return ProviderResult(
+                    "current-standalone-review",
+                    model,
+                    True,
+                    "review",
+                    None,
+                    0.01,
+                )
+
+        provider = _RunProvider()
+        provider_factory_calls = []
+
+        def provider_for(name):
+            provider_factory_calls.append(name)
+            return provider
+
+        saved_project = os.environ.get("CLAUDE_PROJECT_DIR")
+        os.environ["CLAUDE_PROJECT_DIR"] = td
+        try:
+            for stem in (
+                "current-standalone-review",
+                "Current-Standalone-Review",
+                "CURRENT-STANDALONE-REVIEW",
+            ):
+                spec = SimpleNamespace(name=stem, model="m", via=("codex",))
+                args = engine_cli.build_parser().parse_args(
+                    ["run", stem, "prompt", "--session-id", "S", "--json"]
+                )
+                stderr = io.StringIO()
+                with (
+                    mock.patch.object(engine_cli, "known_seat_names", return_value=[stem]),
+                    mock.patch.object(engine_cli.seats, "seat_spec", return_value=spec),
+                    mock.patch.object(engine_cli.channels, "resolve_seat", return_value=execution),
+                    mock.patch.object(engine_cli, "get_provider", side_effect=provider_for),
+                    redirect_stderr(stderr),
+                ):
+                    rc = engine_cli.cmd_run(args)
+                check(f"derived external run rejects pointer stem {stem!r} with zero provider calls",
+                      rc == 2 and "reserved" in stderr.getvalue()
+                      and provider_factory_calls == []
+                      and provider.availability_calls == 0
+                      and provider.run_calls == 0
+                      and pointer.read_bytes() == pointer_bytes,
+                      "exit 2 + zero provider + pointer intact",
+                      f"rc={rc} err={stderr.getvalue()[:120]!r} "
+                      f"factory={provider_factory_calls}")
+
+            allowed_spec = SimpleNamespace(
+                name="current-standalone-review",
+                model="m",
+                via=("codex",),
+            )
+            explicit_path = tdp / "explicit-result.json"
+            allowed_args = engine_cli.build_parser().parse_args(
+                ["run", "current-standalone-review", "prompt",
+                 "--session-id", "S", "--json", "-o", str(explicit_path)]
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    engine_cli,
+                    "known_seat_names",
+                    return_value=["current-standalone-review"],
+                ),
+                mock.patch.object(
+                    engine_cli.seats,
+                    "seat_spec",
+                    return_value=allowed_spec,
+                ),
+                mock.patch.object(
+                    engine_cli.channels,
+                    "resolve_seat",
+                    return_value=execution,
+                ),
+                mock.patch.object(
+                    engine_cli,
+                    "get_provider",
+                    side_effect=provider_for,
+                ),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                allowed_rc = engine_cli.cmd_run(allowed_args)
+            check("explicit run -o preserves ad-hoc reserved-seat semantics",
+                  allowed_rc == 0 and explicit_path.is_file()
+                  and provider.availability_calls == 1
+                  and provider.run_calls == 1
+                  and pointer.read_bytes() == pointer_bytes,
+                  "exit 0 + one provider call + explicit output + pointer intact",
+                  f"rc={allowed_rc} err={stderr.getvalue()[:120]!r}")
+        finally:
+            if saved_project is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = saved_project
 
     # 8b. Name binding + write authority at the CLI: a valid result copied to
     #     another seat's filename never satisfies that seat's pending check; a
@@ -16691,7 +17131,7 @@ def test_run_scoped_reviews():
             [str(CREW_DISPATCHER), "persist-seat", "sonnet", "--session-id", "S",
              "--model", "sonnet", "--failed", "--error", "spawn timeout"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, cwd=td)
+            stderr=subprocess.PIPE, text=True, env=_neutral_env(), cwd=td)
         try:
             proc.wait(timeout=15)
             hung = False
@@ -17030,6 +17470,9 @@ def test_run_scoped_reviews():
         pointer = flat / "current-run.json"
         pointer_bytes = b'{"run_id": "run-abcdef123456"}'
         pointer.write_bytes(pointer_bytes)
+        standalone_pointer = flat / "current-standalone-review.json"
+        standalone_pointer_bytes = b'{"schema":1,"sentinel":"keep"}'
+        standalone_pointer.write_bytes(standalone_pointer_bytes)
         # Case-folded: on a case-insensitive filesystem a mixed-case stem
         # ALIASES the control file, so the guard must catch it too.
         for stem in ("current-run", "Current-Run", "SEAT"):
@@ -17040,6 +17483,26 @@ def test_run_scoped_reviews():
                   rc.returncode == 2 and "reserved" in rc.stderr
                   and pointer.read_bytes() == pointer_bytes,
                   "exit 2 + pointer intact", f"rc={rc.returncode} err={rc.stderr[:150]!r}")
+        for stem in (
+            "current-standalone-review",
+            "Current-Standalone-Review",
+            "CURRENT-STANDALONE-REVIEW",
+        ):
+            persisted = _run_dispatcher(
+                ["persist-seat", stem, "--session-id", "S",
+                 "--model", "opus", "-f", str(src)],
+                cwd=td, timeout=30)
+            repaired = _run_dispatcher(
+                ["repair-seat", stem, "--session-id", "S",
+                 "-f", str(src)],
+                cwd=td, timeout=30)
+            check(f"flat derived writers reject standalone pointer stem {stem!r} without mutation",
+                  persisted.returncode == 2 and "reserved" in persisted.stderr
+                  and repaired.returncode == 2 and "reserved" in repaired.stderr
+                  and standalone_pointer.read_bytes() == standalone_pointer_bytes,
+                  "both exit 2 + standalone pointer intact",
+                  f"persist={persisted.returncode}/{persisted.stderr[:100]!r} "
+                  f"repair={repaired.returncode}/{repaired.stderr[:100]!r}")
 
     # 8i. Mixed-case stems against a LIVE run dir: the run.json record stays
     #     byte-intact through both writers' refusals.
@@ -17225,7 +17688,7 @@ def test_collect_run_scoped():
             [str(CREW_DISPATCHER), "persist-seat", "sonnet", "--session-id", "S",
              "--run-id", o1["run_id"], "--model", "sonnet",
              "--failed", "--error", "seat timed out"],
-            input="", capture_output=True, text=True, cwd=td, timeout=30)
+            input="", capture_output=True, text=True, env=_neutral_env(), cwd=td, timeout=30)
         cf = _collect(td, "sonnet", ("--run-id", o1["run_id"]))
         check("a stamped, named failure renders as FAILED (never skipped-stale)",
               bf.returncode == 0 and cf.returncode == 0
@@ -20124,6 +20587,58 @@ def test_swab():
               "present", "deleted")
         check("orphan alongside a pointer is removed by --yes", not orph.exists(),
               "gone", "present")
+
+    # --- current-standalone-review.json has equal protection and cleanup ---
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        reviews = td / ".crew" / "reviews" / "standalone"
+        reviews.mkdir(parents=True)
+        target_sha = "0" * 64
+        workflow_identity = {"kind": "standalone_review"}
+        run_id, identity_digest = _rr.mint_identity(
+            target_sha256=target_sha,
+            target_spec="working-tree",
+            target_base="",
+            seat_signatures={},
+            workflow_identity=workflow_identity,
+        )
+        protected = reviews / run_id
+        protected.mkdir()
+        (protected / "run.json").write_text(json.dumps({
+            "run_id": run_id,
+            "identity_digest": identity_digest,
+            "target_sha256": target_sha,
+            "target_spec": "working-tree",
+            "target_base": "",
+            "seat_signatures": {},
+            "workflow_identity": workflow_identity,
+        }))
+        pointer = reviews / "current-standalone-review.json"
+        exact_pointer = {
+            "schema": 1,
+            "run_id": run_id,
+            "identity_digest": identity_digest,
+            "target_sha256": target_sha,
+        }
+        pointer.write_text(json.dumps(exact_pointer))
+        rc, out, err = _swab_run(td, as_json=True)
+        names = {item["name"] for item in json.loads(out)["prunable"]}
+        check("standalone pointer-named run is NOT prunable",
+              run_id not in names, "protected", str(names))
+        pointer.write_text(json.dumps({
+            "schema": 1,
+            "ref": {"schema": 1, "session_segment": "standalone", "run_id": run_id,
+                    "attempt_id": "attempt-0001", "target_sha256": target_sha},
+            "workflow_identity": workflow_identity,
+        }))
+        rc, out, err = _swab_run(td, as_json=True)
+        names = {item["name"] for item in json.loads(out)["prunable"]}
+        check("provisional standalone pointer shape gives NO swab protection",
+              run_id in names, "prunable", str(names))
+        pointer.write_text(json.dumps(exact_pointer))
+        _ap.drop_dangling_pointer(reviews, {run_id})
+        check("drop_dangling_pointer removes the standalone pointer",
+              not pointer.exists(), "removed", "present")
 
     # --- flat current-run.json protects a flat sessionless run ---
     with tempfile.TemporaryDirectory() as td:

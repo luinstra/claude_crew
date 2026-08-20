@@ -20,7 +20,9 @@ seat = "codex"
 #   below the floor; agy's floor is its print timeout plus grace, about 8
 #   minutes by default, so the 1800-second default is not floored;
 #   --timeout > [dispatch].timeout > builtin 1800
-#   NON-DISPATCH (review/council/run/probe) seats use [tuning].timeout.
+#   NON-DISPATCH [tuning].timeout is the raw standalone-review input;
+#   standalone external work is capped at 540s + 60s settlement, while
+#   council/run/probe use it as their ordinary seat wall-clock.
 
 # [dispatch.codex]: write-mode tuning for /crew:dispatch (opt-in; unknown keys warn and drop)
 # [dispatch.codex]
@@ -87,8 +89,9 @@ seat = "codex"
 
 # [seats.cursor-grok]   # opt-in; see docs/engine-notes.md for why
 
-# [tuning].timeout: NON-DISPATCH (review/council/run/probe) seat wall-clock
-#   default (positive integer seconds).
+# [tuning].timeout: raw standalone-review input (positive integer seconds;
+#   standalone external work is capped at 540s + 60s settlement).
+#   Council/run/probe otherwise use it as their ordinary seat wall-clock.
 # [tuning].deadline_minutes: the persistence loops' wall clock, read by
 #   `crew state init` (1-1440; 0 = no deadline, honored from the
 #   global ~/.crew-config.toml only, and the stop-fires cap still bounds

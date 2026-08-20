@@ -107,7 +107,12 @@ gloss lives here.
 - **Decision-J** — `<ran_seats>` order is `subprocess_seats` (resolved prep order)
   THEN the `task_seats` (verbatim: the `name == slug(name)` invariant means no dot-stripping).
 
-## T3a reference-spawn (why Task seats fetch their prompt by file)
+## T3a reference-spawn (build and measure-twice history)
+
+This section describes the still-current `review-prep` transport in build and
+measure-twice. Standalone review no longer duplicates it in Markdown: Python
+issues the reviewer prompt, exact primary scribe ingress, distinct fallback,
+typed submission, formatter, and synthesis actions through `review_workflow`.
 
 - **Reference-spawn (T3a).** The review-bearing commands spawn `crew:reviewer`
   Task seats with a REFERENCE to the prep-staged prompt file in the run dir
@@ -122,8 +127,8 @@ gloss lives here.
   path the orchestrator hands that returned text INLINE to a `crew:scribe`
   sub-agent (Write-only), which Writes it to the tmp-seat file inside its OWN
   transcript, so the persist-Write never renders back into orchestrator context.
-  The orchestrator keeps the landing authority. review.md, build.md, and
-  measure-twice.md call `persist-seat --verify` and gate on its exit code for
+  The orchestrator keeps the landing authority. build.md and measure-twice.md
+  call `persist-seat --verify` and gate on its exit code for
   the landed record. The scribe's self-reported line is never the gate. On any
   scribe failure it falls back to
   Writing a DISTINCT `-fallback` path itself and persisting that, so a timed-out
@@ -157,6 +162,23 @@ crew is ever pointed at untrusted / external-contributor diffs, these seats
 
 A `readonly: true` frontmatter key is NOT real — Claude Code ignores unknown
 fields, so it's a no-op, not enforcement.
+
+## Standalone review workflow (Phase 1)
+
+Standalone `/crew:review` is now owned by the Python
+`multiagent.review_workflow` module. The shared command is a finite transport
+adapter: it passes the literal harness session id, launches Python-issued work,
+and submits Python-issued HostResult files. Target intent, seat selection,
+prompts, claims, repair admission, barrier, quorum, and terminal status do not
+belong in Markdown or shared roles.
+
+The command adapter is exposed for Claude and Cursor. Claude may use its native
+reviewer channel, while Cursor remains all-external and uses parent-context
+formatter/synthesis work. Codex-host all-external protocol compatibility is
+covered deterministically through the Python CLI in this phase, but the Codex
+plugin does not yet expose standalone `/crew:review`; its app-native adapter
+remains deferred. Build and measure-twice continue to use `review-prep` until
+their later workflow phases migrate them.
 
 ## Cursor host: all-external seat execution, native subagent channel deferred
 

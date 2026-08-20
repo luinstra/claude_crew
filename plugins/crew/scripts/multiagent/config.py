@@ -5,7 +5,9 @@ the user names no panel), the panel ROSTER (``[panels]``: what's *in* a preset),
 the SEAT catalog (``[seats.<name>]`` for availability, model pins, per-provider
 tunes, and whole new seats: resolved in ``seats.py`` over ``raw_layers()``, not
 by a getter here), the NON-DISPATCH (review/council/run/probe) seat wall-clock
-``[tuning].timeout`` and dispatch-WORK ``[dispatch].timeout`` wall clocks.
+``[tuning].timeout`` (the raw standalone-review input, capped by that workflow
+at 540 seconds of external work plus 60 seconds settlement, and the ordinary
+council/run/probe seat wall clock) and dispatch-WORK ``[dispatch].timeout``.
 Provider floors raise the effective timeout only when the resolved value is
 below the floor; agy's floor is its print timeout plus grace, about 8 minutes
 by default, so the 1800-second default is not floored. The persistence loops'
@@ -593,9 +595,13 @@ def _extract_default_timeout(data: dict, layer: str) -> int | None:
 
 
 def default_timeout() -> int | None:
-    """Resolve the NON-DISPATCH (review/council/run/probe) seat wall-clock from
-    ``[tuning].timeout`` (per-repo over global), or return ``None`` so the caller
-    keeps its built-in default."""
+    """Resolve ``[tuning].timeout`` (per-repo over global).
+
+    Standalone review treats this as its raw input and caps external work at
+    540 seconds with 60 seconds reserved for settlement; council, run, and
+    probe use the value as their ordinary seat wall-clock. Return ``None`` so
+    callers can keep their built-in default when it is unset.
+    """
     return _first(
         _extract_default_timeout(_load(), "repo"),
         _extract_default_timeout(_global_load(), "global"),

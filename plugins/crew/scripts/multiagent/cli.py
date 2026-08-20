@@ -11,9 +11,9 @@ PARENT dir (``.../scripts``) onto ``sys.path`` so the package-relative imports
 (``from multiagent...``) resolve in every case (the guard is a harmless no-op when
 the parent is already importable, e.g. under the dispatcher).
 
-Subcommands: ``review`` (fan-out over a resolved target), ``council`` (fan-out
-of a free-form question — the engine half of /crew:debate's crew-native
-council), ``debate`` (scaffold-only: writes the debate dir + question.md + an
+Subcommands: ``review`` (start or resume the Python-owned standalone workflow),
+``council`` (one-shot fan-out of a free-form question — the engine half of
+/crew:debate's crew-native council), ``debate`` (scaffold-only: writes the debate dir + question.md + an
 empty subprocess.json; NEVER runs seats internally), ``run`` (one
 seat ad-hoc), ``render`` (build ONE seat's prompt, no execution), ``seats``
 (print the resolved subprocess seat list, one per line, for per-seat fan-out),
@@ -74,6 +74,7 @@ from multiagent import (
     continuations,
     findings,
     prompts,
+    review_workflow,
     render,
     review_runs,
     rounds,
@@ -322,6 +323,114 @@ def _resolved_catalog_executions(
     }
 
 
+@dataclasses.dataclass(frozen=True)
+class ReviewSelection:
+    """Argparse-free review roster split shared by prep and standalone review."""
+
+    subprocess_seats: tuple[str, ...]
+    task_seats: tuple[str, ...]
+    task_seat_models: dict[str, str]
+    resolved_catalog: dict[str, channels.ResolvedExecution]
+
+
+def resolve_review_selection(
+    *,
+    host: str,
+    panel: str | None,
+    seats_arg: str | None,
+    task_seats_arg: str | None = None,
+    strict_explicit: bool = False,
+) -> ReviewSelection:
+    """Resolve independent panel/seats axes without running any provider."""
+    seats_given = seats_arg is not None
+    source_names = (
+        [name.strip() for name in seats_arg.split(",") if name.strip()]
+        if seats_given
+        else []
+    )
+    panel_named = panel is not None
+    if panel_named:
+        preset_names: list[str] | None = _panel_seat_list(panel)
+    elif not seats_given:
+        preset_names = _panel_seat_list(config.default_panel() or "full")
+    else:
+        preset_names = None
+
+    source_expanded = _expand_seat_groups(source_names)
+    if strict_explicit:
+        seen: set[str] = set()
+        for name in source_expanded:
+            if name in seen:
+                raise ValueError(f"duplicate review seat {name!r}")
+            seen.add(name)
+            if seats.seat_spec(name) is None:
+                raise LookupError(f"unknown review seat {name!r}")
+
+    preset_expanded = _expand_seat_groups(preset_names or [])
+    resolved_catalog = _resolved_catalog_executions(host)
+    external_names = {
+        name
+        for name, execution in resolved_catalog.items()
+        if execution.engine_runnable
+    }
+    native_names = {
+        name for name, execution in resolved_catalog.items() if execution.native
+    }
+
+    subprocess_raw = [
+        name
+        for name in (source_expanded if seats_given else preset_expanded)
+        if name in external_names
+    ]
+    subprocess_explicit = (
+        set(source_expanded)
+        if seats_given
+        else set(preset_expanded) if panel_named else set()
+    )
+
+    explicit_task_seats = [
+        name.strip()
+        for name in (task_seats_arg or "").split(",")
+        if name.strip()
+    ]
+    if explicit_task_seats:
+        task_raw: list[str] = []
+        task_explicit: set[str] = set()
+    else:
+        source_native = [name for name in source_expanded if name in native_names]
+        if seats_given and source_native:
+            task_raw = source_native
+            task_explicit = set(source_expanded)
+        else:
+            task_raw = [name for name in preset_expanded if name in native_names]
+            task_explicit = set(preset_expanded) if panel_named else set()
+
+    subprocess_kept = _drop_unavailable(subprocess_raw, subprocess_explicit)
+    task_kept = _drop_unavailable(task_raw, task_explicit)
+    if (
+        (subprocess_raw or task_raw or explicit_task_seats)
+        and not subprocess_kept
+        and not task_kept
+        and not explicit_task_seats
+    ):
+        _all_unavailable_warn()
+        subprocess_kept, task_kept = subprocess_raw, task_raw
+
+    subprocess_seats = tuple(dict.fromkeys(subprocess_kept))
+    task_seats = tuple(
+        explicit_task_seats
+        if explicit_task_seats
+        else dict.fromkeys(task_kept)
+    )
+    task_seat_models = {name: _task_seat_model(name) for name in task_seats}
+    return ReviewSelection(
+        subprocess_seats,
+        task_seats,
+        task_seat_models,
+        resolved_catalog,
+    )
+
+
 def _resolve_seats(seats_arg: str | None) -> list[str]:
     """Resolve the comma-separated --seats arg to host-resolved external seats.
 
@@ -559,13 +668,14 @@ def _stage_path(session_id: str, seat_role: str | None) -> str:
 
 
 def _fan_out(seats: list[str], prompt: str, timeout: int) -> list[ProviderResult]:
-    """Run the subprocess seats in parallel over one prompt.
+    """Run the ad-hoc council seats in parallel over one prompt.
 
-    Shared by ``review`` and ``council``: same parallel fan-out, same
-    ``ProviderResult`` shape, same graceful degradation (one seat failing or
-    hanging never sinks the panel). Pool sized to absorb one hung thread
-    (>= number of seats) so a hung agy thread cannot block codex's result.
-    Returns results in stable seat order (as requested).
+    Standalone ``review`` does not enter this pool; ``review_workflow`` issues
+    one independently claimable action per seat. Council keeps this one-shot
+    path with the same graceful degradation (one seat failing or hanging never
+    sinks the panel). Pool sized to absorb one hung thread (>= number of seats)
+    so a hung agy thread cannot block codex's result. Returns results in stable
+    seat order (as requested).
     """
     results_by_name: dict[str, ProviderResult] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(seats), 2)) as pool:
@@ -641,41 +751,132 @@ def _emit(text: str, out_path: str | None) -> None:
 
 
 def cmd_review(args: argparse.Namespace) -> int:
+    request = review_workflow.ReviewRequest(
+        target_input=args.target,
+        base=args.base or "main",
+        panel=args.panel,
+        seats=args.seats,
+        session_id=args.session_id,
+        timeout_seconds=args.timeout,
+        inline=args.inline_diff,
+    )
     try:
-        target = targets.resolve(args.target, base=args.base)
-    except targets.TargetError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        step = review_workflow.start_review(request)
+        print(json.dumps(review_workflow.review_step_to_dict(step), ensure_ascii=False))
+        return 0
+    except (review_workflow.WorkflowError, review_runs.ReviewRunError, OSError) as exc:
+        print(json.dumps(_review_command_error(exc), ensure_ascii=False))
         return 2
 
-    prompt = prompts.build_prompt(target, inline=args.inline_diff)
 
-    seats = _resolve_seats(args.seats)
-    if not seats:
-        print("error: no subprocess seats requested", file=sys.stderr)
+def _review_command_error(exc: Exception) -> dict:
+    if isinstance(exc, review_workflow.WorkflowError):
+        return review_workflow.workflow_error_dict(exc)
+    wrapped = review_workflow.WorkflowError("persistence_error", str(exc))
+    return review_workflow.workflow_error_dict(wrapped)
+
+
+def _review_ref_from_args(args: argparse.Namespace) -> review_workflow.ReviewRef:
+    return review_workflow.parse_review_ref({
+        "schema": 1,
+        "session_segment": args.session_segment,
+        "run_id": args.run_id,
+        "attempt_id": args.attempt_id,
+        "target_sha256": args.target_sha256,
+    })
+
+
+def _workflow_step_json(step: review_workflow.ReviewStep) -> str:
+    return json.dumps(review_workflow.review_step_to_dict(step), ensure_ascii=False)
+
+
+def cmd_review_next(args: argparse.Namespace) -> int:
+    try:
+        print(_workflow_step_json(review_workflow.next_review(_review_ref_from_args(args))))
+        return 0
+    except (review_workflow.WorkflowError, review_runs.ReviewRunError, OSError) as exc:
+        print(json.dumps(_review_command_error(exc), ensure_ascii=False))
         return 2
 
-    timeout = _resolve_timeout(args.timeout)
-    results = _fan_out(seats, prompt, timeout)
 
-    if args.json:
-        body = render.render_json(results)
-    else:
-        lines = [f"TARGET: {target.descriptor}"]
-        lines += [f"NOTE: {note}" for note in target.notes]
-        lines += ["", render.render_panel(results)]
-        body = "\n".join(lines)
-    _emit(body, args.out)
+def cmd_review_claim(args: argparse.Namespace) -> int:
+    try:
+        response = review_workflow.claim_review_action(
+            review_workflow.ClaimRequest(_review_ref_from_args(args), args.action_id)
+        )
+        print(json.dumps(review_workflow.claim_response_to_dict(response), ensure_ascii=False))
+        return 0
+    except (review_workflow.WorkflowError, review_runs.ReviewRunError, OSError) as exc:
+        print(json.dumps(_review_command_error(exc), ensure_ascii=False))
+        return 2
 
-    return _all_failed_exit(results)
+
+def cmd_review_execute(args: argparse.Namespace) -> int:
+    try:
+        print(_workflow_step_json(review_workflow.execute_external_review(_review_ref_from_args(args), args.action_id)))
+        return 0
+    except (review_workflow.WorkflowError, review_runs.ReviewRunError, OSError) as exc:
+        print(json.dumps(_review_command_error(exc), ensure_ascii=False))
+        return 2
+
+
+def cmd_review_submit(args: argparse.Namespace) -> int:
+    try:
+        path = Path(args.submission_path)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        result = review_workflow.parse_host_result(raw)
+        request = review_workflow.SubmissionRequest(str(path), args.consume, result)
+        print(_workflow_step_json(review_workflow.submit_review(request)))
+        return 0
+    except (OSError, ValueError, review_runs.ReviewRunError, review_workflow.WorkflowError) as exc:
+        if isinstance(exc, ValueError) and not isinstance(exc, review_workflow.WorkflowError):
+            error = review_workflow.workflow_error_dict(
+                review_workflow.WorkflowError("invalid_submission", str(exc))
+            )
+        else:
+            error = _review_command_error(exc)
+        print(json.dumps(error, ensure_ascii=False))
+        return 2
+
+
+def cmd_review_recover(args: argparse.Namespace) -> int:
+    try:
+        req = review_workflow.RecoveryRequest(
+            _review_ref_from_args(args),
+            args.action_id,
+            "not_running" if args.confirm_not_running else "",
+            args.diagnostic_code,
+        )
+        print(_workflow_step_json(review_workflow.recover_review_action(req)))
+        return 0
+    except (review_workflow.WorkflowError, review_runs.ReviewRunError, OSError) as exc:
+        print(json.dumps(_review_command_error(exc), ensure_ascii=False))
+        return 2
+
+
+def cmd_review_retry(args: argparse.Namespace) -> int:
+    try:
+        seats_arg = tuple(
+            seat
+            for value in (args.seats or "").split(",")
+            if (seat := value.strip())
+        )
+        req = review_workflow.RetryRequest(_review_ref_from_args(args), seats_arg or None)
+        print(_workflow_step_json(review_workflow.retry_review(req)))
+        return 0
+    except (review_workflow.WorkflowError, review_runs.ReviewRunError, OSError) as exc:
+        print(json.dumps(_review_command_error(exc), ensure_ascii=False))
+        return 2
 
 
 def cmd_council(args: argparse.Namespace) -> int:
     """Fan a free-form QUESTION across the subprocess council seats.
 
     The engine half of the crew-native council (/crew:debate): single round,
-    free-form prompt, REUSING ``review``'s fan-out + ``ProviderResult`` + render
-    + graceful-degradation. No target resolution. The orchestrator adds the
-    opus/sonnet Task seats and synthesizes.
+    free-form prompt using the retained ad-hoc ``ProviderResult`` + render path
+    with graceful degradation. No target resolution. Standalone review is a
+    separate action workflow. The orchestrator adds the opus/sonnet Task seats
+    and synthesizes.
     """
     # Exactly one prompt source: -f <file> XOR positional <question>.
     if args.file and args.question is not None:
@@ -980,9 +1181,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         in_run_dir = (results_dir / review_runs.RUN_JSON_NAME).is_file()
         if args.out is None and review_runs.is_reserved_stem(seat):
             # EVERY derived destination is guarded, flat included: a seat
-            # named current-run would overwrite the SESSION pointer in the
-            # flat dir, and run/seat would shadow control filenames. Only an
-            # explicit -o keeps ad-hoc freedom.
+            # named current-run/current-standalone-review would overwrite a
+            # SESSION pointer in the flat dir, and run/seat would shadow
+            # control filenames. Only an explicit -o keeps ad-hoc freedom.
             print(
                 f"error: seat name {seat!r} collides with a reserved crew "
                 "control filename stem; its derived <seat>.json is refused "
@@ -3237,8 +3438,8 @@ def cmd_repair_seat(args: argparse.Namespace) -> int:
             # Same guard, same chokepoint as run/persist-seat's derived
             # destinations (case-folded): the name supplies the filename stem,
             # so `repair-seat run` would derive and REWRITE the run dir's
-            # immutable run.json (current-run/seat likewise shadow control
-            # files). Only review-prep may touch those.
+            # immutable run.json (current-run/current-standalone-review/seat
+            # likewise shadow control files). Only review-prep may touch those.
             print(
                 f"error: seat name {seat_name!r} collides with a reserved crew "
                 "control filename stem; its derived <seat>.json is refused "
@@ -3426,8 +3627,9 @@ def cmd_persist_seat(args: argparse.Namespace) -> int:
     slug = _seat_role_slug(args.seat)
     if review_runs.is_reserved_stem(slug):
         # persist-seat ALWAYS derives its destination, so the guard covers the
-        # flat layout too: a seat slugged `current-run` would overwrite the
-        # SESSION pointer, and `run`/`seat` shadow control filenames.
+        # flat layout too: a seat slugged `current-run` or
+        # `current-standalone-review` would overwrite a SESSION pointer, and
+        # `run`/`seat` shadow control filenames.
         print(
             f"error: seat slug {slug!r} collides with a reserved crew control "
             "filename stem and cannot be persisted",
@@ -3635,6 +3837,28 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
         )
         return 2
 
+    # Reject every explicit derived-name intake before selection can drop an
+    # unknown case variant or trigger whole-panel fallback. The canonical
+    # comparison is case-folded in review_runs.is_reserved_stem, so all spellings
+    # of a control pointer are refused even when a configured catalog accepts
+    # only the lowercase spelling.
+    reserved_inputs = [
+        name
+        for raw in (args.seats, args.task_seats)
+        if raw is not None
+        for name in (part.strip() for part in raw.split(","))
+        if name and review_runs.is_reserved_stem(name)
+    ]
+    if reserved_inputs:
+        print(
+            "error: seat name(s) collide with reserved run-dir filename stems: "
+            f"{', '.join(repr(name) for name in reserved_inputs)} "
+            f"(reserved stems: {', '.join(sorted(review_runs.RESERVED_STEMS))}). "
+            "Nothing was written.",
+            file=sys.stderr,
+        )
+        return 2
+
     # 1. Target dispatch — the SAME call cmd_review/cmd_render make. --base
     #    defaults to "main" (parity with render/review); coerce before resolve.
     base = args.base if args.base is not None else "main"
@@ -3667,108 +3891,17 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     #    catalog Task seat (-> task_seats), or NEITHER (silently DROPPED;
     #    never loud-error). A NAMED --panel's members are EXPLICIT (an unavailable one
     #    is skipped WITH a note); a default_panel's are silent drops (refinement 3).
-    seats_given = args.seats is not None
-    source_names = (
-        [s.strip() for s in args.seats.split(",") if s.strip()]
-        if seats_given else []
-    )
-    panel_named = args.panel is not None
-    if panel_named:
-        preset_names: list[str] | None = _panel_seat_list(args.panel)
-    elif not seats_given:
-        preset_names = _panel_seat_list(config.default_panel() or "full")
-    else:
-        preset_names = None
-
     host = channels.current_host()
-    resolved_catalog = _resolved_catalog_executions(host)
-    known = {
-        name for name, resolved in resolved_catalog.items()
-        if resolved.engine_runnable
-    }
-    native_names = {
-        name for name, resolved in resolved_catalog.items() if resolved.native
-    }
-
-    def _dedup(xs: list[str]) -> list[str]:
-        seen: set[str] = set()
-        return [x for x in xs if not (x in seen or seen.add(x))]
-
-    # 2a. Subprocess RAW backing (resolver-filtered, pre-availability) + explicit
-    #     set. An explicit-empty/omitted --seats yields []. Availability is NOT
-    #     applied yet — that happens whole-panel in 2d so a per-split empty can't
-    #     trigger the fallback on its own.
-    if seats_given:
-        sub_expanded = _expand_seat_groups(source_names)
-        sub_explicit = set(sub_expanded)                       # --seats names explicit
-    elif preset_names is not None:
-        sub_expanded = _expand_seat_groups(preset_names)
-        sub_explicit = set(sub_expanded) if panel_named else set()  # default: silent
-    else:
-        sub_expanded = []
-        sub_explicit = set()
-    sub_raw = [s for s in sub_expanded if s in known]
-
-    # 2b. Task RAW backing + explicit set. Precedence: explicit --task-seats override
-    #     (OPAQUE echo, never resolved/availability-filtered) > task names in an
-    #     explicit --seats > the --panel/default preset's task names > []. NEVER
-    #     resolved through the subprocess registry, NEVER spawned/run. When the
-    #     opaque override is in play the task list bypasses availability entirely
-    #     (task_raw stays empty so 2d's whole-panel fallback considers ONLY the
-    #     subprocess seats — the override IS the task panel).
-    task_names = native_names
-    explicit_task_seats = [
-        s.strip() for s in (args.task_seats or "").split(",") if s.strip()
-    ]
-    override_task = bool(explicit_task_seats)
-    if override_task:
-        task_raw: list[str] = []
-        task_explicit: set[str] = set()
-    else:
-        seats_task_names = (
-            [n for n in _expand_seat_groups(source_names) if n in task_names]
-            if seats_given else []
-        )
-        if seats_given and seats_task_names:
-            task_raw = seats_task_names
-            task_explicit = set(_expand_seat_groups(source_names))
-        elif preset_names is not None:
-            preset_expanded = _expand_seat_groups(preset_names)
-            task_raw = [n for n in preset_expanded if n in task_names]
-            task_explicit = set(preset_expanded) if panel_named else set()
-        else:
-            task_raw = []
-            task_explicit = set()
-
-    # 2d. Availability — WHOLE-PANEL. Drop unavailable seats per-split (skip-noting
-    #     an explicitly-named one) with NO per-split fallback, then apply the
-    #     unfiltered-panel fallback ONCE only if the ENTIRE resolved panel
-    #     (subprocess + task + the opaque --task-seats override) is empty. This is
-    #     the BLOCKING fix: disabling both task seats in `full` yields task_seats ==
-    #     [] with the five subprocess seats intact (no opus/sonnet restoration);
-    #     disabling EVERY seat triggers a single whole-panel fallback (one warn)
-    #     restoring the unfiltered panel. The opaque --task-seats override
-    #     (explicit_task_seats; task_raw stays [] for it) counts toward the final
-    #     panel being NON-empty, so `--task-seats opus` with every subprocess seat
-    #     unavailable must NOT restore the disabled subprocess seats — the override
-    #     IS the (non-empty) panel.
-    sub_kept = _drop_unavailable(sub_raw, sub_explicit)
-    task_kept = _drop_unavailable(task_raw, task_explicit)
-    if (
-        (sub_raw or task_raw or explicit_task_seats)
-        and not sub_kept
-        and not task_kept
-        and not explicit_task_seats
-    ):
-        _all_unavailable_warn()
-        sub_kept, task_kept = sub_raw, task_raw
-    subprocess_seats = _dedup(sub_kept)
-    task_seats = explicit_task_seats if override_task else _dedup(task_kept)
-
-    # 2c. task_seat_models: the per-seat model pin for each Task seat. The CATALOG
-    #     is the SINGLE source (a seat's `model` is a Task-tool alias). The
-    #     orchestrator reads `model` FROM here; it never hardcodes a pin.
-    task_seat_models = {n: _task_seat_model(n) for n in task_seats}
+    selection = resolve_review_selection(
+        host=host,
+        panel=args.panel,
+        seats_arg=args.seats,
+        task_seats_arg=args.task_seats,
+    )
+    subprocess_seats = list(selection.subprocess_seats)
+    task_seats = list(selection.task_seats)
+    task_seat_models = selection.task_seat_models
+    resolved_catalog = selection.resolved_catalog
 
     # 3. Manifest hygiene + run identity. Resolve + placeholder-guard the
     #    session id up front (prep writes run-scoped artifacts even for a
@@ -3840,11 +3973,11 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
         )
         return 2
 
-    # A seat named after a run-dir control file (run.json /
-    # current-run.json) would let its ordinary <seat>.json write destroy the
-    # identity record, and a Task seat named "seat" would stage
-    # prompt-seat.txt ONTO the shared subprocess prompt; only prep may create
-    # or modify those files. Applies to BOTH kinds: a config-declared
+    # A seat named after a control file (run.json / current-run.json /
+    # current-standalone-review.json) would let its ordinary <seat>.json write
+    # destroy an identity record or pointer, and a Task seat named "seat" would
+    # stage prompt-seat.txt ONTO the shared subprocess prompt; only prep may
+    # create or modify those files. Applies to BOTH kinds: a config-declared
     # subprocess seat can carry any registry-legal name.
     reserved = [n for n in roster_all if review_runs.is_reserved_stem(n)]
     if reserved:
@@ -4417,7 +4550,9 @@ def _render_config_template(
     L.append("#   below the floor; agy's floor is its print timeout plus grace, about 8")
     L.append("#   minutes by default, so the 1800-second default is not floored;")
     L.append("#   --timeout > [dispatch].timeout > builtin 1800")
-    L.append("#   NON-DISPATCH (review/council/run/probe) seats use [tuning].timeout.")
+    L.append("#   NON-DISPATCH [tuning].timeout is the raw standalone-review input;")
+    L.append("#   standalone external work is capped at 540s + 60s settlement, while")
+    L.append("#   council/run/probe use it as their ordinary seat wall-clock.")
     L.append("")
     # Commented [dispatch.<kind>] blocks, sourced from the SAME provider
     # declarations the `dispatch --options` listing renders (one public map,
@@ -4504,8 +4639,9 @@ def _render_config_template(
     # scaffolded default and the enforced bound from drifting apart.
     from models import DEFAULT_DEADLINE_MINUTES, MAX_DEADLINE_MINUTES
 
-    L.append("# [tuning].timeout: NON-DISPATCH (review/council/run/probe) seat wall-clock")
-    L.append("#   default (positive integer seconds).")
+    L.append("# [tuning].timeout: raw standalone-review input (positive integer seconds;")
+    L.append("#   standalone external work is capped at 540s + 60s settlement).")
+    L.append("#   Council/run/probe otherwise use it as their ordinary seat wall-clock.")
     L.append("# [tuning].deadline_minutes: the persistence loops' wall clock, read by")
     L.append(f"#   `crew state init` (1-{MAX_DEADLINE_MINUTES}; 0 = no deadline, honored from the")
     L.append("#   global ~/.crew-config.toml only, and the stop-fires cap still bounds")
@@ -5026,9 +5162,11 @@ def cmd_swab(args: argparse.Namespace) -> int:
 
     DRY-RUN BY DEFAULT, modelled on ``git clean -n``: the read-the-list moment IS
     the safety mechanism. Prunes two artifact families under the project ``.crew/``:
-    ORPHANED review-run dirs (no active loop AND no current-run pointer names them;
-    there is deliberately no review-run age threshold) and stale debate dirs (past
-    the 1-day threshold, no synthesis). Signal markers are deliberately left
+    ORPHANED review-run dirs (no active loop, no current-run or
+    current-standalone-review pointer names them, and no nonterminal or ambiguous
+    standalone workflow protects them; there is deliberately no review-run age
+    threshold) and stale debate dirs (past the 1-day threshold, no synthesis).
+    Signal markers are deliberately left
     untouched: they carry no clean orphan signal at an attended moment, so this
     command does not delete them (session-start's aged sweep still reaps them).
 
@@ -5145,34 +5283,91 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     review = sub.add_parser(
-        "review", help="Run a review fan-out over registered external seats (host-resolved).",
+        "review", help="Start or resume the engine-owned standalone review workflow.",
     )
     review.add_argument(
         "target",
-        nargs="?",
-        default="auto",
-        help="plan .md path, working-tree, branch, commit:<sha>, a SHA, or auto",
+        help="fixed review intent: plan .md path, working-tree, branch, "
+             "commit:<sha>, SHA/range, code, or an empty string for newest plan",
     )
     review.add_argument(
         "--seats", default=None,
-        help="comma-separated registered external seats (host-resolved; e.g. "
+        help="comma-separated registered seats (host-resolved native Claude or external; e.g. "
              "codex,cursor-auto,cursor-composer)",
     )
-    review.add_argument("--json", action="store_true", help="emit a JSON array of results")
+    review.add_argument("--panel", default=None, help="named standalone review panel")
+    review.add_argument("--session-id", dest="session_id", required=True, help="literal harness session id")
     review.add_argument("--base", default="main", help="base ref for branch/auto diffs")
-    review.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
+    review.add_argument(
+        "--timeout", type=int, default=None,
+        help="raw requested/config timeout (s); external work is capped at 540s "
+             "with 60s settlement",
+    )
     review.add_argument(
         "--inline-diff", action="store_true",
         help="embed the diff/plan in the prompt instead of referencing it "
              "(seats fetch it themselves by default — smaller, no ARG_MAX cap)",
     )
-    review.add_argument(
-        "-o", "--out", default=None, type=anchor_path,
-        help="write results to this file instead of stdout (keeps the call "
-             "shell-redirect-free and allowlistable). A relative path resolves "
-             "against the project root (crew_base), not the shell cwd.",
-    )
     review.set_defaults(func=cmd_review)
+
+    def add_review_ref(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--session-segment", required=True)
+        parser.add_argument("--run-id", required=True)
+        parser.add_argument("--attempt-id", required=True)
+        parser.add_argument("--target-sha256", required=True)
+
+    review_next = sub.add_parser("review-next", help="derive the next standalone review step")
+    add_review_ref(review_next)
+    review_next.set_defaults(func=cmd_review_next)
+
+    review_claim = sub.add_parser("review-claim", help="claim one standalone review action")
+    add_review_ref(review_claim)
+    review_claim.add_argument("--action-id", required=True)
+    review_claim.set_defaults(func=cmd_review_claim)
+
+    review_execute = sub.add_parser("review-execute", help="execute one external standalone reviewer")
+    add_review_ref(review_execute)
+    review_execute.add_argument("--action-id", required=True)
+    review_execute.set_defaults(func=cmd_review_execute)
+
+    review_submit = sub.add_parser("review-submit", help="submit an issued standalone HostResult file")
+    review_submit.add_argument(
+        "-f",
+        "--submission-path",
+        required=True,
+        type=anchor_path,
+        help=(
+            "read the issued HostResult from this file; a relative path resolves "
+            "against the project root, not the shell cwd"
+        ),
+    )
+    review_submit.add_argument("--consume", action="store_true")
+    review_submit.set_defaults(func=cmd_review_submit)
+
+    review_recover = sub.add_parser("review-recover", help="recover one confirmed-lost standalone action")
+    add_review_ref(review_recover)
+    review_recover.add_argument("--action-id", required=True)
+    review_recover.add_argument("--confirm-not-running", action="store_true")
+    review_recover.add_argument(
+        "--diagnostic-code",
+        required=True,
+        choices=(
+            "native_task_lost",
+            "external_process_lost",
+            "formatter_task_lost",
+            "parent_formatter_lost",
+            "parent_synthesis_lost",
+        ),
+    )
+    review_recover.set_defaults(func=cmd_review_recover)
+
+    review_retry = sub.add_parser(
+        "review-retry",
+        help="retry pending standalone reviewer seats from a terminal attempt",
+    )
+    add_review_ref(review_retry)
+    review_retry.add_argument("--seats", default=None)
+    review_retry.set_defaults(func=cmd_review_retry)
 
     council = sub.add_parser(
         "council",
@@ -5491,7 +5686,8 @@ def build_parser() -> argparse.ArgumentParser:
              "flat .crew/reviews/<id>/ dir. An empty/whitespace-only output "
              "lands as ok=false with error 'empty seat output' (never a "
              "fabricated success), and a slug matching a reserved crew "
-             "control filename stem (run/current-run/seat, case-folded) is "
+             "control filename stem (run/current-run/current-standalone-review/seat, "
+             "case-folded) is "
              "rejected (exit 2) since the destination is always derived. "
              "The engine owns slug derivation, "
              "the render-safe shape, and the path echo — no LLM hand-assembly. "
@@ -5606,7 +5802,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run ONE registered seat resolved to external execution for the "
              "current host through the "
              "engine. A seat name matching a reserved crew control filename "
-             "stem (run/current-run/seat, case-folded) is rejected (exit 2) "
+             "stem (run/current-run/current-standalone-review/seat, case-folded) "
+             "is rejected (exit 2) "
              "whenever the output path is DERIVED, flat and run-scoped alike; "
              "an explicit -o keeps ad-hoc freedom.",
     )
@@ -5935,7 +6132,8 @@ def build_parser() -> argparse.ArgumentParser:
     swab = sub.add_parser(
         "swab",
         help="swab the decks: review and prune stale crew artifacts (orphaned "
-             "review runs with no active loop or current-run pointer, and stale "
+             "review runs with no active loop, current-run/current-standalone-review "
+             "pointer, or nonterminal/ambiguous standalone workflow, and stale "
              "debate transcripts). Dry-run by default; pass --yes to delete.",
     )
     swab.add_argument(

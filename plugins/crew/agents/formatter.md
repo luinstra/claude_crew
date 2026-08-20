@@ -40,7 +40,7 @@ Return ONLY this structure (no preamble, no "here is the reformatted review"):
 
 ```
 ## VERDICT
-APPROVED   (or REVISE — use the seat's own verdict; REVISE if it raised a blocker)
+APPROVED   (or REVISE — use the seat's explicitly stated verdict; omit the section if unstated)
 
 ## CRITERIA
 - <Criterion>: PASS — reason        (only criteria the seat actually scored)

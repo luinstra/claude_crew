@@ -34,8 +34,15 @@ without a verified tag are expectations, not guarantees.
 
 ## Seat execution
 
+Standalone `/crew:review` uses the shared Python workflow protocol in Cursor.
+This phase intentionally routes every resolved seat externally (including Claude
+voice seats through the configured CLI); Cursor-native reviewer/formatter roles
+remain Phase 2 work. The command still works inside the Cursor app because the
+host only transports Python-issued work and typed result files. Build and
+measure-twice retain their `review-prep` orchestration until their later phases.
+
 - Commands (both with the `/crew:` prefix and bare) import and execute in Cursor (verified live, 2026-08-17)
-- The full `/crew:review` pipeline ran live end to end: review-prep, per-seat engine runs, collect digest. Quorum was MET at 5/6 usable seats; the one failure was the known cursor-auto empty-output flake, not a host defect (verified live, 2026-08-17)
+- Historical pre-Phase-1 probe: the former `/crew:review` pipeline ran live end to end through review-prep, per-seat engine runs, and collect; this records the old route and is not evidence for the current workflow protocol (verified live, 2026-08-17)
 - All three external channels authenticate inside Cursor: the codex CLI, the cursor-agent CLI, and the claude CLI. Opus and fable ran as external Claude-channel seats with truthful channel provenance stamps (verified live, 2026-08-17)
 - Panel prep is host-truthful under `unknown` detection: with no native Claude channel on this host, every seat, including Claude voices, routes external through the `claude` CLI, and that routing is correct regardless of the marker-table gap above (verified live, 2026-08-17)
 - Commands whose recipes spawn Claude Task agents (`analyze`, `code-search`, `execute`, `deepinit`, and the loop commands' default executor and advisor steps) run with SILENT SUBSTITUTION: a Cursor-native agent answers in the role instead of the named crew agent. This is documented-unsupported, not guarded (verified live, 2026-08-18)

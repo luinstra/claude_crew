@@ -17,6 +17,7 @@ root) and multiagent.cli (scripts on sys.path) import it as a top-level module.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -26,8 +27,11 @@ from state_discovery import is_active_value, is_loop_state_file
 from multiagent.review_runs import (
     POINTER_NAME,
     RUN_JSON_NAME,
+    ReviewRunError,
+    read_run_json,
     read_pointer_run_id,
     session_segment,
+    verify_run_record,
 )
 
 # This MUST track what review_runs mints, NOT the permissive shared RUN_ID_RE.
@@ -38,6 +42,8 @@ from multiagent.review_runs import (
 # the engine never mints. A destructive sweep validates against the mint, not a
 # guard. If review_runs ever changes the truncation length or charset, change this.
 MINTED_RUN_DIR_RE = re.compile(r"^run-[0-9a-f]{12}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+STANDALONE_POINTER_NAME = "current-standalone-review.json"
 
 # Coarse debate-dir ownership heuristic: a `run-` or `YYYYMMDD-HHMMSS` PREFIX. This
 # is a LOOSE prefix match, not proof the engine minted the name (it also admits a
@@ -158,8 +164,54 @@ def live_run_keys(crew_dir: Path) -> set:
     return keys
 
 
+def _standalone_pointer_data(session_dir: Path) -> dict | None:
+    """Parse only the exact schema-1 standalone pointer shape."""
+    try:
+        data = json.loads((session_dir / STANDALONE_POINTER_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(data, dict)
+        or set(data) != {"schema", "run_id", "identity_digest", "target_sha256"}
+        or data.get("schema") != 1
+        or not isinstance(data.get("run_id"), str)
+        or MINTED_RUN_DIR_RE.fullmatch(data["run_id"]) is None
+        or not isinstance(data.get("identity_digest"), str)
+        or SHA256_RE.fullmatch(data["identity_digest"]) is None
+        or not isinstance(data.get("target_sha256"), str)
+        or SHA256_RE.fullmatch(data["target_sha256"]) is None
+    ):
+        return None
+    return data
+
+
+def _standalone_pointer_run_id(session_dir: Path) -> str | None:
+    """Return the run id only when pointer and immutable run record agree."""
+    data = _standalone_pointer_data(session_dir)
+    if data is None:
+        return None
+    run = session_dir / data["run_id"]
+    if not own_dir(run):
+        return None
+    try:
+        record = read_run_json(run)
+        verify_run_record(
+            record,
+            expected_run_id=data["run_id"],
+            source=run / RUN_JSON_NAME,
+        )
+    except ReviewRunError:
+        return None
+    if (
+        data["identity_digest"] != record.get("identity_digest")
+        or data["target_sha256"] != record.get("target_sha256")
+    ):
+        return None
+    return data["run_id"]
+
+
 def pointer_protected_keys(reviews_root: Path) -> set:
-    """``(session segment, run_id)`` pairs named by a ``current-run.json`` POINTER.
+    """Run keys named by either supported current-review pointer.
 
     The pointer means "this is the run in play", so a run it names is NOT an
     orphan even when no loop state records it: it protects an in-flight standalone
@@ -175,13 +227,59 @@ def pointer_protected_keys(reviews_root: Path) -> set:
     flat = read_pointer_run_id(reviews_root)
     if flat:
         keys.add(("", flat))
+    standalone_flat = _standalone_pointer_run_id(reviews_root)
+    if standalone_flat:
+        keys.add(("", standalone_flat))
     for session_dir in reviews_root.iterdir():
         if not own_dir(session_dir):
             continue
         rid = read_pointer_run_id(session_dir)
         if rid:
             keys.add((session_dir.name, rid))
+        standalone = _standalone_pointer_run_id(session_dir)
+        if standalone:
+            keys.add((session_dir.name, standalone))
     return keys
+
+
+def _standalone_workflow_terminal(run: Path, segment: str) -> bool | None:
+    """Delegate pruning classification to the canonical standalone engine.
+
+    ``None`` means there is no standalone workflow. Every exception means the
+    record is malformed or ambiguous and therefore must remain protected.
+    """
+    workflow_path = run / "workflow.json"
+    try:
+        if workflow_path.is_symlink():
+            return False
+        if not workflow_path.exists():
+            return None
+        if not workflow_path.is_file():
+            return False
+        from multiagent import review_workflow
+
+        return review_workflow._standalone_run_terminal_for_prune(run, segment)
+    except Exception:
+        return False
+
+
+def standalone_workflow_protected_keys(reviews_root: Path) -> set:
+    """Protect every active or conservatively unreadable standalone workflow."""
+    protected = set()
+
+    def inspect(session_dir: Path, segment: str) -> None:
+        for run in session_dir.glob("run-*"):
+            if not own_dir(run) or MINTED_RUN_DIR_RE.fullmatch(run.name) is None:
+                continue
+            terminal = _standalone_workflow_terminal(run, segment)
+            if terminal is False:
+                protected.add((segment, run.name))
+
+    inspect(reviews_root, "")
+    for session_dir in reviews_root.iterdir():
+        if own_dir(session_dir):
+            inspect(session_dir, session_dir.name)
+    return protected
 
 
 def _review_runs_under(
@@ -199,7 +297,8 @@ def _review_runs_under(
     it is a real dir (not a symlink, and its resolved path stays inside reviews/);
     it holds a present ``run.json`` marker file (presence, not contents: an
     unreadable record still means crew wrote the dir); and its run id is NOT in
-    ``protected`` (named by an active loop OR by a current-run pointer).
+    ``protected`` (named by an active loop/current pointer, or carrying a
+    nonterminal or conservatively unreadable standalone workflow).
 
     ``with_sizes=False`` keeps every validation but SKIPS the ``dir_size`` walk and
     records ``bytes=0``: a count-only caller (the session-start reporter) needs the
@@ -219,6 +318,13 @@ def _review_runs_under(
         except OSError:
             continue
         if (segment, entry.name) in protected:
+            continue
+        if segment == "" and any(
+            protected_segment == entry.name
+            for protected_segment, _protected_run in protected
+        ):
+            # A first-level name can itself look like a minted run while serving
+            # as the session segment for a protected nested standalone run.
             continue
         out.append(
             Prunable(
@@ -250,8 +356,13 @@ def prunable_review_runs(crew_dir: Path, with_sizes: bool = True) -> list[Prunab
     reviews_root = crew_dir / REVIEWS_SUBDIR
     if not own_dir(reviews_root):
         return []
-    # A run is protected when a still-active loop OR a current-run pointer names it.
-    protected = live_run_keys(crew_dir) | pointer_protected_keys(reviews_root)
+    # Active loops, either current pointer, and every nonterminal/ambiguous
+    # standalone workflow independently protect their run.
+    protected = (
+        live_run_keys(crew_dir)
+        | pointer_protected_keys(reviews_root)
+        | standalone_workflow_protected_keys(reviews_root)
+    )
 
     out = _review_runs_under(reviews_root, "", protected, reviews_root, with_sizes)
     for session_dir in reviews_root.iterdir():
@@ -361,7 +472,7 @@ def collect_prunable(
 
 
 def drop_dangling_pointer(session_dir: Path, removed_names: set) -> None:
-    """Remove a ``current-run.json`` pointer left naming a just-removed run.
+    """Remove either pointer when it names a just-removed run.
 
     Hygiene, not correctness (the next review-prep overwrites the pointer before
     anything reads it): a dangling pointer would make launch-time derivation
@@ -370,5 +481,11 @@ def drop_dangling_pointer(session_dir: Path, removed_names: set) -> None:
     if read_pointer_run_id(session_dir) in removed_names:
         try:
             (session_dir / POINTER_NAME).unlink(missing_ok=True)
+        except OSError:
+            pass
+    standalone = _standalone_pointer_data(session_dir)
+    if standalone is not None and standalone["run_id"] in removed_names:
+        try:
+            (session_dir / STANDALONE_POINTER_NAME).unlink(missing_ok=True)
         except OSError:
             pass

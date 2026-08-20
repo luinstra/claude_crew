@@ -89,6 +89,7 @@ git commit -m "ci: update workflow permissions"
 |---------|---------|
 | `/plugin` | Install plugin from current directory (run from `plugins/crew/` or `plugins/sk/`) |
 | `python plugins/crew/scripts/tests/test-hooks.py` | Run hook unit tests |
+| `python plugins/crew/scripts/tests/test-review-workflow.py` | Run standalone review workflow contract tests |
 | `python plugins/crew/scripts/tests/test-multiagent.py` | Run the multi-model engine + dispatcher tests |
 | `python plugins/crew/scripts/tests/test-version-bump.py` | Run the post-commit version-bump hardening tests |
 | `python plugins/sk/scripts/tests/test-sk-hook.py` | Run the sk stack-detection hook tests |

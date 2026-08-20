@@ -16,6 +16,15 @@ A Claude Code plugin for persistence, specialized agents, and tech-stack guidanc
 
 ## Hosts
 
+Standalone `/crew:review` is backed by one Python-owned workflow protocol in
+Claude Code and Cursor. Claude may use native reviewer Tasks, while Cursor uses
+its current all-external route. Phase 1 also covers Codex-host all-external
+protocol compatibility deterministically through the Python CLI, but the Codex
+plugin does not yet expose standalone `/crew:review`; its app-native adapter
+remains deferred.
+Build and measure-twice continue to use their existing `review-prep` interface
+while those workflows are migrated.
+
 - **Claude Code** is the full experience: 8 agents, Stop-enforced persistence loops, and sk stack detection.
 - **Codex** is supported; see [`plugins/crew/docs/codex-host.md`](plugins/crew/docs/codex-host.md).
 - **Cursor** is supported: commands import, hooks deliver, and the one-shot flows (review, dispatch, debate) run end to end. Persistence loops are enabled, with two caveats: stop-coercion is unverified on this host, so a loop's Stop-hook enforcement is best-effort there, and the hooks only emit Cursor-shaped output when the host is bound (export `CREW_HOST=cursor` in the shell that launches Cursor, until automatic detection ships). Subagent-dependent commands are unsupported. See [`plugins/crew/docs/cursor-host.md`](plugins/crew/docs/cursor-host.md).
@@ -104,13 +113,33 @@ repo-relative path.
 |---------|-------------|
 | `/crew:plan "description"` | Start a planning session with the advisor agent |
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (keeps main context clean) |
-| `/crew:review "the plan \| the diff"` | Multi-model review of a plan OR code diff (natural-language dispatch) → `APPROVED`/`REVISE` verdict |
+| `/crew:review "the plan \| diff"` | Multi-model review of a plan or code diff using the fixed target grammar below → `APPROVED`/`REVISE` verdict |
 | `/crew:debate "question"` | Crew-native council — single-round multi-model take on a question (the default review panel), synthesized into agreement/disagreement/recommendation |
 | `/crew:dispatch "[--seat <name>] <task>"` | Delegate a WORK task to ONE non-Claude seat (default `codex`) in write mode — it edits the working tree and leaves changes UNCOMMITTED + UNSTAGED for you to review (keep / revert / pipe into `/crew:review`) |
 | `/crew:build "task"` | Start a persistence loop: persists toward completion, also ending on a completing verdict, your cancel, or a safety bound |
 | `/crew:cancel-build` | Exit an active build loop early |
 | `/crew:measure-twice "task"` | Start a self-refining plan loop — generates plan, reviews, revises toward loop completion (a panel's completing verdict, or a human `--force`) |
 | `/crew:cancel-measure-twice` | Exit an active measure-twice loop early |
+
+`/crew:review` uses a fixed target grammar rather than guessing from arbitrary
+prose: an empty target or `latest plan` selects the newest `.crew/plans/*.md`;
+an explicit `.md` path selects that plan; and code review accepts `code`,
+`working-tree`, `branch`/`branch vs <base>`, `commit:<sha>` (or a bare SHA), and
+Git ref ranges. Ambiguous text returns `needs_input`, asks one exact question,
+and writes no review state. Failed standalone reviewer seats are retried only
+on an explicit request; resuming does not silently relaunch them. The distinct
+exception is an identical start after `synthesis_failed`, which intentionally
+issues a fresh attempt-local synthesis action without rerunning reviewer seats.
+Standalone `/crew:review` resolves its raw timeout as CLI `--timeout` >
+per-repo/global `[tuning].timeout` > builtin 600 seconds, then caps external
+provider work at 540 seconds to reserve 60 seconds for settlement. An Agy floor
+is accepted only when it stays within that cap; otherwise the start fails. A
+fresh over-cap resolution emits one stderr warning. When `--timeout` is
+omitted, a matching-pointer resume adopts its frozen timeout without warning.
+An explicit timeout re-resolves normally and may re-warn; only a different
+effective value creates a new identity. Council, `run`, and `probe`
+keep the ordinary `[tuning].timeout` behavior without this standalone settlement
+reservation.
 
 ### Utilities
 
@@ -154,8 +183,9 @@ repo-relative path.
 
 ### Multi-Model Review
 
-`/crew:review` fans the same review prompt across a panel of models and
-synthesizes one verdict. The built-in default panel and the presets:
+`/crew:review` gives each frozen panel seat a Python-issued review action and
+synthesizes one verdict from the admitted results. The built-in default panel
+and the presets:
 
 <!-- seat-roster:default -->
 - Default panel: `codex`, `codex-luna`, `agy`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`
@@ -183,8 +213,9 @@ External seats run via the bundled `multiagent` engine
 (`plugins/crew/scripts/multiagent/`): the two codex seats are distinct OpenAI
 voices (`gpt-5.6-sol` and `gpt-5.6-luna`) on the one codex CLI, while Claude
 voices use the native `crew:reviewer` Task path on Claude Code and the
-read-only `claude` CLI elsewhere. It dispatches plan-vs-code from natural
-language and reports `APPROVED`/`REVISE` with `[BLOCKING]`/`[MINOR]` findings.
+read-only `claude` CLI elsewhere. It resolves plan-vs-code targets through a
+fixed, documented intent grammar and reports `APPROVED`/`REVISE` with
+`[BLOCKING]`/`[MINOR]` findings.
 A skipped or failed seat (any kind) is reported by name but never sinks the
 panel: the verdict is synthesized from whichever seats succeed, and only an
 all-seats-failed panel skips the verdict. A missing external CLI is a named
@@ -192,8 +223,9 @@ skipped seat; a CLI failure is a named failed seat. Hosts without a native
 Claude channel do not emulate Claude seats with host-native subagents.
 Certification is quorum-gated, though: the grouped digest opens with a
 `PANEL: … quorum <n>: MET|NOT MET` header (a strict majority of the launched
-panel), and a `NOT MET` panel cannot certify an `APPROVED`; the orchestrator
-relaunches the pending seats or surfaces the shortfall instead. In the `/crew:build`
+panel), and a `NOT MET` panel cannot certify an `APPROVED`; standalone review
+surfaces the shortfall and relaunches pending reviewer seats only after an
+explicit retry request. In the `/crew:build`
 and `/crew:measure-twice` loops a human may still authorize completion over a
 `NOT MET` panel with `--force`, which is recorded as an explicit override for the
 audit trail.
@@ -228,7 +260,8 @@ routine work.
 `full` is the **built-in** default panel. An optional, personal per-repo
 `.crew/config.toml` (already gitignored under `.crew/`) can override that default, tune per-seat
 models (plus codex `reasoning_effort`, agy `print_timeout`) and the
-NON-DISPATCH (review/council/run/probe) seat wall-clock `[tuning].timeout`,
+NON-DISPATCH `[tuning].timeout` (raw standalone-review resolution plus the
+ordinary council/run/probe seat wall clock),
 while dispatch WORK has its own `[dispatch].timeout` wall-clock (default 1800
 seconds; provider floors raise the effective timeout only when the resolved
 `[dispatch].timeout` is below the floor; agy's floor is its print timeout plus
@@ -251,7 +284,8 @@ lists them, non-billable).
 the effective timeout only when the resolved `[dispatch].timeout` is below the
 floor; agy's floor is its print timeout plus grace, about 8 minutes by default,
 so the 1800-second default is not floored. The NON-DISPATCH (review/council/run/probe)
-seats use `[tuning].timeout`. Its precedence is
+uses `[tuning].timeout` as the raw standalone-review value and as the ordinary
+council/run/probe seat wall clock. Dispatch precedence is
 `--timeout` > `[dispatch].timeout` > builtin 1800.
 
 > **Migration:** `[dispatch].timeout` is a new behavior split: `crew dispatch`
@@ -310,7 +344,7 @@ reasoning_effort = "high"
 print_timeout = "8m"
 
 [tuning]
-timeout = 600                     # NON-DISPATCH (review/council/run/probe) seat wall-clock seconds
+timeout = 600                     # standalone-review raw value; ordinary council/run/probe wall clock
 deadline_minutes = 240            # the persistence loops' wall clock (1-1440); read by `crew state init`.
                                   # 0 = no deadline exists but is honored ONLY in the global
                                   # ~/.crew-config.toml (this repo file sits in the tree the agent edits)
@@ -409,7 +443,8 @@ for ad-hoc calls — never raw `agy -p` / `codex exec`.**
 #### Cleaning up stale artifacts (`crew swab`)
 
 Attended cleanup of stale crew artifacts under the project `.crew/`: orphaned
-review-run dirs (no active loop and no current-run pointer names them) and stale
+review-run dirs (no active loop, current-run/current-standalone-review pointer,
+or nonterminal/ambiguous standalone workflow names or protects them) and stale
 debate dirs (past the 1-day threshold, no synthesis). It is DRY-RUN by default,
 modelled on `git clean -n`: with no flag it only lists what it would remove, so
 reading the list is the safety step.
@@ -426,8 +461,9 @@ reading the list is the safety step.
 also REFUSES (exit 2, deletes nothing) when run from a terminal `.crew` cwd with
 `CLAUDE_PROJECT_DIR` unset: the project root is only a guess there, so cd back to
 the project root or set the env var (the dry-run listing still works). A review
-run is protected while an active loop or a current-run pointer names it, and
-plans and loop state are never in scope, so swab only ever removes stale
+run is protected while an active loop, a current-run/current-standalone-review
+pointer, or a nonterminal/ambiguous standalone workflow names or protects it;
+protection is fail-closed. Plans and loop state are never in scope, so swab only ever removes stale
 review/debate debris. `--json` emits the machine payload (`prunable`, `removed`,
 `failed`, `total_bytes`).
 
@@ -444,7 +480,7 @@ Specialized agents for different tasks. Use via `Task(subagent_type="crew:agent-
 | **reviewer** | Panel seat for `/crew:review` (read-only by convention — has `Bash` for git inspection, not sandbox-enforced; spawned at `model: opus` / `model: sonnet`) | (driven by `/crew:review`) |
 | **panelist** | Discuss-mode council seat for `/crew:debate` (independent critical take — direct take, strongest objection, risks/tradeoffs; no verdict; read-only by convention) | (driven by `/crew:debate`) |
 | **formatter** | Reformats one review seat's raw output into the structured FINDINGS schema (faithful transform, read-only, `model: haiku`) for the per-seat repair fallback | (driven by the review/build/measure-twice repair step) |
-| **scribe** | Persists one review seat's text to disk on the orchestrator's behalf so the persist-Write does not render in the terminal (verbatim transcribe, `Write`-only, `model: haiku`) | (driven by the review/build/measure-twice success-path persist step) |
+| **scribe** | Lands one native review seat's text at an engine-issued ingress path so the Write does not render in the terminal (verbatim transcribe, `Write`-only, `model: haiku`) | (driven by standalone review transport and the build/measure-twice persist step) |
 
 ### Quick Reference
 
@@ -570,7 +606,7 @@ claude-crew/
 │   │   │   ├── models.py           # Dataclasses for JSON structures
 │   │   │   ├── persistent-mode.py  # Build + measure-twice loop enforcement
 │   │   │   ├── session-start.py    # State restoration
-│   │   │   └── tests/              # Test suite (test-hooks.py, test-multiagent.py, fixtures/)
+│   │   │   └── tests/              # Test suite (test-review-workflow.py, test-hooks.py, test-multiagent.py, fixtures/)
 │   │   └── docs/
 │   │       └── CLAUDE.md     # User config template
 │   └── sk/

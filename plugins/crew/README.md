@@ -4,6 +4,13 @@ Persistence, specialized agents, and workflow commands for Claude Code.
 
 ## What's In Here
 
+Standalone `/crew:review` uses the Python-owned workflow engine through the
+Claude Code and Cursor host adapters. Cursor remains all-external until its
+native phase. Codex-host all-external protocol compatibility is covered
+deterministically through the Python CLI, but the Codex plugin does not yet
+expose standalone `/crew:review`; its app-native adapter remains deferred.
+Build and measure-twice continue to use `review-prep`.
+
 - **8 specialized agents** — advisor, executor, reader, document-writer, reviewer, panelist, formatter, scribe
 - **Slash commands** — planning, execution, search, build/measure-twice loops
 - **2 lifecycle hooks** — SessionStart context restoration, Stop persistence enforcement
