@@ -7800,6 +7800,22 @@ def test_persist_seat_doc_sync():
                   and "ask the returned `question` verbatim" in normalized_text
                   and "print `display` verbatim" in normalized_text,
                   "exact extraction plus needs_input/display", "missing adapter flow")
+            check("commands/review.md overlaps external execution with native Task work",
+                  "claim only native or parent actions" in normalized_text
+                  and "never call `review-claim` for it" in normalized_text
+                  and "with `run_in_background=true`" in normalized_text
+                  and "three-field shape" in normalized_text
+                  and "timeout=<computed-ms>, run_in_background=true" in normalized_text
+                  and "Bash **tool input field**" in normalized_text
+                  and "Do not omit it, set it false" in normalized_text
+                  and "Retain every returned background task ID and output-file path" in normalized_text
+                  and "immediately spawn the authorized native Task calls in the foreground" in normalized_text
+                  and "background external process must overlap the native Task" in normalized_text
+                  and "await its host completion notification without polling" in normalized_text
+                  and "Read its exact returned output file once" in normalized_text
+                  and "shell `&`" in normalized_text,
+                  "background external handle overlaps foreground native Task",
+                  "missing executable external/native overlap contract")
             check("commands/review.md distinguishes primary scribe and fallback transport",
                   "replace its one exact `{{REVIEWER_RETURN_DATA}}` marker" in normalized_text
                   and "fresh bare `crew:scribe` Task" in normalized_text

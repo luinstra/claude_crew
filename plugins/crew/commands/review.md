@@ -56,20 +56,35 @@ After the user answers, restart with that answer as the target and the same
 supplied options. For every non-`needs_input` response, print `display` verbatim
 before claiming or executing any work.
 
-For every `work_batch`, claim each native or parent action in separate parallel
-Bash calls. Execute each external action in a separate parallel Bash call.
-Never use shell backgrounding, compound commands, or sequential seat execution.
-On Claude, set each external Bash call's tool timeout to
+For every `work_batch`, claim only native or parent actions before performing
+them; an external action is claimed only by `review-execute`, so never call
+`review-claim` for it. On Claude, start each external `review-execute` Bash call
+with `run_in_background=true` and tool timeout
 `(work_item.timeout_seconds + 60) * 1000` milliseconds (600000 at the 540-second
-provider ceiling). On a host without a command-tool timeout, Python's frozen
-provider timeout remains authoritative.
+provider ceiling). Retain every returned background task ID and output-file path,
+then immediately spawn the authorized native Task calls in the foreground. Do
+not wait for an external result before spawning native work: the background
+external process must overlap the native Task. Never use shell `&` or a compound
+shell command. On a host without a background command tool, separate parallel
+tool calls are best-effort and Python's frozen provider timeout remains
+authoritative.
+
+For each external WorkItem on Claude, invoke the Bash tool with exactly this
+three-field shape, substituting only issued reference/action values and the
+computed timeout:
+
+`Bash(command="\"${CLAUDE_PLUGIN_ROOT}/crew\" review-execute --session-segment '<session-segment>' --run-id '<run-id>' --attempt-id '<attempt-id>' --target-sha256 '<target-sha256>' --action-id '<action-id>'", timeout=<computed-ms>, run_in_background=true)`
+
+`run_in_background=true` is a Bash **tool input field**, not shell text. Do not
+omit it, set it false, or wait for that Bash result before the native Task call.
 
 If Python returns `provider_timeout_config_drift` for Agy, leave the old action
 untouched. For a current effective timeout at or below 540 seconds, start a new
 review with the returned explicit `--timeout <current-effective-seconds>` value;
-that explicit value changes the canonical review identity. If the current
-effective timeout exceeds 540 seconds, lower the Agy timeout configuration
-first, then start a new review with the resulting explicit value.
+that value re-resolves normally, and only a different canonical effective value
+changes the review identity. If the current effective timeout exceeds 540
+seconds, lower the Agy timeout configuration first, then start a new review with
+the resulting explicit value.
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" review-claim --session-segment '<session-segment>' --run-id '<run-id>' --attempt-id '<attempt-id>' --target-sha256 '<target-sha256>' --action-id '<action-id>'
@@ -169,8 +184,11 @@ reviewer response remains a valid `ok` result.
 
 After every known completion response, derive aggregate state once. A
 post-batch `stale_ref` race is handled only by repeating the identical start.
-For `waiting`, await handles still owned by this host; after compaction, yield
-the returned in-flight ids without polling or reclaiming.
+For a Claude background external process, await its host completion notification
+without polling, then Read its exact returned output file once and handle that
+typed response before deriving aggregate state. For `waiting`, await handles
+still owned by this host; after compaction, yield the returned in-flight ids
+without polling or reclaiming.
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" review-next --session-segment '<session-segment>' --run-id '<run-id>' --attempt-id '<attempt-id>' --target-sha256 '<target-sha256>'
