@@ -51,8 +51,11 @@ Opt-in for COST (premium/metered Cursor buckets):
   `cursor-gemini` is left opt-in.
 - `cursor-glm` — glm-max draws on Cursor's shared premium MAX allotment, so it's
   opt-in too; `cursor-auto` fills that slot from the cheap/dedicated bucket.
-- `cursor-grok` — grok-4.5-xhigh draws that same shared premium MAX allotment,
-  so it's opt-in for the same reason as `cursor-glm`.
+- `cursor-grok` — cursor-grok-4.5-high draws that same shared premium allotment,
+  so it's opt-in for the same reason as `cursor-glm`. The pin must stay an exact
+  advertised catalog id: the earlier `grok-4.5-xhigh` was not advertised and was
+  fuzzy-matched down to Cursor Grok 4.5 High, so the seat ran a tier below its
+  request while the result recorded the requested pin.
 
 ## Why the debate panel uses `seats --debate`, not a `debate-prep` mirror
 

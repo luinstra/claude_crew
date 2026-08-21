@@ -2062,10 +2062,12 @@ def test_registry():
     check("each cursor seat is a DISTINCT model (no closure late-binding bug)",
           len({get_provider(s)._default_model for s in CURSOR_SEATS}) == len(CURSOR_SEATS),
           "all distinct models", str([get_provider(s)._default_model for s in CURSOR_SEATS]))
-    # The opt-in premium grok seat's model pin (verified via `agent models`).
-    check("CURSOR_SEATS pins cursor-grok to grok-4.5-xhigh",
-          CURSOR_SEATS.get("cursor-grok").model == "grok-4.5-xhigh",
-          "grok-4.5-xhigh", str(CURSOR_SEATS.get("cursor-grok")))
+    # Must be an EXACT advertised catalog id. A near-miss is not rejected, it is
+    # fuzzy-matched to a neighbouring tier, and the result then persists the
+    # requested pin while a different model answered.
+    check("CURSOR_SEATS pins cursor-grok to cursor-grok-4.5-high",
+          CURSOR_SEATS.get("cursor-grok").model == "cursor-grok-4.5-high",
+          "cursor-grok-4.5-high", str(CURSOR_SEATS.get("cursor-grok")))
     # Codex model-seats mirror cursor: one CodexProvider per CODEX_SEATS entry,
     # each pinned to its model (codex + codex-luna default, codex-terra opt-in).
     CODEX_SEATS = shipped_seats("codex")
@@ -14574,7 +14576,7 @@ def test_seat_roster_drift_guard():
         ("cursor-gpt",      "CursorProvider", "gpt-5.5-extra-high",    True),
         ("cursor-gemini",   "CursorProvider", "gemini-3.1-pro",        True),
         ("cursor-glm",      "CursorProvider", "glm-5.2-max",           True),
-        ("cursor-grok",     "CursorProvider", "grok-4.5-xhigh",        True),
+        ("cursor-grok",     "CursorProvider", "cursor-grok-4.5-high",  True),
         ("cursor-auto",     "CursorProvider", "auto",                  False),
         ("cursor-composer", "CursorProvider", "composer-2.5",          False),
         ("opus",             "ClaudeProvider",  "opus",                  False),

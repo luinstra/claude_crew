@@ -1,9 +1,11 @@
 # Cursor host contract
 
 What crew has verified about running inside the Cursor harness.
-Every fact carries an evidence tag: (verified live, 2026-08-17) or
-(verified live, 2026-08-18), or (research-sourced, unverified). Facts
-without a verified tag are expectations, not guarantees.
+Every fact carries an evidence tag: (verified live, 2026-08-17),
+(verified live, 2026-08-18), (verified live, 2026-08-20, cursor-agent
+2026.08.11-e8db854), or (research-sourced, unverified). Facts without a
+verified tag are expectations, not guarantees. The 2026-08-20 batch is
+EXTERNAL `cursor-agent` CLI evidence only; see its scope warning.
 
 ## Install and component routing
 
@@ -56,7 +58,74 @@ measure-twice retain their `review-prep` orchestration until their later phases.
 - sk's skills ARE exposed to Cursor through the marketplace (verified live, 2026-08-17)
 - sk ships NO hooks entry for Cursor: its hook is Claude-format and unproven on this host (verified live, 2026-08-17)
 
+## Step 0 probe results, EXTERNAL `cursor-agent` CLI surface only
+
+Captured with `cursor-agent -p --trust --plugin-dir <dir> --output-format
+stream-json`, client `2026.08.11-e8db854`, on 2026-08-20.
+
+SCOPE WARNING, read before reusing any row below. Every result here is evidence
+about the EXTERNAL `cursor-agent` CLI, which is the route crew already ships for
+cursor-channel seats. The roadmap's Phase 2 gate requires a native seat with NO
+`cursor-agent` dependency, so nothing here settles app-native behavior. Treat
+these as indicators the app-surface probes should confirm, never as native
+evidence.
+
+- Plugin-shipped agents ARE discovered on this surface: a local plugin dir whose
+  `plugin.json` sets `agents` had its agent listed with the built-ins (verified
+  live, 2026-08-20, cursor-agent 2026.08.11-e8db854)
+- Named delegation initiated by the assistant mid-turn works and returns the
+  agent's own text (verified live, 2026-08-20, same client)
+- `readonly: true` IS ENFORCED on this surface. Same instruction, same runner,
+  same `--force`, only the key differs: the `readonly: true` agent returned its
+  token and created NO file; the `readonly: false` agent returned its token and
+  wrote the file (verified live, 2026-08-20, same client). This is the OPPOSITE
+  of Claude Code, where `engine-notes.md:163` records the key as an ignored
+  no-op: Claude ignoring an unknown field was never evidence about Cursor
+- SIGTERM to a running invocation terminates it cleanly with no orphan (verified
+  live, 2026-08-20, same client)
+
+### Model attribution on this surface
+
+- `--output-format stream-json` emits a `system/init` line carrying `model`, a
+  runtime-reported value rather than a subagent self-report (verified live,
+  2026-08-20, same client)
+- An unknown model string is REJECTED before any run with the valid-model list on
+  stderr, so far-miss strings are validated rather than echoed (verified live,
+  2026-08-20, same client)
+- `init.model` attributes the SESSION. A parent at `composer-2.5` delegating to an
+  agent pinned `gemini-3.1-pro` returned the subagent's token while `init.model`
+  still read `Composer 2.5`, and no emitted surface named the subagent's model
+  (verified live, 2026-08-20, same client). Whether the APP can attribute a
+  native subagent is UNRESOLVED and cannot be inferred from this
+- Per-invocation `--model` is reflected in `init.model` for a top-level call
+  (verified live, 2026-08-20, same client):
+
+  | requested | `init.model` |
+  | --- | --- |
+  | `auto` | `Auto` |
+  | `composer-2.5` | `Composer 2.5` |
+  | `gpt-5.5-extra-high` | `GPT-5.5 272K Extra High` |
+  | `gemini-3.1-pro` | `Gemini 3.1 Pro` |
+  | `glm-5.2-max` | `GLM 5.2 Max` |
+  | `grok-4.5-xhigh` | `Cursor Grok 4.5 High` |
+
+- `auto` reports the literal `Auto`, which is the alias echoed back, NOT the
+  router's concrete choice. It therefore does NOT establish truthful attribution,
+  and `cursor-auto` stays unverifiable (verified live, 2026-08-20, same client)
+- `grok-4.5-xhigh` (`seats.toml:60`) is NOT an advertised model: the catalog
+  offers `cursor-grok-4.5-{low,medium,high}` and reserves `xhigh` for 4.6. It is
+  not rejected like a far-miss string, it is fuzzy-matched down to `Cursor Grok
+  4.5 High`, so the seat runs a tier below its request while results persist the
+  requested pin and falsely attribute the answering model. Validation is NOT
+  total. FIXED: the pin is now the exact advertised id `cursor-grok-4.5-high`
+  (verified live, 2026-08-20, same client)
+
 ## Probe log
 
 - 2026-08-17: install/component-routing capture, env captures (both surfaces), hook payload captures, live `/crew:review` pipeline run, sk exposure check
 - 2026-08-18: subagent-substitution check for Task-spawning commands
+- 2026-08-20, cursor-agent 2026.08.11-e8db854: EXTERNAL CLI batch. Plugin agent
+  discovery, assistant-initiated named delegation, `readonly` enforcement plus a
+  write control, SIGTERM cancellation, `stream-json` model attribution with an
+  invalid-model negative control, and a six-string per-invocation model sweep.
+  No app-surface probe ran; native execution remains unmeasured
