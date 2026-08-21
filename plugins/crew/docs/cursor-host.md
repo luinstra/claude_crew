@@ -138,6 +138,29 @@ a retired id is fuzzy-matched down instead of erroring (see below).
   id `cursor-grok-4.6-xhigh`, which resolves to `Cursor Grok 4.6 Extra High`
   (verified live, 2026-08-20, same client)
 
+## App-surface findings (Cursor app, operator-reported)
+
+- The app can launch a subagent on a model OTHER than the parent chat's: the
+  parent passes the model on the Task call (operator-reported from a live Cursor
+  session, 2026-08-20)
+- A custom subagent in `.cursor/agents/` or `~/.cursor/agents/` may pin `model:`
+  in frontmatter; omitting it inherits the parent. Both P8 mechanisms therefore
+  exist on the app surface, so the delegated-subagent transport stands and needs
+  no rework (operator-reported, 2026-08-20)
+- The app UI renders a MODEL BADGE per response, naming the model that produced
+  it. That is an app-rendered artifact rather than a subagent's claim about
+  itself, so it is admissible as the P7 oracle, unlike the CLI's `init.model`
+  which attributes only the session (operator-reported, 2026-08-20)
+- Plan and team limits can still override model selection (blocked models, Max
+  Mode), so an available slug is not guaranteed usable on every account
+  (operator-reported, 2026-08-20)
+- Open sliver: confirm a SUBAGENT run carries its own badge rather than
+  displaying the parent's. The mechanism is present; only that attribution detail
+  is unconfirmed
+- `/best-of-n` is a separate path (parallel runs in worktrees), NOT a nested Task
+  subagent, and is not the mechanism crew would drive (operator-reported,
+  2026-08-20)
+
 ## Probe log
 
 - 2026-08-17: install/component-routing capture, env captures (both surfaces), hook payload captures, live `/crew:review` pipeline run, sk exposure check
