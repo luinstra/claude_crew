@@ -2292,8 +2292,8 @@ class ReviewWorkflowTest(unittest.TestCase):
                 self.assertIsNotNone(spec)
                 execution = channels.resolve_seat(
                     spec,
-                    host="codex",
                     capabilities=channels.active_capabilities(),
+                    declared_native=channels.task_native_channel("codex"),
                 )
                 self.assertIsNotNone(execution)
                 changed = replace(execution, **drift)

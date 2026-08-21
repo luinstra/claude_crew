@@ -1668,22 +1668,34 @@ def test_host_detection():
               "disjoint marker names",
               repr((channels._CODEX_HOST_MARKERS, channels._CURSOR_HOST_MARKERS)))
 
-        check("native_channel maps Claude only",
+        check("native_channel maps the hosts with an in-session channel",
               channels.native_channel("claude") == "claude"
+              and channels.native_channel("cursor") == "cursor"
               and channels.native_channel("codex") is None
-              and channels.native_channel("cursor") is None
               and channels.native_channel("unknown") is None,
+              "claude / cursor / None / None",
+              repr([channels.native_channel(host)
+                    for host in ("claude", "cursor", "codex", "unknown")]))
+        check("task_native_channel maps Claude only",
+              channels.task_native_channel("claude") == "claude"
+              and channels.task_native_channel("cursor") is None
+              and channels.task_native_channel("codex") is None
+              and channels.task_native_channel("unknown") is None,
               "claude / None / None / None",
-              repr([channels.native_channel(host) for host in ("claude", "codex", "cursor", "unknown")]))
-        check("codex channel table has no native channel",
-              not any(spec.native for spec in channels.channel_table("codex").values()),
-              "zero native channels", repr(channels.channel_table("codex")))
-        check("cursor channel table has no native channel",
-              not any(spec.native for spec in channels.channel_table("cursor").values()),
-              "zero native channels", repr(channels.channel_table("cursor")))
-        check("unknown channel table has no native channel",
-              not any(spec.native for spec in channels.channel_table("unknown").values()),
-              "zero native channels", repr(channels.channel_table("unknown")))
+              repr([channels.task_native_channel(host)
+                    for host in ("claude", "cursor", "codex", "unknown")]))
+        for table_host in ("codex", "cursor", "unknown"):
+            table = channels.channel_table(
+                declared_native=channels.task_native_channel(table_host))
+            check(f"{table_host} task channel table has no native channel",
+                  not any(spec.native for spec in table.values()),
+                  "zero native channels", repr(table))
+        cursor_native = channels.channel_table(
+            declared_native=channels.native_channel("cursor"))
+        check("a caller that drives cursor natively gets exactly that channel",
+              [name for name, spec in cursor_native.items() if spec.native] == ["cursor"],
+              "['cursor']",
+              repr([name for name, spec in cursor_native.items() if spec.native]))
     finally:
         channels._warned.clear()
         channels._warned.update(saved_warned)
@@ -10892,10 +10904,13 @@ def test_dispatch():
                     rc = cli.cmd_dispatch(
                         _dispatch_ns(seat="declared-native", task="x", json=True),
                     )
+            dispatch_host = channels.current_host()
             engine_names = ", ".join(
                 sorted(
                     name for name, execution in
-                    cli._resolved_catalog_executions(channels.current_host()).items()
+                    cli._resolved_catalog_executions(
+                        declared_native=channels.task_native_channel(dispatch_host),
+                    ).items()
                     if execution.engine_runnable
                 )
             )
@@ -15485,20 +15500,23 @@ def test_resolver():
     from multiagent.providers import get_provider, known_seat_names  # noqa: E402
 
     host = channels.current_host()
-    table = channels.channel_table(host)
-    check("Claude is the current host and its native channel is claude",
-          host == "claude" and channels.native_channel(host) == "claude",
-          "host='claude', native='claude'", f"host={host!r} native={channels.native_channel(host)!r}")
+    # One local for the route this test DECLARES, so no case can build the
+    # table from one accessor and assert against the other.
+    declared = channels.task_native_channel(host)
+    table = channels.channel_table(declared_native=declared)
+    check("Claude is the current host and its declared task route is claude",
+          host == "claude" and declared == "claude",
+          "host='claude', declared='claude'", f"host={host!r} declared={declared!r}")
     check("channel table is derived from the legacy-kind inverse",
           set(table) == set(seats.CHANNEL_TO_LEGACY_KIND)
           and table["claude"].legacy_kind == "claude-code"
           and all(table[channel].legacy_kind == legacy
                  for channel, legacy in seats.CHANNEL_TO_LEGACY_KIND.items()),
           str(seats.CHANNEL_TO_LEGACY_KIND), str(table))
-    check("channel table marks exactly the native channel",
+    check("channel table marks exactly the declared native channel",
           sum(spec.native for spec in table.values()) == 1
-          and table[channels.native_channel(host)].native
-          and all(spec.native == (name == channels.native_channel(host))
+          and table[declared].native
+          and all(spec.native == (name == declared)
                   for name, spec in table.items()),
           "one native channel", str(table))
     check("channel table keeps model rules in seats.PROVIDER_KINDS",
@@ -15517,7 +15535,8 @@ def test_resolver():
 
     one = seats.SeatSpec(name="direct", via=("codex",), model=None)
     resolved = channels.resolve_seat(
-        one, host=host, capabilities={"codex": capability("codex")})
+        one, capabilities={"codex": capability("codex")},
+        declared_native=declared)
     check("one eligible external channel skips probing and is engine-runnable",
           resolved is not None and resolved.channel == "codex"
           and resolved.model is None and resolved.engine_runnable
@@ -15529,7 +15548,8 @@ def test_resolver():
         AssertionError("provider capabilities were imported"))
     try:
         injected = channels.resolve_seat(
-            one, host=host, capabilities={"codex": capability("injected")})
+            one, capabilities={"codex": capability("injected")},
+            declared_native=declared)
     finally:
         channels._default_capabilities = saved_default
     check("explicit capability injection is the sole resolver source",
@@ -15541,7 +15561,7 @@ def test_resolver():
         AssertionError("default capabilities were consulted"))
     channels.set_capabilities({"codex": capability("active-override")})
     try:
-        active = channels.resolve_seat(one, host=host)
+        active = channels.resolve_seat(one, declared_native=declared)
     finally:
         channels.set_capabilities(None)
         channels._default_capabilities = saved_default
@@ -15549,9 +15569,11 @@ def test_resolver():
           active is not None and active.channel == "codex",
           "active override codex resolution", repr(active))
 
-    missing = channels.resolve_seat(one, host=host, capabilities={})
+    missing = channels.resolve_seat(
+        one, capabilities={}, declared_native=declared)
     native = seats.SeatSpec(name="opus", via=("claude",), model="opus")
-    native_missing = channels.resolve_seat(native, host=host, capabilities={})
+    native_missing = channels.resolve_seat(
+        native, capabilities={}, declared_native=declared)
     check("missing capability key is fail-closed without a KeyError",
           missing is not None and not missing.engine_runnable
           and not missing.supports_workspace_write
@@ -15563,21 +15585,25 @@ def test_resolver():
     bad_alias = seats.SeatSpec(name="bad-alias", via=("claude",), model="not-an-alias")
     external_none = seats.SeatSpec(name="external-none", via=("cursor",), model=None)
     check("model rules gate Claude aliases but allow external model=None",
-          channels.resolve_seat(bad_alias, host=host, capabilities={}) is None
+          channels.resolve_seat(
+              bad_alias, capabilities={}, declared_native=declared) is None
           and channels.resolve_seat(
-              external_none, host=host, capabilities={"cursor": capability("none")})
+              external_none,
+              capabilities={"cursor": capability("none")}, declared_native=declared)
               is not None,
           "bad Claude alias rejected; external None accepted", "resolver result mismatch")
     check("a seat with no known eligible channel is unresolved",
           channels.resolve_seat(
               seats.SeatSpec(name="unknown", via=("missing",), model="x"),
-              host=host, capabilities={}) is None,
+              capabilities={}, declared_native=declared) is None,
           "None", "resolved")
 
     deterministic_a = channels.resolve_seat(
-        one, host=host, capabilities={"codex": capability("codex")})
+        one, capabilities={"codex": capability("codex")},
+        declared_native=declared)
     deterministic_b = channels.resolve_seat(
-        one, host=host, capabilities={"codex": capability("codex")})
+        one, capabilities={"codex": capability("codex")},
+        declared_native=declared)
     check("the same seat and capability inputs resolve deterministically",
           deterministic_a == deterministic_b,
           repr(deterministic_a), repr(deterministic_b))
@@ -15587,9 +15613,10 @@ def test_resolver():
     multi = seats.SeatSpec(name="multi", via=("codex", "cursor"), model=None)
     calls.clear()
     selected = channels.resolve_seat(
-        multi, host=host,
+        multi,
         capabilities={"codex": capability("codex", available=False),
-                      "cursor": capability("cursor", available=True)})
+                      "cursor": capability("cursor", available=True)},
+        declared_native=declared)
     check("multiple eligible channels choose the first available external channel",
           selected is not None and selected.channel == "cursor"
           and calls == {"codex": 1, "cursor": 1},
@@ -15597,24 +15624,27 @@ def test_resolver():
     calls.clear()
     first = channels.resolve_seat(
         seats.SeatSpec(name="first", via=("cursor", "codex"), model=None),
-        host=host,
         capabilities={"cursor": capability("cursor", available=True),
-                      "codex": capability("codex", available=True)})
+                      "codex": capability("codex", available=True)},
+        declared_native=declared)
     check("multiple eligible channels stop probing after the first available",
           first is not None and first.channel == "cursor" and calls == {"cursor": 1},
           "cursor only", f"selected={first!r} calls={calls}")
     calls.clear()
     missing_first = channels.resolve_seat(
-        multi, host=host, capabilities={"cursor": capability("cursor", available=True)})
+        multi,
+        capabilities={"cursor": capability("cursor", available=True)},
+        declared_native=declared)
     check("a missing earlier capability falls through to a later available channel",
           missing_first is not None and missing_first.channel == "cursor"
           and calls == {"cursor": 1},
           "cursor, probe only cursor", f"selected={missing_first!r} calls={calls}")
     calls.clear()
     fallback = channels.resolve_seat(
-        multi, host=host,
+        multi,
         capabilities={"codex": capability("codex", available=False),
-                      "cursor": capability("cursor", available=False)})
+                      "cursor": capability("cursor", available=False)},
+        declared_native=declared)
     check("no available channel falls back deterministically to the first eligible",
           fallback is not None and fallback.channel == "codex"
           and calls == {"codex": 1, "cursor": 1},
@@ -15656,7 +15686,8 @@ def test_resolver():
         capabilities = channels.active_capabilities()
         executions = {
             name: channels.resolve_seat(
-                spec, host=host, capabilities=capabilities,
+                spec, capabilities=capabilities,
+                declared_native=declared,
             )
             for name, spec in catalog.items()
         }
@@ -15681,6 +15712,260 @@ def test_resolver():
                   for name, execution in resolved_catalog.items()
                   if execution.engine_runnable),
               "provider-class write capability", str(resolved_catalog))
+
+
+def test_routing_parameter_neutrality():
+    """Pin every seat-resolution consumer's route on all four host values.
+
+    Each consumer now DECLARES the native route it can drive instead of
+    inheriting the host's. None of them may start resolving in-session work
+    that used to run as an external CLI, so the rule they all still follow is
+    the one the host used to impose: a claude-channel seat runs in-session only
+    on a Claude host, and no other channel ever runs in-session here.
+    """
+    log_section("routing-parameter behavior neutrality across host values")
+    from multiagent import channels, seats  # noqa: E402
+
+    # Every case names its own host, so no ambient detection marker may reach a
+    # child: an inherited CLAUDECODE would silently turn the unknown-host case
+    # into a second Claude case.
+    ambient_markers = (
+        tuple(channels.codex_host_markers())
+        + tuple(channels.cursor_host_markers())
+        + channels._CLAUDE_HOST_MARKERS
+        + ("CREW_HOST",)
+    )
+
+    shipped = seats.shipped_catalog()
+    claude_registered = {n for n, spec in shipped.items() if spec.via[0] == "claude"}
+
+    def channel_of(name: str) -> str:
+        return shipped[name].via[0]
+
+    hosts = ("claude", "cursor", "codex", "unknown")
+    captured: dict[str, dict] = {}
+
+    with tempfile.TemporaryDirectory() as root:
+        for host in hosts:
+            project = Path(root) / host
+            (project / ".crew" / "plans").mkdir(parents=True)
+            (project / ".crew" / "plans" / "p.md").write_text(
+                "# Neutrality target\n\nOne fixed body so the run identity is stable.\n"
+            )
+            (project / ".crew" / "config.toml").write_text(
+                '[build]\nexecutor = "cursor-composer"\n'
+            )
+            (project / "seat.txt").write_text("seat output\n")
+
+            env = _neutral_env()
+            env["CLAUDE_PROJECT_DIR"] = str(project)
+            # No provider CLI may be reachable: these cases exercise ROUTING,
+            # and an installed CLI on an accept path would spend real money.
+            env["PATH"] = ""
+            for marker in ambient_markers:
+                env.pop(marker, None)
+            if host != "unknown":
+                env["CREW_HOST"] = host
+
+            def run(*argv):
+                return _run_cli(list(argv), env=env, cwd=str(project))
+
+            # A project with NO [build] table: the sentinel executor is the one
+            # shape whose reported channel is the routing answer itself, since a
+            # named seat overwrites it with its own resolved channel.
+            plain = Path(root) / f"{host}-no-build-config"
+            plain.mkdir(parents=True)
+            plain_env = dict(env)
+            plain_env["CLAUDE_PROJECT_DIR"] = str(plain)
+
+            prep_full = run("review-prep", ".crew/plans/p.md", "--panel", "full",
+                            "--session-id", "neutral")
+            prep_override = run("review-prep", ".crew/plans/p.md", "--seats", "codex",
+                                "--task-seats", "custom-task", "--session-id", "neutral2")
+            captured[host] = {
+                # The two per-host project roots, so a cross-host comparison
+                # can blank paths that differ only because each host runs in
+                # its own temp dir.
+                "project": str(project),
+                "plain": str(plain),
+                "prep_full": json.loads(prep_full.stdout),
+                "prep_override": json.loads(prep_override.stdout),
+                "seats": run("seats"),
+                "debate": run("seats", "--debate", "--json"),
+                "doctor": json.loads(run("doctor").stdout),
+                "build_executor": run("build-executor"),
+                "build_sentinel": _run_cli(
+                    ["build-executor"], env=plain_env, cwd=str(plain)),
+                "run_opus": run("run", "opus", "hello"),
+                "run_cursor": run("run", "cursor-auto", "hello"),
+                "dispatch_cursor": run("dispatch", "hello", "--seat", "cursor-composer"),
+                "probe_opus": run("probe", "opus"),
+                "probe_cursor": run("probe", "cursor-auto"),
+                "probe_all": run("probe", "--all"),
+                "persist": run("persist-seat", "cursor-auto", "--model", "auto",
+                               "--session-id", "neutral3", "-f", "seat.txt"),
+                "persisted": (
+                    project / ".crew" / "reviews" / "neutral3" / "cursor-auto.json"
+                ).read_text(),
+            }
+
+        # The reference roster comes from the shipped catalog, never from a
+        # payload under test, so a mis-routed consumer cannot move the bar it
+        # is measured against.
+        panel_order = list(seats._shipped()["panels"]["full"])
+        native_panel = [n for n in panel_order if channel_of(n) == "claude"]
+        external_panel = [n for n in panel_order if channel_of(n) != "claude"]
+        check("the resolved panel roster does not depend on the host",
+              bool(native_panel) and bool(external_panel)
+              and all(
+                  sorted(captured[host]["prep_full"]["subprocess_seats"]
+                         + captured[host]["prep_full"]["task_seats"])
+                  == sorted(panel_order)
+                  for host in hosts
+              ),
+              f"same roster on every host: {sorted(panel_order)}",
+              repr({host: captured[host]["prep_full"]["subprocess_seats"]
+                    + captured[host]["prep_full"]["task_seats"] for host in hosts}))
+
+        expected_channels = {n: channel_of(n) for n in panel_order}
+        for host in hosts:
+            native_here = host == "claude"
+            payload = captured[host]["prep_full"]
+            expected_task = native_panel if native_here else []
+            expected_subprocess = external_panel if native_here else panel_order
+            check(f"review-prep splits the panel unchanged on host={host}",
+                  payload["subprocess_seats"] == expected_subprocess
+                  and payload["task_seats"] == expected_task
+                  and payload["task_seat_models"] == {
+                      n: shipped[n].model for n in expected_task
+                  }
+                  and payload["seat_channels"] == expected_channels,
+                  f"subprocess={expected_subprocess} task={expected_task}",
+                  repr(payload))
+
+            override = captured[host]["prep_override"]
+            check(f"an explicit --task-seats name keeps its channel on host={host}",
+                  override["seat_channels"] == {
+                      "codex": "codex",
+                      "custom-task": "claude" if native_here else None,
+                  },
+                  repr({"codex": "codex",
+                        "custom-task": "claude" if native_here else None}),
+                  repr(override["seat_channels"]))
+
+            sentinel = json.loads(captured[host]["build_sentinel"].stdout)
+            check(f"the default build executor keeps its channel on host={host}",
+                  sentinel["executor"] == "crew:executor"
+                  and sentinel["channel"] == ("claude" if native_here else None),
+                  f'executor=crew:executor channel={"claude" if native_here else None}',
+                  repr(sentinel))
+
+            listing = captured[host]["seats"].stdout.split()
+            check(f"crew seats lists the external subset unchanged on host={host}",
+                  listing == expected_subprocess,
+                  repr(expected_subprocess), repr(listing))
+
+            debate = json.loads(captured[host]["debate"].stdout)
+            check(f"crew debate --json partitions seats unchanged on host={host}",
+                  debate["subprocess_seats"] == expected_subprocess
+                  and debate["task_seats"] == expected_task
+                  and debate["seat_channels"] == expected_channels,
+                  f"subprocess={expected_subprocess} task={expected_task}",
+                  repr(debate))
+
+            doctor = captured[host]["doctor"]
+            expected_doctor_task = claude_registered if native_here else set()
+            check(f"crew doctor maps registered seats unchanged on host={host}",
+                  set(doctor["task"]) == expected_doctor_task
+                  and set(doctor["subprocess"]).isdisjoint(expected_doctor_task)
+                  and (native_here
+                       or claude_registered <= set(doctor["subprocess"])),
+                  f"task={sorted(expected_doctor_task)}",
+                  repr({"task": sorted(doctor["task"]),
+                        "subprocess": sorted(doctor["subprocess"])}))
+
+            registered = set(doctor["task"]) | set(doctor["subprocess"])
+            probe_all = json.loads(captured[host]["probe_all"].stdout)
+            check(f"crew probe --all selects the engine-runnable set on host={host}",
+                  set(probe_all) == registered - expected_doctor_task,
+                  f"{sorted(registered - expected_doctor_task)}",
+                  repr(sorted(probe_all)))
+
+            task_refusal = "is a Task seat"
+            run_opus = captured[host]["run_opus"]
+            probe_opus = captured[host]["probe_opus"]
+            check(f"crew run and crew probe refuse opus only where it is native "
+                  f"(host={host})",
+                  ((run_opus.returncode == 2
+                    and task_refusal in run_opus.stderr
+                    and probe_opus.returncode == 2
+                    and task_refusal in probe_opus.stderr)
+                   if native_here
+                   else (task_refusal not in run_opus.stderr
+                         and task_refusal not in probe_opus.stderr)),
+                  "orchestrator-owned refusal on a Claude host only",
+                  repr((run_opus.returncode, run_opus.stderr,
+                        probe_opus.returncode, probe_opus.stderr)))
+
+            check(f"a cursor seat is never refused as a Task seat on host={host}",
+                  task_refusal not in captured[host]["run_cursor"].stderr
+                  and task_refusal not in captured[host]["probe_cursor"].stderr
+                  and task_refusal not in captured[host]["dispatch_cursor"].stderr,
+                  "no Task-seat refusal for cursor-auto or cursor-composer",
+                  repr((captured[host]["run_cursor"].stderr,
+                        captured[host]["probe_cursor"].stderr,
+                        captured[host]["dispatch_cursor"].stderr)))
+
+        def scrub(host, text):
+            # Each host runs in its own temp dir, so a diagnostic that names a
+            # path differs for a reason that has nothing to do with routing.
+            # Longest first: the no-build-config root extends the project root.
+            # The two roots get DISTINCT tokens, so a payload naming one root
+            # here and the other there still compares unequal.
+            for path, token in sorted(
+                ((captured[host]["project"], "<project>"),
+                 (captured[host]["plain"], "<plain-project>")),
+                key=lambda pair: len(pair[0]), reverse=True,
+            ):
+                text = text.replace(path, token)
+            return text
+
+        # No captured payload names a path today, so pin the normalizer on the
+        # paths themselves: an ordering bug would leave the longer root half
+        # substituted and the whole guard silently inert.
+        check("the cross-host normalizer blanks both per-host project roots",
+              all(scrub(host, captured[host]["project"]) == "<project>"
+                  and scrub(host, captured[host]["plain"]) == "<plain-project>"
+                  for host in hosts),
+              "a distinct token for each root on every host",
+              repr({host: (scrub(host, captured[host]["project"]),
+                           scrub(host, captured[host]["plain"]))
+                    for host in hosts}))
+
+        def same_on_every_host(key, extract):
+            values = {
+                host: scrub(host, repr(extract(captured[host][key])))
+                for host in hosts
+            }
+            return len(set(values.values())) == 1, repr(values)
+
+        # These four are pinned BY CONSTRUCTION, not by behavior: a cursor seat
+        # is external under every host's task route, so they cannot differ
+        # today. They are the regression net for a route that starts varying,
+        # and the cases with real teeth are the native_here branches above.
+        for label, key, extract in (
+            ("crew build-executor resolves a cursor executor identically",
+             "build_executor", lambda p: (p.returncode, p.stdout, p.stderr)),
+            ("crew run reports a cursor seat identically",
+             "run_cursor", lambda p: (p.returncode, p.stdout, p.stderr)),
+            ("crew dispatch reports a cursor seat identically",
+             "dispatch_cursor", lambda p: (p.returncode, p.stdout, p.stderr)),
+            ("a persisted cursor seat carries the same channel stamp",
+             "persisted", lambda text: text),
+        ):
+            identical, got = same_on_every_host(key, extract)
+            check(f"{label} on every host value", identical,
+                  "one value across claude/cursor/codex/unknown", got)
 
 
 def test_codex_host_fail_closed():
@@ -19884,9 +20169,11 @@ def test_channel_source_gates():
     check(
         "native channel literals stay inside the channel resolver definitions",
         set(literal_owners) <= {
-            "channel_table", "native_channel", "current_host", "_detect_host",
+            "channel_table", "native_channel", "task_native_channel",
+            "current_host", "_detect_host",
         },
-        "only channel_table/native_channel/current_host/_detect_host",
+        "only channel_table/native_channel/task_native_channel/"
+        "current_host/_detect_host",
         repr(literal_owners),
     )
 
@@ -19968,6 +20255,7 @@ def main():
     test_config_split_seat_layers()
     test_via_migration()
     test_resolver()
+    test_routing_parameter_neutrality()
     test_host_detection()
     test_channel_source_gates()
     test_codex_host_fail_closed()

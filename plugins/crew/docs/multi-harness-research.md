@@ -46,9 +46,11 @@ implemented already, it still assumes a Claude `Task` split, and its Pi,
   "one channel per seat until a second host exists."
 - `plugins/crew/scripts/multiagent/channels.py` already detects Claude and Codex,
   accepts `CREW_HOST=claude|cursor|codex`, returns `ResolvedExecution`, and
-  records the selected channel. It currently maps only Claude to a native
-  channel. Its multi-entry algorithm also prefers a later native candidate over
-  an earlier viable external candidate, which would violate ordered route
+  records the selected channel. It now answers the native question twice:
+  `native_channel` maps Claude and Cursor to an in-session channel, while
+  `task_native_channel`, the narrower answer every caller declares today, maps
+  only Claude. Its multi-entry algorithm also prefers a later native candidate
+  over an earlier viable external candidate, which would violate ordered route
   ownership once multi-entry `via` is enabled.
 - `plugins/crew/scripts/multiagent/cli.py` already routes `review-prep`, debate
   seat resolution, dispatch, and `build-executor` through `channels.resolve_seat`.

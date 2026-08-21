@@ -267,11 +267,12 @@ def _resolve_dispatch_timeout(arg: int | None) -> int:
 def _run_seat(name: str, prompt: str, timeout: int) -> ProviderResult:
     provider = available_seats([name])[0]
     spec = seats.seat_spec(name)
+    host = channels.current_host()
     resolved = (
         channels.resolve_seat(
             spec,
-            host=channels.current_host(),
             capabilities=channels.active_capabilities(),
+            declared_native=channels.task_native_channel(host),
         )
         if spec is not None else None
     )
@@ -310,15 +311,21 @@ def _expand_seat_groups(names: list[str]) -> list[str]:
 
 
 def _resolved_catalog_executions(
-    host: str,
+    *,
+    declared_native: str | None,
 ) -> dict[str, channels.ResolvedExecution]:
-    """Resolve each catalog seat once for the current host."""
+    """Resolve every catalog seat once against the caller's declared route.
+
+    ``declared_native`` is forwarded verbatim: this helper resolves seats for
+    whichever caller asked, and never substitutes a native route of its own.
+    """
     capabilities = channels.active_capabilities()
     return {
         name: resolved
         for name, spec in seats.merged_catalog().items()
         if (resolved := channels.resolve_seat(
-            spec, host=host, capabilities=capabilities,
+            spec, capabilities=capabilities,
+            declared_native=declared_native,
         )) is not None
     }
 
@@ -335,9 +342,9 @@ class ReviewSelection:
 
 def resolve_review_selection(
     *,
-    host: str,
     panel: str | None,
     seats_arg: str | None,
+    declared_native: str | None,
     task_seats_arg: str | None = None,
     strict_explicit: bool = False,
 ) -> ReviewSelection:
@@ -367,7 +374,9 @@ def resolve_review_selection(
                 raise LookupError(f"unknown review seat {name!r}")
 
     preset_expanded = _expand_seat_groups(preset_names or [])
-    resolved_catalog = _resolved_catalog_executions(host)
+    resolved_catalog = _resolved_catalog_executions(
+        declared_native=declared_native,
+    )
     external_names = {
         name
         for name, execution in resolved_catalog.items()
@@ -450,9 +459,12 @@ def _resolve_seats(seats_arg: str | None) -> list[str]:
         explicit = set()
     names = _expand_seat_groups(raw)
     # Engine drives only host-resolved, external seats.
+    host = channels.current_host()
     engine_runnable = {
         name for name, resolved in
-        _resolved_catalog_executions(channels.current_host()).items()
+        _resolved_catalog_executions(
+            declared_native=channels.task_native_channel(host),
+        ).items()
         if resolved.engine_runnable
     }
     # Filter to resolved engine seats, de-duplicating while preserving order.
@@ -690,11 +702,12 @@ def _fan_out(seats: list[str], prompt: str, timeout: int) -> list[ProviderResult
                 from multiagent import seats as seat_catalog
 
                 spec = seat_catalog.seat_spec(name)
+                host = channels.current_host()
                 resolved = (
                     channels.resolve_seat(
                         spec,
-                        host=channels.current_host(),
                         capabilities=channels.active_capabilities(),
+                        declared_native=channels.task_native_channel(host),
                     )
                     if spec is not None else None
                 )
@@ -1087,15 +1100,20 @@ def cmd_run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    host = channels.current_host()
+    native = channels.task_native_channel(host)
     resolved = channels.resolve_seat(
-        spec, host=channels.current_host(),
+        spec,
         capabilities=channels.active_capabilities(),
+        declared_native=native,
     )
     if resolved is None or resolved.native or not resolved.engine_runnable:
         engine_names = ", ".join(
             sorted(
                 name for name, execution in
-                _resolved_catalog_executions(channels.current_host()).items()
+                _resolved_catalog_executions(
+                    declared_native=native,
+                ).items()
                 if execution.engine_runnable
             )
         )
@@ -1671,7 +1689,9 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    resolved = channels.resolve_seat(spec, host=channels.current_host())
+    host = channels.current_host()
+    native = channels.task_native_channel(host)
+    resolved = channels.resolve_seat(spec, declared_native=native)
     if resolved is None:
         known = ", ".join(known_seat_names())
         print(
@@ -1684,7 +1704,9 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         engine_names = ", ".join(
             sorted(
                 name for name, execution in
-                _resolved_catalog_executions(channels.current_host()).items()
+                _resolved_catalog_executions(
+                    declared_native=native,
+                ).items()
                 if execution.engine_runnable
             )
         )
@@ -2217,7 +2239,10 @@ def cmd_build_executor(args: argparse.Namespace) -> int:
 
     # 2. Validate. The sentinel bypasses the seat checks: it IS the Task path,
     #    which the engine never runs and which no registry knows.
-    channel = channels.native_channel(channels.current_host())
+    host = channels.current_host()
+    # The sentinel executor IS the Task path, so it keeps the Task-recipe
+    # native channel; a real seat overwrites it below.
+    channel = channels.task_native_channel(host)
     if executor != "crew:executor":
         spec = seats.seat_spec(executor)
         if spec is None:
@@ -2230,7 +2255,7 @@ def cmd_build_executor(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        resolved = channels.resolve_seat(spec, host=channels.current_host())
+        resolved = channels.resolve_seat(spec, declared_native=channel)
         if resolved is None:
             print(
                 f"error: executor seat '{executor}' resolves to no eligible "
@@ -2582,7 +2607,9 @@ def cmd_seats(args: argparse.Namespace) -> int:
             # resolver-engine seat is a subprocess seat, a resolver-native seat is
             # a task seat (the union is exhaustive under the current catalog).
             host = channels.current_host()
-            resolved_catalog = _resolved_catalog_executions(host)
+            resolved_catalog = _resolved_catalog_executions(
+                declared_native=channels.task_native_channel(host),
+            )
             known = {
                 name for name, execution in resolved_catalog.items()
                 if execution.engine_runnable
@@ -3676,9 +3703,11 @@ def cmd_persist_seat(args: argparse.Namespace) -> int:
     )
     spec = seats.seat_spec(args.seat)
     if spec is not None:
+        host = channels.current_host()
         resolved = channels.resolve_seat(
-            spec, host=channels.current_host(),
+            spec,
             capabilities=channels.active_capabilities(),
+            declared_native=channels.task_native_channel(host),
         )
         result.channel = resolved.channel if resolved is not None else None
 
@@ -3892,11 +3921,14 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     #    never loud-error). A NAMED --panel's members are EXPLICIT (an unavailable one
     #    is skipped WITH a note); a default_panel's are silent drops (refinement 3).
     host = channels.current_host()
+    # Prep's output field is literally ``task_seats``, and the recipes that
+    # consume it drive only the Claude Task channel.
+    native = channels.task_native_channel(host)
     selection = resolve_review_selection(
-        host=host,
         panel=args.panel,
         seats_arg=args.seats,
         task_seats_arg=args.task_seats,
+        declared_native=native,
     )
     subprocess_seats = list(selection.subprocess_seats)
     task_seats = list(selection.task_seats)
@@ -3937,7 +3969,7 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
             name: (
                 resolved_catalog[name].channel
                 if name in resolved_catalog
-                else channels.native_channel(host)
+                else native
             )
             for name in task_seats
         },
@@ -4239,13 +4271,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     and the JSON is ALWAYS printed to stdout regardless.
     """
     host = channels.current_host()
+    native = channels.task_native_channel(host)
     capabilities = channels.active_capabilities()
     subprocess_map: dict[str, dict] = {}
     avail_by_kind: dict[str, tuple[bool, str]] = {}
     for name in known_seat_names():
         spec = seats.seat_spec(name)
         resolved = (
-            channels.resolve_seat(spec, host=host, capabilities=capabilities)
+            channels.resolve_seat(
+                spec, capabilities=capabilities,
+                declared_native=native,
+            )
             if spec is not None else None
         )
         if resolved is None:
@@ -4268,7 +4304,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for name in sorted(known_seat_names()):
         spec = seats.seat_spec(name)
         resolved = (
-            channels.resolve_seat(spec, host=host, capabilities=capabilities)
+            channels.resolve_seat(
+                spec, capabilities=capabilities,
+                declared_native=native,
+            )
             if spec is not None else None
         )
         if resolved is None or not resolved.native:
@@ -4350,7 +4389,10 @@ def cmd_probe(args: argparse.Namespace) -> int:
     healthy green to a scripted health check keying on the exit code).
     """
     if args.all:
-        executions = _resolved_catalog_executions(channels.current_host())
+        host = channels.current_host()
+        executions = _resolved_catalog_executions(
+            declared_native=channels.task_native_channel(host),
+        )
         names = sorted(
             name for name, execution in executions.items()
             if execution.engine_runnable
@@ -4365,9 +4407,11 @@ def cmd_probe(args: argparse.Namespace) -> int:
         if spec is None or n not in known_seat_names():
             print(f"error: unknown seat {n!r}", file=sys.stderr)
             return 2
+        probe_host = channels.current_host()
         resolved = channels.resolve_seat(
-            spec, host=channels.current_host(),
+            spec,
             capabilities=channels.active_capabilities(),
+            declared_native=channels.task_native_channel(probe_host),
         )
         if resolved is None or resolved.native or not resolved.engine_runnable:
             print(

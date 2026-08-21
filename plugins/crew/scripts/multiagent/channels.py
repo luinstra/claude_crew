@@ -115,19 +115,41 @@ def current_host() -> str:
 
 
 def native_channel(host: str) -> str | None:
-    """Return the in-session channel, or ``None`` when every seat is external."""
+    """Return the channel ``host`` can run in-session, or ``None`` when none is.
+
+    This is the host's TRUE native channel: the seam the review path declares
+    from once it can drive a cursor session itself. No production caller
+    declares it today; every one passes ``task_native_channel`` below, which is
+    the narrower answer the Task recipes and subprocess runners share.
+    """
+    return {"claude": "claude", "cursor": "cursor"}.get(host)
+
+
+def task_native_channel(host: str) -> str | None:
+    """Return the native channel the Task recipes and subprocess runners know.
+
+    The seat-prep split and the subprocess runners have to classify one seat
+    the same way: whatever prep calls a subprocess seat, ``crew run`` has to be
+    willing to run. Both sides pass this answer, so neither drifts from the
+    other when a host gains an in-session channel the recipes cannot drive.
+    """
     return {"claude": "claude"}.get(host)
 
 
-def channel_table(host: str) -> dict[str, ChannelSpec]:
-    """Return the capability-free static channel table for ``host``."""
-    native = native_channel(host)
-    # A host with no native channel marks every channel external.
+def channel_table(*, declared_native: str | None) -> dict[str, ChannelSpec]:
+    """Return the capability-free static channel table.
+
+    ``declared_native`` is required and has no default: the CALLER states which
+    channel it can drive in-session, and a caller that can drive none passes
+    ``None``. The table therefore needs no host: the native column is the
+    caller's declaration, not a fact derived from the harness.
+    """
+    # A caller that can drive no native channel marks every channel external.
     return {
         channel: ChannelSpec(
             name=channel,
             legacy_kind=legacy_kind,
-            native=channel == native,
+            native=channel == declared_native,
             model_rule=seats.PROVIDER_KINDS[legacy_kind].model_rule,
         )
         for channel, legacy_kind in seats.CHANNEL_TO_LEGACY_KIND.items()
@@ -164,12 +186,17 @@ def active_capabilities() -> Mapping[str, ChannelCapability]:
 def resolve_seat(
     spec: seats.SeatSpec,
     *,
-    host: str,
     capabilities: Mapping[str, ChannelCapability] | None = None,
+    declared_native: str | None,
 ) -> ResolvedExecution | None:
-    """Resolve ``spec`` without changing its model or selecting another seat."""
+    """Resolve ``spec`` without changing its model or selecting another seat.
+
+    ``declared_native`` is required and has no default, for the reason stated
+    on the two accessors above: the caller, not the host, names the route it
+    can drive in-session.
+    """
     effective = capabilities if capabilities is not None else active_capabilities()
-    table = channel_table(host)
+    table = channel_table(declared_native=declared_native)
     eligible: list[ChannelSpec] = []
     for channel in spec.via:
         channel_spec = table.get(channel)

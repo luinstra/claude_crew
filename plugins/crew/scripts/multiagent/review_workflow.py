@@ -849,10 +849,10 @@ def _resolve_seats(request: ReviewRequest, host: str) -> list[tuple[str, object,
 
     try:
         selection = cli.resolve_review_selection(
-            host=host,
             panel=request.panel,
             seats_arg=request.seats,
             strict_explicit=True,
+            declared_native=channels.task_native_channel(host),
         )
     except LookupError as exc:
         raise WorkflowError("unknown_seat", str(exc)) from exc
@@ -2791,8 +2791,9 @@ def _frozen_external_provider(action: dict):
         execution = (
             channels.resolve_seat(
                 spec,
-                host=_host(),
                 capabilities=channels.active_capabilities(),
+                # Drift is judged against the same view that froze the run.
+                declared_native=channels.task_native_channel(_host()),
             )
             if spec is not None
             else None
