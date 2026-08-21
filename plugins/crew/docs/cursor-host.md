@@ -154,9 +154,18 @@ a retired id is fuzzy-matched down instead of erroring (see below).
 - Plan and team limits can still override model selection (blocked models, Max
   Mode), so an available slug is not guaranteed usable on every account
   (operator-reported, 2026-08-20)
-- Open sliver: confirm a SUBAGENT run carries its own badge rather than
-  displaying the parent's. The mechanism is present; only that attribution detail
-  is unconfirmed
+- CLOSED, a SUBAGENT run carries its OWN badge. A parent running Cursor Grok 4.6
+  High launched a subagent and the subagent's chip showed `Composer 2.5 Fast`,
+  its own model, not the parent's (operator-reported with a UI capture,
+  2026-08-20). This is the P7 oracle: app-rendered, seat-scoped attribution
+- The subagent CANNOT self-report its model. Asked directly, it answered "I do
+  not know the model id" (operator-reported, 2026-08-20). That is stronger than
+  the bar required: self-report is not merely disqualified, it is impossible, so
+  the badge is the only channel and an echo of the requested pin cannot occur
+- CAVEAT for P8: the parent was asked for "Composer" and the badge resolved to
+  `Composer 2.5 Fast`, the `-fast` variant, not plain `Composer 2.5`. Whether
+  pinning the exact slug `composer-2.5` yields exactly `Composer 2.5` is a live
+  per-string question, and the badge is what answers it
 - `/best-of-n` is a separate path (parallel runs in worktrees), NOT a nested Task
   subagent, and is not the mechanism crew would drive (operator-reported,
   2026-08-20)
