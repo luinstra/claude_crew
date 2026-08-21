@@ -84,6 +84,18 @@ evidence.
 - SIGTERM to a running invocation terminates it cleanly with no orphan (verified
   live, 2026-08-20, same client)
 
+### The authoritative model catalog
+
+`cursor-agent --list-models` prints the full `slug - Display Name` catalog. That
+is the source of truth for any seat pin; do not infer the set from an example in
+prose. All six registered cursor-channel seat models are listed
+(verified live, 2026-08-20, cursor-agent 2026.08.11-e8db854): `auto`,
+`composer-2.5`, `gpt-5.5-extra-high`, `gemini-3.1-pro`, `glm-5.2-max`, and
+`cursor-grok-4.6-xhigh` (Cursor Grok 4.6 Extra High).
+
+Recheck seat pins against this command when the provider ships a new generation:
+a retired id is fuzzy-matched down instead of erroring (see below).
+
 ### Model attribution on this surface
 
 - `--output-format stream-json` emits a `system/init` line carrying `model`, a
