@@ -170,6 +170,46 @@ a retired id is fuzzy-matched down instead of erroring (see below).
   subagent, and is not the mechanism crew would drive (operator-reported,
   2026-08-20)
 
+## P8: the Task-subagent allowlist is NOT the model catalog
+
+This is the phase-deciding fact. `cursor-agent --list-models` is the catalog the
+CLI accepts. The app's **Task subagent** surface accepts a much smaller
+allowlist, and the two are not the same set (operator-reported with UI badges,
+2026-08-20).
+
+Observed session allowlist, five slugs:
+`claude-opus-5-thinking-high`, `composer-2.5-fast`, `cursor-grok-4.5-high-fast`,
+`cursor-grok-4.6-high`, `gpt-5.6-sol-medium`.
+
+ALL FIVE registered cursor-channel seat models were REJECTED as subagent models:
+`composer-2.5`, `gpt-5.5-extra-high`, `gemini-3.1-pro`, `glm-5.2-max`,
+`cursor-grok-4.6-xhigh`. Being in the catalog does not make a slug usable as a
+subagent model.
+
+Rejection is LOUD and there is no silent substitution on this surface: the parent
+declined every unlisted slug and did not fall back to a neighbouring one (for
+example `composer-2.5-fast` for `composer-2.5`). That is the opposite of the
+retired-id hazard on the CLI, where a near-miss degrades quietly.
+
+Requested slug to badge, for the four allowed slugs launched:
+
+| requested | badge |
+| --- | --- |
+| `composer-2.5-fast` | `Composer 2.5 Fast` |
+| `cursor-grok-4.5-high-fast` | `Cursor Grok 4.5 High Fast` |
+| `cursor-grok-4.6-high` | `Cursor Grok 4.6 High` |
+| `gpt-5.6-sol-medium` | `GPT-5.6 Sol Medium` |
+
+Every badge matched its requested slug exactly, so an allowed slug is honored
+without substitution and the badge remains a truthful oracle.
+
+Consequence for Phase 2: with today's seat catalog, a Cursor-native reviewer map
+built from the registered pins would be EMPTY, and under the operator's
+warn-and-drop rule every cursor-channel seat would drop. Either the cursor seats
+are repinned onto allowlist slugs, or the native tier serves no seat. The
+allowlist was described as session-scoped, so it may vary by plan, team policy,
+or mode: treat a rejection as `unentitled` until it reproduces across sessions.
+
 ## Probe log
 
 - 2026-08-17: install/component-routing capture, env captures (both surfaces), hook payload captures, live `/crew:review` pipeline run, sk exposure check
