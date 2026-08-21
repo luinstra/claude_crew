@@ -107,17 +107,23 @@ evidence.
   | `gpt-5.5-extra-high` | `GPT-5.5 272K Extra High` |
   | `gemini-3.1-pro` | `Gemini 3.1 Pro` |
   | `glm-5.2-max` | `GLM 5.2 Max` |
-  | `grok-4.5-xhigh` | `Cursor Grok 4.5 High` |
+  | `grok-4.5-xhigh` (retired) | `Cursor Grok 4.5 High` |
+  | `grok-4.6-xhigh` (never valid) | REJECTED |
+  | `cursor-grok-4.6-xhigh` | `Cursor Grok 4.6 Extra High` |
 
 - `auto` reports the literal `Auto`, which is the alias echoed back, NOT the
   router's concrete choice. It therefore does NOT establish truthful attribution,
   and `cursor-auto` stays unverifiable (verified live, 2026-08-20, same client)
-- `grok-4.5-xhigh` (`seats.toml:60`) is NOT an advertised model: the catalog
-  offers `cursor-grok-4.5-{low,medium,high}` and reserves `xhigh` for 4.6. It is
-  not rejected like a far-miss string, it is fuzzy-matched down to `Cursor Grok
-  4.5 High`, so the seat runs a tier below its request while results persist the
-  requested pin and falsely attribute the answering model. Validation is NOT
-  total. FIXED: the pin is now the exact advertised id `cursor-grok-4.5-high`
+- A RETIRED model id degrades SILENTLY; a never-valid one errors loudly. This is
+  the sharp edge. `grok-4.5-xhigh` (`seats.toml:60`) was a valid pin until Grok
+  4.6 replaced it. Once retired it was not rejected: it was fuzzy-matched down to
+  `Cursor Grok 4.5 High`, so the seat quietly ran a tier below its request while
+  results persisted the old pin and misattributed the answering model. By
+  contrast the never-valid spelling `grok-4.6-xhigh` (missing the required
+  `cursor-` prefix) is REJECTED outright. So a pin cannot be trusted to keep
+  meaning what it meant: any seat model can degrade in place when the provider
+  ships a new generation, with no error. FIXED: repinned to the exact advertised
+  id `cursor-grok-4.6-xhigh`, which resolves to `Cursor Grok 4.6 Extra High`
   (verified live, 2026-08-20, same client)
 
 ## Probe log

@@ -57,7 +57,7 @@ opt_in = true
 
 [seats.cursor-grok]
 via = ["cursor"]
-model = "cursor-grok-4.5-high"
+model = "cursor-grok-4.6-xhigh"
 opt_in = true
 
 [seats.cursor-auto]

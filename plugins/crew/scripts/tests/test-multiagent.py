@@ -2065,9 +2065,9 @@ def test_registry():
     # Must be an EXACT advertised catalog id. A near-miss is not rejected, it is
     # fuzzy-matched to a neighbouring tier, and the result then persists the
     # requested pin while a different model answered.
-    check("CURSOR_SEATS pins cursor-grok to cursor-grok-4.5-high",
-          CURSOR_SEATS.get("cursor-grok").model == "cursor-grok-4.5-high",
-          "cursor-grok-4.5-high", str(CURSOR_SEATS.get("cursor-grok")))
+    check("CURSOR_SEATS pins cursor-grok to cursor-grok-4.6-xhigh",
+          CURSOR_SEATS.get("cursor-grok").model == "cursor-grok-4.6-xhigh",
+          "cursor-grok-4.6-xhigh", str(CURSOR_SEATS.get("cursor-grok")))
     # Codex model-seats mirror cursor: one CodexProvider per CODEX_SEATS entry,
     # each pinned to its model (codex + codex-luna default, codex-terra opt-in).
     CODEX_SEATS = shipped_seats("codex")
@@ -14576,7 +14576,7 @@ def test_seat_roster_drift_guard():
         ("cursor-gpt",      "CursorProvider", "gpt-5.5-extra-high",    True),
         ("cursor-gemini",   "CursorProvider", "gemini-3.1-pro",        True),
         ("cursor-glm",      "CursorProvider", "glm-5.2-max",           True),
-        ("cursor-grok",     "CursorProvider", "cursor-grok-4.5-high",  True),
+        ("cursor-grok",     "CursorProvider", "cursor-grok-4.6-xhigh", True),
         ("cursor-auto",     "CursorProvider", "auto",                  False),
         ("cursor-composer", "CursorProvider", "composer-2.5",          False),
         ("opus",             "ClaudeProvider",  "opus",                  False),
