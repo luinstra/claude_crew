@@ -170,12 +170,13 @@ a retired id is fuzzy-matched down instead of erroring (see below).
   subagent, and is not the mechanism crew would drive (operator-reported,
   2026-08-20)
 
-## P8: the Task-subagent allowlist is NOT the model catalog
+## P8: the Task-subagent model set is the account's ENABLED models
 
-This is the phase-deciding fact. `cursor-agent --list-models` is the catalog the
-CLI accepts. The app's **Task subagent** surface accepts a much smaller
-allowlist, and the two are not the same set (operator-reported with UI badges,
-2026-08-20).
+`cursor-agent --list-models` is the catalog the CLI accepts. The app's **Task
+subagent** surface offers a smaller set, and that set is what the operator has
+ENABLED in Cursor, not a platform limit (operator-confirmed, 2026-08-20). More
+models can be enabled at will, so a rejection here is `unentitled`, a setup
+state, never `unsupported`.
 
 Observed session allowlist, five slugs:
 `claude-opus-5-thinking-high`, `composer-2.5-fast`, `cursor-grok-4.5-high-fast`,
@@ -203,12 +204,13 @@ Requested slug to badge, for the four allowed slugs launched:
 Every badge matched its requested slug exactly, so an allowed slug is honored
 without substitution and the badge remains a truthful oracle.
 
-Consequence for Phase 2: with today's seat catalog, a Cursor-native reviewer map
-built from the registered pins would be EMPTY, and under the operator's
-warn-and-drop rule every cursor-channel seat would drop. Either the cursor seats
-are repinned onto allowlist slugs, or the native tier serves no seat. The
-allowlist was described as session-scoped, so it may vary by plan, team policy,
-or mode: treat a rejection as `unentitled` until it reproduces across sessions.
+Consequence for Phase 2: this is a SETUP PRECONDITION, not a design constraint.
+Before native seats can run, the operator enables the seat models in Cursor;
+until then those seats are `unentitled` and warn-and-drop applies to them as a
+current-state fact, not a permanent one. Nothing here forces a repin and nothing
+here justifies stopping the phase. P8 records, per string, whether a rejection is
+`unentitled` (enable it and retry) or `unsupported` (the app will not honor it at
+all), and only the latter would be a design input.
 
 ## Probe log
 
