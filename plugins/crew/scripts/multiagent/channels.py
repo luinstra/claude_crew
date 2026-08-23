@@ -52,7 +52,18 @@ _CODEX_HOST_MARKERS: tuple[str, ...] = (
     "CODEX_SANDBOX_NETWORK_DISABLED",
 )
 
-_CURSOR_HOST_MARKERS: tuple[str, ...] = ()
+# Observed live in the Cursor agent shell (see docs/cursor-host.md), which is
+# the shell every crew command runs in on that host. That shell scrubs operator
+# exports such as CREW_HOST but keeps these, so they are the only unaided signal
+# available there. CURSOR_INVOKED_AS and CURSOR_RIPGREP_PATH were observed too
+# and deliberately left out: detection matches on ANY name, so a wider table
+# buys no detection power and only widens the false-positive surface, and a
+# tool-path or invocation-name variable is the likeliest thing a non-Cursor
+# shell exports by coincidence.
+_CURSOR_HOST_MARKERS: tuple[str, ...] = (
+    "CURSOR_AGENT",
+    "CURSOR_CONVERSATION_ID",
+)
 
 _CLAUDE_HOST_MARKERS: tuple[str, ...] = (
     "CLAUDECODE",
@@ -83,9 +94,24 @@ def _warn_once(key: str, message: str) -> None:
 def _detect_host(env: Mapping[str, str]) -> str:
     """Detect the current harness from an environment mapping.
 
-    ``CREW_HOST`` is the explicit operator override. Exact Codex markers, when
-    the marker table is populated, outrank the cursor and Claude compatibility
-    marker tiers.
+    ``CREW_HOST`` is the explicit operator override and outranks every marker.
+    Below it the tiers answer one question: when markers for more than one host
+    are present, which harness is actually EXECUTING crew?
+
+    Cursor ranks LAST for that reason. Its markers ride in the integrated
+    terminal a human types into, so they survive into whatever that human
+    launches there, another harness included: a Claude Code session started
+    from a Cursor terminal carries ``CLAUDECODE`` and ``CURSOR_AGENT`` at once,
+    and the executor is Claude Code. Reading that env as cursor mints native
+    actions Claude Code cannot spawn, so the Claude tier has to win it. The
+    Cursor agent shell, the shell every crew command runs in on that host,
+    carries no Claude marker at all, so pure-cursor detection is unaffected.
+
+    Codex stays above Claude. Its reachable collision runs the other way: crew
+    scrubs the codex and cursor markers from a claude child but nothing scrubs
+    ``CLAUDECODE`` from a codex child, so a codex seat re-invoking crew sees
+    both names with codex as the true executor.
+
     Empty-valued markers are treated as absent.
     """
     known_hosts = ("claude", "codex", "cursor")
@@ -103,10 +129,10 @@ def _detect_host(env: Mapping[str, str]) -> str:
 
     if any(env.get(marker) for marker in _CODEX_HOST_MARKERS):
         return "codex"
-    if any(env.get(marker) for marker in _CURSOR_HOST_MARKERS):
-        return "cursor"
     if any(env.get(marker) for marker in _CLAUDE_HOST_MARKERS):
         return "claude"
+    if any(env.get(marker) for marker in _CURSOR_HOST_MARKERS):
+        return "cursor"
     return "unknown"
 
 
@@ -114,15 +140,31 @@ def current_host() -> str:
     return _detect_host(os.environ)
 
 
+# The one native-channel table. A row here is only half the answer: whether the
+# review workflow can drive it depends on that host also having a role row, and
+# `native_channel_for` returns None without one, so a row added here alone
+# declares nothing native rather than failing at mint. A test pins the two key
+# sets equal on top of that, so a half-added host is named rather than silent.
+_NATIVE_CHANNELS: dict[str, str] = {"claude": "claude", "cursor": "cursor"}
+
+
+def native_channel_hosts() -> frozenset[str]:
+    """Return every host with a native channel row."""
+    return frozenset(_NATIVE_CHANNELS)
+
+
 def native_channel(host: str) -> str | None:
     """Return the channel ``host`` can run in-session, or ``None`` when none is.
 
-    This is the host's TRUE native channel: the seam the review path declares
-    from once it can drive a cursor session itself. No production caller
-    declares it today; every one passes ``task_native_channel`` below, which is
-    the narrower answer the Task recipes and subprocess runners share.
+    This is the host's TRUE native channel. The standalone review path declares
+    from it, per seat, because it can drive an in-session cursor action; every
+    other caller passes ``task_native_channel`` below, the narrower answer the
+    Task recipes and subprocess runners share. Whether a host CAN run a channel
+    and whether a given workflow can drive a given SEAT through it are separate
+    questions: the second depends on which roles ship, which is review policy
+    and lives with the workflow.
     """
-    return {"claude": "claude", "cursor": "cursor"}.get(host)
+    return _NATIVE_CHANNELS.get(host)
 
 
 def task_native_channel(host: str) -> str | None:

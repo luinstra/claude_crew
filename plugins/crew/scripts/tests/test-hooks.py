@@ -60,9 +60,32 @@ def log_section(name: str) -> None:
 _NEUTRAL_HOME = tempfile.mkdtemp(prefix="crew-test-neutral-home-")
 
 
+# Host markers this suite drops before pinning the host below. The scripts under
+# test detect from their own env, and this dict is copied wholesale from the
+# developer's shell, so a run from inside Cursor or Codex would otherwise flip
+# the emitted hook shape. Every cursor name observed live is dropped, not just
+# the two in the marker table.
+_AMBIENT_HOST_MARKERS = (
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CODEX_THREAD_ID",
+    "CODEX_SANDBOX_NETWORK_DISABLED",
+    "CURSOR_AGENT",
+    "CURSOR_CONVERSATION_ID",
+    "CURSOR_INVOKED_AS",
+    "CURSOR_RIPGREP_PATH",
+)
+
+
 def _neutral_env() -> dict:
     env = dict(os.environ)
     env["HOME"] = _NEUTRAL_HOME
+    for marker in _AMBIENT_HOST_MARKERS:
+        env.pop(marker, None)
+    # Pin rather than leave unset: the shipped assertions are Claude-host
+    # shapes, and the tests that want another host set it through extra_env,
+    # which is applied after this.
+    env["CREW_HOST"] = "claude"
     return env
 
 
@@ -226,12 +249,25 @@ def main():
         _detect_host,
     )
     from multiagent import channels as _channels
+    # The literal-equal assertion below compares marker TUPLES only, so this
+    # matrix is the one guard that both detectors agree on PRECEDENCE. The
+    # multi-marker rows appear in both key orders: the answer must come from
+    # the tier order, never from insertion order.
     _host_matrix = (
         ({"CREW_HOST": "CuRsOr"}, "cursor"),
         ({"CREW_HOST": "CoDeX"}, "codex"),
         ({"CREW_HOST": "claude"}, "claude"),
         ({"CREW_HOST": "invalid"}, "unknown"),
         ({"CODEX_THREAD_ID": "1", "CLAUDECODE": "1"}, "codex"),
+        ({"CLAUDECODE": "1", "CODEX_THREAD_ID": "1"}, "codex"),
+        # Claude Code launched from a Cursor integrated terminal.
+        ({"CURSOR_AGENT": "1", "CLAUDECODE": "1"}, "claude"),
+        ({"CLAUDECODE": "1", "CURSOR_AGENT": "1"}, "claude"),
+        ({"CODEX_THREAD_ID": "1", "CURSOR_AGENT": "1"}, "codex"),
+        ({"CURSOR_AGENT": "1", "CODEX_THREAD_ID": "1"}, "codex"),
+        ({"CODEX_THREAD_ID": "1", "CURSOR_AGENT": "1", "CLAUDECODE": "1"}, "codex"),
+        ({"CLAUDECODE": "1", "CURSOR_AGENT": "1", "CODEX_THREAD_ID": "1"}, "codex"),
+        ({"CURSOR_AGENT": "1"}, "cursor"),
         ({"CLAUDECODE": "1"}, "claude"),
         ({}, "unknown"),
     )
@@ -800,16 +836,56 @@ def main():
         log_fail("Cursor hook manifest pins python3 commands and 10/5 second timeouts",
                  "sessionStart=10, stop=5, loop_limit=3", repr(_cursor_hooks))
 
-    # The probe fixtures were temporary: the manifest's agents dir must exist
-    # (its .gitkeep) and ship NO subagent definitions.
-    _agents_cursor_md = sorted((PROJECT_DIR / "agents-cursor").glob("*.md"))
-    if (not _agents_cursor_md
+    # The manifest's agents dir ships EXACTLY crew's Cursor role adapters (plus
+    # the .gitkeep that keeps the dir present when the set shrinks). The
+    # engine-side check that this set equals the role names the workflow can
+    # actually issue lives in test-review-workflow.py, which imports the
+    # workflow; this suite pins the literal shipped names.
+    _agents_cursor_md = sorted(
+        path.name for path in (PROJECT_DIR / "agents-cursor").glob("*.md")
+    )
+    _expected_role_files = ["crew-formatter.md", "crew-reviewer.md", "crew-scribe.md"]
+    if (_agents_cursor_md == _expected_role_files
             and (PROJECT_DIR / "agents-cursor" / ".gitkeep").is_file()):
-        log_pass("agents-cursor ships no subagent definitions (dir retained via .gitkeep)")
+        log_pass("agents-cursor ships exactly the Cursor role adapters (dir retained via .gitkeep)")
     else:
-        log_fail("agents-cursor ships no subagent definitions (dir retained via .gitkeep)",
-                 "empty agents-cursor with .gitkeep",
+        log_fail("agents-cursor ships exactly the Cursor role adapters (dir retained via .gitkeep)",
+                 repr(_expected_role_files),
                  repr(_agents_cursor_md))
+
+    # Role files are thin adapters: the workflow's own vocabulary must not leak
+    # into a host-side file that a model reads before the issued prompt.
+    _role_vocabulary = (
+        "verdict", "approved", "revise", "blocking", "minor", "quorum",
+        "strict-majority", "panel", "synthesis", "findings", "criteria",
+        "seat roster", "retry",
+    )
+    _vocabulary_hits: dict[str, list[str]] = {}
+    for _role_path in sorted((PROJECT_DIR / "agents-cursor").glob("*.md")):
+        _lowered = _role_path.read_text(encoding="utf-8").casefold()
+        _hits = [token for token in _role_vocabulary if token in _lowered]
+        if _hits:
+            _vocabulary_hits[_role_path.name] = _hits
+    if not _vocabulary_hits:
+        log_pass("Cursor role adapters carry no workflow vocabulary")
+    else:
+        log_fail("Cursor role adapters carry no workflow vocabulary",
+                 "no workflow tokens", repr(_vocabulary_hits))
+
+    # A shipped role file must be reachable: Cursor routes components through
+    # this manifest field, so a role set the manifest does not point at is inert.
+    try:
+        _cursor_plugin = json.loads(
+            (PROJECT_DIR / ".cursor-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+        _agents_field = _cursor_plugin.get("agents")
+    except (OSError, json.JSONDecodeError) as _exc:
+        _agents_field = repr(_exc)
+    if _agents_field == "./agents-cursor":
+        log_pass("Cursor plugin manifest routes agents to agents-cursor")
+    else:
+        log_fail("Cursor plugin manifest routes agents to agents-cursor",
+                 "./agents-cursor", repr(_agents_field))
 
     # Global-state isolation: every subprocess env pins HOME to _NEUTRAL_HOME
     # (see _neutral_env), so the scripts under test can never read from — or

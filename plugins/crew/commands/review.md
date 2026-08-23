@@ -17,8 +17,9 @@ the five characters `'"'"'`, then wrap the whole value in single quotes. The
 only shell expansion allowed below is `${CLAUDE_PLUGIN_ROOT}`.
 
 Parse and preserve the command's substituted `$ARGUMENTS` before invoking
-Python. Recognize `--panel VALUE`, `--seats VALUE`, `--base VALUE`, and
-`--timeout VALUE` independently, plus the valueless `--inline-diff`. Reject a
+Python. Recognize `--panel VALUE`, `--seats VALUE`, `--base VALUE`,
+`--timeout VALUE`, and `--force-external VALUE` independently, plus the
+valueless `--inline-diff`. Reject a
 missing value or a duplicate option. Remove only those option tokens; the
 remaining positional tokens, in their original order, are the target. Use the
 empty string as the target when none remain. `--panel` never consumes or
@@ -41,8 +42,21 @@ reference.
 ```
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" review --session-id '<session-id>' --base '<base>' --panel '<panel>' --seats '<seats>' --timeout '<seconds>' --inline-diff -- '<target>'
+"${CLAUDE_PLUGIN_ROOT}/crew" review --session-id '<session-id>' --base '<base>' --panel '<panel>' --seats '<seats>' --timeout '<seconds>' --force-external '<channels>' --inline-diff -- '<target>'
 ```
+
+`--force-external` is the user's, exactly like the others: pass it only when
+they supplied it, and never add it yourself to work around a refused spawn or a
+role that did not resolve. It names the channels this run must execute as
+external subprocesses, and Python resolves it over the configured value.
+
+The harness this runs on is Python's to determine, not yours. It reads the
+ambient environment of the shell the command runs in and freezes that answer
+into the run. Pass nothing about the harness, and never set or clear an
+environment variable to steer the answer: an operator who has to override it
+does so in the shell that launches the harness, outside this file. Every later
+command re-derives the same answer and returns a typed conflict if it changed,
+so a wrong one is loud rather than silent.
 
 A decoded top-level object containing `error` is a typed error envelope, not a
 `ReviewStep`: surface its `message` verbatim and stop without reading step fields
@@ -94,22 +108,77 @@ the resulting explicit value.
 "${CLAUDE_PLUGIN_ROOT}/crew" review-execute --session-segment '<session-segment>' --run-id '<run-id>' --attempt-id '<attempt-id>' --target-sha256 '<target-sha256>' --action-id '<action-id>'
 ```
 
-On Claude, every authorized native Task is a bare foreground one-shot: NO
-`name`, `team_name`, background, resume, or continuation argument. Spawn a
-reviewer with exactly:
+Every authorized native Task is a bare foreground one-shot: NO `name`,
+`team_name`, background, resume, or continuation argument. Branch on the issued
+`channel` value, never on a guess about which harness is running. The role and
+model are always the issued values; the fences are stated per channel so a
+change to one channel's mechanic can never silently retarget the other.
+
+With `work_item.channel` = `claude`, spawn a reviewer with exactly:
 
 `Task(subagent_type="<work_item.role>", model="<work_item.model>", prompt="You are the <work_item.seat> seat. Read <work_item.prompt_path> and follow it exactly.")`
 
-Spawn a native formatter with exactly:
+With `work_item.channel` = `cursor`, spawn a reviewer with exactly:
+
+`Task(subagent_type="<work_item.role>", model="<work_item.model>", prompt="You are the <work_item.seat> seat. Read <work_item.prompt_path> and follow it exactly.")`
+
+With `work_item.channel` = `claude`, spawn a native formatter with exactly:
 
 `Task(subagent_type="<work_item.role>", model="<work_item.model>", prompt="Read <work_item.prompt_path> and follow it exactly.")`
 
+With `work_item.channel` = `cursor`, spawn a native formatter with exactly:
+
+`Task(subagent_type="<work_item.role>", model="<work_item.model>", prompt="Read <work_item.prompt_path> and follow it exactly.")`
+
+The formatter fences deliberately omit the seat preamble the reviewer fences
+carry, on both channels.
+
+Each pair of fences above is byte-identical across the two channels, and keeping
+them that way is the invariant: there is ONE mechanic, spawn the issued role at
+the issued model and hand it the issued path, and the channel decides only which
+fence you read, never how an issued value is spent. They are written out twice so
+a future host-specific change lands on one channel alone instead of silently
+retargeting both. Any divergence must therefore be a recorded host fact in
+`docs/cursor-host.md`, with the reason on the fence that differs.
+
+On the `cursor` channel the issued model must be one the account has enabled for
+subagents. A model that is not enabled is refused loudly at spawn. Treat that
+refusal as a lost action and recover it with the codes below; there is no CLI
+fallback for a reviewer seat issued native, so that seat settles FAILED and the
+panel degrades by one voice (quorum recounts the usable seats and the digest
+synthesizes from whatever returned). Never substitute a neighbouring model
+yourself, and never spawn a role the action did not name. If every native seat
+is refused this way, the fix is enabling those models in Cursor, not anything
+you can do from here.
+
+Also on the `cursor` channel: a spawned reviewer, formatter, or scribe INHERITS
+the tools of the session that spawned it, because that host offers no per-role
+tool field. The reviewer and formatter adapters ship `readonly: true`, but the
+one enforcement evidence for that key comes from the external CLI, not from the
+in-session surface these Tasks run on, so plan for it being inert here. The
+reviewer's read-only posture and the formatter's and scribe's write restraint
+are then prose those roles hold themselves to, not boundaries the harness
+enforces. The issued action says which tier applies: `access=read-only` means the
+constraint is mechanical, `access=read-only-advisory` means it is prose. Every
+native action on this host is advisory. That is less than the `claude` channel's
+support roles, which are tool-scoped (the `claude` reviewer is convention too, so
+that one is the same tier), and less than the `cursor-agent` subprocess route
+these seats used before, which ran under `--mode plan` and applied no edits.
+Weigh that before reviewing material you do not trust.
+
 For native reviewer and native formatter Tasks only, the parent must not Read or
 inline the prompt contents; those Tasks receive the issued path by reference.
-The scribe is the required exception because it lacks Read: the parent Reads
-the issued primary scribe prompt, then replace its one exact
+The scribe is the required exception because it does not read the file itself:
+the parent Reads the issued primary scribe prompt, then replace its one exact
 `{{REVIEWER_RETURN_DATA}}` marker with the reviewer's returned text. Pass those
-fully substituted contents to a fresh bare `crew:scribe` Task with exactly:
+fully substituted contents to a fresh bare Task on the same channel the reviewer
+used.
+
+When that reviewer's `channel` is `claude`, invoke exactly:
+
+`Task(subagent_type="<return_transport.primary.role>", model="<return_transport.primary.model>", prompt="<fully substituted primary prompt contents>")`
+
+When that reviewer's `channel` is `cursor`, invoke exactly:
 
 `Task(subagent_type="<return_transport.primary.role>", model="<return_transport.primary.model>", prompt="<fully substituted primary prompt contents>")`
 
@@ -206,6 +275,20 @@ running, using exactly the action-kind/driver diagnostic mapping:
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/crew" review-recover --session-segment '<session-segment>' --run-id '<run-id>' --attempt-id '<attempt-id>' --target-sha256 '<target-sha256>' --action-id '<action-id>' --confirm-not-running --diagnostic-code '<diagnostic-code>'
 ```
+
+Recovering a lost NATIVE FORMATTER does not fail it. Read the returned step
+rather than assuming the action settled: it comes back as the same action id
+with `driver` = `parent`, so do the repair in this context from its unchanged
+`prompt_path` and submit it like any parent action. A repair must never be the
+reason a panel loses a seat, so a role this host will not spawn falls back to
+the parent context rather than costing the seat its findings. It happens at most
+once; a `parent_formatter_lost` on the reissued action settles it failed.
+
+A lost native REVIEWER settles failed. A seat's answer belongs to the model that
+gave it, and its own channel is one this host drives in-session rather than as a
+subprocess, so there is nothing to move it to. The panel degrades rather than
+dying: quorum recounts the usable seats and the digest synthesizes from whatever
+returned.
 
 Retry pending reviewer seats only on explicit user request. Omit `--seats` to
 retry every pending seat, or supply the requested frozen-roster subset. This

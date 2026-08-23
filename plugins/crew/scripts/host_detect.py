@@ -10,7 +10,10 @@ _CODEX_HOST_MARKERS: tuple[str, ...] = (
     "CODEX_THREAD_ID",
     "CODEX_SANDBOX_NETWORK_DISABLED",
 )
-_CURSOR_HOST_MARKERS: tuple[str, ...] = ()
+_CURSOR_HOST_MARKERS: tuple[str, ...] = (
+    "CURSOR_AGENT",
+    "CURSOR_CONVERSATION_ID",
+)
 _CLAUDE_HOST_MARKERS: tuple[str, ...] = (
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
@@ -26,7 +29,12 @@ def _warn_once(key: str, message: str) -> None:
 
 
 def _detect_host(env: Mapping[str, str]) -> str:
-    """Apply the hook-side host precedence without importing the engine."""
+    """Apply the hook-side host precedence without importing the engine.
+
+    Order: ``CREW_HOST`` override, then codex, claude, cursor. Cursor ranks last
+    because its markers ride in a terminal a human can launch another harness
+    from; multiagent/channels.py holds the full rule this mirrors.
+    """
     known_hosts = ("claude", "codex", "cursor")
     override = env.get("CREW_HOST", "")
     if override:
@@ -42,10 +50,10 @@ def _detect_host(env: Mapping[str, str]) -> str:
 
     if any(env.get(marker) for marker in _CODEX_HOST_MARKERS):
         return "codex"
-    if any(env.get(marker) for marker in _CURSOR_HOST_MARKERS):
-        return "cursor"
     if any(env.get(marker) for marker in _CLAUDE_HOST_MARKERS):
         return "claude"
+    if any(env.get(marker) for marker in _CURSOR_HOST_MARKERS):
+        return "cursor"
     return "unknown"
 
 

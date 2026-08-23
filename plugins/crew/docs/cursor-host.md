@@ -19,7 +19,11 @@ EXTERNAL `cursor-agent` CLI evidence only; see its scope warning.
 - Two distinct env surfaces exist in this host. Agent-spawned shells are sandbox-scrubbed to a whitelist: operator exports like `CREW_HOST` are DROPPED, and `__CURSOR_SANDBOX_ENV_RESTORE` is present as evidence of the scrub. Hook processes, by contrast, DO inherit the app's launch-shell env (verified live, 2026-08-17)
 - Native env markers observed in the agent shell: `CURSOR_AGENT`, `CURSOR_CONVERSATION_ID`, `CURSOR_INVOKED_AS`, `CURSOR_RIPGREP_PATH` (verified live, 2026-08-17)
 - No `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, or `CODEX_*` markers appear: Cursor emulates neither the Claude Code host nor the Codex host (verified live, 2026-08-17)
-- Unaided host detection currently reads `unknown`: the cursor marker table ships empty. A fill is staged on a parking branch pending a second capture (verified live, 2026-08-17; fill: unverified). The all-external seat routing this host needs is correct under `unknown` too, so reviews and dispatch work without any override in the meantime
+- The marker table ships FILLED with `CURSOR_AGENT` and `CURSOR_CONVERSATION_ID`, two of the four agent-shell names on the line above (verified live, 2026-08-17). The other two are deliberately left out: detection matches on ANY name, so a wider table adds no detection power and only more chances for a non-Cursor shell to collide. It follows from the fill, not from a capture, that unaided detection now reads `cursor` in the agent shell: no live run has been captured since the table was empty, when it demonstrably read `unknown`. That shell keeps these markers even though it drops `CREW_HOST`, which is what puts an unaided signal exactly where the override cannot survive. Provenance, stated plainly: the fill rests on ONE live capture (2026-08-17) and the second capture it was once parked pending has NOT been taken. What a second one would confirm is that both names appear in a FRESH agent shell on a different client build and a different conversation, rather than being artifacts of that one session, since detection matching on ANY name means a single absent-in-general marker would still be covered by the other but both being session-local would send this host back to reading `unknown`
+- The cursor tier is DELIBERATELY the LAST marker tier: `CREW_HOST` first, then the codex markers, then the Claude markers, then these. The reason is the other Cursor env surface, the INTEGRATED TERMINAL a human types into, which is not the agent shell the line above describes: it hands `CURSOR_AGENT` to anything launched from it, another harness included. A `claude` session started there carries `CLAUDECODE` and `CURSOR_AGENT` at once and the harness executing crew is Claude Code, so a cursor answer would mint native cursor actions Claude Code cannot spawn. Ranking claude above cursor does not touch pure-cursor detection: the agent shell carries no Claude marker at all. Codex keeps its standing above claude because its reachable collision runs the opposite way (crew scrubs codex and cursor markers from a `claude` child but nothing scrubs `CLAUDECODE` from a codex child, so a codex seat re-invoking crew is a genuine codex executor)
+- Honest residual of that ordering: env alone cannot show which harness nests inside which, so the mirror case loses. A `cursor-agent` process spawned BY a Claude session inherits `CLAUDECODE`, and crew re-invoked from inside it now reads `claude` even though cursor is the executor. The remedy is the override, `CREW_HOST=cursor`. The integrated-terminal case was chosen over this one because it is an ordinary human setup and this one is a nested re-invocation
+- Adjacent but DISTINCT residual, from the marker fill rather than the ordering: a bare `crew review` typed by a HUMAN into the integrated terminal, with no harness executing it, now reads `cursor` where it once read `unknown`. It mints native actions nothing is there to spawn, and unlike the `unknown` read it does NOT reach the all-external route: a lost native formatter reroutes to parent context, but a lost native reviewer settles FAILED, so every cursor-channel seat is lost and the panel yields nothing usable. The fix is `force_external_channels = ["cursor"]` under `[review]` in config (see the Subagents section), which asks for the all-external route up front while the run still records the host it actually ran on. `CREW_HOST=codex` reaches the same routing, because a host with no role row and a channel forced external both drive nothing in-session, but it makes crew assert a host name that is false and has to be re-exported for every later command in the run; prefer the config key
+- The HOOK shell is the other surface and is NOT covered by that: it inherits the app's launch-shell env, where these markers have not been observed, so a hook still reads `unknown` unless the operator exports `CREW_HOST=cursor` in the shell that launches Cursor. The override is therefore retired for seat routing and still load-bearing for hook output shape
 
 ## Hook integration
 
@@ -36,22 +40,204 @@ EXTERNAL `cursor-agent` CLI evidence only; see its scope warning.
 
 ## Seat execution
 
-Standalone `/crew:review` uses the shared Python workflow protocol in Cursor.
-This phase intentionally routes every resolved seat externally (including Claude
-voice seats through the configured CLI); Cursor-native reviewer/formatter roles
-remain Phase 2 work. The command still works inside the Cursor app because the
-host only transports Python-issued work and typed result files. Build and
-measure-twice retain their `review-prep` orchestration until their later phases.
+Standalone `/crew:review` uses the shared Python workflow protocol in Cursor and
+now routes cursor-channel seats NATIVELY: a seat whose model has a shipped
+Cursor reviewer role is issued as an in-session Task action (`driver=native`,
+`channel=cursor`) instead of a `cursor-agent` subprocess. Claude voice seats on
+this host still resolve external through the configured CLI, and codex and agy
+seats are external as before. The formatter and the reviewer return-transport
+scribe are native here too, so a Cursor review that spawns cleanly needs no
+`cursor-agent` process for its own channel at all. The two SUPPORT roles are not
+hard dependencies: a lost native formatter reroutes to parent context and the
+scribe keeps its host-write fallback (see the Subagents section). A SEAT is a
+different matter, and the next bullets say how.
+
+Four consequences worth stating plainly:
+
+- **Unmapped models are warned about and dropped, not silently rerouted.** A
+  cursor-channel seat whose model has no shipped role (`cursor-auto` at `auto`
+  is the shipped example, and a config `model` override away from a shipped
+  string is the other) prints one warning naming the seat and its model and is
+  removed from the roster before the run is minted. The surviving seats run and
+  the quorum denominator counts only them; a roster reduced to zero fails with
+  the ordinary `no_seats` error. The drop happens BEFORE the freeze, so an
+  unmapped seat never becomes an action at all.
+- **A lost native reviewer settles FAILED. There is no CLI fallback for it.**
+  `review-recover` with `native_task_lost` settles the action, because a seat's
+  answer belongs to the model that gave it and its own channel is one this host
+  drives in-session rather than as a subprocess (the same routing policy that
+  drops an unmapped seat). The panel degrades rather than dying: quorum recounts
+  the usable seats and the digest synthesizes from whatever returned. A retry
+  mints a fresh attempt on the FROZEN native route, so it gets a fresh in-session
+  spawn and no more.
+- **Only review is routed.** `/crew:analyze`, `/crew:code-search`,
+  `/crew:execute`, `/crew:deepinit`, and the loop commands' executor and advisor
+  steps still run under the documented-unsupported silent substitution described
+  in the routing row below: a Cursor-native agent answers in the role instead of
+  the named crew agent. Build and measure-twice retain their `review-prep`
+  orchestration until their later phases.
+- **Native role tools are inherited; `readonly: true` is SHIPPED but unverified
+  here.** A reviewer, formatter, or scribe spawned in-session gets the launching
+  session's tools: this host has no per-role tool field. The two roles that must
+  not write, `crew-reviewer` and `crew-formatter`, ship `readonly: true`, but the
+  only enforcement evidence for that key comes from the external CLI surface (see
+  its scope warning below), not from the in-session surface these roles run on.
+  The scribe does not carry it, because it exists to write. So plan for the key
+  being inert here and treat the read-only and write-only constraints as held by
+  role prose: the adapters say so in their own words, and the run record stamps
+  every native action on this host `access: read-only-advisory` rather than the
+  `read-only` this channel's own external route carries (the tier is per adapter,
+  and agy's, for one, is advisory too). The Claude comparison is per ROLE, not
+  wholesale: `agents/formatter.md` is `tools: Read` and `agents/scribe.md` is
+  `tools: Write`, so those two are tool-scoped and a Claude support role that
+  ignored its prose still could not write, which is a tier no role here holds.
+  The Claude REVIEWER is not in that tier either: it carries `Bash` for git
+  inspection with nothing sandboxing it, so it is read-only by convention and
+  stamps `read-only-advisory` too. What this host loses against Claude is the
+  two support roles' enforcement, not the reviewer's.
+  Routing a cursor seat natively also GIVES UP enforcement the external route
+  had: `providers/cursor.py` passes `--mode plan`, which applies no edits, and an
+  in-session Task has no equivalent. The trade is one review's worth of
+  `cursor-agent` processes against losing the only mechanical read-only boundary
+  on this host's seats. `review.md` states this at the spawn fences.
+
+Seat routing needs no override: the filled marker table answers `cursor` in the
+agent shell every crew command runs in, and every native route follows from that
+answer. `CREW_HOST=cursor` still forces it where the markers do not reach (the
+hook shell) or where a test pins a host deliberately.
+
+Native admission is the default and has an opt-out that does not touch the host
+name: `[review].force_external_channels = ["cursor"]` sends every cursor-channel
+seat back out through `cursor-agent` and leaves this host driving nothing
+in-session. The Subagents section states it in full, beside the two unverified
+assumptions it exists to answer.
 
 - Commands (both with the `/crew:` prefix and bare) import and execute in Cursor (verified live, 2026-08-17)
 - Historical pre-Phase-1 probe: the former `/crew:review` pipeline ran live end to end through review-prep, per-seat engine runs, and collect; this records the old route and is not evidence for the current workflow protocol (verified live, 2026-08-17)
 - All three external channels authenticate inside Cursor: the codex CLI, the cursor-agent CLI, and the claude CLI. Opus and fable ran as external Claude-channel seats with truthful channel provenance stamps (verified live, 2026-08-17)
-- Panel prep is host-truthful under `unknown` detection: with no native Claude channel on this host, every seat, including Claude voices, routes external through the `claude` CLI, and that routing is correct regardless of the marker-table gap above (verified live, 2026-08-17)
-- Commands whose recipes spawn Claude Task agents (`analyze`, `code-search`, `execute`, `deepinit`, and the loop commands' default executor and advisor steps) run with SILENT SUBSTITUTION: a Cursor-native agent answers in the role instead of the named crew agent. This is documented-unsupported, not guarded (verified live, 2026-08-18)
+- Panel prep is host-truthful: with no native Claude channel on this host, every seat, including Claude voices, routes external through the `claude` CLI. Captured while detection still read `unknown`, and the routing it records is unchanged by the marker fill, since it follows from the absent Claude channel rather than from the host name (verified live, 2026-08-17)
+- Commands whose recipes spawn Claude Task agents (`/crew:analyze`, `/crew:code-search`, `/crew:execute`, `/crew:deepinit`, and the loop commands' default executor and advisor steps) run with SILENT SUBSTITUTION: a Cursor-native agent answers in the role instead of the named crew agent. This is documented-unsupported, not guarded (verified live, 2026-08-18)
+
+### In-flight reviews across this change
+
+A standalone review started before the native routing landed froze its seats as
+`subprocess` and its host as whatever detection returned then. Finish or abandon
+ANY in-flight standalone review before adopting these bytes, on any host: a run
+frozen with `host=unknown` returns `conflict/host_mismatch`, and one frozen
+`host=cursor` with external seats hits `provider_config_drift` at
+`review-execute`. Both are guards working; the remedy is a fresh review, not a
+migration.
+
+Two more in-flight cases are NOT Cursor-specific (a formatter action minted
+before the reroute mark existed, and a run identity frozen before it carried
+`force_external_channels`); both are recorded in `docs/engine-notes.md`, where a
+Claude-host operator will find them.
 
 ## Subagents
 
-- The plugin ships an empty `agents-cursor/` directory, deliberately: crew's Claude agent definitions are never exposed to Cursor (verified live, 2026-08-17)
+- Crew's Claude agent definitions are still never exposed to Cursor. What
+  `agents-cursor/` ships instead is three THIN role adapters written for this
+  host: `crew-reviewer.md`, `crew-formatter.md`, and `crew-scribe.md`. Each
+  carries static metadata plus the host-safety prose its role needs, and nothing
+  else: no rubric, no flow, no verdict vocabulary, no panel knowledge. All
+  canonical instructions arrive through the issued `prompt_path`, exactly as on
+  Claude. The empty-directory state is retired (it was recorded as deliberate on
+  2026-08-17, before any native role existed)
+- Every shipped name carries the `crew-` prefix, because a project
+  `.cursor/agents/` takes precedence over other sources and an unprefixed name
+  would be easy to shadow
+- The shipped files assume the agent NAME comes from the filename, so
+  `crew-reviewer.md` is invoked as `crew-reviewer` and the role map's values are
+  those stems. That assumption is UNVERIFIED against the app: a source test pins
+  the file set to the map, but only an app-surface capture can show whether the
+  app instead wants a `name:` frontmatter key. If it does, every role resolves to
+  nothing and the routing is inert, so this is the first thing to check when a
+  live run finds no role. Check it with one command:
+  `cursor-agent -p --trust --plugin-dir plugins/crew "list your available
+  subagents by exact name"`, and look for the three stems verbatim. That is the
+  external CLI surface (see the scope warning below), so it indicates rather than
+  settles; the app-surface confirmation is the Task subagent picker offering the
+  same three stems
+- **What to do while a live run finds no role: force the channel external.** Put
+  `force_external_channels = ["cursor"]` under `[review]` in the per-repo
+  `.crew/config.toml` (or the global `~/.crew-config.toml`; per-repo wins, and
+  `crew review --force-external cursor` wins over both, while
+  `--force-external ""` forces nothing). Standalone review then resolves every
+  cursor-channel seat to the `cursor-agent` provider it used before native
+  admission existed, instead of dropping it for having no native route, and it
+  drives NOTHING in-session on that channel: the formatter mints on the
+  parent-context route directly rather than needing a recovery call every run,
+  and the scribe never mints, because it rides only a native reviewer action. The
+  choice is frozen into the run identity as `force_external_channels`, so the
+  record says which route the answers came from and a config edit mid-run cannot
+  change how the run is judged. Native stays the default; this is the escape
+  hatch for exactly the two UNVERIFIED assumptions on this page (the role name
+  and the Task spawn form), and for an account whose mapped seat models are not
+  enabled for subagents. It is a config FILE and not an env var because the agent
+  shell here scrubs operator exports. It does NOT cover the bare-human
+  integrated-terminal case: that one has no agent to perform the parent actions
+  either, and its remedy is in the detection section above
+- The reviewer map is keyed by MODEL, not by seat: repinning a seat's `model` to
+  a string with no shipped role drops that seat instead of binding the role file
+  pinned to the old string
+- Frontmatter is `description`, plus `model` on the two support roles only.
+  The reviewer file deliberately omits `model`: it is shared by every model in
+  the reviewer map, so any single pin would be wrong for the other four, and if
+  a pin beat the model the Task call carries, five seats would run one model
+  while the run record named five. Omitting the key inherits the caller's model,
+  which is exactly what a model-keyed map needs. The scribe and formatter DO pin,
+  because each is a single-model role and its pin is the same string the role
+  table drives it at. `readonly: true` IS SHIPPED on
+  the reviewer and the formatter, and its app-surface enforcement is UNVERIFIED:
+  the only evidence for that key is from the external `cursor-agent` CLI surface
+  (see the scope warning below), and no app-surface capture has tested it. It is
+  shipped anyway because all three outcomes are acceptable: enforced restores a
+  boundary, ignored costs nothing, and rejected makes the roles resolve to
+  nothing at the first probe, which is loud rather than silent. Per file, the
+  reviewer carries it as its ONE unverified key (it deliberately pins no
+  `model`), while the formatter adds it beside a live `model: composer-2.5` pin,
+  so a rejection there would take a working pin down with it. The formatter's
+  blast radius is the smaller one even so: a lost formatter reroutes to the
+  parent-context route, while a lost reviewer settles that seat failed. Until an
+  app-surface capture exists, plan for the key being inert: the read-only
+  constraint here is prose plus an unverified key, a weaker tier than the Claude
+  SUPPORT roles hold (those are tool-scoped, `tools: Read` on the formatter and
+  `tools: Write` on the scribe) though not weaker than the Claude reviewer's,
+  which is read-only by convention over an unsandboxed `Bash`. The run record
+  says which is which by stamping `access: read-only-advisory` on every native
+  action here. Revisit when app-surface evidence exists
+- Cursor subagents have no `tools` frontmatter field and inherit the parent's
+  tools, so the Cursor scribe cannot be tool-restricted to write-only the way
+  `agents/scribe.md` is. Its single-path, verbatim, no-other-tool constraint is
+  prose-only, and the file says so
+- The invocation form the driver writes is the app's Task call carrying the
+  model, which is what the app-surface finding below records ("the parent passes
+  the model on the Task call"). It is UNVERIFIED as a shipped fence; an
+  app-surface capture is still owed
+- The two support roles (scribe, formatter) run at `composer-2.5`: first of the
+  catalog's cursor models in cost order, because Cursor bills composer from the
+  cheap bucket
+- Before native seats can run, the operator must ENABLE the seat models in
+  Cursor's subagent surface (see the enabled-models section below). Until then
+  those seats are `unentitled`, and the drop rule does NOT cover them: it keys
+  solely on membership in the reviewer map, so an unentitled but MAPPED model
+  resolves native, is issued native, and is refused loudly at spawn. That
+  refusal is a lost action, recovered with `native_task_lost`, which SETTLES the
+  seat FAILED: no CLI fallback exists for a seat issued native. On the account
+  state recorded below, where all five mapped models are rejected as subagent
+  models, every cursor-channel seat takes that path, so a cursor-only panel
+  yields nothing usable. The panel degrades rather than erroring (quorum
+  recounts usable seats and the digest synthesizes from whatever returned), and
+  enabling the models is the mitigation. This is a setup precondition, not a
+  code defect
+- The two SUPPORT roles need no entitlement to keep a roster whole. The formatter is
+  minted native on this host for every roster, an all-external one included, and
+  the support model is `composer-2.5`, which the recorded session allowlist
+  REJECTED. So a lost native formatter is REROUTED to a parent-context action by
+  `review-recover` instead of failing: a repair step is never the reason a panel
+  loses a seat. The scribe needs no equivalent because it rides only a native
+  reviewer action, whose seat already depends on this host, and it keeps its
+  host-write fallback
 
 ## sk plugin
 
@@ -93,8 +279,15 @@ prose. All six registered cursor-channel seat models are listed
 `composer-2.5`, `gpt-5.5-extra-high`, `gemini-3.1-pro`, `glm-5.2-max`, and
 `cursor-grok-4.6-xhigh` (Cursor Grok 4.6 Extra High).
 
-Recheck seat pins against this command when the provider ships a new generation:
-a retired id is fuzzy-matched down instead of erroring (see below).
+**Recheck every cursor seat pin against `--list-models` whenever the provider
+ships a new model generation.** A retired id is fuzzy-matched down without an
+error, while a never-valid one is rejected outright (see below), so a pin cannot
+be trusted to keep meaning what it meant. `test-multiagent.py` pins today's
+answer for every cursor seat, which stops a silent near-miss edit; only the
+recheck catches tomorrow's retirement. The same rule governs
+`CURSOR_REVIEWER_AGENTS` in `review_workflow.py`, whose keys are those same
+model strings: a retired key stops matching and its seat starts being dropped
+with a warning, which is loud but is still the recheck's job to prevent.
 
 ### Model attribution on this surface
 
@@ -204,13 +397,20 @@ Requested slug to badge, for the four allowed slugs launched:
 Every badge matched its requested slug exactly, so an allowed slug is honored
 without substitution and the badge remains a truthful oracle.
 
-Consequence for Phase 2: this is a SETUP PRECONDITION, not a design constraint.
-Before native seats can run, the operator enables the seat models in Cursor;
-until then those seats are `unentitled` and warn-and-drop applies to them as a
-current-state fact, not a permanent one. Nothing here forces a repin and nothing
-here justifies stopping the phase. P8 records, per string, whether a rejection is
-`unentitled` (enable it and retry) or `unsupported` (the app will not honor it at
-all), and only the latter would be a design input.
+Consequence: this is a SETUP PRECONDITION, not a design constraint and not a
+code defect. Before native seats can run, the operator enables the seat models
+in Cursor. Until then every cursor-channel seat here is `unentitled`, and
+warn-and-drop does NOT apply to it: the drop keys on membership in the reviewer
+map, and these five strings ARE mapped. Such a seat resolves native, is issued
+native, and is refused at spawn. `review-recover` then SETTLES it FAILED. There
+is no CLI fallback for a seat issued native, so on an unentitled account every
+cursor-channel seat takes that path and `--panel cursor` yields nothing usable.
+The panel degrades rather than dying: quorum recounts the usable seats and the
+digest synthesizes from whatever returned, so a mixed roster still produces a
+review from its other voices. Enabling the mapped models in Cursor is the
+mitigation. Nothing here forces a repin. What is still worth recording, per string, is
+whether a rejection is `unentitled` (enable it and retry) or `unsupported` (the
+app will not honor it at all); only the latter would be a design input.
 
 ## Probe log
 

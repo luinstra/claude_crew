@@ -17,8 +17,10 @@ A Claude Code plugin for persistence, specialized agents, and tech-stack guidanc
 ## Hosts
 
 Standalone `/crew:review` is backed by one Python-owned workflow protocol in
-Claude Code and Cursor. Claude may use native reviewer Tasks, while Cursor uses
-its current all-external route. Phase 1 also covers Codex-host all-external
+Claude Code and Cursor. Both may use native reviewer Tasks: Claude for its
+Claude voice seats, Cursor for the cursor-channel seats whose model has a
+shipped role (a cursor seat with no shipped role is warned about and dropped
+from the panel, never rerouted). Phase 1 also covers Codex-host all-external
 protocol compatibility deterministically through the Python CLI, but the Codex
 plugin does not yet expose standalone `/crew:review`; its app-native adapter
 remains deferred.
@@ -27,7 +29,7 @@ while those workflows are migrated.
 
 - **Claude Code** is the full experience: 8 agents, Stop-enforced persistence loops, and sk stack detection.
 - **Codex** is supported; see [`plugins/crew/docs/codex-host.md`](plugins/crew/docs/codex-host.md).
-- **Cursor** is supported: commands import, hooks deliver, and the one-shot flows (review, dispatch, debate) run end to end. Persistence loops are enabled, with two caveats: stop-coercion is unverified on this host, so a loop's Stop-hook enforcement is best-effort there, and the hooks only emit Cursor-shaped output when the host is bound (export `CREW_HOST=cursor` in the shell that launches Cursor, until automatic detection ships). Subagent-dependent commands are unsupported. See [`plugins/crew/docs/cursor-host.md`](plugins/crew/docs/cursor-host.md).
+- **Cursor** is supported: commands import, hooks deliver, and the one-shot flows (review, dispatch, debate) run end to end. Persistence loops are enabled, with two caveats: stop-coercion is unverified on this host, so a loop's Stop-hook enforcement is best-effort there, and the hooks only emit Cursor-shaped output when the host is bound (export `CREW_HOST=cursor` in the shell that launches Cursor: crew's commands now detect this host on their own, but a hook process inherits the launch shell, where the markers that make that possible are absent). Standalone `/crew:review` routes cursor-channel seats through native Cursor subagents, which requires those seat models to be enabled for subagents in Cursor (an unenabled one is refused at spawn and settles failed, with no CLI fallback); every other subagent-dependent command (`/crew:analyze`, `/crew:code-search`, `/crew:execute`, `/crew:deepinit`, and the loop commands' executor and advisor steps) still runs under documented-unsupported silent substitution, where a Cursor-native agent answers in the role instead of the named crew agent. See [`plugins/crew/docs/cursor-host.md`](plugins/crew/docs/cursor-host.md).
 
 ## The Workflow
 
@@ -207,14 +209,18 @@ override changes what actually runs. `"${CLAUDE_PLUGIN_ROOT}/crew" seats` prints
 the resolved AVAILABLE seats that are external for the current host. Claude
 voices appear in the Task split on a Claude host and in the external list on a
 non-Claude host. If the `claude` CLI is missing, they remain listed and are
-recorded as named skipped seats.
+recorded as named skipped seats. That split is a HOST-level answer and is not a
+preview of a standalone review's roster: on a Cursor host the `cursor-*` seats
+print as external here while standalone `/crew:review` issues them in-session.
 
 External seats run via the bundled `multiagent` engine
 (`plugins/crew/scripts/multiagent/`): the two codex seats are distinct OpenAI
-voices (`gpt-5.6-sol` and `gpt-5.6-luna`) on the one codex CLI, while Claude
-voices use the native `crew:reviewer` Task path on Claude Code and the
-read-only `claude` CLI elsewhere. It resolves plan-vs-code targets through a
-fixed, documented intent grammar and reports `APPROVED`/`REVISE` with
+voices (`gpt-5.6-sol` and `gpt-5.6-luna`) on the one codex CLI. Which seats run
+in-session instead depends on the host: on Claude Code the Claude voices take
+the native `crew:reviewer` Task path, and on a Cursor host standalone review
+issues the `cursor-*` seats natively as `crew-reviewer` while the Claude voices
+there fall back to the read-only `claude` CLI. It resolves plan-vs-code targets
+through a fixed, documented intent grammar and reports `APPROVED`/`REVISE` with
 `[BLOCKING]`/`[MINOR]` findings.
 A skipped or failed seat (any kind) is reported by name but never sinks the
 panel: the verdict is synthesized from whichever seats succeed, and only an

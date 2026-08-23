@@ -33,6 +33,12 @@ for _marker in (
     "CLAUDE_CODE_ENTRYPOINT",
     "CODEX_THREAD_ID",
     "CODEX_SANDBOX_NETWORK_DISABLED",
+    # Every cursor name observed live, not just the two in the marker table: an
+    # ambient one that later joins the table would otherwise flip detection.
+    "CURSOR_AGENT",
+    "CURSOR_CONVERSATION_ID",
+    "CURSOR_INVOKED_AS",
+    "CURSOR_RIPGREP_PATH",
 ):
     os.environ.pop(_marker, None)
 
@@ -43,6 +49,11 @@ from review_workflow_fakes import InMemoryReviewDriver
 
 
 VALID_REVIEW = "## VERDICT\nAPPROVED\n\n## FINDINGS\nnone\n"
+
+
+def _route_policy(host: str, *force_external: str) -> review_workflow.RoutePolicy:
+    """A route policy for direct routing-helper calls (default: force nothing)."""
+    return review_workflow.RoutePolicy.resolve(host, force_external)
 
 
 class _Provider:
@@ -65,6 +76,10 @@ class _Provider:
 
     def is_available(self) -> tuple[bool, str]:
         return True, ""
+
+    def effective_timeout(self, timeout: int) -> int:
+        # Only the agy channel asks; the fake imposes no floor of its own.
+        return timeout
 
     def run(self, prompt: str, *, model: str | None = None, timeout: int) -> ProviderResult:
         self.calls += 1
@@ -163,9 +178,11 @@ class ReviewWorkflowTest(unittest.TestCase):
         os.environ.pop("CLAUDE_PROJECT_DIR", None)
         os.environ.pop("CREW_HOST", None)
 
-    def _start(self, *, seats: str = "codex", session: str = "s", timeout: int | None = 1):
+    def _start(self, *, seats: str = "codex", session: str = "s", timeout: int | None = 1,
+               force_external: tuple[str, ...] | None = None):
         return review_workflow.start_review(review_workflow.ReviewRequest(
             str(self.plan), seats=seats, session_id=session, timeout_seconds=timeout,
+            force_external_channels=force_external,
         ))
 
     def _workflow(self, step) -> tuple[Path, dict]:
@@ -529,6 +546,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             (cli.cmd_review, SimpleNamespace(
                 target=str(self.plan), base="main", panel=None, seats="codex",
                 session_id="session", timeout=1, inline_diff=False,
+                force_external=None,
             ), "start_review"),
             (cli.cmd_review_next, SimpleNamespace(**ref_args), "next_review"),
             (cli.cmd_review_claim, SimpleNamespace(**ref_args, action_id=action_id), "claim_review_action"),
@@ -593,10 +611,18 @@ class ReviewWorkflowTest(unittest.TestCase):
         })
 
     def test_in_memory_driver_uses_issued_typed_submission(self) -> None:
-        os.environ["CREW_HOST"] = "claude"
-        driver = InMemoryReviewDriver("typed-driver")
-        step = driver.start(str(self.plan), seats="opus", timeout_seconds=1)
+        # The deterministic driver must run the native path on EVERY host that
+        # has one, not just the host it was written against.
+        for host, seat in (("claude", "opus"), ("cursor", "cursor-composer")):
+            with self.subTest(host=host):
+                os.environ["CREW_HOST"] = host
+                self._drive_native_review(f"typed-driver-{host}", seat)
+
+    def _drive_native_review(self, session: str, seat: str) -> None:
+        driver = InMemoryReviewDriver(session)
+        step = driver.start(str(self.plan), seats=seat, timeout_seconds=1)
         reviewer = step.work_items[0]
+        self.assertEqual(reviewer.driver, "native")
         self.assertEqual(driver.claim(step.ref, reviewer.action_id).authorization, "spawn")
 
         def submit(item, content: str, *, judgment=None):
@@ -1703,6 +1729,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             "target_sha": step.ref.target_sha256,
             "signatures": record["seat_signatures"],
             "host": "codex",
+            "force_external_channels": [],
             "prompt_mode": wf["workflow_identity"]["prompt_mode"],
             "prompt_metadata_sha256": wf["workflow_identity"][
                 "prompt_metadata_sha256"
@@ -1716,6 +1743,14 @@ class ReviewWorkflowTest(unittest.TestCase):
         ))
         self.assertIsNone(review_workflow._matching_pointer_identity(
             **common, target_spec="branch", target_base="main",
+        ))
+        # Changing the route policy between two starts leaves the target and
+        # every seat signature identical, so the policy has to be IN the match
+        # key: the identity this returns is what the new start adopts its
+        # timeout envelope from, and a differently-routed run must not supply it.
+        self.assertIsNone(review_workflow._matching_pointer_identity(
+            **{**common, "force_external_channels": ["codex"]},
+            target_spec="branch", target_base="trunk",
         ))
 
     def test_fixed_intent_grammar_and_zero_write_needs_input(self) -> None:
@@ -2663,11 +2698,11 @@ class ReviewWorkflowTest(unittest.TestCase):
         self.assertNotIn("content admissibility", text)
         self.assertNotIn("resubmit it once", text)
 
-    def test_codex_and_cursor_are_all_external_with_parent_followups(self) -> None:
+    def test_codex_is_all_external_with_parent_followups(self) -> None:
         original = review_workflow.get_provider_for_channel
         review_workflow.get_provider_for_channel = lambda name, channel: _Provider(output="RAW", name=name)
         try:
-            for host in ("codex", "cursor"):
+            for host in ("codex",):
                 os.environ["CREW_HOST"] = host
                 step = self._start(seats="opus", session=f"{host}-external")
                 self.assertEqual([item.driver for item in step.work_items], ["external"])
@@ -2732,6 +2767,1254 @@ class ReviewWorkflowTest(unittest.TestCase):
                 self.assertIn("Never choke", synthesis_prompt)
         finally:
             review_workflow.get_provider_for_channel = original
+
+    # --- Cursor-native routing -------------------------------------------
+
+    def _cursor_roles(self) -> review_workflow.HostRoles:
+        roles = review_workflow.native_roles(_route_policy("cursor"))
+        self.assertIsNotNone(roles)
+        return roles
+
+    def _no_cursor_provider(self):
+        """Provider factory that fails the test if a cursor seat is executed."""
+        def factory(name: str, channel: str):
+            if channel == "cursor":
+                raise AssertionError(
+                    f"cursor-channel seat {name!r} reached a provider"
+                )
+            return _Provider(output="RAW", name=name)
+        return factory
+
+    def test_cursor_native_reviewer_has_native_formatter_and_parent_synthesis(self) -> None:
+        os.environ["CREW_HOST"] = "cursor"
+        roles = self._cursor_roles()
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=self._no_cursor_provider(),
+        ):
+            step = self._start(seats="opus,cursor-composer", session="cursor-native")
+            external = next(item for item in step.work_items if item.seat == "opus")
+            native = next(item for item in step.work_items if item.seat == "cursor-composer")
+            self.assertEqual(
+                (external.driver, external.channel, external.role),
+                ("external", "claude", None),
+            )
+            # The external seat is sandboxed by its provider; this host's
+            # in-session roles inherit the launching session's tools, so the
+            # record says advisory rather than claiming a boundary nothing here
+            # checks.
+            self.assertEqual(external.access, "read-only")
+            self.assertEqual(
+                (native.driver, native.channel, native.role, native.access),
+                ("native", "cursor", "crew-reviewer", "read-only-advisory"),
+            )
+            review_workflow.claim_review_action(
+                review_workflow.ClaimRequest(step.ref, native.action_id)
+            )
+            self._submit(step, native, "RAW")
+            formatter_step = review_workflow.execute_external_review(
+                step.ref, external.action_id,
+            )
+        formatter = next(
+            item for item in formatter_step.work_items
+            if item.kind == "formatter" and item.seat == "cursor-composer"
+        )
+        self.assertEqual(
+            (
+                formatter.driver,
+                formatter.access,
+                formatter.role,
+                formatter.model,
+                formatter.channel,
+            ),
+            (
+                "native",
+                roles.formatter_access,
+                roles.formatter_role,
+                roles.formatter_model,
+                "cursor",
+            ),
+        )
+        self.assertEqual(roles.formatter_access, "read-only-advisory")
+        after_formatter = formatter_step
+        while True:
+            pending = [
+                item for item in after_formatter.work_items if item.kind == "formatter"
+            ]
+            if not pending:
+                break
+            review_workflow.claim_review_action(
+                review_workflow.ClaimRequest(step.ref, pending[0].action_id)
+            )
+            after_formatter = self._submit(step, pending[0], VALID_REVIEW)
+        synthesis = next(
+            item for item in after_formatter.work_items if item.kind == "synthesis"
+        )
+        self.assertEqual(
+            (
+                synthesis.driver,
+                synthesis.access,
+                synthesis.role,
+                synthesis.model,
+                synthesis.channel,
+            ),
+            ("parent", "parent-context", None, None, None),
+        )
+
+    def test_mixed_routing_mirrors_between_claude_and_cursor(self) -> None:
+        seat_list = "cursor-composer,opus"
+        observed: dict[str, set[tuple[str, str, str]]] = {}
+        for host in ("cursor", "claude"):
+            os.environ["CREW_HOST"] = host
+            with mock.patch.object(
+                review_workflow,
+                "get_provider_for_channel",
+                side_effect=self._no_cursor_provider()
+                if host == "cursor"
+                else lambda name, channel: _Provider(output="RAW", name=name),
+            ):
+                step = self._start(seats=seat_list, session=f"mixed-{host}")
+            observed[host] = {
+                (item.seat, item.driver, item.channel) for item in step.work_items
+            }
+        self.assertEqual(observed["cursor"], {
+            ("cursor-composer", "native", "cursor"),
+            ("opus", "external", "claude"),
+        })
+        self.assertEqual(observed["claude"], {
+            ("cursor-composer", "external", "cursor"),
+            ("opus", "native", "claude"),
+        })
+
+    def test_no_claude_role_leaks_into_a_cursor_workflow(self) -> None:
+        os.environ["CREW_HOST"] = "cursor"
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=self._no_cursor_provider(),
+        ):
+            step = self._start(seats="cursor-composer", session="cursor-no-leak")
+            native = step.work_items[0]
+            review_workflow.claim_review_action(
+                review_workflow.ClaimRequest(step.ref, native.action_id)
+            )
+            formatter_step = self._submit(step, native, "RAW")
+        issued = [*step.work_items, *formatter_step.work_items]
+        roles = [item.role for item in issued if item.role is not None]
+        transports = [
+            entry.get("role")
+            for item in issued
+            if item.return_transport
+            for entry in item.return_transport.values()
+            if isinstance(entry, dict)
+        ]
+        self.assertTrue(roles)
+        for role in [*roles, *[r for r in transports if r is not None]]:
+            self.assertFalse(role.startswith("crew:"), role)
+
+    def test_cursor_host_never_reaches_a_cursor_provider(self) -> None:
+        os.environ["CREW_HOST"] = "cursor"
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=self._no_cursor_provider(),
+        ):
+            step = self._start(
+                seats="cursor-auto,cursor-composer,codex",
+                session="cursor-no-provider",
+            )
+            for item in step.work_items:
+                if item.driver == "external":
+                    review_workflow.execute_external_review(
+                        step.ref, item.action_id,
+                    )
+        self.assertNotIn(
+            "cursor-auto",
+            [item.seat for item in step.work_items],
+        )
+
+    def test_formatter_role_follows_the_host_role_table(self) -> None:
+        roles = self._cursor_roles()
+        claude_roles = review_workflow.native_roles(_route_policy("claude"))
+        expected = {
+            "cursor": ("native", roles.formatter_role, roles.formatter_model, "cursor"),
+            "claude": (
+                "native",
+                claude_roles.formatter_role,
+                claude_roles.formatter_model,
+                "claude",
+            ),
+            "codex": ("parent", None, None, None),
+            "unknown": ("parent", None, None, None),
+        }
+        for host, want in expected.items():
+            with self.subTest(host=host):
+                if host == "unknown":
+                    os.environ.pop("CREW_HOST", None)
+                else:
+                    os.environ["CREW_HOST"] = host
+                with mock.patch.object(
+                    review_workflow,
+                    "get_provider_for_channel",
+                    side_effect=lambda name, channel: _Provider(output="RAW", name=name),
+                ):
+                    step = self._start(seats="codex", session=f"formatter-role-{host}")
+                    formatter_step = review_workflow.execute_external_review(
+                        step.ref, step.work_items[0].action_id,
+                    )
+                formatter = next(
+                    item for item in formatter_step.work_items if item.kind == "formatter"
+                )
+                self.assertEqual(
+                    (
+                        formatter.driver,
+                        formatter.role,
+                        formatter.model,
+                        formatter.channel,
+                    ),
+                    want,
+                )
+
+    def _native_formatter_on_host(self, session: str, host: str = "cursor"):
+        """Drive one external seat to an off-schema success on a native host."""
+        os.environ["CREW_HOST"] = host
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=lambda name, channel: _Provider(output="RAW", name=name),
+        ):
+            step = self._start(seats="codex", session=session)
+            formatter_step = review_workflow.execute_external_review(
+                step.ref, step.work_items[0].action_id,
+            )
+        formatter = next(
+            item for item in formatter_step.work_items if item.kind == "formatter"
+        )
+        self.assertEqual(formatter.driver, "native")
+        return step, formatter
+
+    def _action_record(self, step, action_id: str) -> dict:
+        _run, workflow = self._workflow(step)
+        return next(
+            action for action in workflow["actions"]
+            if action["action_id"] == action_id
+        )
+
+    def test_a_lost_native_formatter_reroutes_to_the_parent(self) -> None:
+        # Both hosts with a role row mint a native formatter, so both reroute.
+        for host in ("cursor", "claude"):
+            with self.subTest(host=host):
+                step, formatter = self._native_formatter_on_host(
+                    f"formatter-reroute-{host}", host=host,
+                )
+                self.assertIsNone(
+                    self._action_record(step, formatter.action_id)["rerouted_from"]
+                )
+                review_workflow.claim_review_action(
+                    review_workflow.ClaimRequest(step.ref, formatter.action_id)
+                )
+                rerouted_step = review_workflow.recover_review_action(
+                    review_workflow.RecoveryRequest(
+                        step.ref, formatter.action_id, "not_running", "formatter_task_lost",
+                    )
+                )
+                rerouted = next(
+                    item for item in rerouted_step.work_items
+                    if item.action_id == formatter.action_id
+                )
+                self.assertEqual(
+                    (rerouted.kind, rerouted.driver, rerouted.role, rerouted.model,
+                     rerouted.channel, rerouted.access),
+                    ("formatter", "parent", None, None, None, "parent-context"),
+                )
+                # Same action, same paths: nothing re-derives across the reroute.
+                self.assertEqual(rerouted.prompt_path, formatter.prompt_path)
+                self.assertEqual(rerouted.ingress_path, formatter.ingress_path)
+                self.assertEqual(rerouted.submission_path, formatter.submission_path)
+                record = self._action_record(step, formatter.action_id)
+                self.assertEqual(
+                    (record["rerouted_from"], record["status"], record["ok"],
+                     record["diagnostic"], record["claim_id"]),
+                    ("native", "ready", None, None, None),
+                )
+                # The reissued action is claimable and submittable, which reloads
+                # and revalidates the record carrying the reroute mark.
+                review_workflow.claim_review_action(
+                    review_workflow.ClaimRequest(step.ref, rerouted.action_id)
+                )
+                after = self._submit(step, rerouted, VALID_REVIEW)
+                self.assertTrue(any(item.kind == "synthesis" for item in after.work_items))
+                self.assertTrue(self._action_record(step, formatter.action_id)["ok"])
+
+    def test_a_rerouted_formatter_is_never_rerouted_twice(self) -> None:
+        step, formatter = self._native_formatter_on_host("formatter-reroute-once")
+        review_workflow.claim_review_action(
+            review_workflow.ClaimRequest(step.ref, formatter.action_id)
+        )
+        review_workflow.recover_review_action(review_workflow.RecoveryRequest(
+            step.ref, formatter.action_id, "not_running", "formatter_task_lost",
+        ))
+        review_workflow.claim_review_action(
+            review_workflow.ClaimRequest(step.ref, formatter.action_id)
+        )
+        # The native code no longer matches the parent action it became.
+        with self.assertRaises(review_workflow.WorkflowError) as caught:
+            review_workflow.recover_review_action(review_workflow.RecoveryRequest(
+                step.ref, formatter.action_id, "not_running", "formatter_task_lost",
+            ))
+        self.assertEqual(caught.exception.code, "invalid_recovery")
+        after = review_workflow.recover_review_action(review_workflow.RecoveryRequest(
+            step.ref, formatter.action_id, "not_running", "parent_formatter_lost",
+        ))
+        record = self._action_record(step, formatter.action_id)
+        self.assertEqual(
+            (record["status"], record["ok"], record["diagnostic"], record["rerouted_from"]),
+            ("settled", False, "parent_formatter_lost", "native"),
+        )
+        self.assertTrue(any(item.kind == "synthesis" for item in after.work_items))
+
+    def test_a_reroute_mark_needs_a_host_that_could_mint_one(self) -> None:
+        # A codex host mints its formatter parent-context and has no native
+        # formatter to lose, so a reroute mark there describes nothing.
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=lambda name, channel: _Provider(output="RAW", name=name),
+        ):
+            step = self._start(seats="codex", session="formatter-reroute-mark")
+            formatter_step = review_workflow.execute_external_review(
+                step.ref, step.work_items[0].action_id,
+            )
+        formatter = next(
+            item for item in formatter_step.work_items if item.kind == "formatter"
+        )
+        self.assertEqual(formatter.driver, "parent")
+        run, workflow = self._workflow(step)
+        record = next(
+            action for action in workflow["actions"]
+            if action["action_id"] == formatter.action_id
+        )
+        record["rerouted_from"] = "native"
+        (run / "workflow.json").write_text(json.dumps(workflow), encoding="utf-8")
+        with self.assertRaises(review_workflow.WorkflowError) as caught:
+            review_workflow.next_review(step.ref)
+        self.assertEqual(caught.exception.code, "corrupt_workflow")
+        self.assertIn("invalid reroute mark", str(caught.exception))
+
+    def test_host_role_rows_and_native_channel_rows_name_the_same_hosts(self) -> None:
+        # The guard in native_channel_for holds this by construction; the pin is
+        # the second line of defense, so a row added to one table alone is named
+        # here rather than only showing up as a host that declares nothing.
+        self.assertEqual(
+            set(review_workflow._HOST_ROLES),
+            set(channels.native_channel_hosts()),
+        )
+
+    def test_a_channel_row_without_a_role_row_declares_nothing_native(self) -> None:
+        # Drop the role row while the channel row stays: the workflow can drive
+        # no native action for any seat, so it must declare none rather than
+        # freeze one as a Task action and refuse it at mint.
+        policy = review_workflow.RoutePolicy.resolve("cursor", ())
+        # The model comes from the role map rather than the catalog: a config
+        # layer may repin a seat's model, and this test is about the tables, not
+        # about which model that seat happens to carry.
+        spec = replace(
+            seats.seat_spec("cursor-composer"),
+            model=next(iter(review_workflow.CURSOR_REVIEWER_AGENTS)),
+        )
+        self.assertEqual(
+            review_workflow.native_channel_for(spec, policy), "cursor"
+        )
+        with mock.patch.dict(
+            review_workflow._HOST_ROLES, {}, clear=True,
+        ):
+            self.assertEqual(channels.native_channel("cursor"), "cursor")
+            self.assertIsNone(review_workflow.native_channel_for(spec, policy))
+
+    def test_a_missing_scribe_role_names_the_scribe_model(self) -> None:
+        os.environ["CREW_HOST"] = "cursor"
+        roles = self._cursor_roles()
+        roleless = replace(roles, scribe_role=None, scribe_model="scribe-model")
+        with mock.patch.dict(
+            review_workflow._HOST_ROLES, {"cursor": roleless}, clear=False,
+        ), mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=self._no_cursor_provider(),
+        ):
+            with self.assertRaises(review_workflow.WorkflowError) as caught:
+                self._start(seats="cursor-composer", session="scribe-model")
+        self.assertEqual(caught.exception.code, "unresolved_native_role")
+        self.assertIn("scribe", str(caught.exception))
+        # The scribe's own model, not the reviewer's, which is what the seat
+        # resolved at and would send a reader to the wrong role-table row.
+        self.assertIn("scribe-model", str(caught.exception))
+        self.assertNotIn("composer-2.5", str(caught.exception))
+
+    def test_cursor_native_transport_carries_the_cursor_scribe(self) -> None:
+        os.environ["CREW_HOST"] = "cursor"
+        roles = self._cursor_roles()
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=self._no_cursor_provider(),
+        ):
+            step = self._start(seats="cursor-composer", session="cursor-transport")
+        item = step.work_items[0]
+        transport = item.return_transport
+        self.assertEqual(set(transport), {"primary", "fallback"})
+        self.assertEqual(
+            (
+                transport["primary"]["kind"],
+                transport["primary"]["role"],
+                transport["primary"]["model"],
+                transport["primary"]["data_marker"],
+            ),
+            ("scribe", roles.scribe_role, roles.scribe_model, "{{REVIEWER_RETURN_DATA}}"),
+        )
+        self.assertEqual(transport["fallback"]["kind"], "host_write")
+        allowed = {
+            transport["primary"]["ingress_path"],
+            transport["fallback"]["ingress_path"],
+        }
+        self.assertEqual(
+            item.host_result_template["artifact"]["path"],
+            transport["primary"]["ingress_path"],
+        )
+        self.assertIn(item.host_result_template["artifact"]["path"], allowed)
+
+    def test_cursor_native_actions_require_a_claim(self) -> None:
+        os.environ["CREW_HOST"] = "cursor"
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=self._no_cursor_provider(),
+        ):
+            step = self._start(seats="cursor-composer", session="cursor-claim")
+            native = step.work_items[0]
+            first = review_workflow.claim_review_action(
+                review_workflow.ClaimRequest(step.ref, native.action_id)
+            )
+            second = review_workflow.claim_review_action(
+                review_workflow.ClaimRequest(step.ref, native.action_id)
+            )
+            self.assertEqual(
+                (first.authorization, second.authorization),
+                ("spawn", "do_not_spawn"),
+            )
+            formatter_step = self._submit(step, native, "RAW")
+            formatter = next(
+                item for item in formatter_step.work_items if item.kind == "formatter"
+            )
+            self.assertEqual(formatter.driver, "native")
+            formatter_first = review_workflow.claim_review_action(
+                review_workflow.ClaimRequest(step.ref, formatter.action_id)
+            )
+            formatter_second = review_workflow.claim_review_action(
+                review_workflow.ClaimRequest(step.ref, formatter.action_id)
+            )
+        self.assertEqual(
+            (formatter_first.authorization, formatter_second.authorization),
+            ("spawn", "do_not_spawn"),
+        )
+
+    def test_cursor_native_recovery_uses_the_shared_diagnostics(self) -> None:
+        os.environ["CREW_HOST"] = "cursor"
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=self._no_cursor_provider(),
+        ):
+            step = self._start(seats="cursor-composer", session="cursor-recover")
+            native = step.work_items[0]
+            review_workflow.claim_review_action(
+                review_workflow.ClaimRequest(step.ref, native.action_id)
+            )
+            self.assertEqual(
+                review_workflow.RECOVERY_DIAGNOSTICS[
+                    (review_workflow.ActionKind.REVIEWER, review_workflow.ActionDriver.NATIVE)
+                ],
+                "native_task_lost",
+            )
+            recovered = review_workflow.recover_review_action(
+                review_workflow.RecoveryRequest(
+                    step.ref, native.action_id, "not_running", "native_task_lost",
+                )
+            )
+        # A native seat has no other transport here, so the loss settles it.
+        self.assertEqual(recovered.outcome["status"], "all_failed")
+
+    def test_run_identity_is_host_scoped_across_claude_and_cursor(self) -> None:
+        refs: dict[str, review_workflow.ReviewRef] = {}
+        for host in ("claude", "cursor"):
+            os.environ["CREW_HOST"] = host
+            with mock.patch.object(
+                review_workflow,
+                "get_provider_for_channel",
+                side_effect=self._no_cursor_provider(),
+            ):
+                step = self._start(seats="cursor-composer", session=f"identity-{host}")
+            refs[host] = step.ref
+        self.assertNotEqual(refs["claude"].run_id, refs["cursor"].run_id)
+        os.environ["CREW_HOST"] = "cursor"
+        run = (
+            self.root / ".crew" / "reviews"
+            / refs["claude"].session_segment / refs["claude"].run_id
+        )
+        before = (run / "workflow.json").read_bytes()
+        with self.assertRaises(review_workflow.WorkflowError) as ctx:
+            review_workflow.next_review(refs["claude"])
+        self.assertEqual(
+            (ctx.exception.error, ctx.exception.code),
+            ("conflict", "host_mismatch"),
+        )
+        self.assertEqual((run / "workflow.json").read_bytes(), before)
+
+    def test_unmapped_cursor_model_warns_and_drops_before_the_freeze(self) -> None:
+        os.environ["CREW_HOST"] = "cursor"
+        stderr = io.StringIO()
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=self._no_cursor_provider(),
+        ):
+            with redirect_stderr(stderr):
+                step = self._start(
+                    seats="cursor-auto,cursor-composer",
+                    session="cursor-unmapped",
+                )
+        warnings = [
+            line for line in stderr.getvalue().splitlines()
+            if "cursor-auto" in line
+        ]
+        self.assertEqual(len(warnings), 1, stderr.getvalue())
+        self.assertIn("'auto'", warnings[0])
+        run, wf = self._workflow(step)
+        record = json.loads((run / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(list(record["seat_signatures"]), ["cursor-composer"])
+        self.assertEqual(wf["roster"], ["cursor-composer"])
+        self.assertEqual([item.seat for item in step.work_items], ["cursor-composer"])
+        self.assertTrue(all(item.role is not None for item in step.work_items))
+
+    def test_unmapped_cursor_seat_still_runs_external_on_a_claude_host(self) -> None:
+        os.environ["CREW_HOST"] = "claude"
+        stderr = io.StringIO()
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=lambda name, channel: _Provider(output="RAW", name=name),
+        ):
+            with redirect_stderr(stderr):
+                step = self._start(seats="cursor-auto", session="cursor-auto-claude")
+        self.assertNotIn("dropping it", stderr.getvalue())
+        item = step.work_items[0]
+        self.assertEqual(
+            (item.seat, item.driver, item.channel, item.role),
+            ("cursor-auto", "external", "cursor", None),
+        )
+
+    def test_config_model_override_off_a_shipped_string_drops_the_seat(self) -> None:
+        os.environ["CREW_HOST"] = "cursor"
+        repo_config = self.root / ".crew" / "config.toml"
+        repo_config.write_text(
+            "[seats.cursor-composer]\nmodel = \"composer-2.4\"\n",
+            encoding="utf-8",
+        )
+        config._reset_cache_for_tests()
+        try:
+            stderr = io.StringIO()
+            with mock.patch.object(
+                review_workflow,
+                "get_provider_for_channel",
+                side_effect=self._no_cursor_provider(),
+            ):
+                with redirect_stderr(stderr):
+                    step = self._start(
+                        seats="cursor-composer,codex",
+                        session="cursor-override",
+                    )
+            self.assertIn("cursor-composer", stderr.getvalue())
+            self.assertIn("'composer-2.4'", stderr.getvalue())
+            self.assertEqual([item.seat for item in step.work_items], ["codex"])
+        finally:
+            repo_config.unlink()
+            config._reset_cache_for_tests()
+
+    def test_every_cursor_seat_dropped_fails_with_no_seats(self) -> None:
+        os.environ["CREW_HOST"] = "cursor"
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(review_workflow.WorkflowError) as ctx:
+                self._start(seats="cursor-auto", session="cursor-empty")
+        self.assertEqual(ctx.exception.code, "no_seats")
+        self.assertIn("cursor-auto", stderr.getvalue())
+
+    # --- forced-external opt-out ------------------------------------------
+
+    def _write_repo_config(self, body: str) -> Path:
+        path = self.root / ".crew" / "config.toml"
+        path.write_text(body, encoding="utf-8")
+        config._reset_cache_for_tests()
+        self.addCleanup(config._reset_cache_for_tests)
+        self.addCleanup(lambda: path.exists() and path.unlink())
+        return path
+
+    def _identity(self, step) -> dict:
+        _run, workflow = self._workflow(step)
+        return workflow["workflow_identity"]
+
+    def test_native_admission_is_the_default_and_the_identity_says_so(self) -> None:
+        os.environ["CREW_HOST"] = "cursor"
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=self._no_cursor_provider(),
+        ):
+            step = self._start(seats="cursor-composer", session="force-default")
+        self.assertEqual(step.work_items[0].driver, "native")
+        self.assertEqual(self._identity(step)["force_external_channels"], [])
+
+    def test_forcing_a_channel_external_routes_its_seats_through_the_cli(self) -> None:
+        # The escape hatch for a host whose in-session role surface does not
+        # resolve: the seat keeps the external route it had before native
+        # admission existed, rather than being dropped for lacking a native one.
+        os.environ["CREW_HOST"] = "cursor"
+        stderr = io.StringIO()
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=lambda name, channel: _Provider(output="RAW", name=name),
+        ):
+            with redirect_stderr(stderr):
+                step = self._start(
+                    seats="cursor-composer",
+                    session="force-external-seat",
+                    force_external=("cursor",),
+                )
+            item = step.work_items[0]
+            self.assertEqual(
+                (item.seat, item.driver, item.channel, item.role),
+                ("cursor-composer", "external", "cursor", None),
+            )
+            self.assertNotIn("dropping it", stderr.getvalue())
+            self.assertEqual(
+                self._identity(step)["force_external_channels"], ["cursor"],
+            )
+            formatter_step = review_workflow.execute_external_review(
+                step.ref, item.action_id,
+            )
+        # The support roles follow the seats: with the channel forced external
+        # the host drives nothing in-session, so the repair is minted on the
+        # parent-context route directly instead of needing a recovery call.
+        formatter = next(
+            fmt for fmt in formatter_step.work_items if fmt.kind == "formatter"
+        )
+        self.assertEqual(
+            (formatter.driver, formatter.role, formatter.model, formatter.channel,
+             formatter.access),
+            ("parent", None, None, None, "parent-context"),
+        )
+        self.assertIsNone(item.return_transport)
+
+    def test_forcing_the_hosts_channel_leaves_other_channels_native(self) -> None:
+        # Forcing cursor on a CLAUDE host touches nothing: cursor is already
+        # external there, and the claude seat keeps its in-session route.
+        os.environ["CREW_HOST"] = "claude"
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=lambda name, channel: _Provider(name=name),
+        ):
+            step = self._start(
+                seats="opus,cursor-composer",
+                session="force-other-channel",
+                force_external=("cursor",),
+            )
+        self.assertEqual(
+            {(item.seat, item.driver, item.channel) for item in step.work_items},
+            {("opus", "native", "claude"), ("cursor-composer", "external", "cursor")},
+        )
+
+    def test_forcing_the_hosts_own_channel_reaches_the_roster_split(self) -> None:
+        # The roster split asks `channels` which names are native BEFORE the
+        # per-seat resolution runs, so it has to read the same policy: a split
+        # that still called the forced channel native would be a third view of
+        # one routing fact.
+        os.environ["CREW_HOST"] = "claude"
+        policy = _route_policy("claude", "claude")
+        self.assertIsNone(policy.task_declared_native())
+        self.assertEqual(_route_policy("claude").task_declared_native(), "claude")
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=lambda name, channel: _Provider(name=name),
+        ):
+            step = self._start(
+                seats="opus,codex",
+                session="force-own-channel",
+                force_external=("claude",),
+            )
+        self.assertEqual(
+            {(item.seat, item.driver, item.channel) for item in step.work_items},
+            {("opus", "external", "claude"), ("codex", "external", "codex")},
+        )
+        self.assertEqual(self._identity(step)["force_external_channels"], ["claude"])
+
+    def test_forced_external_channels_resolve_flag_over_repo_over_global(self) -> None:
+        home = Path(os.environ["HOME"])
+        global_config = home / ".crew-config.toml"
+        global_config.write_text(
+            '[review]\nforce_external_channels = ["claude"]\n', encoding="utf-8",
+        )
+        self.addCleanup(global_config.unlink)
+        config._reset_cache_for_tests()
+        self.addCleanup(config._reset_cache_for_tests)
+        request = review_workflow.ReviewRequest(str(self.plan))
+        self.assertEqual(
+            review_workflow._resolve_route_policy(request, "cursor").force_external,
+            frozenset({"claude"}),
+        )
+        self._write_repo_config('[review]\nforce_external_channels = ["cursor"]\n')
+        self.assertEqual(
+            review_workflow._resolve_route_policy(request, "cursor").force_external,
+            frozenset({"cursor"}),
+        )
+        flagged = replace(request, force_external_channels=("codex",))
+        self.assertEqual(
+            review_workflow._resolve_route_policy(flagged, "cursor").force_external,
+            frozenset({"codex"}),
+        )
+        # An explicitly empty flag is a real answer, not a missing one: it is the
+        # only way to override a configured opt-out from the command line.
+        emptied = replace(request, force_external_channels=())
+        self.assertEqual(
+            review_workflow._resolve_route_policy(emptied, "cursor").force_external,
+            frozenset(),
+        )
+
+    def test_a_repo_config_opt_out_reaches_the_roster(self) -> None:
+        # The setting has to be readable where the operator can actually set it:
+        # the Cursor agent shell scrubs operator exports, so a file layer is the
+        # only surface that survives there.
+        os.environ["CREW_HOST"] = "cursor"
+        self._write_repo_config('[review]\nforce_external_channels = ["cursor"]\n')
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=lambda name, channel: _Provider(name=name),
+        ):
+            step = self._start(seats="cursor-composer", session="force-repo-config")
+        self.assertEqual(step.work_items[0].driver, "external")
+        self.assertEqual(self._identity(step)["force_external_channels"], ["cursor"])
+
+    def test_a_frozen_run_is_judged_by_its_recorded_choice_not_live_config(self) -> None:
+        os.environ["CREW_HOST"] = "cursor"
+        repo_config = self._write_repo_config(
+            '[review]\nforce_external_channels = ["cursor"]\n'
+        )
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=lambda name, channel: _Provider(output="RAW", name=name),
+        ):
+            step = self._start(seats="cursor-composer", session="force-frozen")
+            # Editing the config mid-run must not change how the already-minted
+            # route is judged: the identity, not the file, is the authority.
+            repo_config.unlink()
+            config._reset_cache_for_tests()
+            after = review_workflow.execute_external_review(
+                step.ref, step.work_items[0].action_id,
+            )
+        self.assertTrue(any(item.kind == "formatter" for item in after.work_items))
+
+    def test_an_unknown_forced_channel_is_refused_by_name(self) -> None:
+        with self.assertRaises(review_workflow.WorkflowError) as ctx:
+            self._start(session="force-typo", force_external=("cursur",))
+        self.assertEqual(ctx.exception.code, "unknown_channel")
+        self.assertIn("cursur", ctx.exception.message)
+        # And it reaches the caller as a typed envelope, not a traceback.
+        output = io.StringIO()
+        args = SimpleNamespace(
+            target=str(self.plan), base="main", panel=None, seats="codex",
+            session_id="force-typo-cli", timeout=1, inline_diff=False,
+            force_external="cursur",
+        )
+        with redirect_stdout(output):
+            self.assertEqual(cli.cmd_review(args), 2)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["code"], "unknown_channel")
+        self.assertIn("cursur", payload["message"])
+
+    def test_an_unknown_configured_channel_warns_and_is_dropped(self) -> None:
+        # A config typo must never be the reason a review dies.
+        self._write_repo_config('[review]\nforce_external_channels = ["cursur"]\n')
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            resolved = config.review_force_external_channels()
+        # A layer that tried to say something and said nothing usable defers to
+        # the layer below, so one repo typo cannot silently cancel a valid
+        # global opt-out. That is NOT the explicit empty list, which is a real
+        # answer meaning force nothing and does win over the layer below.
+        self.assertIsNone(resolved)
+        self.assertIn("cursur", stderr.getvalue())
+        home = Path(os.environ["HOME"])
+        global_config = home / ".crew-config.toml"
+        global_config.write_text(
+            '[review]\nforce_external_channels = ["cursor"]\n', encoding="utf-8",
+        )
+        self.addCleanup(global_config.unlink)
+        config._reset_cache_for_tests()
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(config.review_force_external_channels(), ("cursor",))
+            self._write_repo_config("[review]\nforce_external_channels = []\n")
+            self.assertEqual(config.review_force_external_channels(), ())
+
+    def test_the_drop_warning_names_the_role_miss_only_when_it_is_one(self) -> None:
+        # The drop predicate is broader than the role miss, so the message asks
+        # the role table rather than inferring the cause. No shipped row reaches
+        # the route-neutral branch today, hence the patched resolution.
+        os.environ["CREW_HOST"] = "cursor"
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(review_workflow.WorkflowError):
+                self._start(seats="cursor-auto", session="drop-role-miss")
+        self.assertIn("has no shipped cursor reviewer role", stderr.getvalue())
+        stderr = io.StringIO()
+        with mock.patch.object(
+            review_workflow, "native_channel_for", return_value=None,
+        ):
+            with redirect_stderr(stderr):
+                with self.assertRaises(review_workflow.WorkflowError):
+                    self._start(seats="cursor-composer", session="drop-route-only")
+        self.assertNotIn("reviewer role", stderr.getvalue())
+        self.assertIn("drives in-session", stderr.getvalue())
+
+    def test_panel_bytes_do_not_depend_on_host(self) -> None:
+        self.maxDiff = None
+        def provider(name: str, _channel: str):
+            if name == "codex":
+                return _Provider(ok=False, name=name)
+            return _UnavailableProvider(name=name)
+
+        os.environ["CREW_HOST"] = "cursor"
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=provider,
+        ):
+            step = self._start(
+                seats="codex,codex-luna",
+                session="cursor-all-failed-golden",
+            )
+            terminal = step
+            for item in step.work_items:
+                terminal = review_workflow.execute_external_review(
+                    step.ref, item.action_id,
+                )
+        self.assertEqual(terminal.outcome["status"], "all_failed")
+        run, _wf = self._workflow(terminal)
+        fixtures = Path(__file__).resolve().parent / "fixtures" / "review-workflow"
+        self.assertEqual(
+            (run / "panel.md").read_bytes(),
+            (fixtures / "all-failed-panel.md").read_bytes(),
+        )
+        self.assertEqual(
+            (run / "panel-full.md").read_bytes(),
+            (fixtures / "all-failed-full.md").read_bytes(),
+        )
+
+    def test_multi_via_cursor_seat_selects_cursor_native_on_a_cursor_host(self) -> None:
+        multi_via = seats.SeatSpec(
+            name="cursor-composer",
+            via=("cursor", "codex"),
+            model="composer-2.5",
+        )
+        original_spec = seats.seat_spec
+
+        def spec_for(name: str):
+            return multi_via if name == "cursor-composer" else original_spec(name)
+
+        expected = {
+            "cursor": ("native", "cursor"),
+            "claude": ("external", "codex"),
+            "unknown": ("external", "cursor"),
+        }
+        for host, want in expected.items():
+            with self.subTest(host=host):
+                if host == "unknown":
+                    os.environ.pop("CREW_HOST", None)
+                else:
+                    os.environ["CREW_HOST"] = host
+                capabilities = {
+                    # EVERY probe is stubbed: leaving codex's live would make the
+                    # claude-host answer depend on a binary being on PATH.
+                    name: replace(
+                        capability,
+                        probe_available=(
+                            (lambda: host != "claude") if name == "cursor"
+                            else (lambda: True)
+                        ),
+                    )
+                    for name, capability in channels._default_capabilities().items()
+                }
+                with (
+                    mock.patch.object(review_workflow.seats, "seat_spec", side_effect=spec_for),
+                    mock.patch.object(
+                        channels, "active_capabilities", return_value=capabilities,
+                    ),
+                    mock.patch.object(
+                        review_workflow,
+                        "get_provider_for_channel",
+                        side_effect=lambda name, channel: _Provider(output="RAW", name=name),
+                    ),
+                ):
+                    step = self._start(
+                        seats="cursor-composer", session=f"multi-via-{host}",
+                    )
+                item = step.work_items[0]
+                self.assertEqual((item.driver, item.channel), want)
+
+    def test_cross_host_role_corruption_is_rejected(self) -> None:
+        cases = (
+            ("cursor", "cursor-composer", {"role": "crew:reviewer"}),
+            ("claude", "opus", {"role": "crew-reviewer"}),
+            ("cursor", "cursor-composer", {"model": "haiku"}),
+            ("cursor", "cursor-composer", {"channel": "claude"}),
+        )
+        for index, (host, seat, mutation) in enumerate(cases):
+            with self.subTest(host=host, mutation=tuple(mutation)):
+                os.environ["CREW_HOST"] = host
+                with mock.patch.object(
+                    review_workflow,
+                    "get_provider_for_channel",
+                    side_effect=self._no_cursor_provider(),
+                ):
+                    step = self._start(seats=seat, session=f"corrupt-role-{index}")
+                run, wf = self._workflow(step)
+                action = next(
+                    entry for entry in wf["actions"]
+                    if entry["kind"] == "reviewer"
+                )
+                action.update(mutation)
+                (run / "workflow.json").write_text(json.dumps(wf), encoding="utf-8")
+                with self.assertRaises(review_workflow.WorkflowError) as ctx:
+                    review_workflow.next_review(step.ref)
+                self.assertEqual(ctx.exception.code, "corrupt_workflow")
+
+    def test_cursor_native_transport_role_corruption_is_rejected(self) -> None:
+        os.environ["CREW_HOST"] = "cursor"
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=self._no_cursor_provider(),
+        ):
+            step = self._start(seats="cursor-composer", session="corrupt-transport")
+        run, wf = self._workflow(step)
+        action = next(entry for entry in wf["actions"] if entry["kind"] == "reviewer")
+        action["return_transport"]["primary"]["role"] = "crew:scribe"
+        (run / "workflow.json").write_text(json.dumps(wf), encoding="utf-8")
+        with self.assertRaises(review_workflow.WorkflowError) as ctx:
+            review_workflow.next_review(step.ref)
+        self.assertEqual(ctx.exception.code, "corrupt_workflow")
+
+    def test_a_native_seat_cannot_be_reloaded_onto_an_unmapped_model(self) -> None:
+        # A native action with no role has nothing to spawn. Resolution never
+        # mints one; this pins the two guards that keep a RELOADED record from
+        # producing one: the run record's identity chain refuses a signature
+        # edit, and the reviewer mirror refuses a roleless native action.
+        os.environ["CREW_HOST"] = "cursor"
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=self._no_cursor_provider(),
+        ):
+            step = self._start(seats="cursor-composer", session="native-unmapped")
+        run, wf = self._workflow(step)
+        record = json.loads((run / "run.json").read_text(encoding="utf-8"))
+        record["seat_signatures"]["cursor-composer"]["model"] = "composer-2.4"
+        (run / "run.json").write_text(json.dumps(record), encoding="utf-8")
+        action = next(entry for entry in wf["actions"] if entry["kind"] == "reviewer")
+        action["role"] = None
+        action["model"] = "composer-2.4"
+        (run / "workflow.json").write_text(json.dumps(wf), encoding="utf-8")
+        with self.assertRaises(review_workflow.WorkflowError) as ctx:
+            review_workflow.next_review(step.ref)
+        self.assertEqual(ctx.exception.code, "corrupt_workflow")
+
+    def test_external_cursor_action_drifts_on_a_cursor_host(self) -> None:
+        # An action frozen external on the cursor channel is stale once this
+        # host drives that channel natively: it must be reported as drifted,
+        # never re-executed against a route the workflow no longer selects.
+        os.environ["CREW_HOST"] = "cursor"
+        action = {
+            "seat": "cursor-composer",
+            "driver": "external",
+            "channel": "cursor",
+            "provider": "cursor",
+            "model": "composer-2.5",
+        }
+        with self.assertRaises(review_workflow.WorkflowError) as ctx:
+            review_workflow._frozen_external_provider(action, _route_policy("cursor"))
+        self.assertEqual(
+            (ctx.exception.error, ctx.exception.code),
+            ("conflict", "provider_config_drift"),
+        )
+        os.environ["CREW_HOST"] = "claude"
+        provider = review_workflow._frozen_external_provider(
+            action, _route_policy("claude")
+        )
+        self.assertIsNotNone(provider)
+
+    def test_external_cursor_action_at_an_unmapped_model_also_drifts(self) -> None:
+        # The seat whose model has no shipped role is the one that used to slip
+        # through: its live resolution declares no native route, which looks
+        # exactly like a host that drives no channel in-session, so the stale
+        # external action matched and ran through the CLI this host does not use.
+        os.environ["CREW_HOST"] = "cursor"
+        action = {
+            "seat": "cursor-auto",
+            "driver": "external",
+            "channel": "cursor",
+            "provider": "cursor",
+            "model": "auto",
+        }
+        self.assertNotIn("auto", review_workflow.CURSOR_REVIEWER_AGENTS)
+        with self.assertRaises(review_workflow.WorkflowError) as ctx:
+            review_workflow._frozen_external_provider(action, _route_policy("cursor"))
+        self.assertEqual(
+            (ctx.exception.error, ctx.exception.code),
+            ("conflict", "provider_config_drift"),
+        )
+        os.environ["CREW_HOST"] = "claude"
+        self.assertIsNotNone(
+            review_workflow._frozen_external_provider(action, _route_policy("claude"))
+        )
+
+    def test_a_roleless_native_action_is_refused_before_anything_is_written(self) -> None:
+        # Resolution never declares a native route for an unmapped model, so
+        # reaching the mint with one means the two views disagree. The mint
+        # refuses by name rather than issuing an action with nothing to spawn.
+        os.environ["CREW_HOST"] = "cursor"
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=self._no_cursor_provider(),
+        ):
+            step = self._start(seats="cursor-composer", session="roleless-mint")
+        run, _wf = self._workflow(step)
+        attempts_before = sorted(p.name for p in (run / "attempts").rglob("*"))
+        with self.assertRaises(review_workflow.WorkflowError) as ctx:
+            review_workflow._reviewer_action(
+                run, step.ref, ordinal=1, seat="cursor-auto", model="auto",
+                channel="cursor", driver=review_workflow.ActionDriver.NATIVE,
+                provider="cursor", policy=_route_policy("cursor"), timeout_seconds=None,
+                prompt="unused",
+            )
+        self.assertEqual(ctx.exception.code, "unresolved_native_role")
+        self.assertEqual(
+            sorted(p.name for p in (run / "attempts").rglob("*")),
+            attempts_before,
+        )
+
+    def test_shipped_cursor_role_files_match_the_host_role_table(self) -> None:
+        roles = self._cursor_roles()
+        agents_dir = (
+            Path(__file__).resolve().parents[2] / "agents-cursor"
+        )
+        shipped = {path.stem for path in agents_dir.glob("*.md")}
+        reachable = {
+            name
+            for name in (
+                *review_workflow.CURSOR_REVIEWER_AGENTS.values(),
+                roles.scribe_role,
+                roles.formatter_role,
+            )
+            if name is not None
+        }
+        self.assertEqual(shipped, reachable)
+        self.assertTrue((agents_dir / ".gitkeep").is_file())
+        self.assertEqual(
+            sorted(path.name for path in agents_dir.iterdir() if path.name != ".gitkeep"),
+            sorted(f"{name}.md" for name in reachable),
+        )
+
+    def test_the_access_tier_matches_what_each_role_file_can_actually_do(
+        self,
+    ) -> None:
+        # The tier is per ROLE: a role the harness can stop from writing gets
+        # the enforced value, one held by prose gets the advisory value. Pinned
+        # against the shipped `tools:` line so a role that gains a mutating tool
+        # cannot keep a record that says it was mechanically constrained.
+        agents_dir = Path(__file__).resolve().parents[2] / "agents"
+
+        def tools(role: str) -> set[str]:
+            for line in (agents_dir / f"{role}.md").read_text(
+                encoding="utf-8"
+            ).splitlines():
+                if line.startswith("tools:"):
+                    return {tok.strip() for tok in line.split(":", 1)[1].split(",")}
+            self.fail(f"{role}.md ships no tools line")
+
+        claude = review_workflow._HOST_ROLES["claude"]
+        # Bash for git inspection, unsandboxed: read-only by convention only.
+        self.assertIn("Bash", tools("reviewer"))
+        self.assertEqual(claude.reviewer_access, review_workflow.ACCESS_ADVISORY)
+        self.assertEqual(tools("formatter"), {"Read"})
+        self.assertEqual(claude.formatter_access, review_workflow.ACCESS_ENFORCED)
+        # An external seat takes its own adapter's tier, never a host role's.
+        self.assertEqual(
+            review_workflow._reviewer_access(claude, native=False, channel="codex"),
+            review_workflow.ACCESS_ENFORCED,
+        )
+        self.assertEqual(
+            review_workflow._reviewer_access(claude, native=True, channel="claude"),
+            review_workflow.ACCESS_ADVISORY,
+        )
+        os.environ["CREW_HOST"] = "claude"
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=lambda name, channel: _Provider(name=name),
+        ):
+            step = self._start(seats="opus,codex,agy", session="access-tier")
+        self.assertEqual(
+            {(item.seat, item.access) for item in step.work_items},
+            {
+                ("opus", "read-only-advisory"),
+                ("codex", "read-only"),
+                # Same run, same "external", different adapter posture.
+                ("agy", "read-only-advisory"),
+            },
+        )
+
+    def test_the_external_access_tier_matches_what_each_adapter_enforces(
+        self,
+    ) -> None:
+        # The tier is per ADAPTER, not a property of "external" as a category.
+        # Pinned against the posture each provider module ships so an adapter
+        # that loosens its sandbox cannot keep a record claiming a mechanically
+        # enforced boundary.
+        providers_dir = (
+            Path(__file__).resolve().parents[1] / "multiagent" / "providers"
+        )
+
+        def source(module: str) -> str:
+            return (providers_dir / f"{module}.py").read_text(encoding="utf-8")
+
+        # Every channel needs an explicit row: a missing one would quietly take
+        # the advisory fallback instead of being noticed here.
+        self.assertEqual(
+            set(review_workflow._CHANNEL_ACCESS),
+            set(seats.CHANNEL_TO_LEGACY_KIND),
+        )
+        # codex refuses the write in its sandbox; cursor's plan mode applies no
+        # edits; the claude CLI is held by plan mode plus a tool allowlist.
+        self.assertIn('sandbox: str = "read-only"', source("codex"))
+        self.assertIn('"--sandbox", sandbox', source("codex"))
+        self.assertIn('cmd += ["--mode", "plan"]', source("cursor"))
+        self.assertIn('"--permission-mode",', source("claude"))
+        self.assertIn('"--allowedTools",', source("claude"))
+        for channel in ("codex", "cursor", "claude"):
+            self.assertEqual(
+                review_workflow._CHANNEL_ACCESS[channel],
+                review_workflow.ACCESS_ENFORCED,
+            )
+        # agy's sandbox blocks only OUT-of-workspace writes; its own module
+        # records the in-workspace residual, so nothing stops that seat mutating
+        # the repo it reviews.
+        self.assertIn("in-workspace writes are still allowed", source("agy"))
+        self.assertEqual(
+            review_workflow._CHANNEL_ACCESS["agy"],
+            review_workflow.ACCESS_ADVISORY,
+        )
+        self.assertEqual(
+            review_workflow._reviewer_access(None, native=False, channel="agy"),
+            review_workflow.ACCESS_ADVISORY,
+        )
+
+    def test_cursor_read_only_roles_ship_the_readonly_key(self) -> None:
+        # The two roles that must not write ship the key; the scribe exists to
+        # write and must not. Enforcement of the key on this surface is
+        # unverified, so the roles also carry the constraint in prose and the
+        # run record stamps the advisory tier rather than the enforced one.
+        roles = self._cursor_roles()
+        agents_dir = Path(__file__).resolve().parents[2] / "agents-cursor"
+        for role in (
+            *set(review_workflow.CURSOR_REVIEWER_AGENTS.values()),
+            roles.formatter_role,
+        ):
+            body = (agents_dir / f"{role}.md").read_text(encoding="utf-8")
+            self.assertIn("readonly: true", body.split("---")[1])
+        self.assertNotIn(
+            "readonly",
+            (agents_dir / f"{roles.scribe_role}.md").read_text(
+                encoding="utf-8"
+            ).split("---")[1],
+        )
+        self.assertEqual(
+            (roles.reviewer_access, roles.formatter_access),
+            (review_workflow.ACCESS_ADVISORY, review_workflow.ACCESS_ADVISORY),
+        )
+
+    def test_cursor_role_frontmatter_pins_only_the_support_models(self) -> None:
+        # The reviewer file is shared by every mapped model, so a `model:` pin in
+        # it would be wrong for all but one of them: if the pin beat the model
+        # the caller passes, five seats would run one model while the run record
+        # named five. The two support roles are single-model by construction and
+        # pin the exact model the table drives them at.
+        roles = self._cursor_roles()
+        agents_dir = Path(__file__).resolve().parents[2] / "agents-cursor"
+
+        def frontmatter(role: str) -> dict[str, str]:
+            lines = (agents_dir / f"{role}.md").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(lines[0], "---")
+            keys = {}
+            for line in lines[1:]:
+                if line == "---":
+                    break
+                key, _, value = line.partition(":")
+                keys[key.strip()] = value.strip()
+            return keys
+
+        for role in set(review_workflow.CURSOR_REVIEWER_AGENTS.values()):
+            self.assertNotIn("model", frontmatter(role))
+        for role, model in (
+            (roles.scribe_role, roles.scribe_model),
+            (roles.formatter_role, roles.formatter_model),
+        ):
+            self.assertEqual(frontmatter(role).get("model"), model)
+
+    def test_cursor_reviewer_map_is_keyed_by_catalog_models(self) -> None:
+        catalog_models = {
+            spec.model
+            for spec in seats.merged_catalog().values()
+            if tuple(spec.via) == ("cursor",) and spec.model != "auto"
+        }
+        self.assertEqual(set(review_workflow.CURSOR_REVIEWER_AGENTS), catalog_models)
+        self.assertNotIn("auto", review_workflow.CURSOR_REVIEWER_AGENTS)
+        self.assertIn(
+            review_workflow.CURSOR_SUPPORT_MODEL,
+            review_workflow.CURSOR_REVIEWER_AGENTS,
+        )
+
+    def test_review_md_branches_only_on_issued_values(self) -> None:
+        review_md = Path(__file__).resolve().parents[2] / "commands" / "review.md"
+        text = review_md.read_text(encoding="utf-8")
+        self.assertIn("With `work_item.channel` = `cursor`, spawn a reviewer with exactly:", text)
+        self.assertIn(
+            "With `work_item.channel` = `cursor`, spawn a native formatter with exactly:",
+            text,
+        )
+        self.assertIn("When that reviewer's `channel` is `cursor`, invoke exactly:", text)
+        self.assertNotIn("CREW_HOST", text)
+        for marker in (
+            *channels.codex_host_markers(),
+            *channels.cursor_host_markers(),
+            "CLAUDECODE",
+            "CLAUDE_CODE_ENTRYPOINT",
+        ):
+            self.assertNotIn(marker, text)
 
     def test_unavailable_provider_is_skipped_without_run_and_is_fully_stamped(self) -> None:
         provider = _UnavailableProvider()

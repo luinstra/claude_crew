@@ -763,6 +763,17 @@ def _emit(text: str, out_path: str | None) -> None:
         print(text)
 
 
+def _parse_force_external(raw: str | None) -> tuple[str, ...] | None:
+    """Split the ``--force-external`` list; None when the flag was not given.
+
+    An explicitly empty value is an explicit "force nothing" that outranks the
+    config layers, which is the only way to override a configured opt-out from
+    the command line."""
+    if raw is None:
+        return None
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     request = review_workflow.ReviewRequest(
         target_input=args.target,
@@ -772,6 +783,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         session_id=args.session_id,
         timeout_seconds=args.timeout,
         inline=args.inline_diff,
+        force_external_channels=_parse_force_external(args.force_external),
     )
     try:
         step = review_workflow.start_review(request)
@@ -5352,6 +5364,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--inline-diff", action="store_true",
         help="embed the diff/plan in the prompt instead of referencing it "
              "(seats fetch it themselves by default — smaller, no ARG_MAX cap)",
+    )
+    review.add_argument(
+        "--force-external", dest="force_external", default=None,
+        help="comma-separated channels this run must run as external "
+             "subprocesses even where the host could drive them in-session "
+             "(overrides [review].force_external_channels; empty string forces "
+             "none)",
     )
     review.set_defaults(func=cmd_review)
 

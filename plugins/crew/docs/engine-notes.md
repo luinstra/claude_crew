@@ -164,8 +164,13 @@ crew is ever pointed at untrusted / external-contributor diffs, these seats
 - `isolation: worktree` (runs in a throwaway worktree — note that won't contain
   *uncommitted* changes, so it can't review a working tree).
 
-A `readonly: true` frontmatter key is NOT real — Claude Code ignores unknown
-fields, so it's a no-op, not enforcement.
+A `readonly: true` frontmatter key does nothing ON THIS HOST: Claude Code
+ignores unknown fields, so on a `claude` role file it is a no-op, not
+enforcement. That is a fact about Claude Code and not about the key in general.
+The Cursor adapters in `agents-cursor/` DO ship it, because the external
+`cursor-agent` CLI was captured enforcing it; whether the in-session Cursor
+surface honors it is unverified, and `docs/cursor-host.md` carries that
+disclosure.
 
 ## Standalone review workflow (Phase 1)
 
@@ -176,21 +181,209 @@ and submits Python-issued HostResult files. Target intent, seat selection,
 prompts, claims, repair admission, barrier, quorum, and terminal status do not
 belong in Markdown or shared roles.
 
-The command adapter is exposed for Claude and Cursor. Claude may use its native
-reviewer channel, while Cursor remains all-external and uses parent-context
-formatter/synthesis work. Codex-host all-external protocol compatibility is
+The command adapter is exposed for Claude and Cursor. Both may use a native
+reviewer channel now (see the Cursor section below); a host with none, codex and
+unknown, uses parent-context formatter work and keeps every seat external.
+Codex-host all-external protocol compatibility is
 covered deterministically through the Python CLI in this phase, but the Codex
 plugin does not yet expose standalone `/crew:review`; its app-native adapter
 remains deferred. Build and measure-twice continue to use `review-prep` until
 their later workflow phases migrate them.
 
-## Cursor host: all-external seat execution, native subagent channel deferred
+## Cursor host: the native reviewer channel, and why it took a design pass
 
-Cursor-host seat execution ships ALL-EXTERNAL: every seat, including Claude
-seats, runs as a subprocess CLI (Claude voices via the external `claude` CLI),
-with no native Cursor-subagent channel. A native channel was considered and
-deferred: the observed per-file model frontmatter for Cursor subagents is
-static, and crew's seats need a per-spawn model pin (e.g. distinct `opus` vs
-`sonnet` Task seats from one agent definition), which static frontmatter
-cannot express. Adopting a native channel would need its own design pass
-backed by live evidence, not a mechanical port of the Claude Task path.
+Cursor-host seat execution WAS all-external, on the reasoning that the observed
+per-file model frontmatter for Cursor subagents is static while crew's seats
+need a per-spawn model pin. That objection was answered by evidence, not by
+working around it: the app passes the model on the Task call, so one role file
+serves every mapped model and the pin rides the invocation. Standalone review
+now issues cursor-channel seats natively on a Cursor host. Claude voices there
+still run through the external `claude` CLI, and codex and agy stay external.
+
+Three seams carry it, and the split between them is the point.
+
+**The caller declares its route (`channels`).** `native_channel(host)` is the
+host's TRUE in-session channel; `task_native_channel(host)` is the narrower
+answer the unmigrated Task recipes and the subprocess runners share. Every
+consumer passes one explicitly as `declared_native`, with no default, because a
+caller that cannot perform native work must not be handed a native route. Prep
+and `crew run` in particular have to classify one seat the same way: whatever
+prep calls a subprocess seat, `crew run` has to be willing to run.
+
+**The workflow decides per SEAT (`review_workflow.native_channel_for`).** A
+channel-level answer is too coarse here. At `host=cursor` every `via=["cursor"]`
+seat would resolve native, including one whose model has no shipped role, and
+the run would freeze it as `kind=task` before anything consulted the role map,
+then issue a native action with no role to spawn. So `review_workflow` computes
+the declared route per seat: the host's native channel when a reviewer role
+exists for that seat's model, otherwise none. `channels` answers "is this
+channel native on this host"; `review_workflow` answers "can this workflow drive
+a native action for this seat", which depends on `CURSOR_REVIEWER_AGENTS` and so
+cannot live anywhere else without moving review policy out of the engine.
+
+**A seat with no role is warned about and dropped, not rerouted.** A
+cursor-channel seat that resolves external on a Cursor host has nowhere to go
+under review's routing policy: a channel the host drives in-session is not also
+opened as a subprocess from resolution. That is a choice, not a capability
+limit. The `cursor-agent` CLI is installed and authenticated inside Cursor (the
+live capture records it running there); what resolution declines to do is pick
+it for a channel this host drives natively. Such a seat gets one warning naming the seat and
+its model and is removed from the roster BEFORE the identity freeze, so
+`run.json` records only seats that run and the quorum denominator counts only
+them. A roster reduced to zero fails with the existing `no_seats` error rather
+than starting an empty review. The alternative, keeping the seat and letting it
+fail at execute, would have spent a provider call to learn something resolution
+already knew.
+
+The role names, the two support-role models, and the channel come from one
+literal `_HOST_ROLES` table beside `_reviewer_action`, which replaced five
+hardcoded Claude names and three validation mirrors. The TOTAL reviewer name (a
+host whose one reviewer role file pins no model, so every model reaches it) is
+a table field too, not a default inside the accessor: a name left in the method
+is a name a new host inherits by saying nothing, which is how a Cursor row would
+have silently answered with the Claude reviewer's name. It is a dict and an
+accessor, not a registry: hosts are added by adding a row, and a host with no
+row (codex, unknown) drives no native work, which is exactly what
+`native_roles` returning `None` already meant.
+
+**The drop rule is one predicate, and minting is fail-closed.** "This seat has
+no route on this host" is asked in exactly one place (`has_no_route_here`) by
+both the roster resolver and the drift reconstruction. Two copies of that
+question is how a stale EXTERNAL cursor action survived on a Cursor host: the
+per-seat native declaration returns `None` both for an unmapped model and for a
+host with no native channel at all, so the drift check could not tell the two
+apart and re-ran an action against a CLI this host does not use for its own
+channel. Downstream of resolution, the reviewer and formatter mints REFUSE
+(`unresolved_native_role`) before preparing any path when a native action's role
+does not resolve. Resolution should make that unreachable; if the two ever
+disagree, the honest outcome is a named refusal, never an action issued with
+nothing to spawn or a role quietly stood in for.
+
+**A support role is never a hard dependency for a roster that needs nothing
+else from the host.** The formatter mint asks only whether the host HAS a role
+row, so on a Cursor host an all-external roster (`--panel quick` is codex plus a
+Claude voice, both external there) still mints a native `crew-formatter` at the
+support model. That model has to be enabled for subagents on the account, and
+the recorded live capture had every registered cursor seat model rejected on
+that surface, so an off-schema seat could lose its repair to a role the roster
+never asked for. The fix is a reroute, not a mint-time gate: `formatter_task_lost`
+recovery rewrites the action to `driver=parent`, the route codex and unknown
+hosts already take, keeping the action id and every path. Two alternatives were
+rejected. Gating the mint on "does the roster contain a native seat" would have
+demoted a Claude host's `--seats codex` panel to a parent-context repair for no
+gain, and would still leave entitled seats with an unentitled support model
+hard-failing. Pinning the Cursor support roles unspawnable would encode one
+account's current enablement as a permanent design fact, which is exactly what
+the P8 evidence says it is not.
+
+The formatter is the ONE action that changes route this way; a SEAT never does.
+A seat's answer is attributed to the model that gave it, so `channels` never
+reroutes a resolved seat once it starts and a lost native reviewer settles
+FAILED rather than moving transports. The formatter only reshapes an answer
+already given, and its output must still satisfy `findings.parse_seat` before it
+is accepted. The scribe needs no equivalent: it exists only on a NATIVE reviewer
+action, so the host is already that seat's dependency, and it has the host-write
+fallback besides. Mint, reroute, and validation all read one `_formatter_route`
+table so a rerouted action cannot describe a route no mint could produce, and
+the formatter reroute happens at most once by construction (the rerouted action
+is PARENT, whose only recovery code settles it).
+
+**A lost native reviewer settles failed, and the panel degrades.** The mint-time
+refusal and the roster drop both cover seats resolution can SEE are unroutable.
+A seat that resolves native and is then refused at spawn is a different failure,
+and there is nowhere honest to send it: its own channel is one this host drives
+in-session rather than as a subprocess, which is the same routing policy
+`has_no_route_here` enforces at resolution. So `native_task_lost` recovery
+settles the action, quorum recounts the usable seats, and the digest synthesizes
+from whatever returned.
+
+A general retry policy that turned lost native actions into external ones was
+built and removed, for two reasons, neither of them a capability limit. The
+first is the operator's: work policy forbids them from using the `cursor-agent`
+CLI, and the app is the only permitted surface there, so a per-action fallback
+onto that CLI is a route they cannot take. The binary is present and
+authenticated in that environment, as the drop-rule paragraph above records from
+a live capture, which is why this has to be stated as the permission it is and
+never as a missing client. The second is this codebase's routing and
+attribution policy, the one `has_no_route_here` already enforces: a channel the
+host drives in-session is not also opened as a subprocess, because a seat's
+answer belongs to the model that gave it and moving transports mid-action would
+change which surface produced it. On Claude the retry was a live transport and
+billing change for the ordinary Task-idle case that nothing asked for. Ordered
+`via` fallback is the seam that owns per-action retry, and it stays deferred; a
+per-action retry ahead of it would have prejudged the design.
+
+**The channel-level opt-out is `[review].force_external_channels`.** What a
+per-action retry could not honestly do, a RUN-level choice can: naming a channel
+here makes standalone review resolve every seat on it to its ordinary external
+provider, and drives nothing in-session on it at all. Resolution follows the
+usual chain, CLI `--force-external` over per-repo `.crew/config.toml` over
+global `~/.crew-config.toml` over the built-in (force nothing), so native
+admission stays the default and this
+is the escape hatch. It is a config file rather than an env var deliberately: the
+Cursor agent shell every crew command runs in scrubs operator exports, so an
+env-tier opt-out would be unreachable on the host that most needs one. The
+resolved choice is frozen into the run identity (`force_external_channels`) and
+every later step rebuilds its route from there, so editing the file mid-run
+cannot change how an already-minted run is judged, and the record says which
+route the answers came from.
+
+The reason it exists NOW, rather than staying deferred with ordered `via`, is
+that the cursor-native route replaced a route verified live with one resting on
+two app-surface assumptions that are still UNVERIFIED (the role name resolving
+from the filename, and the app's Task spawn form; both are flagged in
+`cursor-host.md`). On the operator's only permitted surface that is the concrete
+use case the deferral was waiting for.
+
+**Native stays the DEFAULT anyway, and the opt-out is an opt-out.** The obvious
+counter-move to two unverified assumptions is to invert the default and make
+in-session cursor seats opt-IN. It was rejected on the one fact that decides it:
+the live-verified alternative those seats would fall back to is the
+`cursor-agent` CLI, and the operator's work policy forbids that CLI. Forcing
+every cursor channel external by default would therefore ship a default that
+resolves to nothing runnable on the exact host it exists for, trading assumptions
+that may hold for a certainty that they cannot. Verified-elsewhere is not the
+same as usable-here. The assumptions also fail LOUDLY (a seat refused at spawn
+settles failed and the digest names it) rather than silently producing a wrong
+answer, and the cost of being wrong is one panel, recoverable by naming the
+channel in the opt-out. So the default optimizes for the host that has to use
+it, and `crew review` prints one stderr note there naming
+`[review].force_external_channels` when a run actually mints native cursor
+seats, so the escape hatch is learned at the point it is needed rather than from
+this document. Do not re-derive this trade as a defect; if the app-surface
+captures ever land and contradict the assumptions, that is a different question
+with different evidence.
+
+Support roles follow the seats: with a
+channel forced external the formatter mints on the parent-context route directly
+rather than being minted native and needing a recovery call every run, and the
+scribe never mints at all because it rides only a native reviewer action.
+
+The consequence to state plainly is a SETUP one, not a code defect. A seat model
+that is mapped but not yet enabled in the host's subagent surface resolves
+native, is issued native, and is refused at spawn (the drop rule cannot catch it,
+because the drop keys on map membership and such a model IS mapped). On an
+account where none of the mapped models are enabled, every cursor-channel seat
+takes that path, so a cursor-only panel returns nothing usable. Enabling those
+models in Cursor is the mitigation; there is no CLI fallback for a native seat.
+
+**Finish or abandon an in-flight standalone review before adopting these bytes,
+on EVERY host, Claude included.** Two guards catch a run frozen by an older
+shape, and both are guards working rather than defects; the remedy is a fresh
+review, never a migration.
+- The run identity gained `force_external_channels`, and the identity key set is
+  validated exactly. A run frozen without it fails validation as
+  `corrupt_workflow` at its next command, and an identical restart mints a
+  different digest and returns `conflict`.
+- A formatter action minted before the reroute mark existed fails the action
+  key-set check as `corrupt_workflow` too.
+
+A Cursor host has two further in-flight cases of its own (a run frozen
+`host=unknown`, and one frozen `host=cursor` with external seats); they are in
+`docs/cursor-host.md`, because only that host can reach them.
+
+The reviewer map is keyed by MODEL rather than by seat so that a config `model`
+override behaves honestly: repinning a seat to an unshipped string drops it,
+where a seat-keyed map would have resolved the seat while the role file's pin
+had drifted. `auto` is deliberately unmapped: it names no concrete model, so
+nothing can attribute the answer to one.

@@ -92,11 +92,14 @@ implemented already, it still assumes a Claude `Task` split, and its Pi,
   `commands/`, `agents/`, and `hooks/hooks.json`.
 - Cursor packaging exists through `plugins/crew/.cursor-plugin/plugin.json`,
   `.cursor-plugin/marketplace.json`, and `hooks/cursor-hooks.json`. The Cursor
-  manifest deliberately points at an empty `agents-cursor/`; the tests currently
-  require only `.gitkeep`. `plugins/crew/docs/cursor-host.md` verifies commands,
+  manifest points at `agents-cursor/`, which now ships the three thin role
+  adapters standalone review drives in-session (reviewer, formatter, scribe)
+  alongside the `.gitkeep` that retains the directory.
+  `plugins/crew/docs/cursor-host.md` verifies commands,
   hooks, all three external clients, and an end-to-end review, but records native
-  agent substitution and unverified stop-hook follow-up. Cursor host markers are
-  deliberately empty pending an independent second capture. Its verified install
+  agent substitution and unverified stop-hook follow-up. The Cursor host marker
+  table now ships filled with `CURSOR_AGENT` and `CURSOR_CONVERSATION_ID`; an
+  independent second capture is still owed. Its verified install
   currently uses the Claude marketplace manifest/copy semantics and Cursor's
   pinned marketplace clone/cache path. Loops are operator-enabled and explicitly
   best-effort; the previously shipped Cursor refuse-to-arm guard was removed and
@@ -1760,8 +1763,14 @@ landed and exercised live.
    `/crew:review` name in Claude and Cursor and prohibit recursive invocation of
    `/crew:review` from `crew:review`.
 3. Add minimal Cursor reviewer/scribe/formatter definitions under
-   `plugins/crew/agents-cursor/` only if the Phase 0A probe proves named plugin
-   subagents and tool restrictions. Remove the test that requires the directory
+   `plugins/crew/agents-cursor/` only if the probe proves named plugin
+   subagents. SUPERSEDED on the tool-restriction half: the three adapters
+   SHIPPED, and this host offers no per-role tool field, so their read-only and
+   write-only constraints are held by role prose plus a `readonly: true` key on
+   the reviewer and formatter whose app-surface enforcement is UNVERIFIED (the
+   only evidence for that key is from the external CLI surface).
+   `docs/cursor-host.md` records that weaker tier as a host fact.
+   Remove the test that requires the directory
    to be empty and replace it with manifest/role/access assertions. If Cursor's
    supported interface is generic prompt-only, leave the directory empty and
    encode the verified generic operation in `hosts/cursor.md` instead.

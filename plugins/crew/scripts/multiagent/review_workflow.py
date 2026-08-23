@@ -14,6 +14,7 @@ import re
 import stat
 import sys
 import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -93,6 +94,9 @@ class ReviewRequest:
     session_id: str = ""
     timeout_seconds: int | None = None
     inline: bool = False
+    # None means "the caller named no channels", which is what lets the config
+    # layers answer; an empty tuple is an explicit "force nothing" that wins.
+    force_external_channels: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -844,15 +848,49 @@ def _resolve_target_intent(
         raise WorkflowError("target_error", str(exc)) from exc
 
 
-def _resolve_seats(request: ReviewRequest, host: str) -> list[tuple[str, object, object]]:
+def _resolve_route_policy(request: ReviewRequest, host: str) -> RoutePolicy:
+    """Resolve this run's route policy: flag > per-repo > global > built-in.
+
+    The escape hatch is deliberately file-readable rather than env-driven: the
+    Cursor agent shell every crew command runs in there scrubs operator exports,
+    so an env-var opt-out would be unreachable on the one host that needs it
+    most. An explicitly named channel is validated hard, because a typo in a flag
+    the operator typed should be told rather than silently ignored; the config
+    layers keep the never-choke contract and drop unknown names with a warning.
+    """
+    named = request.force_external_channels
+    if named is None:
+        named = config.review_force_external_channels() or ()
+    else:
+        unknown = sorted(
+            channel for channel in named
+            if channel not in seats.CHANNEL_TO_LEGACY_KIND
+        )
+        if unknown:
+            raise WorkflowError(
+                "unknown_channel",
+                f"cannot force unknown channel(s) {', '.join(unknown)} external; "
+                f"known channels are {', '.join(sorted(seats.CHANNEL_TO_LEGACY_KIND))}",
+            )
+    return RoutePolicy.resolve(host, named)
+
+
+def _resolve_seats(
+    request: ReviewRequest, policy: RoutePolicy
+) -> list[tuple[str, object, object]]:
     from multiagent import cli
 
     try:
+        # The ROSTER resolver still declares the narrow Task-recipe route: it
+        # answers which names are in the panel, and every name reaches the
+        # per-seat resolution below whichever split it landed in. It reads that
+        # route through the policy, so the split and the per-seat resolution
+        # cannot answer the same routing question two ways.
         selection = cli.resolve_review_selection(
             panel=request.panel,
             seats_arg=request.seats,
             strict_explicit=True,
-            declared_native=channels.task_native_channel(host),
+            declared_native=policy.task_declared_native(),
         )
     except LookupError as exc:
         raise WorkflowError("unknown_seat", str(exc)) from exc
@@ -868,12 +906,45 @@ def _resolve_seats(request: ReviewRequest, host: str) -> list[tuple[str, object,
             raise WorkflowError("reserved_seat", f"review seat {name!r} is reserved")
 
     answer: list[tuple[str, object, object]] = []
+    capabilities = channels.active_capabilities()
     for name in names:
         spec = seats.seat_spec(name)
         if spec is None:  # panel configuration can contain stale names
             raise WorkflowError("unknown_seat", f"unknown review seat {name!r}")
-        resolved = selection.resolved_catalog.get(name)
+        resolved = channels.resolve_seat(
+            spec,
+            capabilities=capabilities,
+            declared_native=native_channel_for(spec, policy),
+        )
         if resolved is None:
+            continue
+        if has_no_route_here(resolved, policy):
+            # Warn and drop before the freeze, so quorum counts what runs.
+            at_model = (
+                f" at model {spec.model!r}" if spec.model
+                # A seat with no model pins no string for the role table to
+                # match, so naming one would invent a model it never carried.
+                else " with no model pinned"
+            )
+            roles = native_roles(policy)
+            # The predicate is broader than the role miss, so the message asks
+            # the role table itself rather than inferring the cause from the
+            # drop. A future cause reaching here gets the route-neutral wording
+            # instead of being reported as a missing role file.
+            if roles is not None and roles.reviewer_role(spec.model) is None:
+                reason = (
+                    f"which has no shipped {resolved.channel} reviewer role"
+                )
+            else:
+                reason = (
+                    "which this host drives in-session rather than opening as a "
+                    "subprocess"
+                )
+            print(
+                f"warning: review seat {name!r} resolves to the {resolved.channel} "
+                f"channel{at_model}, {reason}; dropping it from this panel",
+                file=sys.stderr,
+            )
             continue
         if any(existing[0] == name for existing in answer):
             raise WorkflowError("duplicate_seat", f"duplicate review seat {name!r}")
@@ -1207,6 +1278,9 @@ _FORMATTER_ACTION_KEYS = {
     "prompt_path", "ingress_path", "result_path", "submission_path",
     "timeout_seconds", "return_transport", "status", "ok", "diagnostic",
     "claim_id", "accepted_path", "accepted_sha256", "submission_sha256",
+    # The one field recovery may add: a ready action carries no diagnostic or
+    # claim, so a reroute has nowhere else to leave its evidence.
+    "rerouted_from",
 }
 _SYNTHESIS_ACTION_KEYS = {
     "action_id", "attempt_id", "ordinal", "kind", "driver", "seat",
@@ -1265,14 +1339,342 @@ def _authoritative_reviewer_prompt(
     )
 
 
+# Every model that has a shipped Cursor reviewer role, keyed by the EXACT model
+# string a seat resolves to. Keying by model, not by seat, is what makes a
+# config model override honest: repinning a seat to an unshipped string drops
+# that seat instead of binding the role file pinned to the old string. `auto` is
+# absent deliberately: it names no concrete model, so nothing can attribute the
+# answer to one.
+CURSOR_REVIEWER_AGENTS: dict[str, str] = {
+    "composer-2.5": "crew-reviewer",
+    "gpt-5.5-extra-high": "crew-reviewer",
+    "gemini-3.1-pro": "crew-reviewer",
+    "glm-5.2-max": "crew-reviewer",
+    "cursor-grok-4.6-xhigh": "crew-reviewer",
+}
+
+# The model the two Cursor support roles run at. First of the catalog's cursor
+# models in cost order: Cursor bills composer from the cheap bucket.
+CURSOR_SUPPORT_MODEL = "composer-2.5"
+
+# The two read-only tiers an action may be issued under. ENFORCED means
+# something mechanical stops the seat writing (a provider sandbox that refuses
+# it, a role whose tool list omits every write); ADVISORY means the read-only is
+# what the role prose or the adapter's posture asks for and nothing checks. The
+# tier is a property of the individual role or adapter, never of "native" or
+# "external" as a category: a Claude reviewer role carries unsandboxed Bash and
+# the agy adapter permits in-workspace writes, so each side ships both answers.
+# The distinction is stamped rather than flattened because the run record is
+# where a reader learns what actually constrained the seat that produced an
+# answer.
+ACCESS_ENFORCED = "read-only"
+ACCESS_ADVISORY = "read-only-advisory"
+ACCESS_PARENT = "parent-context"
+
+
+@dataclass(frozen=True)
+class HostRoles:
+    """The role names and support-role models one host can drive in-session."""
+
+    channel: str
+    scribe_role: str
+    scribe_model: str
+    formatter_role: str
+    formatter_model: str
+    total_reviewer_role: str | None
+    reviewer_agents: dict[str, str] | None
+    # How each in-session role is actually held to read-only. The run record
+    # stamps these verbatim, so a reader can tell a mechanically enforced
+    # boundary from one the role prose asks for. They are per ROLE, not per
+    # host: what decides the tier is whether the harness can stop that role
+    # writing, and one host can ship both answers.
+    reviewer_access: str
+    formatter_access: str
+
+    def reviewer_role(self, model: str | None) -> str | None:
+        """Return the reviewer role for ``model``, or None when none ships.
+
+        ``reviewer_agents=None`` marks a host whose reviewer role is TOTAL: any
+        model reaches the one name ``total_reviewer_role`` carries, because that
+        role file pins no model. Every role name lives in the table, so a new
+        host cannot inherit another host's name by leaving a field out.
+        """
+        if self.reviewer_agents is None:
+            return self.total_reviewer_role
+        return self.reviewer_agents.get(model or "")
+
+
+_HOST_ROLES: dict[str, HostRoles] = {
+    "claude": HostRoles(
+        channel="claude",
+        scribe_role="crew:scribe",
+        scribe_model="haiku",
+        formatter_role="crew:formatter",
+        formatter_model="haiku",
+        total_reviewer_role="crew:reviewer",
+        reviewer_agents=None,
+        # `agents/reviewer.md` is `tools: Read, Grep, Glob, Bash`. The Bash is
+        # for git inspection and the role is instructed never to mutate, but
+        # nothing sandboxes it, so this seat is read-only by CONVENTION and the
+        # record must not claim otherwise.
+        reviewer_access=ACCESS_ADVISORY,
+        # `agents/formatter.md` is `tools: Read`: a formatter that ignored its
+        # prose still could not write.
+        formatter_access=ACCESS_ENFORCED,
+    ),
+    "cursor": HostRoles(
+        channel="cursor",
+        scribe_role="crew-scribe",
+        scribe_model=CURSOR_SUPPORT_MODEL,
+        formatter_role="crew-formatter",
+        formatter_model=CURSOR_SUPPORT_MODEL,
+        total_reviewer_role=None,
+        reviewer_agents=CURSOR_REVIEWER_AGENTS,
+        # This host has no per-role tool field at all, so every in-session role
+        # inherits the launching session's tools. The adapters ship
+        # `readonly: true` and carry the discipline in prose, but no app-surface
+        # capture has tested that key, so neither role may claim the enforced
+        # tier.
+        reviewer_access=ACCESS_ADVISORY,
+        formatter_access=ACCESS_ADVISORY,
+    ),
+}
+
+# How each EXTERNAL channel is actually held to read-only, pinned per provider
+# the way the role tiers above are pinned to a role file's `tools:` line.
+# "External" is not itself a tier: what decides one is the posture the adapter
+# argv establishes, and the adapters do not all establish the same one.
+_CHANNEL_ACCESS: dict[str, str] = {
+    # `providers/codex.py` runs review seats at `--sandbox read-only`.
+    "codex": ACCESS_ENFORCED,
+    # `providers/cursor.py` runs review seats under `--mode plan`, which applies
+    # no edits (its module records that as verified).
+    "cursor": ACCESS_ENFORCED,
+    # `providers/claude.py` uses `--permission-mode plan` plus an `--allowedTools`
+    # list as its sole read-only boundary.
+    "claude": ACCESS_ENFORCED,
+    # `providers/agy.py` runs at `--sandbox`, which blocks OUT-of-workspace
+    # writes only; that module records in-workspace writes as an accepted
+    # residual, so nothing stops this seat mutating the repo it reviews.
+    "agy": ACCESS_ADVISORY,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class RoutePolicy:
+    """The routes ONE run may drive in-session: a host plus its opted-out channels.
+
+    Every route question this module asks (which roles exist, whether a seat is
+    admitted native, whether an external seat has anywhere to go) is answered
+    from this one value, so the answers cannot disagree across call sites. At
+    start it is resolved from the request and config; afterwards it is rebuilt
+    from the FROZEN identity, never from live config, so editing the config file
+    mid-run cannot change how an already-minted run is judged.
+    """
+
+    host: str
+    force_external: frozenset[str]
+
+    @classmethod
+    def resolve(cls, host: str, force_external: Iterable[str]) -> RoutePolicy:
+        return cls(host=host, force_external=frozenset(force_external))
+
+    @classmethod
+    def from_identity(cls, identity: Mapping) -> RoutePolicy:
+        return cls(
+            host=identity["host"],
+            force_external=frozenset(identity.get("force_external_channels") or ()),
+        )
+
+    def identity_value(self) -> list[str]:
+        """The JSON-stable form the run identity records (sorted, so the digest
+        does not depend on the order the operator listed the channels in)."""
+        return sorted(self.force_external)
+
+    def task_declared_native(self) -> str | None:
+        """The narrow Task-recipe channel, minus anything forced external.
+
+        The ROSTER split asks ``channels`` which names are native before the
+        per-seat resolution runs, so it has to be told about the opt-out too. A
+        split that called a forced channel native would be a third view of the
+        one routing fact the rest of this module keeps in a single place.
+        """
+        channel = channels.task_native_channel(self.host)
+        if channel is None or channel in self.force_external:
+            return None
+        return channel
+
+
+def _valid_force_external_channels(value: object) -> bool:
+    """Whether a frozen identity's forced-external list is well formed.
+
+    The shape rule is not restated here: the value is rebuilt through the same
+    mint path that wrote it, so one run's choice has exactly one on-disk
+    spelling and cannot present as two different identities."""
+    if not isinstance(value, list) or not all(
+        isinstance(entry, str) and entry in seats.CHANNEL_TO_LEGACY_KIND
+        for entry in value
+    ):
+        return False
+    return RoutePolicy(host="", force_external=frozenset(value)).identity_value() == value
+
+
+def native_roles(policy: RoutePolicy) -> HostRoles | None:
+    """Return the roles this workflow can drive under ``policy``, else None.
+
+    A forced-external channel answers None for the same reason a host with no
+    row does: this run drives nothing in-session on it, support roles included.
+    A formatter minted native against a role surface the operator has already
+    declared unusable would need a recovery call every run to reach the
+    parent-context route it should have been minted on.
+
+    It takes the POLICY rather than a host name so that no caller can ask this
+    question while holding only half the answer.
+    """
+    roles = _HOST_ROLES.get(policy.host)
+    if roles is None or roles.channel in policy.force_external:
+        return None
+    return roles
+
+
+def native_channel_for(spec: seats.SeatSpec, policy: RoutePolicy) -> str | None:
+    """Return the native channel this workflow can drive FOR ONE SEAT.
+
+    ``channels`` answers whether a channel is native on a host; this answers
+    whether the workflow can actually issue a native action for this seat,
+    which depends on the shipped role set. Declaring a native route for a seat
+    with no role would freeze it as a Task action and then issue that action
+    with no role to spawn.
+
+    A host absent from ``_HOST_ROLES`` answers None here even when it has a
+    channel row, so a host that gained a channel without roles declares nothing
+    native instead of declaring native and failing at mint. That makes the two
+    tables' agreement hold by construction; the test pinning their key sets
+    equal is the second line of defense, not the only one.
+
+    Admission is keyed on the ROLE MAP and does not consult the seat's own
+    ``via``: a seat whose model happens to match a role key for a channel it
+    cannot run on would be declared native here. What keeps that harmless is
+    ``channels.resolve_seat``, which honors this declaration only for the
+    channel it actually SELECTS from ``spec.via``, so a claude-via seat carrying
+    a colliding model string still resolves external. Any change to
+    ``resolve_seat`` that widens which channel the declaration applies to must
+    add the ``via`` check here, or a seat gets frozen native onto a channel it
+    was never routable on.
+    """
+    channel = channels.native_channel(policy.host)
+    if channel is None or channel in policy.force_external:
+        return None
+    roles = native_roles(policy)
+    if roles is None or roles.reviewer_role(spec.model) is None:
+        return None
+    return channel
+
+
+def has_no_route_here(
+    execution: channels.ResolvedExecution, policy: RoutePolicy
+) -> bool:
+    """Return True when ``execution`` names a route this run cannot take.
+
+    A seat that resolved EXTERNAL onto the host's own native channel has
+    nowhere to go under review's routing POLICY: a channel this host drives
+    in-session is not also opened as a subprocess from resolution. That is a
+    deliberate choice, not a missing binary (the CLI for that channel is
+    installed and authenticated on the hosts this applies to). Both consumers
+    ask THIS question so neither can answer it differently: roster resolution
+    drops such a seat before the freeze, and
+    drift reconstruction refuses to re-run an action frozen external before the
+    native route existed. Without the shared answer, an unmapped model at drift
+    time is indistinguishable from a host with no native channel at all, and the
+    stale action runs.
+
+    A channel the run forced external is exempt, which is what makes the opt-out
+    an escape hatch rather than a way to empty the roster: the whole point of
+    forcing it is to send those seats out as subprocesses.
+
+    The question is asked of the SELECTED channel only. A seat whose ``via``
+    named a second, runnable channel would still be dropped, which no shipped or
+    configurable row can reach today (a multi-entry ``via`` is truncated to one
+    at catalog load) and which errs toward refusing a seat rather than running
+    it somewhere it was not frozen for.
+    """
+    if execution.native or execution.channel in policy.force_external:
+        return False
+    return execution.channel == channels.native_channel(policy.host)
+
+
+def _require_native_role(
+    role: str | None,
+    *,
+    kind: str,
+    seat: str | None,
+    model: str | None,
+    host: str,
+) -> str:
+    """Return ``role``, refusing to mint a native action that has none.
+
+    A native action carries the role the host spawns; with no role there is
+    nothing to spawn and nothing that may stand in for it. Resolution already
+    keeps a roleless seat from being frozen native, so reaching here means the
+    two disagree, and the honest answer is a loud refusal rather than an action
+    the transport would have to improvise a role for.
+    """
+    if role is None:
+        raise WorkflowError(
+            "unresolved_native_role",
+            f"no native {kind} role resolves for seat {seat!r} at model {model!r} "
+            f"on host {host!r}; refusing to issue a native action with no role to spawn",
+        )
+    return role
+
+
+def _reviewer_access(roles: HostRoles | None, *, native: bool, channel: str) -> str:
+    """The read-only tier a reviewer action is issued under.
+
+    Mint and validation both read THIS, so a record can never be stamped with
+    one tier and judged against another literal somewhere else. Neither may
+    compute the tier inline, which is the whole reason this is a function.
+    """
+    if not native:
+        # An external seat is held by its own adapter's sandbox or permission
+        # mode, and those postures differ per provider. A channel with no row
+        # takes the weaker claim: under-claiming a boundary is safe, and a
+        # record that overstates one is the failure this table exists to stop.
+        return _CHANNEL_ACCESS.get(channel, ACCESS_ADVISORY)
+    # A native action with no role row is refused at mint and read as corrupt at
+    # validation, so this branch decides nothing. It claims the weaker tier
+    # anyway: an unreachable line must not be the one that overstates a boundary.
+    return roles.reviewer_access if roles is not None else ACCESS_ADVISORY
+
+
 def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
                      model: str, channel: str, driver: str, provider: str,
+                     policy: RoutePolicy,
                      timeout_seconds: int | None, prompt: str) -> dict:
+    native = driver == ActionDriver.NATIVE
+    roles = native_roles(policy)
+    reviewer_role = None
+    if native:
+        # Refuse BEFORE any path is prepared or written: a refusal that had
+        # already staged prompts would leave a run dir describing an action
+        # nobody minted.
+        reviewer_role = _require_native_role(
+            roles.reviewer_role(model) if roles is not None else None,
+            kind="reviewer", seat=seat, model=model, host=policy.host,
+        )
+        _require_native_role(
+            roles.scribe_role if roles is not None else None,
+            # The SCRIBE's own model: the transport is what would fail to spawn,
+            # and naming the reviewer's model here would send the reader looking
+            # at the wrong row of the role table.
+            kind="scribe", seat=seat,
+            model=roles.scribe_model if roles is not None else None,
+            host=policy.host,
+        )
     action_id = _action_id(_attempt_number(ref.attempt_id), "reviewer", ordinal)
     digest = _hash_action(action_id)
     root = run / "attempts" / ref.attempt_id
     prompt_path = root / "prompts" / f"reviewer-{ordinal:04d}.txt"
-    native = driver == ActionDriver.NATIVE
     transport_prompt = root / "transport" / f"scribe-{ordinal:04d}.txt"
     primary_ingress = root / "ingress" / "scribe" / f"{digest}.md"
     fallback_ingress = root / "ingress" / "host-write" / f"{digest}.md"
@@ -1307,14 +1709,21 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
         "action_id": action_id, "attempt_id": ref.attempt_id, "ordinal": ordinal,
         "kind": ActionKind.REVIEWER, "driver": driver, "seat": seat,
         "provider": provider,
-        "role": "crew:reviewer" if native else None, "model": model,
-        "channel": channel, "access": "read-only", "prompt_path": str(prompt_path),
+        "role": reviewer_role,
+        "model": model,
+        "channel": channel,
+        "access": _reviewer_access(roles, native=native, channel=channel),
+        "prompt_path": str(prompt_path),
         "ingress_path": None,
         "result_path": None if native else str(result_path),
         "submission_path": str(submission_path) if native else None,
         "timeout_seconds": None if native else timeout_seconds,
         "return_transport": {
-            "primary": {"kind": "scribe", "role": "crew:scribe", "model": "haiku",
+            # Reached only when the mint above found a role, which it cannot do
+            # without a role table, so there is no roleless case to guard here.
+            "primary": {"kind": "scribe",
+                        "role": roles.scribe_role,
+                        "model": roles.scribe_model,
                         "prompt_template_path": str(transport_prompt),
                         "data_marker": "{{REVIEWER_RETURN_DATA}}",
                         "ingress_path": str(primary_ingress)},
@@ -1326,9 +1735,73 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
     }
 
 
+def _formatter_route(roles: HostRoles | None) -> dict:
+    """Return the route fields a formatter action carries for ``roles``.
+
+    ``None`` means no native role is in play: that covers a host with no role
+    row and an action rerouted back to the parent after its native spawn was
+    lost. Minting, rerouting, and validation all read this one table, so a
+    rerouted action cannot end up describing a route no mint could produce.
+    """
+    if roles is None:
+        return {
+            "driver": ActionDriver.PARENT, "role": None, "model": None,
+            "channel": None, "access": ACCESS_PARENT,
+        }
+    return {
+        "driver": ActionDriver.NATIVE, "role": roles.formatter_role,
+        "model": roles.formatter_model, "channel": roles.channel,
+        "access": roles.formatter_access,
+    }
+
+
+def _reroute_lost_formatter(action: dict) -> bool:
+    """Send a formatter whose native spawn was lost back out to the parent.
+
+    A repair step must never be the one thing that makes the host a hard
+    dependency. Every roster on a host with a role row mints a native formatter,
+    including one whose seats all run external and need nothing from the host,
+    and a support model the host will not spawn would then cost that seat its
+    repair for no reason of its own. The parent-context route is the one codex
+    and unknown hosts already take, so the fallback is a shipped path rather than
+    a new one.
+
+    A formatter is the one action that may change route this way. A reviewer
+    answer is attributed to the model that gave it, so a lost reviewer settles
+    failed rather than moving transports. The formatter only reshapes an answer
+    already given, and its output must still satisfy the findings parser before
+    it is accepted. Paths and the action id are untouched, so nothing
+    re-derives.
+
+    One reroute at most, structurally: the rerouted action is PARENT, and the
+    only recovery code a parent formatter matches settles it failed.
+    """
+    if action.get("kind") != ActionKind.FORMATTER \
+            or action.get("driver") != ActionDriver.NATIVE:
+        return False
+    action.update(
+        **_formatter_route(None),
+        rerouted_from="native",
+        status="ready", ok=None, diagnostic=None, claim_id=None,
+    )
+    return True
+
+
 def _formatter_action(wf: dict, run: Path, source: dict, result: ProviderResult) -> dict:
     ref = parse_review_ref(wf["ref"])
     ordinal = int(source["ordinal"])
+    policy = RoutePolicy.from_identity(wf["workflow_identity"])
+    roles = native_roles(policy)
+    if roles is not None:
+        # Same refusal point as the reviewer mint: no paths prepared yet.
+        # DEFENSIVE SYMMETRY, not a live path: `formatter_role` is non-optional
+        # on every shipped row, so this cannot fire today. It is here so a host
+        # row added with no formatter refuses instead of minting an action with
+        # nothing to spawn, which is what the reviewer mint beside it does.
+        _require_native_role(
+            roles.formatter_role, kind="formatter", seat=source["seat"],
+            model=roles.formatter_model, host=policy.host,
+        )
     action_id = _action_id(_attempt_number(ref.attempt_id), "formatter", ordinal)
     digest = _hash_action(action_id)
     root = run / "attempts" / ref.attempt_id
@@ -1352,18 +1825,19 @@ def _formatter_action(wf: dict, run: Path, source: dict, result: ProviderResult)
         prompts.standalone_formatter(result.output),
         f"formatter action {action_id} prompt",
     )
-    native = wf["workflow_identity"]["host"] == "claude"
     return {
         "action_id": action_id, "attempt_id": ref.attempt_id, "ordinal": ordinal,
-        "kind": ActionKind.FORMATTER, "driver": ActionDriver.NATIVE if native else ActionDriver.PARENT,
+        "kind": ActionKind.FORMATTER,
+        **_formatter_route(roles),
         "source_action_id": source["action_id"], "seat": source["seat"],
-        "role": "crew:formatter" if native else None, "model": "haiku" if native else None,
-        "channel": "claude" if native else None, "access": "read-only" if native else "parent-context",
         "prompt_path": str(prompt_path), "ingress_path": str(ingress_path),
         "result_path": None, "submission_path": str(submission_path),
         "timeout_seconds": None, "return_transport": None, "status": "ready", "ok": None,
         "diagnostic": None, "claim_id": None, "accepted_path": None,
         "accepted_sha256": None, "submission_sha256": None,
+        # Every mint starts clean: only recovery sets this, and a later attempt
+        # mints its own formatter rather than inheriting an earlier reroute.
+        "rerouted_from": None,
     }
 
 
@@ -1400,7 +1874,7 @@ def _synthesis_action(wf: dict, run: Path) -> dict:
         "action_id": action_id, "attempt_id": ref.attempt_id, "ordinal": 0,
         "kind": ActionKind.SYNTHESIS, "driver": ActionDriver.PARENT,
         "seat": None, "role": None, "model": None, "channel": None,
-        "access": "parent-context", "prompt_path": str(prompt_path),
+        "access": ACCESS_PARENT, "prompt_path": str(prompt_path),
         "ingress_path": str(ingress_path),
         "result_path": None, "submission_path": str(submission_path),
         "timeout_seconds": None, "return_transport": None, "status": "ready",
@@ -2133,12 +2607,13 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
     if (
         not isinstance(identity, dict)
         or set(identity) != {
-            "kind", "host", "prompt_mode", "timeout_seconds",
-            "provider_timeouts", "prompt_metadata_sha256",
+            "kind", "host", "force_external_channels", "prompt_mode",
+            "timeout_seconds", "provider_timeouts", "prompt_metadata_sha256",
         }
         or identity.get("kind") != "standalone_review"
         or not isinstance(identity.get("host"), str)
         or identity.get("host") not in HOSTS
+        or not _valid_force_external_channels(identity.get("force_external_channels"))
         or not isinstance(identity.get("prompt_mode"), str)
         or identity.get("prompt_mode") not in {"standard", "inline_diff"}
         or not isinstance(identity.get("timeout_seconds"), int)
@@ -2182,6 +2657,7 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
     ):
         _corrupt_workflow("workflow target metadata is invalid")
     roster = wf["roster"]
+    host_roles = native_roles(RoutePolicy.from_identity(identity))
     signatures = record.get("seat_signatures")
     seat_channels = record.get("seat_channels")
     provider_timeouts = identity.get("provider_timeouts")
@@ -2226,7 +2702,11 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
         timeout_value = provider_timeouts[seat]
         if signature["kind"] == "task":
             expected_task.append(seat)
-            if channel != "claude" or timeout_value is not None:
+            if (
+                host_roles is None
+                or channel != host_roles.channel
+                or timeout_value is not None
+            ):
                 _corrupt_workflow(f"native seat authority for {seat!r} is invalid")
         else:
             expected_external.append(seat)
@@ -2290,13 +2770,25 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
             signature = signatures[seat]
             native = signature["kind"] == "task"
             channel = seat_channels[seat]
+            # Keyed off the FROZEN model, so a live catalog repin surfaces as
+            # route drift where that is judged, not as a corrupt record here.
+            expected_role = (
+                host_roles.reviewer_role(signature["model"])
+                if native and host_roles is not None
+                else None
+            )
             if (
                 action["driver"] != (ActionDriver.NATIVE if native else ActionDriver.EXTERNAL)
+                # A native action with no role has nothing to spawn. Resolution
+                # never mints one; a reloaded record could still carry one.
+                or (native and expected_role is None)
                 or action["model"] != signature["model"]
                 or action["channel"] != channel
                 or action["provider"] != seats.CHANNEL_TO_LEGACY_KIND[channel]
-                or action["role"] != ("crew:reviewer" if native else None)
-                or action["access"] != "read-only"
+                or action["role"] != expected_role
+                or action["access"] != _reviewer_access(
+                    host_roles, native=native, channel=channel,
+                )
                 or action["timeout_seconds"] != provider_timeouts[seat]
                 or action["ingress_path"] is not None
             ):
@@ -2325,8 +2817,9 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
                         "data_marker", "ingress_path",
                     }
                     or transport["primary"].get("kind") != "scribe"
-                    or transport["primary"].get("role") != "crew:scribe"
-                    or transport["primary"].get("model") != "haiku"
+                    or host_roles is None
+                    or transport["primary"].get("role") != host_roles.scribe_role
+                    or transport["primary"].get("model") != host_roles.scribe_model
                     or transport["primary"].get("data_marker") != "{{REVIEWER_RETURN_DATA}}"
                     or not isinstance(transport.get("fallback"), dict)
                     or set(transport["fallback"]) != {"kind", "ingress_path"}
@@ -2358,13 +2851,13 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
             _validate_issued_path(run, action["submission_path"],
                                   root / "submissions" / f"{digest}.json",
                                   f"formatter action {action_id} submission")
-            native = identity["host"] == "claude"
+            rerouted = action["rerouted_from"]
+            # Only a host that could mint a native formatter can have lost one.
+            if rerouted not in (None, "native") or (rerouted is not None and host_roles is None):
+                _corrupt_workflow(f"formatter action {action_id!r} has an invalid reroute mark")
+            expected_route = _formatter_route(None if rerouted else host_roles)
             if (
-                action["driver"] != (ActionDriver.NATIVE if native else ActionDriver.PARENT)
-                or action["role"] != ("crew:formatter" if native else None)
-                or action["model"] != ("haiku" if native else None)
-                or action["channel"] != ("claude" if native else None)
-                or action["access"] != ("read-only" if native else "parent-context")
+                any(action[field] != value for field, value in expected_route.items())
                 or action["result_path"] is not None
                 or action["timeout_seconds"] is not None
                 or action["return_transport"] is not None
@@ -2391,7 +2884,7 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
                     "seat", "role", "model", "channel", "result_path",
                     "timeout_seconds", "return_transport",
                 ))
-                or action["access"] != "parent-context"
+                or action["access"] != ACCESS_PARENT
             ):
                 _corrupt_workflow(f"synthesis action {action_id!r} violates its frozen route")
         _validate_action_lifecycle(action, run)
@@ -2511,9 +3004,18 @@ def _matching_pointer_identity(
     target_base: str,
     signatures: dict,
     host: str,
+    force_external_channels: list[str],
     prompt_mode: str,
     prompt_metadata_sha256: str,
 ) -> dict | None:
+    """The pointed-at identity when it describes THIS start, else None.
+
+    The route policy is part of the match key, not merely part of the identity
+    it returns. Two starts on the same target with the same seats can differ
+    only in which channels they forced external, and the returned identity is
+    what the new start adopts its timeout envelope from; matching without the
+    policy would carry one route's envelope into the other's run.
+    """
     pointer = read_standalone_pointer(session)
     if pointer is None:
         return None
@@ -2537,6 +3039,7 @@ def _matching_pointer_identity(
         and run.get("target_base") == target_base
         and run.get("seat_signatures") == signatures
         and identity.get("host") == host
+        and identity.get("force_external_channels") == force_external_channels
         and identity.get("prompt_mode") == prompt_mode
         and identity.get("prompt_metadata_sha256") == prompt_metadata_sha256
     ):
@@ -2548,6 +3051,11 @@ def _matching_pointer_identity(
 def start_review(request: ReviewRequest) -> ReviewStep:
     if request.timeout_seconds is not None and request.timeout_seconds <= 0:
         raise WorkflowError("invalid_timeout", "timeout must be a positive integer")
+    # Both refusals above and here are pure argument checks, so they run before
+    # the target work a mistyped channel name would otherwise pay for. Neither
+    # writes anything, so the zero-write behavior noted below is unchanged.
+    host = _host()
+    policy = _resolve_route_policy(request, host)
     base = request.base or "main"
     resolved_intent = _resolve_target_intent(request.target_input, base)
     if resolved_intent is None:
@@ -2559,7 +3067,7 @@ def start_review(request: ReviewRequest) -> ReviewStep:
             "resolved target carries invalid canonical prompt metadata",
         )
     snapshot_name = review_runs.snapshot_name(target.kind)
-    host, session = _host(), _session(request)
+    session = _session(request)
     # Validate the existing prefix before any seat/provider work, but retain
     # the longstanding zero-write behavior for requests rejected later.
     _guard_review_path(
@@ -2568,7 +3076,7 @@ def start_review(request: ReviewRequest) -> ReviewStep:
         allow_missing=True,
     )
     target_state = "dirty" if targets.is_dirty() else "clean"
-    resolved = _resolve_seats(request, host)
+    resolved = _resolve_seats(request, policy)
     signatures: dict[str, dict] = {}
     for name, spec, execution in resolved:
         signatures[name] = {"kind": "task" if execution.native else "subprocess", "model": spec.model or name}
@@ -2601,6 +3109,7 @@ def start_review(request: ReviewRequest) -> ReviewStep:
             target_base=target_base,
             signatures=signatures,
             host=host,
+            force_external_channels=policy.identity_value(),
             prompt_mode=prompt_mode,
             prompt_metadata_sha256=prompt_metadata_sha,
         )
@@ -2612,6 +3121,25 @@ def start_review(request: ReviewRequest) -> ReviewStep:
         print(
             f"warning: standalone provider timeout {raw_warning}s exceeds the "
             "540s provider budget; using 540s with 60s settlement grace",
+            file=sys.stderr,
+        )
+    if frozen is None and host == "cursor" and any(
+        execution.native for _name, _spec, execution in resolved
+    ):
+        # Named where the run is minted rather than left to the docs: a bare
+        # `crew review` typed into Cursor's integrated terminal mints in-session
+        # seats only a Cursor agent session can spawn, and by the time nothing
+        # answers the operator has already spent the panel. Gating on a seat
+        # actually resolving native covers the suppression too: with the channel
+        # forced external (or an all-external roster) none does, so there is no
+        # failure here to point at. A start that adopts a frozen identity stays
+        # silent; a start naming its own `--timeout` never consults the pointer,
+        # so it re-emits, which is the same shape the warning above has.
+        print(
+            "note: this panel issues in-session cursor seats, which nothing "
+            "spawns outside a Cursor agent session; set [review]."
+            'force_external_channels = ["cursor"] (or pass --force-external '
+            "cursor) to run them through the cursor CLI instead",
             file=sys.stderr,
         )
     current_provider_timeouts = {
@@ -2646,6 +3174,10 @@ def start_review(request: ReviewRequest) -> ReviewStep:
     identity = {
         "kind": "standalone_review",
         "host": host,
+        # Provenance: which channels this run declined to drive in-session. Every
+        # later step rebuilds its route policy from here, so the record is what
+        # the run is judged by, not merely a note about it.
+        "force_external_channels": policy.identity_value(),
         "prompt_mode": prompt_mode,
         "timeout_seconds": timeout,
         "provider_timeouts": provider_timeouts,
@@ -2709,6 +3241,7 @@ def start_review(request: ReviewRequest) -> ReviewStep:
                     else ActionDriver.EXTERNAL
                 ),
                 provider=seats.CHANNEL_TO_LEGACY_KIND[execution.channel],
+                policy=policy,
                 timeout_seconds=provider_timeouts[name],
                 prompt=_authoritative_reviewer_prompt(
                     run,
@@ -2783,8 +3316,14 @@ def claim_review_action(request: ClaimRequest) -> ClaimResponse:
                              _work_item(action, request.ref) if claimed_now else None)
 
 
-def _frozen_external_provider(action: dict):
-    """Reconstruct one action's live route and require its frozen identity."""
+def _frozen_external_provider(action: dict, policy: RoutePolicy):
+    """Reconstruct one action's live route and require its frozen identity.
+
+    ``policy`` comes from the run's FROZEN identity, not from live config: the
+    host is separately proven to still match, but a config file edited between
+    the mint and this call would otherwise silently change how the frozen route
+    is judged.
+    """
     seat_name = action.get("seat")
     spec = seats.seat_spec(seat_name)
     try:
@@ -2793,7 +3332,7 @@ def _frozen_external_provider(action: dict):
                 spec,
                 capabilities=channels.active_capabilities(),
                 # Drift is judged against the same view that froze the run.
-                declared_native=channels.task_native_channel(_host()),
+                declared_native=native_channel_for(spec, policy),
             )
             if spec is not None
             else None
@@ -2818,6 +3357,11 @@ def _frozen_external_provider(action: dict):
         action.get("driver") == ActionDriver.EXTERNAL
         and execution is not None
         and not execution.native
+        # An unmapped model reads as "no native route for this seat", which is
+        # the same shape as "this host has no native channel". Asking the shared
+        # question keeps a stale external action on the host's own channel from
+        # running just because its model has no role.
+        and not has_no_route_here(execution, policy)
         and execution.engine_runnable
         and execution.channel == action.get("channel")
         and selected_provider == action.get("provider")
@@ -2911,7 +3455,9 @@ def execute_external_review(ref: ReviewRef, action_id: str) -> ReviewStep:
             raise WorkflowError("invalid_action", "external reviewer action is not executable")
         seat_name, model = action["seat"], action["model"]
         timeout, result_path = int(action["timeout_seconds"]), Path(action["result_path"])
-        provider = _frozen_external_provider(action)
+        provider = _frozen_external_provider(
+            action, RoutePolicy.from_identity(wf["workflow_identity"])
+        )
         try:
             available, availability_diagnostic = provider.is_available()
             if not isinstance(available, bool) or not isinstance(availability_diagnostic, str):
@@ -3281,6 +3827,8 @@ def recover_review_action(request: RecoveryRequest) -> ReviewStep:
             raise WorkflowError("invalid_recovery", "diagnostic code does not match the claimed action")
         _reconcile_external_results_locked(wf, run)
         if action.get("status") == "claimed":
+            if _reroute_lost_formatter(action):
+                return _advance_locked(wf, run)
             action.update(status="settled", ok=False, diagnostic=request.diagnostic_code)
         return _advance_locked(wf, run)
 
@@ -3429,6 +3977,9 @@ def retry_review(request: RetryRequest) -> ReviewStep:
                     channel=source["channel"],
                     driver=source["driver"],
                     provider=source["provider"],
+                    # The FROZEN route, never live detection or live config: a
+                    # retry reissues the same route the run was minted with.
+                    policy=RoutePolicy.from_identity(wf["workflow_identity"]),
                     timeout_seconds=(
                         source.get("timeout_seconds")
                         if source["driver"] == ActionDriver.EXTERNAL

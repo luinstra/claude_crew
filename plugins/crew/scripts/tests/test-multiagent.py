@@ -73,6 +73,20 @@ from multiagent.providers.agy import (  # noqa: E402
 # suite before any test body runs; detection occurs at call time, and tests that
 # need another host override locally. This pin deliberately leaks into every
 # _clean_env child and clobbers any dev-shell value by design.
+# The marker pops matter for the child processes that drop the override: a
+# suite run from inside Cursor or Codex inherits that harness's own markers, and
+# an inherited marker would decide the host wherever the override is absent.
+for _ambient_marker in (
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CODEX_THREAD_ID",
+    "CODEX_SANDBOX_NETWORK_DISABLED",
+    "CURSOR_AGENT",
+    "CURSOR_CONVERSATION_ID",
+    "CURSOR_INVOKED_AS",
+    "CURSOR_RIPGREP_PATH",
+):
+    os.environ.pop(_ambient_marker, None)
 os.environ["CREW_HOST"] = "claude"
 
 
@@ -1639,29 +1653,61 @@ def test_host_detection():
               })))
 
         markers = channels._CODEX_HOST_MARKERS
-        if not markers:
-            print("codex marker table empty (Phase 0 pending or contingency); "
-                  "markers-win case skipped")
-        else:
-            marker = markers[0]
-            check("Codex markers win over Claude markers",
-                  channels._detect_host({marker: "1", "CLAUDECODE": "1"}) == "codex",
-                  "codex", repr(channels._detect_host({marker: "1", "CLAUDECODE": "1"})))
-            check("empty-valued Codex marker counts as absent",
-                  channels._detect_host({marker: "", "CLAUDECODE": "1"}) == "claude",
-                  "claude", repr(channels._detect_host({marker: "", "CLAUDECODE": "1"})))
+        # Both marker tables ship populated, so assert the population rather
+        # than skipping on an empty one: a skip is what hid the cursor/claude
+        # collision below until it was reachable in an ordinary setup.
+        check("codex marker table names the observed host markers",
+              markers == ("CODEX_THREAD_ID", "CODEX_SANDBOX_NETWORK_DISABLED"),
+              "('CODEX_THREAD_ID', 'CODEX_SANDBOX_NETWORK_DISABLED')", repr(markers))
+        marker = markers[0]
+        check("Codex markers win over Claude markers",
+              channels._detect_host({marker: "1", "CLAUDECODE": "1"}) == "codex",
+              "codex", repr(channels._detect_host({marker: "1", "CLAUDECODE": "1"})))
+        check("empty-valued Codex marker counts as absent",
+              channels._detect_host({marker: "", "CLAUDECODE": "1"}) == "claude",
+              "claude", repr(channels._detect_host({marker: "", "CLAUDECODE": "1"})))
 
         cursor_markers = channels._CURSOR_HOST_MARKERS
-        if not cursor_markers:
-            print("cursor marker table empty; marker-win case skipped")
-        else:
-            cursor_marker = cursor_markers[0]
-            check("Cursor markers win over Claude markers",
-                  channels._detect_host({cursor_marker: "1", "CLAUDECODE": "1"}) == "cursor",
-                  "cursor", repr(channels._detect_host({cursor_marker: "1", "CLAUDECODE": "1"})))
-            check("empty-valued Cursor marker counts as absent",
-                  channels._detect_host({cursor_marker: "", "CLAUDECODE": "1"}) == "claude",
-                  "claude", repr(channels._detect_host({cursor_marker: "", "CLAUDECODE": "1"})))
+        # Pinned by name, not merely non-empty: an empty table sends this host
+        # back to `unknown`, where every native route is unreachable.
+        check("cursor marker table names the observed agent-shell markers",
+              cursor_markers == ("CURSOR_AGENT", "CURSOR_CONVERSATION_ID"),
+              "('CURSOR_AGENT', 'CURSOR_CONVERSATION_ID')", repr(cursor_markers))
+        check("every cursor marker on its own detects the cursor host",
+              all(channels._detect_host({name: "1"}) == "cursor" for name in cursor_markers),
+              "cursor for each marker",
+              repr([channels._detect_host({name: "1"}) for name in cursor_markers]))
+        cursor_marker = cursor_markers[0]
+        # Claude Code launched from a Cursor terminal carries both names; the
+        # executing harness is Claude Code. Asserted in both dict orders so the
+        # answer cannot come from insertion order.
+        check("Claude markers outrank Cursor markers",
+              channels._detect_host({cursor_marker: "1", "CLAUDECODE": "1"}) == "claude"
+              and channels._detect_host({"CLAUDECODE": "1", cursor_marker: "1"}) == "claude",
+              "claude in both key orders",
+              repr((channels._detect_host({cursor_marker: "1", "CLAUDECODE": "1"}),
+                    channels._detect_host({"CLAUDECODE": "1", cursor_marker: "1"}))))
+        check("Codex markers outrank Cursor markers",
+              channels._detect_host({marker: "1", cursor_marker: "1"}) == "codex"
+              and channels._detect_host({cursor_marker: "1", marker: "1"}) == "codex",
+              "codex in both key orders",
+              repr((channels._detect_host({marker: "1", cursor_marker: "1"}),
+                    channels._detect_host({cursor_marker: "1", marker: "1"}))))
+        check("all three marker tiers together resolve to codex",
+              channels._detect_host(
+                  {marker: "1", cursor_marker: "1", "CLAUDECODE": "1"}) == "codex"
+              and channels._detect_host(
+                  {"CLAUDECODE": "1", cursor_marker: "1", marker: "1"}) == "codex",
+              "codex in both key orders",
+              repr((channels._detect_host(
+                        {marker: "1", cursor_marker: "1", "CLAUDECODE": "1"}),
+                    channels._detect_host(
+                        {"CLAUDECODE": "1", cursor_marker: "1", marker: "1"}))))
+        # Paired against no other marker: with claude now above cursor, an
+        # empty cursor marker beside CLAUDECODE would read claude either way.
+        check("empty-valued Cursor marker counts as absent",
+              channels._detect_host({cursor_marker: ""}) == "unknown",
+              "unknown", repr(channels._detect_host({cursor_marker: ""})))
 
         check("Codex and Cursor marker tables are disjoint when populated",
               not set(channels._CODEX_HOST_MARKERS) & set(channels._CURSOR_HOST_MARKERS),
@@ -2080,6 +2126,23 @@ def test_registry():
     check("CURSOR_SEATS pins cursor-grok to cursor-grok-4.6-xhigh",
           CURSOR_SEATS.get("cursor-grok").model == "cursor-grok-4.6-xhigh",
           "cursor-grok-4.6-xhigh", str(CURSOR_SEATS.get("cursor-grok")))
+    # Every cursor pin, not just the one that was caught degrading. These are
+    # the exact ids `cursor-agent --list-models` advertises; recheck them
+    # whenever the provider ships a new model generation, because a retired id
+    # is fuzzy-matched down instead of erroring.
+    CURSOR_CATALOGUED_MODELS = {
+        "cursor-gpt": "gpt-5.5-extra-high",
+        "cursor-gemini": "gemini-3.1-pro",
+        "cursor-glm": "glm-5.2-max",
+        "cursor-grok": "cursor-grok-4.6-xhigh",
+        "cursor-auto": "auto",
+        "cursor-composer": "composer-2.5",
+    }
+    check("every cursor seat pins an exact catalogued model slug",
+          {name: spec.model for name, spec in CURSOR_SEATS.items()}
+          == CURSOR_CATALOGUED_MODELS,
+          str(CURSOR_CATALOGUED_MODELS),
+          str({name: spec.model for name, spec in CURSOR_SEATS.items()}))
     # Codex model-seats mirror cursor: one CodexProvider per CODEX_SEATS entry,
     # each pinned to its model (codex + codex-luna default, codex-terra opt-in).
     CODEX_SEATS = shipped_seats("codex")
@@ -7777,7 +7840,8 @@ def test_persist_seat_doc_sync():
             all_options = (
                 '"${CLAUDE_PLUGIN_ROOT}/crew" review '
                 "--session-id '<session-id>' --base '<base>' --panel '<panel>' "
-                "--seats '<seats>' --timeout '<seconds>' --inline-diff -- '<target>'"
+                "--seats '<seats>' --timeout '<seconds>' "
+                "--force-external '<channels>' --inline-diff -- '<target>'"
             )
             check("commands/review.md pins no-option start with target after --",
                   no_options in start_lines,
@@ -7808,7 +7872,8 @@ def test_persist_seat_doc_sync():
                   "$ARGUMENTS" in text
                   and all(flag in text for flag in (
                       "`--panel VALUE`", "`--seats VALUE`", "`--base VALUE`",
-                      "`--timeout VALUE`", "`--inline-diff`",
+                      "`--timeout VALUE`", "`--force-external VALUE`",
+                      "`--inline-diff`",
                   ))
                   and "Use the empty string as the target" in normalized_text
                   and "ask the returned `question` verbatim" in normalized_text
@@ -7832,7 +7897,10 @@ def test_persist_seat_doc_sync():
                   "missing executable external/native overlap contract")
             check("commands/review.md distinguishes primary scribe and fallback transport",
                   "replace its one exact `{{REVIEWER_RETURN_DATA}}` marker" in normalized_text
-                  and "fresh bare `crew:scribe` Task" in normalized_text
+                  # The transport role is an ISSUED value, so the recipe names
+                  # the channel to invoke on, never a host's role literal.
+                  and "fresh bare Task on the same channel the reviewer used" in normalized_text
+                  and "crew:scribe" not in text
                   and "never run the scribe against the fallback path" in normalized_text
                   and "replace BOTH" in normalized_text
                   and "return_transport.fallback.ingress_path" in normalized_text
@@ -7875,17 +7943,41 @@ def test_persist_seat_doc_sync():
             forbidden_task_args = (
                 "name=", "team_name=", "background=", "resume=", "continuation=",
             )
+            # One fence per native channel: claude and cursor each get their own
+            # spawn line for all three roles, so a change to one channel's
+            # mechanic cannot silently retarget the other.
+            native_channel_branches = (
+                "With `work_item.channel` = `claude`, spawn a reviewer with exactly:",
+                "With `work_item.channel` = `cursor`, spawn a reviewer with exactly:",
+                "With `work_item.channel` = `claude`, spawn a native formatter with exactly:",
+                "With `work_item.channel` = `cursor`, spawn a native formatter with exactly:",
+                "When that reviewer's `channel` is `claude`, invoke exactly:",
+                "When that reviewer's `channel` is `cursor`, invoke exactly:",
+            )
             check("commands/review.md pins exact standalone native Task calls",
-                  all(text.count(f"`{task}`") == 1 for task in native_tasks)
+                  all(text.count(f"`{task}`") == 2 for task in native_tasks)
+                  and all(text.count(branch) == 1 for branch in native_channel_branches)
                   and all(forbidden not in task
                           for task in native_tasks for forbidden in forbidden_task_args),
-                  "one exact reviewer, formatter, and substituted-scribe call",
+                  "one exact reviewer, formatter, and substituted-scribe call per native channel",
                   "missing or altered native Task call")
+            from multiagent import channels as _channels
+            check("commands/review.md branches only on issued values",
+                  "CREW_HOST" not in text
+                  and all(marker not in text for marker in (
+                      *_channels.codex_host_markers(),
+                      *_channels.cursor_host_markers(),
+                      "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+                  ))
+                  and "Branch on the issued `channel` value, never on a guess "
+                      "about which harness is running" in normalized_text,
+                  "channel-keyed branches with no host detection",
+                  "host detection leaked into the driver")
             check("commands/review.md keeps reviewer/formatter reference-only and scribe inline",
                   "For native reviewer and native formatter Tasks only" in normalized_text
                   and "must not Read or inline the prompt contents" in normalized_text
                   and "those Tasks receive the issued path by reference" in normalized_text
-                  and "scribe is the required exception because it lacks Read" in normalized_text
+                  and "scribe is the required exception because it does not read the file itself" in normalized_text
                   and "bare foreground one-shot" in normalized_text
                   and "The Task RESULT is the sole completion signal" in text
                   and "landed file and hash remain the result authority" in normalized_text
@@ -7918,9 +8010,21 @@ def test_persist_seat_doc_sync():
                 "parent formatter → `parent_formatter_lost`",
                 "parent synthesis → `parent_synthesis_lost`",
             )
+            # Two pins, not one count: the mapping BULLETS are exactly five, and
+            # every `*_lost` code cited anywhere in the file is one of those five.
+            # Prose may then name a code (the reroute rule cites the one that
+            # settles a parent formatter) without inventing a sixth.
+            mapping_bullets = [
+                line for line in text.splitlines()
+                if line.startswith("- ") and "_lost`" in line
+            ]
+            cited_codes = set(re.findall(r"`([a-z_]+_lost)`", text))
             check("commands/review.md pins exactly five recovery mappings",
                   all(pair in text for pair in recovery_pairs)
-                  and text.count("_lost`") == 5,
+                  and len(mapping_bullets) == 5
+                  and cited_codes == {
+                      pair.split("`")[1] for pair in recovery_pairs
+                  },
                   "five exact action/driver diagnostics", "missing recovery mapping")
             check("commands/review.md separates seat retry from synthesis restart",
                   "Retry pending reviewer seats only on explicit user request" in text
@@ -20150,13 +20254,28 @@ def test_channel_source_gates():
                 if isinstance(value, ast.Constant) and isinstance(value.value, str):
                     docstrings.add(id(value))
 
-    def enclosing_function(node):
+    def enclosing_owner(node):
+        """Name the function a literal sits in, else its module-level table.
+
+        A function always wins, so a local name inside one still reports the
+        function; the assignment fallback exists only for a literal that no
+        function encloses.
+        """
+        assigned = None
         parent = parents.get(id(node))
         while parent is not None:
             if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 return parent.name
+            if assigned is None and isinstance(parent, (ast.Assign, ast.AnnAssign)):
+                targets = (
+                    parent.targets if isinstance(parent, ast.Assign)
+                    else [parent.target]
+                )
+                named = [t.id for t in targets if isinstance(t, ast.Name)]
+                if named:
+                    assigned = named[0]
             parent = parents.get(id(parent))
-        return None
+        return assigned
 
     literal_owners = []
     for node in ast.walk(channels_tree):
@@ -20165,15 +20284,15 @@ def test_channel_source_gates():
             and node.value == "claude"
             and id(node) not in docstrings
         ):
-            literal_owners.append(enclosing_function(node))
+            literal_owners.append(enclosing_owner(node))
     check(
         "native channel literals stay inside the channel resolver definitions",
         set(literal_owners) <= {
-            "channel_table", "native_channel", "task_native_channel",
-            "current_host", "_detect_host",
+            "_NATIVE_CHANNELS", "channel_table", "native_channel",
+            "task_native_channel", "current_host", "_detect_host",
         },
-        "only channel_table/native_channel/task_native_channel/"
-        "current_host/_detect_host",
+        "only _NATIVE_CHANNELS/channel_table/native_channel/"
+        "task_native_channel/current_host/_detect_host",
         repr(literal_owners),
     )
 

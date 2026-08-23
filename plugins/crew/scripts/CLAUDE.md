@@ -34,15 +34,114 @@ The engine powers `/crew:review`, `/crew:debate`, and the review steps of
 `review_workflow.py`; its Markdown is only a host transport for issued actions.
 Build and measure-twice still use `review-prep`. Both paths resolve each catalog
 seat against the current host: Claude seats are native Task seats on a Claude
-host and external `claude` CLI seats elsewhere; codex, agy, and cursor rows
-remain external provider seats. A missing external CLI produces a named skipped
-result.
+host and external `claude` CLI seats elsewhere; codex and agy rows are always
+external provider seats. Cursor rows are external everywhere EXCEPT standalone
+review on a Cursor host, where `review_workflow` issues them natively; the
+`review-prep` paths keep them external. A missing external CLI produces a named
+skipped result.
+
+**Standalone review's per-seat native admission.** `review_workflow` declares
+its route per SEAT (`native_channel_for`), not per host, because a seat resolved
+native is frozen `kind=task` before anything consults the role map. Every route
+question is asked of ONE `RoutePolicy` (the host plus the channels this run
+forced external), resolved once at start and rebuilt from the FROZEN identity
+afterwards, so no two call sites can hold half the answer and live config cannot
+change how an already-minted run is judged. On a Cursor
+host a cursor-channel seat is native only when `CURSOR_REVIEWER_AGENTS` has its
+exact model string; a seat with no shipped role gets ONE stderr warning naming
+the seat and its model and is DROPPED from the roster before the freeze, so the
+quorum denominator counts only seats that run and an all-dropped roster fails
+with the existing `no_seats` error. The role names, the two support-role models,
+and each host's channel come from the one `_HOST_ROLES` table beside
+`_reviewer_action`, the TOTAL reviewer name included; a host with no row (codex,
+unknown) drives no native work and gets parent-context formatter/synthesis. The
+drop is one shared predicate (`has_no_route_here`, a routing POLICY, not a claim
+that the channel's CLI is absent): roster resolution drops on it and drift
+reconstruction refuses on it, so an unmapped model can never read
+as "this host has no native channel" at one site and "unrunnable" at the other.
+Minting is fail-closed on top of that: a native reviewer or formatter action
+whose role does not resolve raises `unresolved_native_role` BEFORE any prompt
+path is prepared, so no action is ever issued with nothing to spawn and nothing
+is ever substituted for a missing role. The drop message asks the role table
+directly rather than inferring the cause from the predicate, which is broader
+than the role miss, so a future cause reaching it cannot be reported as a
+missing role file.
+
+**The native opt-out is `[review].force_external_channels`.** Naming a channel
+there routes its seats through their ordinary external provider instead of
+admitting them native, and makes `native_roles` answer `None` for that channel,
+so the run drives nothing in-session on it: the formatter mints
+parent-context directly and the scribe never mints. Resolution follows the usual
+chain, CLI `--force-external` over per-repo `.crew/config.toml` over global
+`~/.crew-config.toml` over the built-in (force nothing).
+It is a config FILE, never an env var: the Cursor
+agent shell scrubs operator exports, so an env tier would be unreachable on the
+host that most needs the hatch. The resolved list is frozen into the run
+identity as `force_external_channels`. An unknown channel from the FLAG is a
+typed `unknown_channel` refusal (a typed flag should be told); an unknown one
+from config is dropped with a warning, per the never-choke contract. A config
+layer whose entries ALL dropped answers `None` and defers to the layer below,
+so one repo typo cannot silently shadow a valid global opt-out; an explicitly
+EMPTY list is a different thing, a real answer meaning force nothing, and it
+does win over the layer below. The resolved policy is part of the
+matching-pointer key too, not only of the identity it returns: two starts that
+differ only in policy must not share a timeout envelope.
+
+**A lost native spawn: the SUPPORT role reroutes, the SEAT settles failed.** A
+seat can resolve native and still be refused at spawn (a host whose subagent
+surface has not been enabled for that model), which resolution cannot see, so
+`review-recover` splits the two cases:
+- `formatter_task_lost` rewrites the formatter to `driver=parent` (same action
+  id, same paths, marked `rerouted_from="native"`), so a roster whose seats are
+  all external never loses a seat's repair to a support role it never needed.
+  The three route shapes come from one `_formatter_route` table that mint,
+  reroute, and validation all read. One reroute at most: the rerouted action is
+  PARENT, and `parent_formatter_lost` settles.
+- `native_task_lost` SETTLES the reviewer failed. There is no CLI fallback for a
+  seat issued native: a seat's answer is attributed to its model, and its own
+  channel is one the host drives in-session rather than as a subprocess (the same
+  policy `has_no_route_here` enforces at resolution). The panel degrades instead
+  of erroring, since quorum recounts usable seats and the digest synthesizes
+  from whatever returned. So on a host whose mapped seat models are not enabled
+  for subagents, every native seat settles failed and a panel of only such seats
+  yields nothing usable: a setup precondition, fixed by enabling those models.
+
+**The run record names the read-only TIER, not just "read-only".** An action's
+`access` is `read-only` when the constraint is MECHANICAL and
+`read-only-advisory` when it is held by role prose or by an adapter's own
+discipline. Neither `native` nor `external` is itself a tier: BOTH sides ship
+both answers. External seats take their ADAPTER's tier from `_CHANNEL_ACCESS`,
+one row per channel: codex (`--sandbox read-only`), cursor (`--mode plan`), and
+claude (`--permission-mode plan` plus an allowlist) are mechanical, while agy
+runs at a `--sandbox` that blocks only OUT-of-workspace writes and so is
+ADVISORY (its module records the in-workspace residual). A channel with no row
+takes advisory: under-claiming a boundary is safe, over-claiming is the bug. For
+in-session roles the tier is per ROLE, not per host, so `_HOST_ROLES` carries
+`reviewer_access` and `formatter_access` separately: the Claude formatter is
+`tools: Read` and enforced, the Claude reviewer carries `Bash` for git
+inspection with nothing sandboxing it and is therefore ADVISORY, and both Cursor
+roles are advisory because that host has no per-role tool field at all.
+`_reviewer_access` is the ONE function mint and validation both read (the
+formatter's equivalent is `_formatter_route`), so a record cannot be stamped
+with one tier and judged against a literal somewhere else. `parent-context` is
+unchanged and orthogonal. Pin any new role's tier against its shipped `tools:`
+line and any new channel's against the flags its adapter passes: a role that
+gains a mutating tool, or an adapter that loosens its sandbox, must not keep a
+record saying it was mechanically constrained.
+
+See `docs/engine-notes.md` for WHY the seam sits in `review_workflow` rather
+than `channels`.
 
 Host selection is explicit when needed: `CREW_HOST=claude` selects the native
 Claude Task channel, `CREW_HOST=codex` selects the Codex-host external fallback,
-and `CREW_HOST=cursor` selects the Cursor-host external route. With no override,
-detection uses the shipped exact marker table and Claude compatibility markers;
-an unknown host has no native channel and keeps Claude seats external. The
+and `CREW_HOST=cursor` selects the Cursor host (native cursor-channel seats for
+standalone review, external for everything else). With no override,
+detection falls through the shipped marker tables in a DELIBERATE order,
+codex then claude then cursor, so an env carrying two hosts' markers resolves to
+the harness actually executing crew (a Claude session launched from a Cursor
+terminal carries both and is claude); `_detect_host` in `multiagent/channels.py`
+holds the rule and `docs/cursor-host.md` the evidence. An unknown host has no
+native channel and keeps Claude seats external. The
 override is process-local and is scrubbed before an external Claude child is
 launched so nested crew calls re-detect their host.
 
@@ -58,7 +157,7 @@ multiagent/
 ├── channels.py          # Host detection, channel table (the native column is caller-declared, not host-derived), capability seam, and seat execution resolver
 ├── seats.py             # The seat CATALOG loader: reads shipped `seats.toml`, merges the user's config layers per-seat-per-key, exposes merged_catalog()/merged_panels()/seat_spec()/task_seats()/group_tokens()/premium_off_seats() + PROVIDER_KINDS + the SeatSpec dataclass
 ├── seats.toml           # DATA — the shipped seat + panel catalog (`[seats.<name>]` rows, `[panels]` rosters); merged with per-repo/global config. The one place a built-in model seat is declared
-├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel, [debate].panel, [dispatch].seat, [dispatch].timeout, dispatch_provider_options for the per-provider `[dispatch.<kind>]` write-mode options validated per layer against each provider's DISPATCH_OPTIONS declaration, [panels] roster) + `raw_layers()` feeding seats.py's per-seat resolution (per-seat tuning + `available` live on `SeatSpec`, not here); per-repo>global>builtin; pure leaf, no cli/providers import; parses with stdlib tomllib (the 3.11 floor the `crew` dispatcher asserts)
+├── config.py            # TWO memoized loaders (per-repo `.crew/config.toml` + global `~/.crew-config.toml`) + per-key validating getters (default_panel, [debate].panel, [dispatch].seat, [dispatch].timeout, dispatch_provider_options for the per-provider `[dispatch.<kind>]` write-mode options validated per layer against each provider's DISPATCH_OPTIONS declaration, [review].force_external_channels, [panels] roster) + `raw_layers()` feeding seats.py's per-seat resolution (per-seat tuning + `available` live on `SeatSpec`, not here); per-repo>global>builtin; pure leaf AT LOAD, no cli/providers import (the leaf claim rests on ONE deferred import: `_known_channel_names()` imports `seats` inside the function, and `seats` imports `config` at load, so hoisting it to module scope makes a load-time cycle); parses with stdlib tomllib (the 3.11 floor the `crew` dispatcher asserts)
 ├── render.py            # side-by-side panel + --json rendering (the faithful projection + raw-fallback)
 ├── findings.py          # PURE parser + complete-linkage grouping + grouped-digest renderer (no I/O, no model calls, never raises); powers `collect --group`
 └── providers/
@@ -79,7 +178,10 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   matching-pointer resume adopts the frozen timeout without warning. An explicit
   timeout re-resolves normally and may re-warn; only a different effective value
   creates a new identity. Council/run/probe keep the
-  ordinary `[tuning].timeout` wall clock.
+  ordinary `[tuning].timeout` wall clock. `--force-external <channels>` is the
+  native opt-out (see the admission section above), resolving over
+  `[review].force_external_channels`; an empty value forces nothing, and the
+  resolved list joins the run identity.
 - `review-retry` — retry pending reviewer seats from a terminal attempt. An
   identical `review` start after `synthesis_failed` is the separate,
   intentional attempt-local synthesis restart and does not rerun seats.
@@ -296,7 +398,10 @@ Key contracts (do NOT regress):
 - These lines document the BUILT-IN roster; a configured `default_panel`/`[panels]`
   override changes what actually runs. `"${CLAUDE_PLUGIN_ROOT}/crew" seats` prints
   the seats resolved external for the current host. Claude seats appear there
-  off-host, while native Claude-host Task seats stay in the Task split. WHY each
+  off-host, while native Claude-host Task seats stay in the Task split. Its split
+  is the HOST-level one (`task_native_channel`) and does NOT model standalone
+  review's per-seat native admission, so on a Cursor host a `cursor-*` seat prints
+  as external there while standalone review issues it in-session. WHY each
   opt-in seat is opt-in → engine-notes.
 - When the user names NEITHER `--panel` nor `--seats`, the default panel NAME comes from `default_panel`
   (`config.py`, per-repo `.crew/config.toml` → global `~/.crew-config.toml`), falling back to the
@@ -576,7 +681,13 @@ Key contracts (do NOT regress):
   engine-notes.)
 - Two-tier config (env retired): tuning lives in TWO TOML files — per-repo
   `.crew/config.toml` and global `~/.crew-config.toml` (`config.py`, two memoized
-  loaders). Knobs: `default_panel`, `[debate].panel`, `[dispatch].seat`
+  loaders). Knobs: `default_panel`, `[review].force_external_channels`
+  (standalone review's native opt-out: a list of known channel names whose seats
+  run external and whose support roles are not driven in-session; unknown names
+  dropped with a warn, and a layer whose entries ALL dropped defers to the layer
+  below rather than shadowing it, while an explicitly empty list is a real
+  answer that does win; CLI `--force-external` outranks it),
+  `[debate].panel`, `[dispatch].seat`
   (the `/crew:dispatch` default seat, validated against `known_seat_names()` —
   a panel name / group token like `cursor` is rejected), `[dispatch].timeout`
   (dispatch WORK only, default 1800 seconds; provider floors raise the effective
@@ -634,7 +745,14 @@ Key contracts (do NOT regress):
     `{session_segment, subprocess, task}` JSON map. The `subprocess` map contains seats
     resolved external for the current host, including Claude seats when the host has no
     native Claude channel; the `task` block contains seats resolved native, in
-    sorted registered-seat name order. `session_segment` is the top-level
+    sorted registered-seat name order. That split resolves through
+    `task_native_channel`, the HOST-level answer, so it does NOT model standalone
+    review's per-seat native admission (the `seats` carve-out note above says the
+    same). On a Cursor host the `cursor-*` seats therefore appear under
+    `subprocess` and are probed by looking for the `cursor-agent` CLI, while
+    standalone review issues those same seats in-session. The probe stays useful
+    (it is what the loops' `review-prep` paths take) but it is not a preview of a
+    standalone review's roster. `session_segment` is the top-level
     sanitized segment for the given `--session-id`, else `""` (empty string, the
     flat/sessionless layout, never JSON `null`)). NON-billable: the
     PATH-check seats' `is_available()` are pure `shutil.which`;

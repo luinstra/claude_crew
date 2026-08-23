@@ -7,7 +7,8 @@ tunes, and whole new seats: resolved in ``seats.py`` over ``raw_layers()``, not
 by a getter here), the NON-DISPATCH (review/council/run/probe) seat wall-clock
 ``[tuning].timeout`` (the raw standalone-review input, capped by that workflow
 at 540 seconds of external work plus 60 seconds settlement, and the ordinary
-council/run/probe seat wall clock) and dispatch-WORK ``[dispatch].timeout``.
+council/run/probe seat wall clock), dispatch-WORK ``[dispatch].timeout``, and the
+standalone-review native opt-out ``[review].force_external_channels``.
 Provider floors raise the effective timeout only when the resolved value is
 below the floor; agy's floor is its print timeout plus grace, about 8 minutes
 by default, so the 1800-second default is not floored. The persistence loops'
@@ -755,6 +756,79 @@ def _extract_panels(data: dict, layer: str) -> dict[str, list[str]] | None:
         if kept:
             out[name] = kept
     return out or None
+
+
+# --- [review].force_external_channels -----------------------------------------
+
+def _known_channel_names() -> set[str]:
+    """Every logical execution channel a seat's ``via`` can name.
+
+    Lazy-imports ``seats`` so this module stays a pure leaf at load."""
+    from multiagent import seats
+
+    return set(seats.CHANNEL_TO_LEGACY_KIND)
+
+
+def _extract_force_external_channels(data: dict, layer: str) -> tuple[str, ...] | None:
+    """Validate one layer's ``[review].force_external_channels`` list.
+
+    Returns ``None`` when the layer says nothing, so the next layer answers. An
+    explicitly empty list is a real answer (force nothing) and wins over the
+    layer below it, the same way any other explicit value does. Unknown channel
+    names are dropped with a one-time warn rather than raising: a typo here must
+    never be the reason a review dies.
+
+    A NON-empty list whose every entry dropped is not that explicit empty: it is
+    a layer that tried to say something and said nothing usable, so it defers to
+    the layer below rather than shadowing it. Otherwise one typo in a repo file
+    would silently cancel a valid global opt-out."""
+    tbl = data.get("review")
+    if tbl is None:
+        return None
+    if not isinstance(tbl, dict):
+        _warn_once(f"review:{layer}", f"[review] must be a table; ignoring {tbl!r}")
+        return None
+    val = tbl.get("force_external_channels")
+    if val is None:
+        return None
+    if not isinstance(val, list):
+        _warn_once(
+            f"force_external_channels:{layer}",
+            f"[review].force_external_channels must be a list of channel names; "
+            f"ignoring {val!r}",
+        )
+        return None
+    known = _known_channel_names()
+    kept: list[str] = []
+    for entry in val:
+        if not isinstance(entry, str) or entry not in known:
+            _warn_once(
+                f"force_external_channels:{layer}:{entry!r}",
+                f"[review].force_external_channels names unknown channel {entry!r} "
+                f"({', '.join(sorted(known))}); dropping it",
+            )
+            continue
+        if entry not in kept:
+            kept.append(entry)
+    if val and not kept:
+        return None
+    return tuple(sorted(kept))
+
+
+def review_force_external_channels() -> tuple[str, ...] | None:
+    """``[review].force_external_channels``: channels standalone review must run
+    as external subprocesses even where the host could drive them in-session.
+
+    The escape hatch for a host whose in-session role surface does not resolve:
+    seats on a listed channel take their ordinary external provider route instead
+    of being admitted native, and the host drives no native work for that channel
+    at all. ``None`` when neither layer names it, so the caller keeps the built-in
+    (force nothing, native stays the default). Per-repo wins over global; an
+    explicit ``--force-external`` flag wins over both."""
+    return _first(
+        _extract_force_external_channels(_load(), "repo"),
+        _extract_force_external_channels(_global_load(), "global"),
+    )
 
 
 def panels() -> dict[str, list[str]] | None:

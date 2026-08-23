@@ -146,8 +146,14 @@ Claude-channel seats continue to use the existing Claude CLI provider. The same
 panel configuration remains meaningful in Claude and, later, Codex.
 
 The current one-channel-per-seat rule is sufficient for the first-class Cursor
-workflow. Ordered multi-channel fallback or a separate force-external setting
-is deferred until a concrete use case requires it.
+workflow. Ordered multi-channel fallback stays deferred until a concrete use
+case requires it. The force-external setting is no longer deferred: replacing a
+live-verified external route with a native one that rests on unverified
+app-surface assumptions, on the operator's only permitted Cursor surface, was
+that use case. It ships as `[review].force_external_channels` (CLI
+`--force-external` > per-repo > global > built-in, default force nothing), and a
+listed channel is resolved external for seats and drives no in-session support
+role either. `docs/engine-notes.md` carries the reasoning.
 
 ## What changes and what does not
 
@@ -162,7 +168,7 @@ is deferred until a concrete use case requires it.
 | Hook serializers and host detection | Keep |
 | Workflow recipes embedded in hooks | Move into Python in the owning loop phase |
 | Claude agent definitions | Retain only as thin native-role adapters where needed |
-| Cursor agent surface | Populate with real thin Cursor-native roles |
+| Cursor agent surface | DONE for review: `agents-cursor/` ships the thin reviewer, scribe, and formatter roles the standalone review workflow drives. Advisor and executor roles remain for their own phases |
 | Codex skills and native roles | Add last against the proven interface |
 
 The deletion test governs the result: if the workflow module disappeared,
@@ -279,26 +285,40 @@ This is the first priority plateau.
 
 #### Scope
 
-- Begin with an installed Cursor capability probe covering custom agent
+Status: the routing and adapter items below have SHIPPED; the probe and
+validation items are still owed, and the exit gate has not been run.
+
+- SHIPPED, PARTLY: the capability probe covering custom agent
   discovery, explicit role invocation, foreground result return, cancellation,
   read-only enforcement, requested-model handling, and observable route/model
-  provenance. Cursor documentation is design input; the current installed app
+  provenance. `docs/cursor-host.md` carries a full EXTERNAL-CLI batch and no
+  app-surface capture, so the in-session surface these roles run on is still
+  unmeasured. Cursor documentation is design input; the current installed app
   is the admission authority.
 - If the installed app cannot support a truthful native seat, stop the phase
   and reassess rather than substituting `cursor-agent`, silently changing the
-  model, or claiming the priority plateau at a lower tier.
-- Add thin Cursor-native reviewer, scribe, and formatter role adapters.
-- Implement Cursor's native request, await/cancel, and result-return mechanics.
-- Make reliable Cursor host detection part of the adapter slice; do not depend
-  on an operator `CREW_HOST` value that Cursor may scrub from agent shells.
-- Make the Cursor host resolve the Cursor channel natively while leaving
-  non-native channels, including Claude, on their existing external providers.
-- Replace Cursor's current silent substitution of Claude Task roles with
-  explicit supported routing.
-- Drive the same Python review workflow and deterministic fixture used by
-  Claude.
-- Validate the installed plugin using Cursor's actual marketplace/cache refresh
-  path.
+  model, or claiming the priority plateau at a lower tier. The unverified
+  assumptions this rests on have an operator escape hatch,
+  `[review].force_external_channels`, which sends the seats back out through
+  their CLI without a host override.
+- SHIPPED: thin Cursor-native reviewer, scribe, and formatter role adapters, in
+  `plugins/crew/agents-cursor/`.
+- SHIPPED: Cursor's native request, await/cancel, and result-return mechanics
+  (the scribe transport, its host-write fallback, and the `native_task_lost` /
+  `formatter_task_lost` recovery codes).
+- SHIPPED: reliable Cursor host detection, from the marker tables rather than an
+  operator `CREW_HOST` value that Cursor may scrub from agent shells.
+- SHIPPED for standalone review: the Cursor host resolves the Cursor channel
+  natively while leaving non-native channels, including Claude, on their
+  existing external providers. The `review-prep` paths (build, measure-twice)
+  keep every cursor seat external until their own phases.
+- SHIPPED for standalone review: explicit supported routing in place of the
+  silent substitution of Claude Task roles. The other Task-spawning commands
+  still substitute silently.
+- SHIPPED: the same Python review workflow and deterministic fixture Claude
+  drives.
+- STILL OWED: validate the installed plugin using Cursor's actual
+  marketplace/cache refresh path.
 
 #### Exit gate
 
