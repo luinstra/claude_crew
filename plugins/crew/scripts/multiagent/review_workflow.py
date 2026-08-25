@@ -927,13 +927,14 @@ def _resolve_seats(
                 else " with no model pinned"
             )
             roles = native_roles(policy)
-            # The predicate is broader than the role miss, so the message asks
-            # the role table itself rather than inferring the cause from the
+            # The predicate is broader than the attribution miss, so the message
+            # asks the role table itself rather than inferring the cause from the
             # drop. A future cause reaching here gets the route-neutral wording
-            # instead of being reported as a missing role file.
+            # instead of being reported as an unattributable model.
             if roles is not None and roles.reviewer_role(spec.model) is None:
                 reason = (
-                    f"which has no shipped {resolved.channel} reviewer role"
+                    f"whose model the {resolved.channel} host cannot attribute "
+                    "to a concrete model"
                 )
             else:
                 reason = (
@@ -1339,19 +1340,13 @@ def _authoritative_reviewer_prompt(
     )
 
 
-# Every model that has a shipped Cursor reviewer role, keyed by the EXACT model
-# string a seat resolves to. Keying by model, not by seat, is what makes a
-# config model override honest: repinning a seat to an unshipped string drops
-# that seat instead of binding the role file pinned to the old string. `auto` is
-# absent deliberately: it names no concrete model, so nothing can attribute the
-# answer to one.
-CURSOR_REVIEWER_AGENTS: dict[str, str] = {
-    "composer-2.5": "crew-reviewer",
-    "gpt-5.5-extra-high": "crew-reviewer",
-    "gemini-3.1-pro": "crew-reviewer",
-    "glm-5.2-max": "crew-reviewer",
-    "cursor-grok-4.6-xhigh": "crew-reviewer",
-}
+# Model strings Cursor RESOLVES at run time instead of naming a model: it echoes
+# the alias back rather than the model it picked. A seat pinned to one has no
+# native route, because nothing could attribute its answer to a model. Any model
+# the host can name reaches the reviewer role, which pins no model of its own,
+# so this set is the whole admission rule and there is no per-model list to keep
+# in step with the seat catalog.
+CURSOR_UNATTRIBUTABLE_MODELS = frozenset({"auto"})
 
 # The model the two Cursor support roles run at. First of the catalog's cursor
 # models in cost order: Cursor bills composer from the cheap bucket.
@@ -1381,8 +1376,11 @@ class HostRoles:
     scribe_model: str
     formatter_role: str
     formatter_model: str
-    total_reviewer_role: str | None
-    reviewer_agents: dict[str, str] | None
+    reviewer_role_name: str
+    # Model strings this host resolves at run time rather than naming. A seat
+    # pinned to one takes no native route: the record could not say which model
+    # produced its answer.
+    unattributable_models: frozenset[str]
     # How each in-session role is actually held to read-only. The run record
     # stamps these verbatim, so a reader can tell a mechanically enforced
     # boundary from one the role prose asks for. They are per ROLE, not per
@@ -1394,14 +1392,18 @@ class HostRoles:
     def reviewer_role(self, model: str | None) -> str | None:
         """Return the reviewer role for ``model``, or None when none ships.
 
-        ``reviewer_agents=None`` marks a host whose reviewer role is TOTAL: any
-        model reaches the one name ``total_reviewer_role`` carries, because that
-        role file pins no model. Every role name lives in the table, so a new
-        host cannot inherit another host's name by leaving a field out.
+        The reviewer role file pins no model, so every model this host can NAME
+        reaches the one name ``reviewer_role_name`` carries. That is what lets
+        the seat catalog stay the single place a model is declared: a repin
+        needs no matching edit here. What still answers None is a seat carrying
+        no model, or one pinned to a string the host only resolves at run time,
+        because neither can be attributed in the run record. Every role name
+        lives in the table, so a new host cannot inherit another host's name by
+        leaving a field out.
         """
-        if self.reviewer_agents is None:
-            return self.total_reviewer_role
-        return self.reviewer_agents.get(model or "")
+        if not model or model in self.unattributable_models:
+            return None
+        return self.reviewer_role_name
 
 
 _HOST_ROLES: dict[str, HostRoles] = {
@@ -1411,8 +1413,10 @@ _HOST_ROLES: dict[str, HostRoles] = {
         scribe_model="haiku",
         formatter_role="crew:formatter",
         formatter_model="haiku",
-        total_reviewer_role="crew:reviewer",
-        reviewer_agents=None,
+        reviewer_role_name="crew:reviewer",
+        # Claude seats are alias-validated at catalog load, so each one carries
+        # a model string the record can name.
+        unattributable_models=frozenset(),
         # `agents/reviewer.md` is `tools: Read, Grep, Glob, Bash`. The Bash is
         # for git inspection and the role is instructed never to mutate, but
         # nothing sandboxes it, so this seat is read-only by CONVENTION and the
@@ -1428,8 +1432,8 @@ _HOST_ROLES: dict[str, HostRoles] = {
         scribe_model=CURSOR_SUPPORT_MODEL,
         formatter_role="crew-formatter",
         formatter_model=CURSOR_SUPPORT_MODEL,
-        total_reviewer_role=None,
-        reviewer_agents=CURSOR_REVIEWER_AGENTS,
+        reviewer_role_name="crew-reviewer",
+        unattributable_models=CURSOR_UNATTRIBUTABLE_MODELS,
         # This host has no per-role tool field at all, so every in-session role
         # inherits the launching session's tools. The adapters ship
         # `readonly: true` and carry the discipline in prose, but no app-surface
@@ -1542,9 +1546,9 @@ def native_channel_for(spec: seats.SeatSpec, policy: RoutePolicy) -> str | None:
 
     ``channels`` answers whether a channel is native on a host; this answers
     whether the workflow can actually issue a native action for this seat,
-    which depends on the shipped role set. Declaring a native route for a seat
-    with no role would freeze it as a Task action and then issue that action
-    with no role to spawn.
+    which depends on whether the host can attribute the seat's model. Declaring
+    a native route for a seat it cannot would freeze it as a Task action and
+    then issue that action with no role to spawn.
 
     A host absent from ``_HOST_ROLES`` answers None here even when it has a
     channel row, so a host that gained a channel without roles declares nothing
@@ -1552,9 +1556,9 @@ def native_channel_for(spec: seats.SeatSpec, policy: RoutePolicy) -> str | None:
     tables' agreement hold by construction; the test pinning their key sets
     equal is the second line of defense, not the only one.
 
-    Admission is keyed on the ROLE MAP and does not consult the seat's own
-    ``via``: a seat whose model happens to match a role key for a channel it
-    cannot run on would be declared native here. What keeps that harmless is
+    Admission is keyed on the ROLE TABLE and does not consult the seat's own
+    ``via``: a seat whose model the host could name for a channel it cannot run
+    on would be declared native here. What keeps that harmless is
     ``channels.resolve_seat``, which honors this declaration only for the
     channel it actually SELECTS from ``spec.via``, so a claude-via seat carrying
     a colliding model string still resolves external. Any change to
@@ -1584,7 +1588,7 @@ def has_no_route_here(
     ask THIS question so neither can answer it differently: roster resolution
     drops such a seat before the freeze, and
     drift reconstruction refuses to re-run an action frozen external before the
-    native route existed. Without the shared answer, an unmapped model at drift
+    native route existed. Without the shared answer, an unattributable model at drift
     time is indistinguishable from a host with no native channel at all, and the
     stale action runs.
 
@@ -3357,10 +3361,10 @@ def _frozen_external_provider(action: dict, policy: RoutePolicy):
         action.get("driver") == ActionDriver.EXTERNAL
         and execution is not None
         and not execution.native
-        # An unmapped model reads as "no native route for this seat", which is
-        # the same shape as "this host has no native channel". Asking the shared
-        # question keeps a stale external action on the host's own channel from
-        # running just because its model has no role.
+        # An unattributable model reads as "no native route for this seat", which
+        # is the same shape as "this host has no native channel". Asking the
+        # shared question keeps a stale external action on the host's own channel
+        # from running just because its model cannot be attributed.
         and not has_no_route_here(execution, policy)
         and execution.engine_runnable
         and execution.channel == action.get("channel")

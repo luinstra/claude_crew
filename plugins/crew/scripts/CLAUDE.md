@@ -42,13 +42,18 @@ skipped result.
 
 **Standalone review's per-seat native admission.** `review_workflow` declares
 its route per SEAT (`native_channel_for`), not per host, because a seat resolved
-native is frozen `kind=task` before anything consults the role map. Every route
+native is frozen `kind=task` before anything asks whether its model can be
+attributed. Every route
 question is asked of ONE `RoutePolicy` (the host plus the channels this run
 forced external), resolved once at start and rebuilt from the FROZEN identity
 afterwards, so no two call sites can hold half the answer and live config cannot
 change how an already-minted run is judged. On a Cursor
-host a cursor-channel seat is native only when `CURSOR_REVIEWER_AGENTS` has its
-exact model string; a seat with no shipped role gets ONE stderr warning naming
+host a cursor-channel seat is native whenever the host can NAME its model: the
+reviewer role file pins no model, so `seats.toml` stays the ONE place a cursor
+seat's model is declared and a repin needs no second edit. What is NOT nameable
+is a run-time alias (`auto`, which Cursor echoes back rather than resolving) or
+a seat carrying no model, since neither can be attributed in the run record;
+`CURSOR_UNATTRIBUTABLE_MODELS` holds that set. Such a seat gets ONE stderr warning naming
 the seat and its model and is DROPPED from the roster before the freeze, so the
 quorum denominator counts only seats that run and an all-dropped roster fails
 with the existing `no_seats` error. The role names, the two support-role models,
@@ -57,7 +62,7 @@ and each host's channel come from the one `_HOST_ROLES` table beside
 unknown) drives no native work and gets parent-context formatter/synthesis. The
 drop is one shared predicate (`has_no_route_here`, a routing POLICY, not a claim
 that the channel's CLI is absent): roster resolution drops on it and drift
-reconstruction refuses on it, so an unmapped model can never read
+reconstruction refuses on it, so an unattributable model can never read
 as "this host has no native channel" at one site and "unrunnable" at the other.
 Minting is fail-closed on top of that: a native reviewer or formatter action
 whose role does not resolve raises `unresolved_native_role` BEFORE any prompt
@@ -102,7 +107,7 @@ surface has not been enabled for that model), which resolution cannot see, so
   channel is one the host drives in-session rather than as a subprocess (the same
   policy `has_no_route_here` enforces at resolution). The panel degrades instead
   of erroring, since quorum recounts usable seats and the digest synthesizes
-  from whatever returned. So on a host whose mapped seat models are not enabled
+  from whatever returned. So on a host whose seat models are not enabled
   for subagents, every native seat settles failed and a panel of only such seats
   yields nothing usable: a setup precondition, fixed by enabling those models.
 

@@ -54,19 +54,20 @@ different matter, and the next bullets say how.
 
 Four consequences worth stating plainly:
 
-- **Unmapped models are warned about and dropped, not silently rerouted.** A
-  cursor-channel seat whose model has no shipped role (`cursor-auto` at `auto`
-  is the shipped example, and a config `model` override away from a shipped
-  string is the other) prints one warning naming the seat and its model and is
-  removed from the roster before the run is minted. The surviving seats run and
-  the quorum denominator counts only them; a roster reduced to zero fails with
-  the ordinary `no_seats` error. The drop happens BEFORE the freeze, so an
-  unmapped seat never becomes an action at all.
+- **Unattributable models are warned about and dropped, not silently rerouted.**
+  A cursor-channel seat whose model the host cannot NAME (`cursor-auto` at
+  `auto`, which Cursor echoes back rather than resolving, or a seat carrying no
+  model) prints one warning naming the seat and its model and is removed from
+  the roster before the run is minted. Any concrete model string is admitted,
+  so a config `model` override keeps its seat native. The surviving seats run
+  and the quorum denominator counts only them; a roster reduced to zero fails
+  with the ordinary `no_seats` error. The drop happens BEFORE the freeze, so
+  such a seat never becomes an action at all.
 - **A lost native reviewer settles FAILED. There is no CLI fallback for it.**
   `review-recover` with `native_task_lost` settles the action, because a seat's
   answer belongs to the model that gave it and its own channel is one this host
   drives in-session rather than as a subprocess (the same routing policy that
-  drops an unmapped seat). The panel degrades rather than dying: quorum recounts
+  drops an unattributable seat). The panel degrades rather than dying: quorum recounts
   the usable seats and the digest synthesizes from whatever returned. A retry
   mints a fresh attempt on the FROZEN native route, so it gets a fresh in-session
   spawn and no more.
@@ -147,9 +148,9 @@ Claude-host operator will find them.
   `.cursor/agents/` takes precedence over other sources and an unprefixed name
   would be easy to shadow
 - The shipped files assume the agent NAME comes from the filename, so
-  `crew-reviewer.md` is invoked as `crew-reviewer` and the role map's values are
+  `crew-reviewer.md` is invoked as `crew-reviewer` and the role table's names are
   those stems. That assumption is UNVERIFIED against the app: a source test pins
-  the file set to the map, but only an app-surface capture can show whether the
+  the file set to the role table, but only an app-surface capture can show whether the
   app instead wants a `name:` frontmatter key. If it does, every role resolves to
   nothing and the routing is inert, so this is the first thing to check when a
   live run finds no role. Check it with one command:
@@ -172,20 +173,21 @@ Claude-host operator will find them.
   record says which route the answers came from and a config edit mid-run cannot
   change how the run is judged. Native stays the default; this is the escape
   hatch for exactly the two UNVERIFIED assumptions on this page (the role name
-  and the Task spawn form), and for an account whose mapped seat models are not
+  and the Task spawn form), and for an account whose seat models are not
   enabled for subagents. It is a config FILE and not an env var because the agent
   shell here scrubs operator exports. It does NOT cover the bare-human
   integrated-terminal case: that one has no agent to perform the parent actions
   either, and its remedy is in the detection section above
-- The reviewer map is keyed by MODEL, not by seat: repinning a seat's `model` to
-  a string with no shipped role drops that seat instead of binding the role file
-  pinned to the old string
+- There is no per-model reviewer map: the reviewer role file pins no model, so
+  the host admits any model string it can name and `seats.toml` stays the one
+  place a cursor seat's model is declared. Repinning a seat needs no second
+  edit; only a run-time alias (`auto`) or a missing model drops a seat
 - Frontmatter is `description`, plus `model` on the two support roles only.
-  The reviewer file deliberately omits `model`: it is shared by every model in
-  the reviewer map, so any single pin would be wrong for the other four, and if
-  a pin beat the model the Task call carries, five seats would run one model
-  while the run record named five. Omitting the key inherits the caller's model,
-  which is exactly what a model-keyed map needs. The scribe and formatter DO pin,
+  The reviewer file deliberately omits `model`: it is shared by every model the
+  host can name, so any single pin would be wrong for all but one seat, and if
+  a pin beat the model the Task call carries, every seat would run one model
+  while the run record named several. Omitting the key inherits the caller's
+  model, which is exactly what a shared role file needs. The scribe and formatter DO pin,
   because each is a single-model role and its pin is the same string the role
   table drives it at. `readonly: true` IS SHIPPED on
   the reviewer and the formatter, and its app-surface enforcement is UNVERIFIED:
@@ -220,11 +222,11 @@ Claude-host operator will find them.
 - Before native seats can run, the operator must ENABLE the seat models in
   Cursor's subagent surface (see the enabled-models section below). Until then
   those seats are `unentitled`, and the drop rule does NOT cover them: it keys
-  solely on membership in the reviewer map, so an unentitled but MAPPED model
-  resolves native, is issued native, and is refused loudly at spawn. That
+  solely on whether the host can name the model, so an unentitled but nameable
+  model resolves native, is issued native, and is refused loudly at spawn. That
   refusal is a lost action, recovered with `native_task_lost`, which SETTLES the
   seat FAILED: no CLI fallback exists for a seat issued native. On the account
-  state recorded below, where all five mapped models are rejected as subagent
+  state recorded below, where all five seat models are rejected as subagent
   models, every cursor-channel seat takes that path, so a cursor-only panel
   yields nothing usable. The panel degrades rather than erroring (quorum
   recounts usable seats and the digest synthesizes from whatever returned), and
@@ -284,10 +286,11 @@ ships a new model generation.** A retired id is fuzzy-matched down without an
 error, while a never-valid one is rejected outright (see below), so a pin cannot
 be trusted to keep meaning what it meant. `test-multiagent.py` pins today's
 answer for every cursor seat, which stops a silent near-miss edit; only the
-recheck catches tomorrow's retirement. The same rule governs
-`CURSOR_REVIEWER_AGENTS` in `review_workflow.py`, whose keys are those same
-model strings: a retired key stops matching and its seat starts being dropped
-with a warning, which is loud but is still the recheck's job to prevent.
+recheck catches tomorrow's retirement. The catalog pin is the ONLY place the
+recheck applies: native admission in `review_workflow.py` keeps no per-model
+list, it admits any model string the host can name and excludes only the
+run-time aliases in `CURSOR_UNATTRIBUTABLE_MODELS` (`auto`), so a repin needs
+no second edit and a retired pin is issued as-is rather than dropped.
 
 ### Model attribution on this surface
 
@@ -400,14 +403,14 @@ without substitution and the badge remains a truthful oracle.
 Consequence: this is a SETUP PRECONDITION, not a design constraint and not a
 code defect. Before native seats can run, the operator enables the seat models
 in Cursor. Until then every cursor-channel seat here is `unentitled`, and
-warn-and-drop does NOT apply to it: the drop keys on membership in the reviewer
-map, and these five strings ARE mapped. Such a seat resolves native, is issued
+warn-and-drop does NOT apply to it: the drop keys on attributability, and these
+five strings are all concrete models. Such a seat resolves native, is issued
 native, and is refused at spawn. `review-recover` then SETTLES it FAILED. There
 is no CLI fallback for a seat issued native, so on an unentitled account every
 cursor-channel seat takes that path and `--panel cursor` yields nothing usable.
 The panel degrades rather than dying: quorum recounts the usable seats and the
 digest synthesizes from whatever returned, so a mixed roster still produces a
-review from its other voices. Enabling the mapped models in Cursor is the
+review from its other voices. Enabling the seat models in Cursor is the
 mitigation. Nothing here forces a repin. What is still worth recording, per string, is
 whether a rejection is `unentitled` (enable it and retry) or `unsupported` (the
 app will not honor it at all); only the latter would be a design input.

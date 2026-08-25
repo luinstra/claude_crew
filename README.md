@@ -18,9 +18,9 @@ A Claude Code plugin for persistence, specialized agents, and tech-stack guidanc
 
 Standalone `/crew:review` is backed by one Python-owned workflow protocol in
 Claude Code and Cursor. Both may use native reviewer Tasks: Claude for its
-Claude voice seats, Cursor for the cursor-channel seats whose model has a
-shipped role (a cursor seat with no shipped role is warned about and dropped
-from the panel, never rerouted). Phase 1 also covers Codex-host all-external
+Claude voice seats, Cursor for the cursor-channel seats whose model it can
+name (a cursor seat pinned to a run-time alias such as `auto` is warned about
+and dropped from the panel, never rerouted). Phase 1 also covers Codex-host all-external
 protocol compatibility deterministically through the Python CLI, but the Codex
 plugin does not yet expose standalone `/crew:review`; its app-native adapter
 remains deferred.

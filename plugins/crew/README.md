@@ -7,8 +7,8 @@ Persistence, specialized agents, and workflow commands for Claude Code.
 Standalone `/crew:review` uses the Python-owned workflow engine through the
 Claude Code and Cursor host adapters. Cursor now issues its cursor-channel
 seats as native subagents (`agents-cursor/` ships the three role adapters);
-a cursor seat whose model has no shipped role is warned about and dropped from
-the panel, and one whose model is not enabled for subagents in Cursor is
+a cursor seat pinned to a run-time alias such as `auto` is warned about and
+dropped from the panel, and one whose model is not enabled for subagents in Cursor is
 refused at spawn and settles failed, with no CLI fallback.
 Codex-host all-external protocol compatibility is covered
 deterministically through the Python CLI, but the Codex plugin does not yet

@@ -3116,12 +3116,12 @@ class ReviewWorkflowTest(unittest.TestCase):
         # no native action for any seat, so it must declare none rather than
         # freeze one as a Task action and refuse it at mint.
         policy = review_workflow.RoutePolicy.resolve("cursor", ())
-        # The model comes from the role map rather than the catalog: a config
+        # The model is pinned here rather than read from the catalog: a config
         # layer may repin a seat's model, and this test is about the tables, not
         # about which model that seat happens to carry.
         spec = replace(
             seats.seat_spec("cursor-composer"),
-            model=next(iter(review_workflow.CURSOR_REVIEWER_AGENTS)),
+            model=review_workflow.CURSOR_SUPPORT_MODEL,
         )
         self.assertEqual(
             review_workflow.native_channel_for(spec, policy), "cursor"
@@ -3271,7 +3271,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         )
         self.assertEqual((run / "workflow.json").read_bytes(), before)
 
-    def test_unmapped_cursor_model_warns_and_drops_before_the_freeze(self) -> None:
+    def test_unattributable_cursor_model_warns_and_drops_before_the_freeze(self) -> None:
         os.environ["CREW_HOST"] = "cursor"
         stderr = io.StringIO()
         with mock.patch.object(
@@ -3282,7 +3282,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             with redirect_stderr(stderr):
                 step = self._start(
                     seats="cursor-auto,cursor-composer",
-                    session="cursor-unmapped",
+                    session="cursor-unattributable",
                 )
         warnings = [
             line for line in stderr.getvalue().splitlines()
@@ -3297,7 +3297,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         self.assertEqual([item.seat for item in step.work_items], ["cursor-composer"])
         self.assertTrue(all(item.role is not None for item in step.work_items))
 
-    def test_unmapped_cursor_seat_still_runs_external_on_a_claude_host(self) -> None:
+    def test_unattributable_cursor_seat_still_runs_external_on_a_claude_host(self) -> None:
         os.environ["CREW_HOST"] = "claude"
         stderr = io.StringIO()
         with mock.patch.object(
@@ -3314,7 +3314,13 @@ class ReviewWorkflowTest(unittest.TestCase):
             ("cursor-auto", "external", "cursor", None),
         )
 
-    def test_config_model_override_off_a_shipped_string_drops_the_seat(self) -> None:
+    def test_config_model_override_keeps_the_seat_native(self) -> None:
+        # A config repin is just a different model string, and the reviewer role
+        # pins no model, so the seat still resolves native. The catalog stays the
+        # ONE place a cursor seat's model is declared: nothing here needs editing
+        # when a seat is repinned, which is what an allowlist used to demand (it
+        # dropped the repinned seat instead, with a warning that read like a
+        # missing role file).
         os.environ["CREW_HOST"] = "cursor"
         repo_config = self.root / ".crew" / "config.toml"
         repo_config.write_text(
@@ -3334,9 +3340,23 @@ class ReviewWorkflowTest(unittest.TestCase):
                         seats="cursor-composer,codex",
                         session="cursor-override",
                     )
-            self.assertIn("cursor-composer", stderr.getvalue())
-            self.assertIn("'composer-2.4'", stderr.getvalue())
-            self.assertEqual([item.seat for item in step.work_items], ["codex"])
+            self.assertNotIn("dropping it from this panel", stderr.getvalue())
+            roles = self._cursor_roles()
+            self.assertEqual(
+                roles.reviewer_role("composer-2.4"), roles.reviewer_role_name
+            )
+            # The repinned seat is still issued, in-session at its new model,
+            # rather than dropped from the panel.
+            self.assertEqual(
+                [item.seat for item in step.work_items], ["cursor-composer", "codex"]
+            )
+            native = next(
+                item for item in step.work_items if item.seat == "cursor-composer"
+            )
+            self.assertEqual(
+                (native.driver, native.channel, native.role, native.model),
+                ("native", "cursor", roles.reviewer_role_name, "composer-2.4"),
+            )
         finally:
             repo_config.unlink()
             config._reset_cache_for_tests()
@@ -3579,7 +3599,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         with redirect_stderr(stderr):
             with self.assertRaises(review_workflow.WorkflowError):
                 self._start(seats="cursor-auto", session="drop-role-miss")
-        self.assertIn("has no shipped cursor reviewer role", stderr.getvalue())
+        self.assertIn("cannot attribute to a concrete model", stderr.getvalue())
         stderr = io.StringIO()
         with mock.patch.object(
             review_workflow, "native_channel_for", return_value=None,
@@ -3718,10 +3738,11 @@ class ReviewWorkflowTest(unittest.TestCase):
             review_workflow.next_review(step.ref)
         self.assertEqual(ctx.exception.code, "corrupt_workflow")
 
-    def test_a_native_seat_cannot_be_reloaded_onto_an_unmapped_model(self) -> None:
+    def test_a_native_seat_cannot_be_reloaded_as_a_roleless_action(self) -> None:
         # A native action with no role has nothing to spawn. Resolution never
-        # mints one; this pins the two guards that keep a RELOADED record from
-        # producing one: the run record's identity chain refuses a signature
+        # mints one (every concrete model is admitted, so only a tampered record
+        # can carry one); this pins the two guards that keep a RELOADED record
+        # from producing one: the run record's identity chain refuses a signature
         # edit, and the reviewer mirror refuses a roleless native action.
         os.environ["CREW_HOST"] = "cursor"
         with mock.patch.object(
@@ -3729,7 +3750,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             "get_provider_for_channel",
             side_effect=self._no_cursor_provider(),
         ):
-            step = self._start(seats="cursor-composer", session="native-unmapped")
+            step = self._start(seats="cursor-composer", session="native-roleless")
         run, wf = self._workflow(step)
         record = json.loads((run / "run.json").read_text(encoding="utf-8"))
         record["seat_signatures"]["cursor-composer"]["model"] = "composer-2.4"
@@ -3766,8 +3787,8 @@ class ReviewWorkflowTest(unittest.TestCase):
         )
         self.assertIsNotNone(provider)
 
-    def test_external_cursor_action_at_an_unmapped_model_also_drifts(self) -> None:
-        # The seat whose model has no shipped role is the one that used to slip
+    def test_external_cursor_action_at_an_unattributable_model_also_drifts(self) -> None:
+        # The seat whose model cannot be attributed is the one that used to slip
         # through: its live resolution declares no native route, which looks
         # exactly like a host that drives no channel in-session, so the stale
         # external action matched and ran through the CLI this host does not use.
@@ -3779,7 +3800,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             "provider": "cursor",
             "model": "auto",
         }
-        self.assertNotIn("auto", review_workflow.CURSOR_REVIEWER_AGENTS)
+        self.assertIn("auto", review_workflow.CURSOR_UNATTRIBUTABLE_MODELS)
         with self.assertRaises(review_workflow.WorkflowError) as ctx:
             review_workflow._frozen_external_provider(action, _route_policy("cursor"))
         self.assertEqual(
@@ -3792,7 +3813,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         )
 
     def test_a_roleless_native_action_is_refused_before_anything_is_written(self) -> None:
-        # Resolution never declares a native route for an unmapped model, so
+        # Resolution never declares a native route for an unattributable model, so
         # reaching the mint with one means the two views disagree. The mint
         # refuses by name rather than issuing an action with nothing to spawn.
         os.environ["CREW_HOST"] = "cursor"
@@ -3826,7 +3847,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         reachable = {
             name
             for name in (
-                *review_workflow.CURSOR_REVIEWER_AGENTS.values(),
+                roles.reviewer_role_name,
                 roles.scribe_role,
                 roles.formatter_role,
             )
@@ -3941,7 +3962,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         roles = self._cursor_roles()
         agents_dir = Path(__file__).resolve().parents[2] / "agents-cursor"
         for role in (
-            *set(review_workflow.CURSOR_REVIEWER_AGENTS.values()),
+            roles.reviewer_role_name,
             roles.formatter_role,
         ):
             body = (agents_dir / f"{role}.md").read_text(encoding="utf-8")
@@ -3958,11 +3979,11 @@ class ReviewWorkflowTest(unittest.TestCase):
         )
 
     def test_cursor_role_frontmatter_pins_only_the_support_models(self) -> None:
-        # The reviewer file is shared by every mapped model, so a `model:` pin in
-        # it would be wrong for all but one of them: if the pin beat the model
-        # the caller passes, five seats would run one model while the run record
-        # named five. The two support roles are single-model by construction and
-        # pin the exact model the table drives them at.
+        # The reviewer file is shared by every model the host can name, so a
+        # `model:` pin in it would be wrong for all but one of them: if the pin
+        # beat the model the caller passes, every seat would run one model while
+        # the run record named several. The two support roles are single-model
+        # by construction and pin the exact model the table drives them at.
         roles = self._cursor_roles()
         agents_dir = Path(__file__).resolve().parents[2] / "agents-cursor"
 
@@ -3977,26 +3998,39 @@ class ReviewWorkflowTest(unittest.TestCase):
                 keys[key.strip()] = value.strip()
             return keys
 
-        for role in set(review_workflow.CURSOR_REVIEWER_AGENTS.values()):
-            self.assertNotIn("model", frontmatter(role))
+        self.assertNotIn("model", frontmatter(roles.reviewer_role_name))
         for role, model in (
             (roles.scribe_role, roles.scribe_model),
             (roles.formatter_role, roles.formatter_model),
         ):
             self.assertEqual(frontmatter(role).get("model"), model)
 
-    def test_cursor_reviewer_map_is_keyed_by_catalog_models(self) -> None:
-        catalog_models = {
-            spec.model
-            for spec in seats.merged_catalog().values()
-            if tuple(spec.via) == ("cursor",) and spec.model != "auto"
-        }
-        self.assertEqual(set(review_workflow.CURSOR_REVIEWER_AGENTS), catalog_models)
-        self.assertNotIn("auto", review_workflow.CURSOR_REVIEWER_AGENTS)
-        self.assertIn(
-            review_workflow.CURSOR_SUPPORT_MODEL,
-            review_workflow.CURSOR_REVIEWER_AGENTS,
+    def test_every_named_cursor_catalog_model_reaches_the_reviewer_role(self) -> None:
+        # The catalog is the ONE place a cursor seat's model is declared. The
+        # role file pins no model, so admission asks only whether the host can
+        # NAME the model, and a repin needs no second edit anywhere. Anything
+        # that reintroduced a per-model list would fail here the first time a
+        # seat was repinned to a string nobody remembered to add.
+        roles = self._cursor_roles()
+        for spec in seats.merged_catalog().values():
+            if tuple(spec.via) != ("cursor",):
+                continue
+            expected = (
+                None
+                if spec.model in review_workflow.CURSOR_UNATTRIBUTABLE_MODELS
+                else roles.reviewer_role_name
+            )
+            self.assertEqual(roles.reviewer_role(spec.model), expected, spec.model)
+        # A model string nothing in the catalog carries still resolves: there is
+        # no allowlist for a config repin to fall outside of.
+        self.assertEqual(
+            roles.reviewer_role("a-model-shipped-after-this-test-was-written"),
+            roles.reviewer_role_name,
         )
+        # A seat carrying no model at all cannot be attributed, so it takes no
+        # native route.
+        self.assertIsNone(roles.reviewer_role(None))
+        self.assertIsNone(roles.reviewer_role(""))
 
     def test_review_md_branches_only_on_issued_values(self) -> None:
         review_md = Path(__file__).resolve().parents[2] / "commands" / "review.md"

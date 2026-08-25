@@ -196,7 +196,7 @@ Cursor-host seat execution WAS all-external, on the reasoning that the observed
 per-file model frontmatter for Cursor subagents is static while crew's seats
 need a per-spawn model pin. That objection was answered by evidence, not by
 working around it: the app passes the model on the Task call, so one role file
-serves every mapped model and the pin rides the invocation. Standalone review
+serves every model the host can name and the pin rides the invocation. Standalone review
 now issues cursor-channel seats natively on a Cursor host. Claude voices there
 still run through the external `claude` CLI, and codex and agy stay external.
 
@@ -212,16 +212,23 @@ prep calls a subprocess seat, `crew run` has to be willing to run.
 
 **The workflow decides per SEAT (`review_workflow.native_channel_for`).** A
 channel-level answer is too coarse here. At `host=cursor` every `via=["cursor"]`
-seat would resolve native, including one whose model has no shipped role, and
-the run would freeze it as `kind=task` before anything consulted the role map,
+seat would resolve native, including one pinned to `auto`, and the run would
+freeze it as `kind=task` before anything asked whether its answer could be
+attributed to a model,
 then issue a native action with no role to spawn. So `review_workflow` computes
-the declared route per seat: the host's native channel when a reviewer role
-exists for that seat's model, otherwise none. `channels` answers "is this
-channel native on this host"; `review_workflow` answers "can this workflow drive
-a native action for this seat", which depends on `CURSOR_REVIEWER_AGENTS` and so
-cannot live anywhere else without moving review policy out of the engine.
+the declared route per seat: the host's native channel when the host can NAME
+that seat's model, otherwise none. `channels` answers "is this channel native
+on this host"; `review_workflow` answers "can this workflow drive a native
+action for this seat", which depends on the host role table (`_HOST_ROLES`: the
+reviewer role name plus `unattributable_models`, the run-time aliases such as
+`auto` that the host echoes back instead of naming a model) and so cannot live
+anywhere else without moving review policy out of the engine. There is no
+per-model allowlist: the reviewer role file pins no model, so `seats.toml` is
+the one place a cursor seat's model is declared and a repin needs no second
+edit.
 
-**A seat with no role is warned about and dropped, not rerouted.** A
+**A seat whose model cannot be attributed is warned about and dropped, not
+rerouted.** A
 cursor-channel seat that resolves external on a Cursor host has nowhere to go
 under review's routing policy: a channel the host drives in-session is not also
 opened as a subprocess from resolution. That is a choice, not a capability
@@ -250,7 +257,7 @@ row (codex, unknown) drives no native work, which is exactly what
 no route on this host" is asked in exactly one place (`has_no_route_here`) by
 both the roster resolver and the drift reconstruction. Two copies of that
 question is how a stale EXTERNAL cursor action survived on a Cursor host: the
-per-seat native declaration returns `None` both for an unmapped model and for a
+per-seat native declaration returns `None` both for an unattributable model and for a
 host with no native channel at all, so the drift check could not tell the two
 apart and re-ran an action against a CLI this host does not use for its own
 channel. Downstream of resolution, the reviewer and formatter mints REFUSE
@@ -360,10 +367,10 @@ rather than being minted native and needing a recovery call every run, and the
 scribe never mints at all because it rides only a native reviewer action.
 
 The consequence to state plainly is a SETUP one, not a code defect. A seat model
-that is mapped but not yet enabled in the host's subagent surface resolves
+that the host can name but is not yet enabled in its subagent surface resolves
 native, is issued native, and is refused at spawn (the drop rule cannot catch it,
-because the drop keys on map membership and such a model IS mapped). On an
-account where none of the mapped models are enabled, every cursor-channel seat
+because the drop keys on attributability, not on enablement). On an
+account where none of the seat models are enabled, every cursor-channel seat
 takes that path, so a cursor-only panel returns nothing usable. Enabling those
 models in Cursor is the mitigation; there is no CLI fallback for a native seat.
 
@@ -382,8 +389,9 @@ A Cursor host has two further in-flight cases of its own (a run frozen
 `host=unknown`, and one frozen `host=cursor` with external seats); they are in
 `docs/cursor-host.md`, because only that host can reach them.
 
-The reviewer map is keyed by MODEL rather than by seat so that a config `model`
-override behaves honestly: repinning a seat to an unshipped string drops it,
-where a seat-keyed map would have resolved the seat while the role file's pin
-had drifted. `auto` is deliberately unmapped: it names no concrete model, so
-nothing can attribute the answer to one.
+There is no per-model reviewer map. The reviewer role file pins no model, so
+admission asks only whether the host can NAME the model: a config `model`
+override to any concrete string keeps its seat native, a repin needs no second
+edit, and `seats.toml` stays the one place a cursor seat's model is declared.
+`auto` is excluded (`CURSOR_UNATTRIBUTABLE_MODELS`): it names no concrete
+model, so nothing can attribute the answer to one.
