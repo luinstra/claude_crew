@@ -3,9 +3,10 @@
 What crew has verified about running inside the Cursor harness.
 Every fact carries an evidence tag: (verified live, 2026-08-17),
 (verified live, 2026-08-18), (verified live, 2026-08-20, cursor-agent
+2026.08.11-e8db854), (verified live, 2026-08-25, cursor-agent
 2026.08.11-e8db854), or (research-sourced, unverified). Facts without a
-verified tag are expectations, not guarantees. The 2026-08-20 batch is
-EXTERNAL `cursor-agent` CLI evidence only; see its scope warning.
+verified tag are expectations, not guarantees. The 2026-08-20 and 2026-08-25
+batches are EXTERNAL `cursor-agent` CLI evidence only; see the scope warning.
 
 ## Install and component routing
 
@@ -291,10 +292,13 @@ the catalog, so 3.7 Flash is the newest Gemini generation (verified live,
 to track the newest Gemini generation, accepting a model-CLASS change: 3.7
 Flash is a Flash-class model where 3.1 Pro was Pro-class. A live recheck needs
 an authenticated session (`cursor-agent --list-models` answers "Authentication
-required" otherwise), so log the `cursor-agent` CLI in first. Open: run
-`crew probe cursor-gemini` from an authenticated session to confirm the pin end
-to end; the 2026-08-20 capture confirms the slug is listed, not that this seat
-has answered at it.
+required" otherwise), so log the `cursor-agent` CLI in first. CLOSED: a fresh
+authenticated `--list-models` on 2026-08-25 (204 models) still lists
+`gemini-3.7-flash-high - Gemini 3.7 Flash` as the newest Gemini with no Pro
+newer than 3.1, and `crew probe cursor-gemini` PASSED (9.6s), so the seat has
+answered at this pin, not merely been listed at it; `crew probe cursor-auto
+cursor-composer` passed in the same session (verified live, 2026-08-25,
+cursor-agent 2026.08.11-e8db854).
 
 **Recheck every cursor seat pin against `--list-models` whenever the provider
 ships a new model generation.** A retired id is fuzzy-matched down without an
@@ -441,3 +445,7 @@ app will not honor it at all); only the latter would be a design input.
   write control, SIGTERM cancellation, `stream-json` model attribution with an
   invalid-model negative control, and a six-string per-invocation model sweep.
   No app-surface probe ran; native execution remains unmeasured
+- 2026-08-25, cursor-agent 2026.08.11-e8db854: re-authenticated CLI. Fresh
+  `--list-models` (204 models) re-confirms `gemini-3.7-flash-high` as the newest
+  Gemini; `crew probe cursor-gemini`, `cursor-auto`, and `cursor-composer` all
+  pass. Closes the cursor-gemini open item. No app-surface probe ran
