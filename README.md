@@ -190,7 +190,7 @@ synthesizes one verdict from the admitted results. The built-in default panel
 and the presets:
 
 <!-- seat-roster:default -->
-- Default panel: `codex`, `codex-luna`, `agy`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`
+- Default panel: `codex`, `codex-luna`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`
 <!-- seat-roster:preset:lite -->
 - `--panel lite`: `opus`, `sonnet`
 <!-- seat-roster:preset:solo -->
@@ -202,7 +202,7 @@ and the presets:
 <!-- seat-roster:task-opt-in -->
 - Opt-in Claude voice (add via `--seats`): `fable`
 <!-- seat-roster:all -->
-- Every registered seat: `codex`, `codex-luna`, `codex-terra`, `agy`, `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`, `fable`
+- Every registered seat: `codex`, `codex-luna`, `codex-terra`, `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`, `fable`
 
 These lines document the BUILT-IN roster; a configured `default_panel`/`[panels]`
 override changes what actually runs. `"${CLAUDE_PLUGIN_ROOT}/crew" seats` prints
@@ -236,11 +236,14 @@ and `/crew:measure-twice` loops a human may still authorize completion over a
 `NOT MET` panel with `--force`, which is recorded as an explicit override for the
 audit trail.
 
-**Why some seats are opt-in.** `codex` already covers the GPT lineage and `agy`
-covers the Gemini lineage flat-rate, so the premium cursor seats stay off the
-default: their `glm-max` and `grok-4.5-xhigh` models draw on Cursor's shared
-premium MAX allotment, so the cheap/dedicated `cursor-auto` takes the default
-slot. `fable` is a premium Mythos-class Claude voice, in no built-in default panel so
+**Why some seats are opt-in.** `codex` already covers the GPT lineage, so the
+GPT cursor seat stays off the default; the GLM and Grok cursor seats draw on
+Cursor's shared premium MAX allotment, so the cheap/dedicated `cursor-auto`
+takes the default slot. `cursor-gemini` (pinned `gemini-3.7-flash-high`, a
+Flash-class model) is a metered Cursor seat, not the flat-rate composer/auto
+bucket; its exact billing tier for a Flash model is unverified, and it stays
+opt-in because no default-panel slot has been chosen for it.
+`fable` is a premium Mythos-class Claude voice, in no built-in default panel so
 routine reviews never silently spend it; add it explicitly for the hardest calls
 (falls back to the inherited model if Fable isn't on your plan).
 
@@ -346,7 +349,9 @@ resume_executor = true             # default ON; codex/cursor reuse conversation
 model = "gpt-5.5"
 reasoning_effort = "high"
 
-[seats.agy]
+[seats.agy-gemini]                # no shipped seat rides the agy channel; declaring one is how it runs
+via = ["agy"]
+model = "Gemini 3.1 Pro (High)"
 print_timeout = "8m"
 
 [tuning]
@@ -385,11 +390,12 @@ available = false                 # not authed here -> dropped from any panel;
 ```
 
 A `[panels]` entry names known seats (registered external or Claude-channel
-seats, or the `cursor` group token); an unknown name is dropped with a one-time
-note. Panel names and seat names share ONE namespace: a `[panels]` entry named
+seats, or a group token, `cursor` or `agy`); an unknown name is dropped with a
+one-time note. Panel names and seat names share ONE namespace: a `[panels]` entry named
 after a live seat is ignored with a note (the seat wins), so `--panel` and
 `--seats` can never resolve the same word to two different rosters. Group
-tokens are exempt (redefining the built-in `cursor` preset stays legal). An unavailable seat is filtered out of any resolved panel **after** panel
+tokens are exempt (a `[panels]` entry named `cursor` or `agy` stays legal, so
+redefining the built-in `cursor` preset works). An unavailable seat is filtered out of any resolved panel **after** panel
 resolution and **before** the run; if a filter would empty a panel entirely, crew
 warns once and runs the unfiltered panel rather than nothing.
 
@@ -418,9 +424,9 @@ prints the resolved default panel's external seats (not the whole catalog);
 
 #### Ad-hoc single-provider runs
 
-To call **one** provider directly (no fan-out, no review rubric) — e.g. for a
-quick codex/agy query — use the engine's `run` subcommand instead of a
-hand-built `agy -p "$(cat …)"`. That raw form can't be permission-allowlisted
+To call **one** provider directly (no fan-out, no review rubric), e.g. for a
+quick codex query, use the engine's `run` subcommand instead of a hand-built
+`codex exec "$(cat …)"`. That raw form can't be permission-allowlisted
 because the prompt path changes every time; the `run` wrapper is one stable,
 allowlistable command:
 
@@ -430,10 +436,10 @@ launcher run directly via its shebang + exec bit — no `python` prefix, no
 
 ```bash
 # prompt from a file (handles "the cat" for you)
-"${CLAUDE_PLUGIN_ROOT}/crew" run agy -f <prompt-file>
+"${CLAUDE_PLUGIN_ROOT}/crew" run codex -f <prompt-file>
 
 # or a direct prompt string
-"${CLAUDE_PLUGIN_ROOT}/crew" run codex "summarize this"
+"${CLAUDE_PLUGIN_ROOT}/crew" run codex-luna "summarize this"
 ```
 
 `run <seat>` accepts any registered seat resolved external for the current host,

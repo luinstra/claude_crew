@@ -1,6 +1,5 @@
 {
   "subprocess": {
-    "agy": {"available": true, "diag": ""},
     "codex": {"available": true, "diag": ""},
     "codex-luna": {"available": true, "diag": ""},
     "codex-terra": {"available": true, "diag": ""},

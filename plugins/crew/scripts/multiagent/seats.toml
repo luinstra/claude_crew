@@ -20,6 +20,10 @@
 #   reasoning_effort  codex only. Unset means the provider's own default.
 #   print_timeout     agy only. Unset means the provider's own default.
 #
+# No shipped seat rides the agy channel: declare one ([seats.<name>] with
+# via = ["agy"] and a model) to use that CLI. The bare name `agy` is then the
+# channel's GROUP TOKEN, so no seat may take it.
+#
 # ORDER IS LOAD-BEARING: the built-in subprocess panel, the premium-off set, and
 # the scaffolded config all read this table in the order written here.
 
@@ -36,10 +40,6 @@ via = ["codex"]
 model = "gpt-5.6-terra"
 opt_in = true
 
-[seats.agy]
-via = ["agy"]
-model = "Gemini 3.1 Pro (High)"
-
 [seats.cursor-gpt]
 via = ["cursor"]
 model = "gpt-5.5-extra-high"
@@ -47,7 +47,7 @@ opt_in = true
 
 [seats.cursor-gemini]
 via = ["cursor"]
-model = "gemini-3.1-pro"
+model = "gemini-3.7-flash-high"
 opt_in = true
 
 [seats.cursor-glm]
@@ -88,7 +88,7 @@ opt_in = true
 # cursor-* list: the token is expanded at resolution time so it grows with the
 # catalog. A [panels] table in a user config redefines a panel by name.
 [panels]
-full = ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer", "opus", "sonnet"]
+full = ["codex", "codex-luna", "cursor-auto", "cursor-composer", "opus", "sonnet"]
 quick = ["codex", "sonnet"]
 lite = ["opus", "sonnet"]
 solo = ["opus"]

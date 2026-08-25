@@ -201,6 +201,23 @@ def project_config(toml_text, *, write_file=True):
     return crew_config(project=toml_text if write_file else None)
 
 
+# A config-declared agy seat, named so it clears the GROUP TOKEN. The shipped
+# catalog declares no agy seat, and a free-model executor kind mints a token
+# named after itself unless a shipped seat holds that name, so `agy` is now a
+# token and no config row may take it. The adapter still ships; a config seat
+# under any other name is how it is reached.
+# Twin: test-review-workflow.py declares its own AGY_SEAT / AGY_SEAT_TOML
+# (standalone entry point); rename both together.
+AGY_SEAT = "agy-gemini"
+
+
+def agy_seat_toml(**tunes):
+    """A config-declared agy seat, the only way to reach the adapter now."""
+    keys = {"model": "Gemini 3.1 Pro (High)", **tunes}
+    body = "".join(f"{k} = {json.dumps(v)}\n" for k, v in keys.items())
+    return f'[seats.{AGY_SEAT}]\nvia = ["agy"]\n' + body
+
+
 def shipped_seats(provider):
     """The SHIPPED catalog rows for one provider, in catalog order — the roster as
     seats.toml declares it, with no config layer folded in. Config-independent, so
@@ -1456,12 +1473,21 @@ def test_agy_oversized():
               "ok=False ARG_MAX diag", f"ok={res.ok} error={res.error!r}")
 
 
-def _run_agy_with_fake(script_body: str, prompt="PROMPT", timeout=10, env_extra=None):
-    # Build the agy seat THROUGH the catalog so a [seats.agy] config table (model
+def _run_agy_with_fake(
+    script_body: str, prompt="PROMPT", timeout=10, env_extra=None, seat_tunes=None
+):
+    # Build the agy seat THROUGH the catalog so a [seats.<name>] config table (model
     # or print_timeout) reaches it — the registry binds the resolved tunes, which
-    # a bare AgyProvider() no longer reads.
+    # a bare AgyProvider() no longer reads. The seat is config-declared because
+    # the shipped catalog no longer carries one.
     from multiagent.providers import get_provider
-    prov = get_provider("agy")
+    with project_config(agy_seat_toml(**(seat_tunes or {}))):
+        return _run_agy_fake_locked(
+            get_provider(AGY_SEAT), script_body, prompt, timeout, env_extra
+        )
+
+
+def _run_agy_fake_locked(prov, script_body, prompt, timeout, env_extra):
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
         capture = d / "capture.json"
@@ -1524,7 +1550,7 @@ def test_agy_run():
           and all('"' not in a and "'" not in a for a in args),
           "standalone unquoted positional", str(args))
     check("agy: no --prompt-file", "--prompt-file" not in args, "absent", str(args))
-    check("agy: --model defaults to Gemini 3.1 Pro (High)",
+    check("agy: the config-declared seat's model reaches argv as --model",
           "--model" in args and "Gemini 3.1 Pro (High)" in args,
           "--model 'Gemini 3.1 Pro (High)'", str(args))
     check("agy: --print-timeout present", "--print-timeout" in args, "present", str(args))
@@ -1535,10 +1561,12 @@ def test_agy_run():
     check("agy: stdin is DEVNULL (fake saw no stdin / empty)",
           cap["stdin"] in ("", "<no-stdin>"), "empty/no stdin", cap["stdin"])
 
-    # config [seats.agy].model override (env retired)
-    with project_config('[seats.agy]\nmodel = "Gemini 3.5 Flash (High)"\n'):
-        res, cap = _run_agy_with_fake(capture_args)
-    check("agy: --model overridable via [seats.agy].model config",
+    # A different [seats.agy-gemini].model value reaches argv too: argv follows
+    # the declared row, there is no baked-in default (env override retired).
+    res, cap = _run_agy_with_fake(
+        capture_args, seat_tunes={"model": "Gemini 3.5 Flash (High)"}
+    )
+    check("agy: --model overridable via [seats.agy-gemini].model config",
           "Gemini 3.5 Flash (High)" in cap["args"], "override model present", str(cap["args"]))
 
     # empty output -> ok=False
@@ -1564,17 +1592,17 @@ def test_agy_run():
           res.ok is False and res.error and "auth" in res.error.lower(),
           "ok=False auth diag", f"ok={res.ok} error={res.error!r}")
 
-    # hang -> timeout kill + reap within deadline. config [seats.agy].print_timeout
-    # "1s" keeps the wall-clock floor low so the kill fires fast — without it the
-    # default 8m floor would make this hang (env retired).
+    # hang -> timeout kill + reap within deadline. The config-declared agy seat's
+    # print_timeout = "1s" (the [seats.agy-gemini] shape) keeps the wall-clock
+    # floor low so the kill fires fast; without it the default 8m floor would
+    # make this hang (env retired).
     start = time.monotonic()
-    with project_config('[seats.agy]\nprint_timeout = "1s"\n'):
-        res, _ = _run_agy_with_fake("""
-        import sys, time
-        with open(CAPTURE, "w") as f:
-            f.write('{"args": [], "stdin": ""}')
-        time.sleep(30)
-        """, timeout=1)
+    res, _ = _run_agy_with_fake("""
+    import sys, time
+    with open(CAPTURE, "w") as f:
+        f.write('{"args": [], "stdin": ""}')
+    time.sleep(30)
+    """, timeout=1, seat_tunes={"print_timeout": "1s"})
     elapsed = time.monotonic() - start
     check("agy hang -> ok=False with timeout error",
           res.ok is False and res.error and "timed out" in res.error,
@@ -1757,12 +1785,12 @@ def test_default_seats():
     CURSOR_SEATS = shipped_seats("cursor")
     # No config, no env (retired): the CONFIGURED default panel (here the built-in
     # full) drives _resolve_seats; opus/sonnet (Task seats) drop via the registry
-    # filter, leaving the built-in five subprocess seats.
+    # filter, leaving the built-in four subprocess seats.
     with project_config("", write_file=False):
         resolved = _resolve_seats(None)
         check("_resolve_seats(None) -> builtin full's subprocess subset",
-              resolved == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"],
-              "['codex', 'codex-luna', 'agy', 'cursor-auto', 'cursor-composer']", str(resolved))
+              resolved == ["codex", "codex-luna", "cursor-auto", "cursor-composer"],
+              "['codex', 'codex-luna', 'cursor-auto', 'cursor-composer']", str(resolved))
         # The 'cursor' group token expands on the --seats path (the env path is gone).
         seats = _resolve_seats("cursor")
         check("--seats cursor expands to all cursor-* seats",
@@ -2097,16 +2125,29 @@ def test_registry():
     log_section("Provider registry")
     check("get_provider('codex') -> CodexProvider",
           isinstance(get_provider("codex"), CodexProvider), "CodexProvider", "?")
-    check("get_provider('agy') -> AgyProvider",
-          isinstance(get_provider("agy"), AgyProvider), "AgyProvider", "?")
+    # agy ships an adapter but no shipped seat, so the registry reaches it only
+    # through a config-declared row: that IS the supported path now.
+    with project_config(agy_seat_toml()):
+        check(f"get_provider({AGY_SEAT!r}) -> AgyProvider (config-declared agy seat)",
+              isinstance(get_provider(AGY_SEAT), AgyProvider), "AgyProvider", "?")
+        seats = available_seats(["codex", AGY_SEAT])
+        check("available_seats returns instances", len(seats) == 2, "2", str(len(seats)))
+    with project_config("", write_file=False):
+        try:
+            get_provider(AGY_SEAT)
+            check(f"undeclared {AGY_SEAT} raises", False, "ValueError", "no raise")
+        except ValueError as exc:
+            # The message must name the seat as UNKNOWN (no shipped agy seat and
+            # no config row declares it), not merely contain the substring "agy".
+            check(f"undeclared {AGY_SEAT} is an unknown registered seat",
+                  f"unknown registered seat {AGY_SEAT!r}" in str(exc),
+                  f"unknown registered seat {AGY_SEAT!r}", str(exc))
     try:
         get_provider("nope")
         check("unknown seat raises", False, "ValueError", "no raise")
     except ValueError as exc:
         check("unknown seat raises clear error",
               "nope" in str(exc), "mentions 'nope'", str(exc))
-    seats = available_seats(["codex", "agy"])
-    check("available_seats returns instances", len(seats) == 2, "2", str(len(seats)))
     # Cursor model-seats are registered (one per CURSOR_SEATS entry).
     from multiagent.providers import known_seat_names
     from multiagent.providers.cursor import CursorProvider
@@ -2127,12 +2168,13 @@ def test_registry():
           CURSOR_SEATS.get("cursor-grok").model == "cursor-grok-4.6-xhigh",
           "cursor-grok-4.6-xhigh", str(CURSOR_SEATS.get("cursor-grok")))
     # Every cursor pin, not just the one that was caught degrading. These are
-    # the exact ids `cursor-agent --list-models` advertises; recheck them
-    # whenever the provider ships a new model generation, because a retired id
-    # is fuzzy-matched down instead of erroring.
+    # the exact ids an authenticated `cursor-agent --list-models` advertised on
+    # 2026-08-20 (client 2026.08.11-e8db854); recheck them whenever the provider
+    # ships a new model generation, because a retired id is fuzzy-matched down
+    # instead of erroring.
     CURSOR_CATALOGUED_MODELS = {
         "cursor-gpt": "gpt-5.5-extra-high",
-        "cursor-gemini": "gemini-3.1-pro",
+        "cursor-gemini": "gemini-3.7-flash-high",
         "cursor-glm": "glm-5.2-max",
         "cursor-grok": "cursor-grok-4.6-xhigh",
         "cursor-auto": "auto",
@@ -2271,7 +2313,8 @@ def test_continuations():
         "None and exact ID",
         repr(ProviderContinuation("thread-1")),
     )
-    agy = get_provider("agy")
+    with project_config(agy_seat_toml()):
+        agy = get_provider(AGY_SEAT)
     check(
         "continuation gate: Agy unsupported, Codex/Cursor opted in",
         not getattr(agy, "supports_continuation")
@@ -3518,10 +3561,14 @@ def test_production_invocation_and_fanout():
         _init_repo(str(repo))
         plan = repo / "plan.md"
         plan.write_text("# plan\n", encoding="utf-8")
+        # The agy seat is config-declared (the shipped catalog has none); the
+        # subprocess drops CLAUDE_PROJECT_DIR, so crew_base() is the repo cwd.
+        (repo / ".crew").mkdir(parents=True, exist_ok=True)
+        (repo / ".crew" / "config.toml").write_text(agy_seat_toml(), encoding="utf-8")
         env = _neutral_env()
         env["CREW_HOST"] = "codex"
         proc = _run_cli(
-            ["review", "plan.md", "--seats", "codex,agy", "--session-id", "S", "--timeout", "2"],
+            ["review", "plan.md", "--seats", f"codex,{AGY_SEAT}", "--session-id", "S", "--timeout", "2"],
             env=env, cwd=str(repo), timeout=30,
         )
         check("cli.py bare-script runs without ModuleNotFoundError",
@@ -3533,9 +3580,9 @@ def test_production_invocation_and_fanout():
               "schema-1 work_batch", f"rc={proc.returncode} out={proc.stdout[:200]}")
         work = payload.get("work_items", [])
         check("standalone work_batch exposes each external seat",
-              [item.get("seat") for item in work] == ["codex", "agy"]
+              [item.get("seat") for item in work] == ["codex", AGY_SEAT]
               and all(item.get("driver") == "external" for item in work),
-              "codex,agy external actions", str(work))
+              f"codex,{AGY_SEAT} external actions", str(work))
 
         # The host adapter places all supplied options before a literal `--`
         # and carries the target as one final argv item. This is executable
@@ -3560,7 +3607,7 @@ def test_production_invocation_and_fanout():
         hostile_rel = hostile_plan.relative_to(repo).as_posix()
         all_options = _run_cli(
             ["review", "--session-id", "S-all", "--base", "main",
-             "--panel", "full", "--seats", "codex,agy", "--timeout", "2",
+             "--panel", "full", "--seats", f"codex,{AGY_SEAT}", "--timeout", "2",
              "--inline-diff", "--", hostile_rel],
             env=env, cwd=str(repo), timeout=30,
         )
@@ -3570,9 +3617,9 @@ def test_production_invocation_and_fanout():
               all_options.returncode == 0
               and all_payload.get("type") == "work_batch"
               and all_payload.get("resolved_target", {}).get("scope") == hostile_rel
-              and [item.get("seat") for item in all_work] == ["codex", "agy"]
+              and [item.get("seat") for item in all_work] == ["codex", AGY_SEAT]
               and all(item.get("driver") == "external" for item in all_work),
-              "hostile target path plus independent codex,agy seat selection",
+              f"hostile target path plus independent codex,{AGY_SEAT} seat selection",
               f"rc={all_options.returncode} payload={all_payload}")
 
         missing_session = _run_cli(["review", "plan.md"], env=env, cwd=str(repo), timeout=30)
@@ -4055,7 +4102,7 @@ def test_council_subcommand():
         check("council -f reads the question file and fans it out",
               ok, "exit0 + question in seat output", f"{proc.returncode}: {proc.stdout[:200]}")
 
-    # default subprocess seats = codex,agy (no --seats given).
+    # two fake external seats: codex plus a config-declared agy seat.
     with tempfile.TemporaryDirectory() as td:
         bins = Path(td) / "bin"
         bins.mkdir()
@@ -4069,14 +4116,14 @@ def test_council_subcommand():
         # agy print_timeout via config; _run_cli has no cwd, so resolve the loader
         # via CLAUDE_PROJECT_DIR (env retired — no 8m hang on the agy fake).
         (Path(td) / ".crew").mkdir(parents=True, exist_ok=True)
-        (Path(td) / ".crew" / "config.toml").write_text('[seats.agy]\nprint_timeout = "1s"\n')
+        (Path(td) / ".crew" / "config.toml").write_text(agy_seat_toml(print_timeout="1s"))
         env = path_with(bins)
         env["CLAUDE_PROJECT_DIR"] = td
         # Pin the two fake subprocess seats EXPLICITLY via --seats so this exercises
         # the council fan-out deterministically, independent of the default panel
         # (CREW_MA_SEATS is retired — the flag is now the only override).
         proc = _run_cli(
-            ["council", "Pick one.", "--seats", "codex,agy", "--json", "--timeout", "5"],
+            ["council", "Pick one.", "--seats", f"codex,{AGY_SEAT}", "--json", "--timeout", "5"],
             env=env, timeout=60,
         )
         names = []
@@ -4085,8 +4132,8 @@ def test_council_subcommand():
             names = sorted(r["name"] for r in arr)
         except Exception:
             names = []
-        check("council pinned seats fan out (codex,agy)",
-              names == ["agy", "codex"], "['agy', 'codex']", str(names))
+        check(f"council pinned seats fan out (codex,{AGY_SEAT})",
+              names == [AGY_SEAT, "codex"], f"['{AGY_SEAT}', 'codex']", str(names))
 
     # one seat fails, the other still returns (graceful degradation).
     with tempfile.TemporaryDirectory() as td:
@@ -4100,11 +4147,11 @@ def test_council_subcommand():
         """)
         # agy print_timeout via config (CLAUDE_PROJECT_DIR; env retired).
         (Path(td) / ".crew").mkdir(parents=True, exist_ok=True)
-        (Path(td) / ".crew" / "config.toml").write_text('[seats.agy]\nprint_timeout = "1s"\n')
+        (Path(td) / ".crew" / "config.toml").write_text(agy_seat_toml(print_timeout="1s"))
         env = path_with(bins)
         env["CLAUDE_PROJECT_DIR"] = td
         proc = _run_cli(
-            ["council", "Q?", "--seats", "codex,agy", "--json", "--timeout", "5"],
+            ["council", "Q?", "--seats", f"codex,{AGY_SEAT}", "--json", "--timeout", "5"],
             env=env, timeout=60,
         )
         by_name = {}
@@ -4116,8 +4163,8 @@ def test_council_subcommand():
               by_name.get("codex", {}).get("ok") is True,
               "codex ok=True", str(by_name.get("codex")))
         check("council one-seat-fails: agy ok=False, didn't sink the council",
-              by_name.get("agy", {}).get("ok") is False,
-              "agy ok=False", str(by_name.get("agy")))
+              by_name.get(AGY_SEAT, {}).get("ok") is False,
+              "agy ok=False", str(by_name.get(AGY_SEAT)))
         check("council partial panel -> exit 0 (not all-failed)",
               proc.returncode == 0, "0", f"{proc.returncode}: {proc.stderr[:200]}")
 
@@ -4137,11 +4184,11 @@ def test_council_subcommand():
         """)
         # agy print_timeout via config (CLAUDE_PROJECT_DIR; env retired).
         (Path(td) / ".crew").mkdir(parents=True, exist_ok=True)
-        (Path(td) / ".crew" / "config.toml").write_text('[seats.agy]\nprint_timeout = "1s"\n')
+        (Path(td) / ".crew" / "config.toml").write_text(agy_seat_toml(print_timeout="1s"))
         env = path_with(bins)
         env["CLAUDE_PROJECT_DIR"] = td
         proc = _run_cli(
-            ["council", "Q?", "--seats", "codex,agy", "--json", "--timeout", "5"],
+            ["council", "Q?", "--seats", f"codex,{AGY_SEAT}", "--json", "--timeout", "5"],
             env=env, timeout=60,
         )
         check("council all-fail: no traceback",
@@ -5502,7 +5549,8 @@ def test_config():
         model = "luna-config"
         reasoning_effort = "low"
 
-        [seats.agy]
+        [seats.agy-gemini]
+        via = ["agy"]
         model = "Gemini Config Model"
         print_timeout = "3m"
 
@@ -5521,9 +5569,9 @@ def test_config():
         check("config valid: seat_spec('codex').model -> 'gpt-5.5'",
               seats.seat_spec("codex").model == "gpt-5.5",
               "gpt-5.5", str(seats.seat_spec("codex").model))
-        check("config valid: seat_spec('agy').model -> 'Gemini Config Model'",
-              seats.seat_spec("agy").model == "Gemini Config Model",
-              "Gemini Config Model", str(seats.seat_spec("agy").model))
+        check("config valid: seat_spec('agy-gemini').model -> 'Gemini Config Model'",
+              seats.seat_spec("agy-gemini").model == "Gemini Config Model",
+              "Gemini Config Model", str(seats.seat_spec("agy-gemini").model))
         check("config valid: seat_spec('cursor-glm').model -> 'glm-config-max'",
               seats.seat_spec("cursor-glm").model == "glm-config-max",
               "glm-config-max", str(seats.seat_spec("cursor-glm").model))
@@ -5538,9 +5586,9 @@ def test_config():
         check("config valid: seat_spec('codex-luna').model -> 'luna-config'",
               seats.seat_spec("codex-luna").model == "luna-config",
               "luna-config", str(seats.seat_spec("codex-luna").model))
-        check("config valid: seat_spec('agy').print_timeout -> '3m'",
-              seats.seat_spec("agy").print_timeout == "3m",
-              "3m", str(seats.seat_spec("agy").print_timeout))
+        check("config valid: seat_spec('agy-gemini').print_timeout -> '3m'",
+              seats.seat_spec("agy-gemini").print_timeout == "3m",
+              "3m", str(seats.seat_spec("agy-gemini").print_timeout))
         check("config valid: default_timeout() -> 777",
               config.default_timeout() == 777, "777", str(config.default_timeout()))
         # A seat the config does not tune keeps its shipped pin and no per-provider
@@ -5553,13 +5601,15 @@ def test_config():
               f"{seats.seat_spec('codex-terra').reasoning_effort}")
 
     # 2. Missing file -> default_panel/default_timeout None (no crash, no warn); an
-    #    untuned seat carries no per-provider tune.
+    #    untuned seat carries no per-provider tune. Both knobs read are ones the
+    #    shipped codex seats genuinely carry, so each slot proves the missing
+    #    file left the tune unset rather than reading a knob the seat never had.
     with project("", write_file=False):
         buf = io.StringIO()
         with redirect_stderr(buf):
             vals = (config.default_panel(), config.default_timeout(),
                     seats.seat_spec("codex").reasoning_effort,
-                    seats.seat_spec("agy").print_timeout)
+                    seats.seat_spec("codex-luna").reasoning_effort)
         check("config missing file: getters/tunes None, no stderr noise",
               all(v is None for v in vals) and buf.getvalue() == "",
               "all None + silent", f"vals={vals} stderr={buf.getvalue()!r}")
@@ -5590,7 +5640,9 @@ def test_config():
         reasoning_effort = 123
         model = "kept-codex-model"
 
-        [seats.agy]
+        [seats.agy-gemini]
+        via = ["agy"]
+        model = "Gemini Config Model"
         print_timeout = ""
 
         [tuning]
@@ -5601,7 +5653,7 @@ def test_config():
         with redirect_stderr(buf):
             dp = config.default_panel()
             re_ = seats.seat_spec("codex").reasoning_effort
-            pt = seats.seat_spec("agy").print_timeout
+            pt = seats.seat_spec("agy-gemini").print_timeout
             tmo = config.default_timeout()
             kept = seats.seat_spec("codex").model
         check("config bad fields: each invalid field dropped (tune/getter -> None)",
@@ -5835,24 +5887,25 @@ def test_config():
             os.environ.pop("CURSOR_CAPTURE", None)
 
     # 10. agy model + print_timeout from config reach the argv; per-repo BEATS global.
-    with project("[seats.agy]\nmodel = \"Agy Config Model\"\nprint_timeout = \"4m\"\n"):
-        res, cap = _run_agy_with_fake("""
+    #     The seat is config-declared, so its tunes ride the declaring table.
+    _agy_argv_fake = """
         import sys, json
         json.dump(sys.argv[1:], open(CAPTURE, "w"))
         sys.stdout.write("review body")
         sys.exit(0)
-        """)
-        check("per-seat: config agy model + print_timeout reach argv",
-              cap is not None and "Agy Config Model" in cap and "4m" in cap,
-              "model + 4m in argv", str(cap))
-    with crew_config(project="[seats.agy]\nmodel = \"Agy Repo\"\nprint_timeout = \"4m\"\n",
-                     glob="[seats.agy]\nmodel = \"Agy Global\"\nprint_timeout = \"9m\"\n"):
-        res2, cap2 = _run_agy_with_fake("""
-        import sys, json
-        json.dump(sys.argv[1:], open(CAPTURE, "w"))
-        sys.stdout.write("review body")
-        sys.exit(0)
-        """)
+        """
+    res, cap = _run_agy_with_fake(
+        _agy_argv_fake,
+        seat_tunes={"model": "Agy Config Model", "print_timeout": "4m"})
+    check("per-seat: config agy model + print_timeout reach argv",
+          cap is not None and "Agy Config Model" in cap and "4m" in cap,
+          "model + 4m in argv", str(cap))
+    with crew_config(project=agy_seat_toml(model="Agy Repo", print_timeout="4m"),
+                     glob=agy_seat_toml(model="Agy Global", print_timeout="9m")):
+        # Both layers declare the seat; the wrapper would overwrite the per-repo
+        # file, so drive the locked runner on the catalog-built provider.
+        res2, cap2 = _run_agy_fake_locked(
+            get_provider(AGY_SEAT), _agy_argv_fake, "PROMPT", 10, None)
         check("per-seat: per-repo agy model/print_timeout BEAT the global file",
               cap2 is not None and "Agy Repo" in cap2 and "4m" in cap2
               and "Agy Global" not in cap2 and "9m" not in cap2,
@@ -5897,7 +5950,7 @@ def test_config():
         obj = json.loads(proc.stdout)
         check("review-prep explicit --panel full OVERRIDES config default_panel=lite",
               proc.returncode == 0
-              and obj["subprocess_seats"] == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"],
               "full overrides config", str(obj))
 
@@ -5920,7 +5973,7 @@ def test_config():
         obj = json.loads(proc.stdout) if proc.returncode == 0 else None
         check("review-prep invalid config default_panel -> built-in 'full' (no KeyError)",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"],
               "full fallback on invalid", f"rc={proc.returncode} obj={obj}")
 
@@ -5935,10 +5988,10 @@ def test_global_roster_availability():
     with global_home('default_panel = "lite"\n'):
         check("global-only default_panel applies when no per-repo file",
               config.default_panel() == "lite", "lite", str(config.default_panel()))
-    with global_home('[seats.agy]\nmodel = "Global Agy"\n'):
-        check("global-only [seats.agy].model applies (via the catalog)",
-              seats.seat_spec("agy").model == "Global Agy",
-              "Global Agy", str(seats.seat_spec("agy").model))
+    with global_home(agy_seat_toml(model="Global Agy")):
+        check("global-only [seats.agy-gemini].model applies (via the catalog)",
+              seats.seat_spec("agy-gemini").model == "Global Agy",
+              "Global Agy", str(seats.seat_spec("agy-gemini").model))
 
     # --- panels() roster ------------------------------------------------------
     # Override a built-in preset AND define a custom one.
@@ -6103,7 +6156,7 @@ def test_panel_availability_consistency():
         seats_p = _run_dispatcher(["seats"], cwd=td, env=env, timeout=30)
         lines = [ln for ln in seats_p.stdout.splitlines() if ln.strip()]
         check("ad-hoc `crew seats` drops an available=false seat from the default panel",
-              "cursor-auto" not in lines and "codex" in lines and "agy" in lines,
+              "cursor-auto" not in lines and "codex" in lines and "codex-luna" in lines,
               "no cursor-auto", str(lines))
         rp = _run_dispatcher(["review-prep", "plan.md", "--session-id", "pa1"],
                              cwd=td, env=env, timeout=30)
@@ -6160,7 +6213,7 @@ def test_panel_availability_consistency():
     # 8. BLOCKING: review-prep availability is WHOLE-PANEL, not per-split.
     #    Disabling BOTH task seats in `full` empties the TASK split only — it must
     #    NOT trip the unfiltered-panel fallback (which would re-add opus/sonnet)
-    #    because the five subprocess seats remain. Expected: subprocess intact,
+    #    because the four subprocess seats remain. Expected: subprocess intact,
     #    task_seats == [] (deliberately-disabled seat-KIND stays disabled).
     with tempfile.TemporaryDirectory() as td:
         proj = Path(td)
@@ -6172,7 +6225,7 @@ def test_panel_availability_consistency():
         obj = json.loads(rp.stdout)
         check("review-prep disabling BOTH task seats in full -> task_seats == [] (no opus/sonnet restoration)",
               rp.returncode == 0
-              and obj["subprocess_seats"] == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == [],
               "subprocess intact, task []", str(obj))
         # The empty TASK split must NOT fire the all-unavailable whole-panel warn
@@ -6181,7 +6234,7 @@ def test_panel_availability_consistency():
               "all seats in the resolved panel" not in rp.stderr,
               "no whole-panel fallback warn", repr(rp.stderr[:200]))
 
-    # 8b. Symmetric: disabling ALL FIVE subprocess seats in `full` empties the
+    # 8b. Symmetric: disabling ALL FOUR subprocess seats in `full` empties the
     #     SUBPROCESS split only — task seats remain, no fallback, review runs
     #     task-only (subprocess_seats == []).
     with tempfile.TemporaryDirectory() as td:
@@ -6189,7 +6242,6 @@ def test_panel_availability_consistency():
         _write_cfg(proj,
                    '[seats.codex]\navailable = false\n'
                    '[seats.codex-luna]\navailable = false\n'
-                   '[seats.agy]\navailable = false\n'
                    '[seats.cursor-auto]\navailable = false\n'
                    '[seats.cursor-composer]\navailable = false\n')
         _write_plan(proj)
@@ -6211,7 +6263,6 @@ def test_panel_availability_consistency():
         _write_cfg(proj,
                    '[seats.codex]\navailable = false\n'
                    '[seats.codex-luna]\navailable = false\n'
-                   '[seats.agy]\navailable = false\n'
                    '[seats.cursor-auto]\navailable = false\n'
                    '[seats.cursor-composer]\navailable = false\n'
                    '[seats.opus]\navailable = false\n'
@@ -6223,7 +6274,7 @@ def test_panel_availability_consistency():
         obj = json.loads(rp.stdout)
         check("review-prep disabling EVERY seat -> whole-panel fallback restores the unfiltered panel",
               rp.returncode == 0
-              and obj["subprocess_seats"] == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"],
               "unfiltered full restored", str(obj))
         check("review-prep all-unavailable -> the whole-panel fallback warn fires once",
@@ -6231,7 +6282,7 @@ def test_panel_availability_consistency():
               "all-unavailable warn", repr(rp.stderr[:200]))
 
     # 9b. BLOCKING regression: the opaque --task-seats override counts toward the
-    #     final panel being NON-empty. Disable ALL FIVE subprocess seats in `full`
+    #     final panel being NON-empty. Disable ALL FOUR subprocess seats in `full`
     #     AND pass `--task-seats opus` (which sets task_raw=[] and supplies the
     #     panel via explicit_task_seats). The whole-panel emptiness check must see
     #     the override as the (non-empty) task panel and NOT restore the disabled
@@ -6242,7 +6293,6 @@ def test_panel_availability_consistency():
         _write_cfg(proj,
                    '[seats.codex]\navailable = false\n'
                    '[seats.codex-luna]\navailable = false\n'
-                   '[seats.agy]\navailable = false\n'
                    '[seats.cursor-auto]\navailable = false\n'
                    '[seats.cursor-composer]\navailable = false\n')
         _write_plan(proj)
@@ -6575,7 +6625,7 @@ def test_review_prep():
         proc, obj = _prep(["--panel", "full", "--session-id", "pf"], td)
         check("review-prep --panel full -> default subprocess subset + task_seats/models",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"]
               and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"},
               "full preset split", str(obj))
@@ -6672,7 +6722,7 @@ def test_review_prep():
         bo_prefix = str(Path(td).resolve() / ".crew" / "reviews" / "bo" / "run-")
         check("review-prep both --panel and --seats omitted + no config -> built-in 'full' (subprocess AND task seats)",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"]
               and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"}
               and obj["prompt_path"].startswith(bo_prefix)
@@ -6687,7 +6737,7 @@ def test_review_prep():
         proc, obj = _prep(["--panel", "full", "--task-seats", "opus", "--session-id", "ov1"], td)
         check("review-prep --panel full --task-seats opus -> task list overridden to ['opus']",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus"]
               and obj["task_seat_models"] == {"opus": "opus"},
               "task-seats override", str(obj))
@@ -6743,7 +6793,7 @@ def test_debate_panel_resolver():
             lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
             return proc.returncode, lines
 
-    FULL = ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer", "opus", "sonnet"]
+    FULL = ["codex", "codex-luna", "cursor-auto", "cursor-composer", "opus", "sonnet"]
 
     # 1. [debate].panel="full" BEATS default_panel="lite" -> debate resolves full.
     rc, lines = resolve("default_panel = \"lite\"\n\n[debate]\npanel = \"full\"\n")
@@ -6887,13 +6937,13 @@ def test_debate_panel_resolver():
     rc, payload, _ = resolve_json(None)
     check("seats --debate --json: built-in full -> exact review-prep shape + split",
           rc == 0 and payload == {
-              "subprocess_seats": ["codex", "codex-luna", "agy",
+              "subprocess_seats": ["codex", "codex-luna",
                                    "cursor-auto", "cursor-composer"],
               "task_seats": ["opus", "sonnet"],
               "task_seat_models": {"opus": "opus", "sonnet": "sonnet"},
               "host": "claude",
               "seat_channels": {
-                  "codex": "codex", "codex-luna": "codex", "agy": "agy",
+                  "codex": "codex", "codex-luna": "codex",
                   "cursor-auto": "cursor", "cursor-composer": "cursor",
                   "opus": "claude", "sonnet": "claude",
               },
@@ -7007,21 +7057,21 @@ def test_panel_catalog():
         # actually fans out when nobody names a panel.
         task_names = set(seats.task_seats())
         subprocess_subset = [n for n in panels["full"] if n not in task_names]
-        builtin_five = cli._resolve_seats(None)
+        builtin_four = cli._resolve_seats(None)
         check("full's subprocess subset == _resolve_seats(None) (sequence)",
-              subprocess_subset == builtin_five,
-              str(builtin_five), str(subprocess_subset))
+              subprocess_subset == builtin_four,
+              str(builtin_four), str(subprocess_subset))
 
         # INDEPENDENT-literal drift pins: the built-in panel + premium-off set are
         # DERIVED from the catalog's opt_in flags, so pin both against a
         # hand-literal so a derivation-logic bug (wrong order / wrong filter) fails
         # NAMING it, not just when it drifts in lockstep with the panels literal.
         catalog = seats.merged_catalog()
-        check("_resolve_seats(None) == the built-in five (order pinned)",
-              builtin_five
-              == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"],
-              "['codex', 'codex-luna', 'agy', 'cursor-auto', 'cursor-composer']",
-              str(builtin_five))
+        check("_resolve_seats(None) == the built-in four (order pinned)",
+              builtin_four
+              == ["codex", "codex-luna", "cursor-auto", "cursor-composer"],
+              "['codex', 'codex-luna', 'cursor-auto', 'cursor-composer']",
+              str(builtin_four))
         check("premium_off_seats() == the opt-in SET (no dupes/drops)",
               set(seats.premium_off_seats())
               == {"cursor-glm", "cursor-gpt", "cursor-gemini", "cursor-grok", "codex-terra"}
@@ -7035,11 +7085,11 @@ def test_panel_catalog():
         check("premium_off_seats() == {subprocess seats with opt_in=True}",
               set(seats.premium_off_seats()) == _sub_opt,
               "opt_in True set", str(sorted(set(seats.premium_off_seats()))))
-        check("the built-in five minus agy == {subprocess seats with opt_in=False}",
-              set(builtin_five) - {"agy"}
+        check("the built-in four == {subprocess seats with opt_in=False}",
+              set(builtin_four)
               == {n for n, s in catalog.items()
-                  if s.kind.model_rule == "free" and not s.opt_in and n != "agy"},
-              "opt_in False set", str(sorted(set(builtin_five) - {"agy"})))
+                  if s.kind.model_rule == "free" and not s.opt_in},
+              "opt_in False set", str(sorted(builtin_four)))
 
         # The other panels, verbatim. cursor is the literal group TOKEN, NOT an
         # expanded cursor-* list (the token is expanded at resolution in cli.py).
@@ -7098,11 +7148,11 @@ def test_catalog_cache_reset():
         config._reset_cache_for_tests()
         try:
             resolved = cli._resolve_seats(None)
-            ok = resolved == ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
+            ok = resolved == ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
         except RecursionError:
             ok = False
         check("_resolve_seats(None) resolves on a cold cache (no recursion)",
-              ok, "built-in five", str(locals().get("resolved", "RecursionError")))
+              ok, "built-in four", str(locals().get("resolved", "RecursionError")))
 
     # --- One reset clears ALL SIX caches (AC 24). Warm every cache, then reset,
     # and assert each is back to its unloaded/None sentinel.
@@ -8530,12 +8580,12 @@ def _roster_drill(root: Path):
          lambda t: mutate_roster_line(t, "opt-in",
              lambda l: l.rstrip() + ", `cursor-stale`")),
         ("fake 4-name line in build.md", "plugins/crew/commands/build.md",
-         lambda t: append_line(t, "Panel seats: codex, codex-luna, agy, cursor-auto")),
+         lambda t: append_line(t, "Panel seats: codex, codex-luna, opus, cursor-auto")),
         ("unanchored wrapped 3-current+1-stale run", "plugins/crew/commands/review.md",
-         lambda t: append_line(t, "`codex`, `agy`, `sonnet`, `stale-seat`")),
+         lambda t: append_line(t, "`codex`, `cursor-auto`, `sonnet`, `stale-seat`")),
         ("labeled+punctuated 3-current+1-stale run",
          "plugins/crew/commands/measure-twice.md",
-         lambda t: append_line(t, "Seats: codex, agy, sonnet, stale-seat.")),
+         lambda t: append_line(t, "Seats: codex, cursor-auto, sonnet, stale-seat.")),
         ("wrapped (none) on an anchored roster line", "README.md",
          lambda t: mutate_roster_line(t, "opt-in",
              lambda l: l.split(":", 1)[0] + ": `(none)`")),
@@ -9034,8 +9084,10 @@ def test_dispatch_chain_failure_invariants():
         old_env = with_project(repo)
         observed = []
 
+        # A stand-in for any adapter that opts out of continuation. The provider
+        # is mocked, so the seat name only has to resolve in the catalog.
         class _Unsupported(Provider):
-            name = "agy"
+            name = "cursor-composer"
             supports_workspace_write = True
             supports_continuation = False
 
@@ -9050,18 +9102,18 @@ def test_dispatch_chain_failure_invariants():
                     ) is None,
                 })
                 return ProviderResult(
-                    name="agy", model=None, ok=True, output="AGY BODY",
+                    name="cursor-composer", model=None, ok=True, output="SEAT BODY",
                     error=None, elapsed=0.1,
                 )
 
-        prior = _seed_dispatch_record(repo, seat="agy", provider="agy")
+        prior = _seed_dispatch_record(repo, seat="cursor-composer", provider="cursor")
         out_path = repo / "out.json"
         try:
             with mock.patch("multiagent.cli.get_provider", return_value=_Unsupported()):
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
                     rc = cli.cmd_dispatch(_dispatch_ns(
-                        seat="agy", task="x", json=True, out=str(out_path),
+                        seat="cursor-composer", task="x", json=True, out=str(out_path),
                         session_id="S", chain="build-executor",
                     ))
             envelope = json.loads(out_path.read_text())
@@ -9260,6 +9312,10 @@ def test_dispatch_chain_e2e_fake_clis():
         bins = root / "bin"
         bins.mkdir()
         codex_capture = root / "codex-after-agy.json"
+        # The agy seat is config-declared; the dispatch subprocess anchors
+        # crew_base() at the repo cwd, so the repo config carries it.
+        (repo / ".crew").mkdir(parents=True, exist_ok=True)
+        (repo / ".crew" / "config.toml").write_text(agy_seat_toml(), encoding="utf-8")
         make_fake_bin(bins, "agy", """
         import sys
         sys.stdout.write("[BLOCKING] agy round")
@@ -9279,7 +9335,7 @@ def test_dispatch_chain_e2e_fake_clis():
             )
             agy_proc, agy_env = _run_dispatch(
                 repo, bins,
-                ["--seat", "agy", "--chain", "build-executor", "task"],
+                ["--seat", AGY_SEAT, "--chain", "build-executor", "task"],
                 session="S",
             )
             codex_proc, codex_env = _run_dispatch(
@@ -10553,10 +10609,14 @@ def test_dispatch():
     # --- Task 2: supports_workspace_write fail-closed default + explicit True ---
     check("Provider ABC default supports_workspace_write is False (fail-CLOSED)",
           Provider.supports_workspace_write is False, "False", str(Provider.supports_workspace_write))
-    for s in ("codex", "agy", "cursor-auto"):
+    for s in ("codex", "cursor-auto"):
         check(f"{s} provider opts into supports_workspace_write=True",
               get_provider(s).supports_workspace_write is True,
               "True", str(get_provider(s).supports_workspace_write))
+    with project_config(agy_seat_toml()):
+        check("agy provider opts into supports_workspace_write=True",
+              get_provider(AGY_SEAT).supports_workspace_write is True,
+              "True", str(get_provider(AGY_SEAT).supports_workspace_write))
     check(
         "catalog seat names and group tokens remain disjoint",
         set(seats.merged_catalog()).isdisjoint(set(seats.group_tokens())),
@@ -10652,19 +10712,22 @@ def test_dispatch():
 
     # --- Task 3: config.dispatch_seat validation ---
     log_section("dispatch — config.dispatch_seat() validation")
-    with project_config('[dispatch]\nseat = "agy"\n'):
-        check("[dispatch].seat=agy -> 'agy'", config.dispatch_seat() == "agy",
-              "agy", repr(config.dispatch_seat()))
+    with project_config('[dispatch]\nseat = "codex-terra"\n'):
+        check("[dispatch].seat=codex-terra -> 'codex-terra'",
+              config.dispatch_seat() == "codex-terra",
+              "codex-terra", repr(config.dispatch_seat()))
     with project_config('[dispatch]\nseat = "opus"\n'):
         check("[dispatch].seat=opus -> 'opus'", config.dispatch_seat() == "opus",
               "opus", repr(config.dispatch_seat()))
-    for bad in ("bogus", "cursor"):
+    # `agy` joins the group tokens: with no shipped agy seat, the channel mints a
+    # token under that name, so it names a LIST of seats rather than one.
+    for bad in ("bogus", "cursor", "agy"):
         with project_config(f'[dispatch]\nseat = "{bad}"\n'):
             check(f"[dispatch].seat={bad} (task/unknown/group) -> None (warn once)",
                   config.dispatch_seat() is None, "None", repr(config.dispatch_seat()))
-    with crew_config(project='[dispatch]\nseat = "agy"\n', glob='[dispatch]\nseat = "codex"\n'):
-        check("[dispatch].seat per-repo (agy) wins over global (codex)",
-              config.dispatch_seat() == "agy", "agy", repr(config.dispatch_seat()))
+    with crew_config(project='[dispatch]\nseat = "codex-terra"\n', glob='[dispatch]\nseat = "codex"\n'):
+        check("[dispatch].seat per-repo (codex-terra) wins over global (codex)",
+              config.dispatch_seat() == "codex-terra", "codex-terra", repr(config.dispatch_seat()))
 
     # --- Task 4: git tri-state helpers + full envelope scenarios ---
     log_section("dispatch — git guard helpers + envelope scenarios")
@@ -10864,16 +10927,15 @@ def test_dispatch():
               and json.loads((repo / last).read_text())["seat"] == "codex",
               "printed path == written dispatch-codex.json", f"{proc.returncode}: {last!r}")
 
-        # (9) Default-seat routing via [dispatch].seat config -> agy.
-        make_fake_bin(bins, "agy",
-            "import sys\nsys.stdin.read() if False else None\nprint('AGY OK WORK')\n")
+        # (9) Default-seat routing via [dispatch].seat config -> codex-terra, an
+        #     opt-in seat no built-in default picks, served by the fake codex.
         repo = Path(td) / "r9"; repo.mkdir(); _init_repo(str(repo))
         proj = Path(td) / "proj"; (proj / ".crew").mkdir(parents=True)
-        (proj / ".crew" / "config.toml").write_text('[dispatch]\nseat = "agy"\n')
+        (proj / ".crew" / "config.toml").write_text('[dispatch]\nseat = "codex-terra"\n')
         home = Path(td) / "home"; home.mkdir()
         proc, env = _run_dispatch(repo, bins, ["x"], project_dir=proj, home=str(home))
-        check("dispatch [dispatch].seat=agy routes (no --seat) -> envelope seat=agy",
-              env and env["seat"] == "agy", "seat=agy", str(env))
+        check("dispatch [dispatch].seat=codex-terra routes (no --seat) -> envelope seat=codex-terra",
+              env and env["seat"] == "codex-terra", "seat=codex-terra", str(env))
 
         # (9b) HERMETICITY REGRESSION (billable-leak incident): a REAL
         #      ~/.crew-config.toml in the parent process's HOME must NEVER leak
@@ -11770,11 +11832,11 @@ def test_dispatch_options():
     )
     with crew_config(glob=seeded_global):
         rc, out, err = _run_parsed(["scaffold-config", "--repo", "--out", "-",
-                                    "--dispatch-seat", "agy"])
+                                    "--dispatch-seat", "codex-terra"])
         parsed = _toml.loads(out)
         check("seeded --repo: --dispatch-seat edit lands under [dispatch] proper (section-distinct)",
-              rc == 0 and parsed.get("dispatch", {}).get("seat") == "agy",
-              "dispatch.seat == agy", str(parsed.get("dispatch")))
+              rc == 0 and parsed.get("dispatch", {}).get("seat") == "codex-terra",
+              "dispatch.seat == codex-terra", str(parsed.get("dispatch")))
         check("seeded --repo: the real [dispatch.codex] table survives byte-verbatim",
               parsed["dispatch"]["codex"]["profile"] == "p"
               and '[dispatch.codex]\nprofile = "p"' in out,
@@ -12180,6 +12242,10 @@ def test_doctor():
         bins = d / "bin"; bins.mkdir()
         home = d / "home"; home.mkdir()
         proj = d / "proj"; proj.mkdir()
+        # A config-declared agy seat gives doctor an absent-CLI row to report
+        # (no agy binary is faked on the isolated PATH).
+        (proj / ".crew").mkdir()
+        (proj / ".crew" / "config.toml").write_text(agy_seat_toml(), encoding="utf-8")
         agent_calls = d / "agent_calls.txt"
         codex_calls = d / "codex_calls.txt"
         # codex present — is_available() is pure shutil.which (NEVER exec'd); the
@@ -12226,9 +12292,9 @@ def test_doctor():
                   sub.get("codex-luna", {}).get("available") is True,
                   "codex-luna true", str(sub.get("codex-luna")))
             check("doctor: agy detected ABSENT with a PATH diag",
-                  sub.get("agy", {}).get("available") is False
-                  and "PATH" in (sub.get("agy", {}).get("diag") or ""),
-                  "agy false + diag", str(sub.get("agy")))
+                  sub.get(AGY_SEAT, {}).get("available") is False
+                  and "PATH" in (sub.get(AGY_SEAT, {}).get("diag") or ""),
+                  "agy false + diag", str(sub.get(AGY_SEAT)))
             _cursor = set(_seats.group_tokens()["cursor"])
             check("doctor: every cursor-* seat present (probe fanned)",
                   all(sub.get(s, {}).get("available") is True
@@ -12496,7 +12562,7 @@ def test_probe():
             check("probe --all stdout parses as JSON", False, "valid json",
                   f"{exc}: {proc.stdout[:200]}")
         expected_engine = [
-            "agy", "codex", "codex-luna", "codex-terra", "cursor-auto",
+            "codex", "codex-luna", "codex-terra", "cursor-auto",
             "cursor-composer", "cursor-gemini", "cursor-glm", "cursor-gpt",
             "cursor-grok",
         ]
@@ -12512,10 +12578,11 @@ def test_probe():
               proc.stdout.strip().startswith("{") and proc.stdout.strip().endswith("}"),
               "pure JSON", proc.stdout[:120])
 
-        # 7b. Mixed pass + skipped (codex present via env_pass, agy absent on the
-        # isolated PATH) -> exit 0. A skipped seat alongside a real pass is still
-        # healthy; only ALL-skipped (test 2) or any fail/degraded flips nonzero.
-        proc = _run_cli(["probe", "codex", "agy"], env=env_pass, timeout=30)
+        # 7b. Mixed pass + skipped (codex present via env_pass, the cursor CLI
+        # absent on the isolated PATH) -> exit 0. A skipped seat alongside a real
+        # pass is still healthy; only ALL-skipped (test 2) or any fail/degraded
+        # flips nonzero.
+        proc = _run_cli(["probe", "codex", "cursor-auto"], env=env_pass, timeout=30)
         check("probe pass+skipped -> exit 0", proc.returncode == 0, "0",
               f"{proc.returncode}: {proc.stderr[:200]}")
         try:
@@ -12525,11 +12592,11 @@ def test_probe():
             check("probe pass+skipped stdout parses as JSON", False, "valid json",
                   f"{exc}: {proc.stdout[:200]}")
         if payload is not None:
-            check("probe pass+skipped -> codex pass, agy skipped",
+            check("probe pass+skipped -> codex pass, cursor-auto skipped",
                   payload.get("codex", {}).get("status") == "pass"
-                  and payload.get("agy", {}).get("status") == "skipped",
-                  "codex=pass agy=skipped",
-                  f"codex={payload.get('codex')} agy={payload.get('agy')}")
+                  and payload.get("cursor-auto", {}).get("status") == "skipped",
+                  "codex=pass cursor-auto=skipped",
+                  f"codex={payload.get('codex')} cursor-auto={payload.get('cursor-auto')}")
 
         # 4. Fake codex that prints unrelated prose -> status degraded, exit 1.
         bins_degraded = d / "bin-degraded"; bins_degraded.mkdir()
@@ -12744,7 +12811,7 @@ def test_scaffold_config():
     # --- fresh global template: --out - is PURE TOML, note on stderr ----------
     with crew_config() as proj:
         rc, out, err = run(["scaffold-config", "--out", "-",
-                            "--default-panel", "lite", "--dispatch-seat", "agy"])
+                            "--default-panel", "lite", "--dispatch-seat", "codex-terra"])
         check("scaffold --out - exits 0", rc == 0, "0", str(rc))
         parsed = None
         try:
@@ -12791,24 +12858,25 @@ def test_scaffold_config():
         check("round-trip: default_panel() reads the baked value",
               config.default_panel() == "lite", "lite", str(config.default_panel()))
         check("round-trip: dispatch_seat() reads the baked value",
-              config.dispatch_seat() == "agy", "agy", str(config.dispatch_seat()))
+              config.dispatch_seat() == "codex-terra", "codex-terra", str(config.dispatch_seat()))
         check("round-trip: ZERO config warnings on the emitted template",
               not config._warned, "no warnings", str(config._warned))
 
     # --- detection present: detected-absent + premium -> available=false ------
     with crew_config() as proj:
         det = Path(proj) / "doctor.json"
-        write_det(det, absent=["agy"],
+        write_det(det, absent=["cursor-composer"],
                   present=["codex", "codex-luna", "codex-terra",
-                           "cursor-auto", "cursor-composer",
+                           "cursor-auto",
                            "cursor-glm", "cursor-gpt", "cursor-gemini",
                            "cursor-grok"])
         rc, out, err = run(["scaffold-config", "--out", "-", "--detection", str(det),
                             "--disable-seat", "opus"])
         parsed = _toml.loads(out)
         seats_tbl = parsed.get("seats", {})
-        check("detection: detected-absent agy -> available=false",
-              seats_tbl.get("agy", {}).get("available") is False, "agy false", str(seats_tbl.get("agy")))
+        check("detection: detected-absent cursor-composer -> available=false",
+              seats_tbl.get("cursor-composer", {}).get("available") is False,
+              "cursor-composer false", str(seats_tbl.get("cursor-composer")))
         check("detection: detected-present codex -> available OMITTED",
               "available" not in seats_tbl.get("codex", {}), "codex no available", str(seats_tbl.get("codex")))
         check("detection: detected-present codex-luna -> available OMITTED (default seat, not opt-in)",
@@ -12925,14 +12993,14 @@ def test_scaffold_config():
               "force overwrite", str(env_json))
 
     # --- D3 conservative override table ---------------------------------------
-    # multi-[seats.X] section scoping: edit codex.available, leave agy.model alone.
+    # multi-[seats.X] section scoping: edit codex.available, leave cursor-auto.model alone.
     multi_global = (
         '# tuned global\n'
         'default_panel = "lite"\n\n'
         '[seats.codex]\n'
         'model = "gpt-x"\n\n'
-        '[seats.agy]\n'
-        'model = "Gemini 3.1 Pro (High)"\n'
+        '[seats.cursor-auto]\n'
+        'model = "auto"\n'
     )
     with crew_config(glob=multi_global) as proj:
         rc, out, err = run(["scaffold-config", "--repo", "--out", "-",
@@ -12945,10 +13013,10 @@ def test_scaffold_config():
               parsed["seats"]["codex"].get("available") is False
               and parsed["seats"]["codex"].get("model") == "gpt-x",
               "codex false + model kept", str(parsed["seats"].get("codex")))
-        check("D3 section-scoping: [seats.agy].model UNTOUCHED (not hit by codex edit)",
-              parsed["seats"]["agy"].get("model") == "Gemini 3.1 Pro (High)"
-              and "available" not in parsed["seats"]["agy"],
-              "agy model intact, no available", str(parsed["seats"].get("agy")))
+        check("D3 section-scoping: [seats.cursor-auto].model UNTOUCHED (not hit by codex edit)",
+              parsed["seats"]["cursor-auto"].get("model") == "auto"
+              and "available" not in parsed["seats"]["cursor-auto"],
+              "cursor-auto model intact, no available", str(parsed["seats"].get("cursor-auto")))
         check("D3: comment '# tuned global' preserved verbatim",
               "# tuned global" in out, "comment present", "missing")
         check("D3 case3: [dispatch] appended (absent in base) -> seat lands",
@@ -13024,11 +13092,11 @@ def test_scaffold_config():
               "codex inline intact", str(loaded["seats"].get("codex")))
 
     # dotted-key base -> leave + note, still loads, no duplicate.
-    dotted_global = 'seats.agy.print_timeout = "30s"\n'
+    dotted_global = 'seats.codex-luna.reasoning_effort = "high"\n'
     with crew_config(glob=dotted_global) as proj:
-        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "agy"])
-        check("D3 case5: dotted-key agy -> stderr note + loads (no duplicate)",
-              "could not safely apply override 'agy'" in err,
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "codex-luna"])
+        check("D3 case5: dotted-key codex-luna -> stderr note + loads (no duplicate)",
+              "could not safely apply override 'codex-luna'" in err,
               "leave + note", f"err={err[:60]}")
         _toml.loads(out)  # must NOT raise
 
@@ -13098,21 +13166,21 @@ def test_scaffold_config():
               and loaded["seats"]["cursor-glm"].get("model") == "glm-5.2-max",
               "glm true + model kept", str(loaded["seats"].get("cursor-glm")))
 
-    # internal-whitespace header: [ seats.agy ].
+    # internal-whitespace header: [ seats.codex-luna ].
     ws_header_global = (
         'default_panel = "full"\n\n'
-        '[ seats.agy ]\n'
-        'model = "Gemini 3.1 Pro (High)"\n'
+        '[ seats.codex-luna ]\n'
+        'model = "gpt-5.6-luna"\n'
     )
     with crew_config(glob=ws_header_global) as proj:
-        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "agy"])
-        check("header-recog: '[ seats.agy ]' internal-whitespace header recognized",
-              out.count("seats.agy") == 1, "1 occurrence", str(out.count("seats.agy")))
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "codex-luna"])
+        check("header-recog: '[ seats.codex-luna ]' internal-whitespace header recognized",
+              out.count("seats.codex-luna") == 1, "1 occurrence", str(out.count("seats.codex-luna")))
         loaded = loads_clean(out)
         check("header-recog: whitespace-header output LOADS + disable applied in place",
-              loaded["seats"]["agy"].get("available") is False
-              and loaded["seats"]["agy"].get("model") == "Gemini 3.1 Pro (High)",
-              "agy false + model kept", str(loaded["seats"].get("agy")))
+              loaded["seats"]["codex-luna"].get("available") is False
+              and loaded["seats"]["codex-luna"].get("model") == "gpt-5.6-luna",
+              "codex-luna false + model kept", str(loaded["seats"].get("codex-luna")))
 
     # --- parse-guard BACKSTOP: an edit that would break the base is discarded --
     # Monkeypatch the recognizer to MISS a header (simulating any form the regex
@@ -13159,13 +13227,13 @@ def test_scaffold_config():
     # --- MINOR: --repo + global + VALID --detection -> parsed, NOT auto-applied
     with crew_config(glob=multi_global) as proj:
         det = Path(proj) / "doctor.json"
-        write_det(det, absent=["agy"], present=["codex"])
+        write_det(det, absent=["cursor-auto"], present=["codex"])
         rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--detection", str(det),
                             "--disable-seat", "codex"])
         parsed = _toml.loads(out)  # loads clean
-        check("--repo + global + valid --detection: detected-absent agy NOT auto-applied",
-              "available" not in parsed.get("seats", {}).get("agy", {"available": "x"}),
-              "agy untouched by detection", str(parsed.get("seats", {}).get("agy")))
+        check("--repo + global + valid --detection: detected-absent cursor-auto NOT auto-applied",
+              "available" not in parsed.get("seats", {}).get("cursor-auto", {"available": "x"}),
+              "cursor-auto untouched by detection", str(parsed.get("seats", {}).get("cursor-auto")))
         check("--repo + global + valid --detection: only explicit --disable-seat codex lands",
               parsed["seats"]["codex"].get("available") is False,
               "codex false (explicit)", str(parsed["seats"].get("codex")))
@@ -14626,8 +14694,8 @@ def test_process_group_reaping():
     # longer reads config).
     from multiagent.providers import get_provider as _get_provider  # noqa: E402
     _run_case("agy", "agy",
-              lambda t: _get_provider("agy").run("PROMPT", timeout=t),
-              timeout=1, config_toml='[seats.agy]\nprint_timeout = "1s"\n')
+              lambda t: _get_provider(AGY_SEAT).run("PROMPT", timeout=t),
+              timeout=1, config_toml=agy_seat_toml(print_timeout="1s"))
 
 
 # =============================================================================
@@ -14638,7 +14706,7 @@ _ROSTER_FIXTURES = TESTS_DIR / "fixtures" / "seat-roster"
 
 # The built-in subprocess panel: what a bare `crew seats` must print, and what
 # _resolve_seats(None) must return, on a machine with no crew config at all.
-_BUILTIN_FIVE = ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"]
+_BUILTIN_FOUR = ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
 
 # Fixed in BOTH the committed capture and the verify below: review-prep's
 # prompt_path embeds the session segment, so a run under a different id could
@@ -14691,9 +14759,8 @@ def test_seat_roster_drift_guard():
         ("codex",           "CodexProvider",  "gpt-5.6-sol",           False),
         ("codex-luna",      "CodexProvider",  "gpt-5.6-luna",          False),
         ("codex-terra",     "CodexProvider",  "gpt-5.6-terra",         True),
-        ("agy",             "AgyProvider",    "Gemini 3.1 Pro (High)", False),
         ("cursor-gpt",      "CursorProvider", "gpt-5.5-extra-high",    True),
-        ("cursor-gemini",   "CursorProvider", "gemini-3.1-pro",        True),
+        ("cursor-gemini",   "CursorProvider", "gemini-3.7-flash-high", True),
         ("cursor-glm",      "CursorProvider", "glm-5.2-max",           True),
         ("cursor-grok",     "CursorProvider", "cursor-grok-4.6-xhigh", True),
         ("cursor-auto",     "CursorProvider", "auto",                  False),
@@ -14738,7 +14805,7 @@ def test_seat_roster_drift_guard():
 
     # --- 3. All five presets, verbatim ---------------------------------------
     expected_presets = {
-        "full": ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer",
+        "full": ["codex", "codex-luna", "cursor-auto", "cursor-composer",
                  "opus", "sonnet"],
         "quick": ["codex", "sonnet"],
         "lite": ["opus", "sonnet"],
@@ -14758,12 +14825,12 @@ def test_seat_roster_drift_guard():
     # is the behavior.
     with crew_config():
         resolved = cli._resolve_seats(None)
-    check("_resolve_seats(None) == the built-in five (isolated config)",
-          resolved == _BUILTIN_FIVE, str(_BUILTIN_FIVE), str(resolved))
+    check("_resolve_seats(None) == the built-in four (isolated config)",
+          resolved == _BUILTIN_FOUR, str(_BUILTIN_FOUR), str(resolved))
     check("no opt-in premium seat rides the default panel",
           not ({"codex-terra", "cursor-gpt", "cursor-gemini", "cursor-glm",
-                "cursor-grok", "fable"} & set(resolved)) and "agy" in resolved,
-          "no opt-in seat, agy present", str(resolved))
+                "cursor-grok", "fable"} & set(resolved)),
+          "no opt-in seat", str(resolved))
 
     # The isolation above is what makes those two assertions mean anything: with
     # a config present, the SAME call answers with the configured roster instead.
@@ -14773,7 +14840,7 @@ def test_seat_roster_drift_guard():
                           '[panels]\npersonal = ["codex", "codex-terra", "opus"]\n'):
         configured = cli._resolve_seats(None)
     check("a global config REDEFINES that same resolution (isolation is load-bearing)",
-          configured == ["codex", "codex-terra"] and configured != _BUILTIN_FIVE,
+          configured == ["codex", "codex-terra"] and configured != _BUILTIN_FOUR,
           "['codex', 'codex-terra']", str(configured))
 
     # --- 4b. The cursor GROUP token expands to the SORTED cursor seats --------
@@ -14853,8 +14920,9 @@ def test_config_declared_seats():
     """A seat that exists NOWHERE in the Python source registers, on EVERY
     provider kind, from a config file alone (the headline capability).
 
-    Every seat here has a FRESH name: a shipped name (codex, agy) would be a TUNE
-    of an existing seat, not a declaration. demo-cursor is deliberately NOT named
+    Every seat here has a FRESH name: a shipped name (codex) would be a TUNE of
+    an existing seat, not a declaration, and `agy` is a reserved group token (the
+    config-declared shape is `[seats.agy-gemini]`). demo-cursor is deliberately NOT named
     cursor-* so its group membership can only come from the provider KIND, never a
     startswith("cursor-") prefix (a cursor-demo name would pass vacuously)."""
     log_section("seats declared purely from config (every provider kind)")
@@ -15096,6 +15164,7 @@ def test_config_declared_negative():
         ("claude-code missing model", '[seats.x]\nprovider = "claude-code"\n', "x"),
         ("claude-code bad alias", '[seats.x]\nprovider = "claude-code"\nmodel = "opus-4.6"\n', "x"),
         ("reserved token cursor", '[seats.cursor]\nprovider = "cursor"\n', "cursor"),
+        ("reserved token agy", '[seats.agy]\nvia = ["agy"]\nmodel = "x"\n', "agy"),
     )
     for label, body, name in seat_level:
         cat, warn, full = load(glob=body)
@@ -15139,22 +15208,28 @@ def test_config_declared_negative():
           "codex tuned + in full + no new seat + still shipped",
           f"declared={cat.get('codex')} n={len(cat)} vs {no_config_n}")
 
-    # --- collision matrix: codex/agy are SEATS, not group tokens, so they pass
-    #     through _expand_seat_groups unchanged; full/quick resolve to the pinned
-    #     roster. ---
+    # --- collision matrix: codex is a SEAT, not a group token, so it passes
+    #     through _expand_seat_groups unchanged. agy is the opposite case: a
+    #     free-model kind with NO shipped seat, so the channel mints a token that
+    #     names whatever agy seats the config declares (none, by default).
+    #     full/quick resolve to the pinned roster. ---
     with crew_config():
         check("_expand_seat_groups(['codex']) == ['codex'] (a seat, not a token)",
               cli._expand_seat_groups(["codex"]) == ["codex"],
               "['codex']", str(cli._expand_seat_groups(["codex"])))
-        check("_expand_seat_groups(['agy']) == ['agy']",
-              cli._expand_seat_groups(["agy"]) == ["agy"],
-              "['agy']", str(cli._expand_seat_groups(["agy"])))
+        check("_expand_seat_groups(['agy']) == [] (a token with no shipped members)",
+              cli._expand_seat_groups(["agy"]) == [],
+              "[]", str(cli._expand_seat_groups(["agy"])))
         panels = seats.merged_panels()
         check("full/quick resolve to the exact pinned roster",
-              panels["full"] == ["codex", "codex-luna", "agy", "cursor-auto",
+              panels["full"] == ["codex", "codex-luna", "cursor-auto",
                                  "cursor-composer", "opus", "sonnet"]
               and panels["quick"] == ["codex", "sonnet"],
               "pinned full + quick", f"{panels['full']} / {panels['quick']}")
+    with project_config(agy_seat_toml()):
+        check("_expand_seat_groups(['agy']) names the config-declared agy seat",
+              cli._expand_seat_groups(["agy"]) == [AGY_SEAT],
+              f"['{AGY_SEAT}']", str(cli._expand_seat_groups(["agy"])))
 
     # --- cross-layer resolution (per-key, repo over global) -------------------
     # global DECLARES a provider, repo TUNES a model: the effective table is the
@@ -15444,10 +15519,12 @@ def test_via_migration():
         "agy": "agy",
         "claude-code": "claude",
     }
-    with crew_config():
+    # The shipped catalog carries no agy row, so the agy kind is observed
+    # through a config-declared seat.
+    with project_config(agy_seat_toml()):
         actual_mapping = {
             spec.provider: spec.via[0]
-            for spec in seats.shipped_catalog().values()
+            for spec in seats.merged_catalog().values()
         }
     check("legacy provider kinds map to the four channel names",
           actual_mapping == expected_mapping,
@@ -16242,7 +16319,7 @@ def test_codex_host_fail_closed():
         project = Path(td)
         _write_plan(project)
         disabled = [
-            "codex", "codex-luna", "agy", "cursor-auto", "cursor-composer",
+            "codex", "codex-luna", "cursor-auto", "cursor-composer",
             "opus", "sonnet",
         ]
         crew = project / ".crew"
@@ -16259,7 +16336,7 @@ def test_codex_host_fail_closed():
         )
         payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
         expected = [
-            "codex", "codex-luna", "agy", "cursor-auto", "cursor-composer",
+            "codex", "codex-luna", "cursor-auto", "cursor-composer",
             "opus", "sonnet",
         ]
         check("Codex-host whole-panel availability fallback restores resolver output",
@@ -16284,7 +16361,7 @@ def test_unknown_host_conservative():
         )
         payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
         expected = [
-            "codex", "codex-luna", "agy", "cursor-auto", "cursor-composer",
+            "codex", "codex-luna", "cursor-auto", "cursor-composer",
             "opus", "sonnet",
         ]
         check("unknown host resolves every full-panel seat externally",
@@ -16363,7 +16440,7 @@ def test_roster_channel_invariant():
     """Ensure every emitted final roster member has exactly one channel entry."""
     log_section("final roster and seat-channel map invariant")
     full_subprocess = [
-        "codex", "codex-luna", "agy", "cursor-auto", "cursor-composer",
+        "codex", "codex-luna", "cursor-auto", "cursor-composer",
     ]
     full_task = ["opus", "sonnet"]
 
@@ -19084,7 +19161,7 @@ def test_quorum_header():
         tdp = Path(td)
         _write_plan(tdp)
         _, o1 = _prep_json(
-            ["plan.md", "--seats", "codex,codex-luna,agy,cursor-auto,cursor-composer",
+            ["plan.md", "--seats", "codex,codex-luna,codex-terra,cursor-auto,cursor-composer",
              "--task-seats", "opus,sonnet", "--session-id", "S"], td)
         roster = ",".join(o1["subprocess_seats"] + o1["task_seats"])
         check("the 7-seat manifest resolved intact (explicit names survive availability)",
@@ -19794,10 +19871,10 @@ def test_workplan_contract_freeze():
         (
             "default panel",
             ["review-prep", "plan.md", "--session-id", "freeze-default"],
-            ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"],
+            ["codex", "codex-luna", "cursor-auto", "cursor-composer"],
             ["opus", "sonnet"],
             {"opus": "opus", "sonnet": "sonnet"},
-            {"codex": "codex", "codex-luna": "codex", "agy": "agy",
+            {"codex": "codex", "codex-luna": "codex",
              "cursor-auto": "cursor", "cursor-composer": "cursor",
              "opus": "claude", "sonnet": "claude"},
         ),
@@ -19920,10 +19997,10 @@ def test_debate_split_contract_freeze():
     cases = [
         (
             "default mixed panel",
-            ["codex", "codex-luna", "agy", "cursor-auto", "cursor-composer"],
+            ["codex", "codex-luna", "cursor-auto", "cursor-composer"],
             ["opus", "sonnet"],
             {"opus": "opus", "sonnet": "sonnet"},
-            {"codex": "codex", "codex-luna": "codex", "agy": "agy",
+            {"codex": "codex", "codex-luna": "codex",
              "cursor-auto": "cursor", "cursor-composer": "cursor",
              "opus": "claude", "sonnet": "claude"},
             ["seats", "--debate", "--json"],

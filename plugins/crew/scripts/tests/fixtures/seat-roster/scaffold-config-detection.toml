@@ -4,7 +4,7 @@
 # Every key below is OPTIONAL; delete what you don't need. Python 3.11+ required to load.
 
 # Default panel when you name neither --panel nor --seats.
-# Cost-safe built-in full = codex + codex-luna + agy + cursor-auto + cursor-composer + opus + sonnet.
+# Cost-safe built-in full = codex + codex-luna + cursor-auto + cursor-composer + opus + sonnet.
 default_panel = "full"
 
 # [debate].panel — /crew:debate's default panel (can default fuller than reviews).
@@ -68,10 +68,6 @@ seat = "codex"
 [seats.codex-luna]
 # model = "gpt-5.6-luna"
 # reasoning_effort = "xhigh"     # codex-seat knob (read per seat: [seats.codex-luna] here)
-
-[seats.agy]
-# model = "Gemini 3.1 Pro (High)"
-# print_timeout = "8m"           # agy-only knob (read only from [seats.agy])
 
 [seats.cursor-auto]
 # model = "auto"

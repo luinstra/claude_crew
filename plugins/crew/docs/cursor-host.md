@@ -276,10 +276,25 @@ evidence.
 
 `cursor-agent --list-models` prints the full `slug - Display Name` catalog. That
 is the source of truth for any seat pin; do not infer the set from an example in
-prose. All six registered cursor-channel seat models are listed
-(verified live, 2026-08-20, cursor-agent 2026.08.11-e8db854): `auto`,
-`composer-2.5`, `gpt-5.5-extra-high`, `gemini-3.1-pro`, `glm-5.2-max`, and
-`cursor-grok-4.6-xhigh` (Cursor Grok 4.6 Extra High).
+prose. The six registered cursor-channel seat models: `auto`,
+`composer-2.5`, `gpt-5.5-extra-high`, `gemini-3.7-flash-high`, `glm-5.2-max`,
+and `cursor-grok-4.6-xhigh` (Cursor Grok 4.6 Extra High). All six are exact
+slugs from one authenticated capture (verified live, 2026-08-20, cursor-agent
+2026.08.11-e8db854).
+
+`gemini-3.7-flash-high` is the 2026-08-25 repin off `gemini-3.1-pro`. That same
+capture listed `gemini-3.7-flash-high - Gemini 3.7 Flash`, alongside
+`gemini-3.7-flash-{low,medium}`, `gemini-3.6-flash-*`, `gemini-3.1-pro`,
+`gemini-3.5-flash`, and `gemini-3-flash`; no Gemini Pro newer than 3.1 exists in
+the catalog, so 3.7 Flash is the newest Gemini generation (verified live,
+2026-08-20, cursor-agent 2026.08.11-e8db854). The repin is an operator decision
+to track the newest Gemini generation, accepting a model-CLASS change: 3.7
+Flash is a Flash-class model where 3.1 Pro was Pro-class. A live recheck needs
+an authenticated session (`cursor-agent --list-models` answers "Authentication
+required" otherwise), so log the `cursor-agent` CLI in first. Open: run
+`crew probe cursor-gemini` from an authenticated session to confirm the pin end
+to end; the 2026-08-20 capture confirms the slug is listed, not that this seat
+has answered at it.
 
 **Recheck every cursor seat pin against `--list-models` whenever the provider
 ships a new model generation.** A retired id is fuzzy-matched down without an
@@ -381,7 +396,9 @@ Observed session allowlist, five slugs:
 ALL FIVE registered cursor-channel seat models were REJECTED as subagent models:
 `composer-2.5`, `gpt-5.5-extra-high`, `gemini-3.1-pro`, `glm-5.2-max`,
 `cursor-grok-4.6-xhigh`. Being in the catalog does not make a slug usable as a
-subagent model.
+subagent model. (`gemini-3.1-pro` was the `cursor-gemini` pin on that date; the
+seat has since moved to `gemini-3.7-flash-high`, and whether the subagent
+surface accepts that slug has not been measured, so it carries no row here.)
 
 Rejection is LOUD and there is no silent substitution on this surface: the parent
 declined every unlisted slug and did not fall back to a neighbouring one (for

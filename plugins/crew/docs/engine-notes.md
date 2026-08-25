@@ -29,6 +29,27 @@
 REVIEWS were prompt-level, not a dead seat. Re-probe before any future demotion
 decision.
 
+The shipped `agy` seat was retired 2026-08-25 (operator decision: the seat is
+no longer in use and must not be enabled by default). The adapter, its `agy`
+channel, and the `print_timeout` knob stay; an agy seat is reached through a
+config-declared row (`[seats.<name>]` with `via = ["agy"]` and a `model`).
+With no shipped seat named `agy`, the channel mints an `agy` GROUP TOKEN, so
+`--seats agy` names a list (the declared agy seats), and with no declared agy
+seat that list is empty and each entry point handles it differently: `council`
+exits 2 with `error: no subprocess seats requested`, standalone review raises
+`WorkflowError("no_seats")`, and `review-prep` has no guard and emits an empty
+manifest silently, which only `crew state begin-review` refuses downstream.
+`[dispatch].seat = "agy"` resolves to `None` with the generic
+`[dispatch].seat='agy' is not a known registered seat (...); ignoring` warning.
+A `[seats.agy]` table is ignored in one of two ways: a row that declares `via`
+or `provider` reaches `_validate` and warns `seat name 'agy' is already a panel
+or group token (it resolves to a list of seats); ignoring it`, while a row with
+no execution key (empty or tune-only) never reaches it, is parked in the
+loader's `pending` bucket, and warns `[seats.agy] names no known seat and
+declares no provider or via; ignoring it`. `crew probe agy` exits 2 with
+`error: unknown seat 'agy'`, and `crew run agy` exits 2 with `error: unknown or
+unregistered seat 'agy'; valid registered seats: ...`.
+
 ## Why some registered seats are opt-in
 
 The default panel roster of record is scripts/CLAUDE.md + `seats.toml`'s `[panels]`
@@ -47,8 +68,11 @@ Opt-in for REDUNDANCY (not bucket cost):
 Opt-in for COST (premium/metered Cursor buckets):
 
 - `cursor-gpt` — codex already covers the GPT lineage, so it isn't defaulted.
-- `cursor-gemini` — `agy` covers the Gemini lineage flat-rate, so the metered
-  `cursor-gemini` is left opt-in.
+- `cursor-gemini` (pinned `gemini-3.7-flash-high`, a Flash-class model) is a
+  metered Cursor seat, not the flat-rate composer/auto bucket; its exact
+  billing tier for a Flash model is UNVERIFIED. It stays opt-in because no
+  default-panel slot has been chosen for it. Its earlier justification, that a
+  flat-rate agy seat covered the Gemini lineage, went with the shipped agy seat.
 - `cursor-glm` — glm-max draws on Cursor's shared premium MAX allotment, so it's
   opt-in too; `cursor-auto` fills that slot from the cheap/dedicated bucket.
 - `cursor-grok` — cursor-grok-4.6-xhigh draws that same shared premium allotment,

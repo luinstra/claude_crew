@@ -220,8 +220,8 @@ def _shipped_group_tokens() -> set[str]:
     """The group tokens, from ``seats.toml`` ALONE.
 
     STRUCTURAL: a free-model executor kind mints a token named after it UNLESS a
-    shipped seat already bears that name (``codex`` and ``agy`` are seats, so they
-    mint nothing; ``cursor`` is not, so it mints the ``cursor`` group).
+    shipped seat already bears that name (``codex`` is a seat, so it mints
+    nothing; ``cursor`` and ``agy`` are not, so each mints a group).
 
     Reads the shipped file only, deliberately: ``merged_catalog`` needs the
     reserved tokens to validate a name, and going through the merged panels here

@@ -169,7 +169,7 @@ multiagent/
     ├── __init__.py      # ProviderResult (six-field core plus optional channel, continuation, and run stamps), Provider ABC (external adapter: run() + supports_workspace_write + supports_continuation), registry + known_seat_names()
     ├── codex.py         # CodexProvider — the live codex model-seats (`codex exec - --sandbox read-only -o <tmp>`, prompt via stdin); each seat's name/model/reasoning_effort arrives from its SeatSpec, so a `[seats.<name>]` codex row in config is a first-class seat
     ├── cursor.py        # CursorProvider — the live cursor model-seats; each seat is driven by its SeatSpec, so a `[seats.<name>]` cursor row in config is a first-class seat
-    ├── agy.py           # AgyProvider (default panel) - `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions)
+    ├── agy.py           # AgyProvider (no shipped seat: reached only through a config-declared `[seats.<name>]` row with `via = ["agy"]`) - `agy -p <prompt> --model … --sandbox` (NOT --dangerously-skip-permissions)
     └── claude.py        # ClaudeProvider - read-only `claude -p` external seat; used when a Claude seat does not resolve native, with no continuation or write mode
 ```
 
@@ -395,7 +395,7 @@ Key contracts (do NOT regress):
   defines presets, or hardcodes a model pin (the engine EXECUTES the
   host-resolved external subset, skipped when empty).
 <!-- seat-roster:default -->
-- Built-in default panel: `codex`, `codex-luna`, `agy`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`
+- Built-in default panel: `codex`, `codex-luna`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`
 <!-- seat-roster:opt-in -->
 - Registered but opt-in: `codex-terra`, `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`
 <!-- seat-roster:task-opt-in -->
@@ -435,12 +435,14 @@ Key contracts (do NOT regress):
 ### Group tokens & staging
 
 - `--panel cursor` = `--seats cursor` (every registered cursor-* seat, grows with
-  the cursor rows of the catalog; no codex, no Claude).
+  the cursor rows of the catalog; no codex, no Claude). `agy` is the other
+  minted GROUP TOKEN: with no shipped seat of that name, `--seats agy` expands
+  to the config-declared agy seats (none by default).
 - The registered-seat allowlist is registry-derived via `known_seat_names()` (no
   hardcoded codex/agy list); host resolution decides which registered seats are
-  external for the current call. The `cursor` GROUP TOKEN (in `--seats` and
-  `[panels]` rosters) expands to every registered `cursor-*` seat via `_expand_seat_groups`, so it grows
-  with the cursor rows of the catalog (`seats.group_tokens()` supplies the expansion members).
+  external for the current call. A GROUP TOKEN (`cursor`, `agy`; in `--seats` and
+  `[panels]` rosters) expands to every registered seat of its kind via `_expand_seat_groups`, so it grows
+  with that kind's rows of the catalog (`seats.group_tokens()` supplies the expansion members).
 - `render --stage --session-id <id>` stages a seat prompt to the FLAT
   `.crew/reviews/<session-id>/prompt-<seat-role>.txt`, pointer or no pointer:
   only the Python run owners (`review-prep` for loops and `review_workflow` for
@@ -769,7 +771,7 @@ Key contracts (do NOT regress):
     collapses, so the written path is `.crew/reviews/<session_segment>/doctor.json`. The JSON
     is ALWAYS printed to stdout (no `--json` flag — output is always JSON).
   - **`scaffold-config`** renders a COMMENTED starter config emitting ONLY loader-read
-    keys (`reasoning_effort` under a per-codex-seat table, e.g. `[seats.codex]`, `print_timeout` under `[seats.agy]`,
+    keys (`reasoning_effort` under a per-codex-seat table, e.g. `[seats.codex]`; `print_timeout` is NOT emitted, since it is read only from a config-declared agy-channel table such as `[seats.agy-gemini]` and the template skips declared seats;
     cost-safe defaults, premium seats `available=false`). It consumes `doctor`'s JSON via
     `--detection` (ABSENT flag → omit per-seat `available` lines + a stderr "detection
     skipped" note; GIVEN-but-missing/empty/malformed → error+nonzero). ONE output

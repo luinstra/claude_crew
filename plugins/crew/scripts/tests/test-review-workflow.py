@@ -130,6 +130,15 @@ class _BlankExceptionProvider(_Provider):
         raise Exception()
 
 
+# The shipped catalog declares no agy seat (the kind then mints an `agy` GROUP
+# TOKEN, so no config row may take that name); the adapter is reached through
+# a config-declared seat under another name.
+# Twin: test-multiagent.py declares its own AGY_SEAT / agy_seat_toml()
+# (standalone entry point); rename both together.
+AGY_SEAT = "agy-gemini"
+AGY_SEAT_TOML = f'[seats.{AGY_SEAT}]\nvia = ["agy"]\nmodel = "Gemini 3.1 Pro (High)"\n'
+
+
 class _AgyFloorProvider(_Provider):
     def __init__(self, state: dict[str, int], name: str = "agy") -> None:
         super().__init__(name=name)
@@ -3893,19 +3902,21 @@ class ReviewWorkflowTest(unittest.TestCase):
             review_workflow.ACCESS_ADVISORY,
         )
         os.environ["CREW_HOST"] = "claude"
+        # No shipped seat rides the agy channel; a config-declared one does.
+        self._write_repo_config(AGY_SEAT_TOML)
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
             side_effect=lambda name, channel: _Provider(name=name),
         ):
-            step = self._start(seats="opus,codex,agy", session="access-tier")
+            step = self._start(seats=f"opus,codex,{AGY_SEAT}", session="access-tier")
         self.assertEqual(
             {(item.seat, item.access) for item in step.work_items},
             {
                 ("opus", "read-only-advisory"),
                 ("codex", "read-only"),
                 # Same run, same "external", different adapter posture.
-                ("agy", "read-only-advisory"),
+                (AGY_SEAT, "read-only-advisory"),
             },
         )
 
@@ -5817,16 +5828,19 @@ class ReviewWorkflowTest(unittest.TestCase):
         review_workflow.get_provider_for_channel = (
             lambda name, channel: _AgyFloorProvider(state, name=name)
         )
+        # The agy channel has no shipped seat, so the floor is exercised on a
+        # config-declared one.
+        self._write_repo_config(AGY_SEAT_TOML)
         try:
             with self.assertRaises(review_workflow.WorkflowError) as ctx:
-                self._start(seats="agy", session="agy-over", timeout=1)
+                self._start(seats=AGY_SEAT, session="agy-over", timeout=1)
             self.assertEqual(ctx.exception.code, "provider_timeout_exceeds_budget")
             self.assertFalse(
                 (self.root / ".crew" / "reviews" / "agy-over").exists()
             )
 
             state["floor"] = 10
-            step = self._start(seats="agy", session="agy-drift", timeout=1)
+            step = self._start(seats=AGY_SEAT, session="agy-drift", timeout=1)
             self.assertEqual(step.work_items[0].timeout_seconds, 10)
             run, _wf = self._workflow(step)
             before = (run / "workflow.json").read_bytes()
@@ -5845,7 +5859,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             self.assertEqual((run / "workflow.json").read_bytes(), before)
 
             reminted = self._start(
-                seats="agy",
+                seats=AGY_SEAT,
                 session="agy-drift",
                 timeout=None,
             )
@@ -5853,13 +5867,13 @@ class ReviewWorkflowTest(unittest.TestCase):
             self.assertEqual(reminted.work_items[0].timeout_seconds, 11)
             state["floor"] = 5
             resumed = self._start(
-                seats="agy",
+                seats=AGY_SEAT,
                 session="agy-drift",
                 timeout=None,
             )
             self.assertEqual(resumed.ref, reminted.ref)
             explicit = self._start(
-                seats="agy",
+                seats=AGY_SEAT,
                 session="agy-drift",
                 timeout=11,
             )
@@ -5870,11 +5884,11 @@ class ReviewWorkflowTest(unittest.TestCase):
             )
             self.assertEqual(
                 explicit_workflow["workflow_identity"]["provider_timeouts"],
-                {"agy": 11},
+                {AGY_SEAT: 11},
             )
             self.assertEqual(
                 explicit_record["workflow_identity"]["provider_timeouts"],
-                {"agy": 11},
+                {AGY_SEAT: 11},
             )
         finally:
             review_workflow.get_provider_for_channel = original

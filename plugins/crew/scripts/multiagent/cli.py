@@ -295,10 +295,12 @@ def _run_seat(name: str, prompt: str, timeout: int) -> ProviderResult:
 
 
 def _expand_seat_groups(names: list[str]) -> list[str]:
-    """Expand group tokens to seat names. ``cursor`` -> every cursor seat in the
-    catalog, SORTED, so the group grows with the catalog (a declared cursor seat
-    joins it) and the fan-out order is stable by name rather than by catalog
-    position. Non-group names pass through unchanged.
+    """Expand group tokens to seat names. A token names a free-model executor
+    kind with no shipped seat of that name (``cursor``, ``agy``) and expands to
+    every seat of that kind in the catalog, SORTED, so the group grows with the
+    catalog (a declared cursor or agy seat joins its group) and the fan-out order
+    is stable by name rather than by catalog position. Non-group names pass
+    through unchanged.
     """
     groups = seats.group_tokens()
     out: list[str] = []
@@ -443,13 +445,14 @@ def resolve_review_selection(
 def _resolve_seats(seats_arg: str | None) -> list[str]:
     """Resolve the comma-separated --seats arg to host-resolved external seats.
 
-    Accepts the ``cursor`` group token (expands to all cursor-* seats), so
-    ``--seats cursor`` runs the whole Cursor panel and ``--seats cursor,codex``
-    adds codex. When no ``--seats`` is given, the CONFIGURED default panel
-    (``config.default_panel()`` + ``[panels]``) resolves through the single
-    shared ``_panel_seat_list`` point (→ built-in ``full``), so ad-hoc
-    ``crew review``/``council``/``seats`` honor the roster too. Availability
-    (``_filter_available``) is applied AFTER roster resolution.
+    Group tokens (``cursor``, ``agy``) are expanded to every seat of that kind
+    in the catalog, so ``--seats cursor`` runs the whole Cursor panel and
+    ``--seats cursor,codex`` adds codex. When no ``--seats`` is given, the
+    CONFIGURED default panel (``config.default_panel()`` + ``[panels]``)
+    resolves through the single shared ``_panel_seat_list`` point (→ built-in
+    ``full``), so ad-hoc ``crew review``/``council``/``seats`` honor the roster
+    too. Availability (``_filter_available``) is applied AFTER roster
+    resolution.
     """
     if seats_arg:
         raw = [s.strip() for s in seats_arg.split(",") if s.strip()]
@@ -511,7 +514,7 @@ def _resolve_debate_seats(panel_arg: str | None, seats_arg: str | None) -> list[
     Unlike ``_resolve_seats`` (subprocess-only, registry-filtered), this KEEPS the
     Claude Task seats (opus/sonnet/fable) so the debate orchestrator can split
     the resolved panel into its per-seat subprocess fan-out and its Task dispatch.
-    Group tokens (``cursor``) are expanded; order preserved, de-duplicated.
+    Group tokens (``cursor``, ``agy``) are expanded; order preserved, de-duplicated.
 
     Precedence: explicit ``--seats`` (wins) > explicit ``--panel`` >
     ``config.debate_panel()`` > ``config.default_panel()`` > built-in ``full``.
@@ -4565,11 +4568,14 @@ def _render_config_template(
     detection: dict | None, *, scope: str, default_panel: str, dispatch_seat: str,
     opted_in: set[str], disabled: set[str],
 ) -> str:
-    """Render the COMMENTED starter config (D4) — ONLY keys the loader reads.
+    """Render the COMMENTED starter config: ONLY keys the loader reads.
 
-    ``reasoning_effort`` lives under the codex seat tables (``[seats.codex]`` /
-    ``[seats.codex-luna]``, resolved per seat) and ``print_timeout`` ONLY under
-    ``[seats.agy]`` (where the getters read them). Per-seat ``available``
+    ``reasoning_effort`` is emitted under the codex seat tables (``[seats.codex]``
+    / ``[seats.codex-luna]``, resolved per seat). ``print_timeout`` is NOT emitted
+    by the scaffold (no line, no comment): the getters read it only from a
+    config-declared agy-channel seat table, and the seat loop below skips
+    declared seats. The knob is documented in ``seats.toml``'s header key list
+    and the README's ``[seats.agy-gemini]`` example. Per-seat ``available``
     lines are decided by ``_seat_avail`` (cost-safe defaults; premium seats off).
     """
     today = datetime.date.today().isoformat()
@@ -4590,7 +4596,7 @@ def _render_config_template(
     L.append("# Every key below is OPTIONAL; delete what you don't need. Python 3.11+ required to load.")
     L.append("")
     L.append("# Default panel when you name neither --panel nor --seats.")
-    L.append("# Cost-safe built-in full = codex + codex-luna + agy + cursor-auto + cursor-composer + opus + sonnet.")
+    L.append("# Cost-safe built-in full = codex + codex-luna + cursor-auto + cursor-composer + opus + sonnet.")
     L.append(f"default_panel = {_toml_str(default_panel)}")
     L.append("")
     L.append("# [debate].panel — /crew:debate's default panel (can default fuller than reviews).")
@@ -4658,10 +4664,12 @@ def _render_config_template(
     L.append("")
     # The default (non-opt-in) executor seats, catalog-derived: the list, the
     # model hint, and the per-kind tuning knob all grow with seats.toml. The knob
-    # comment keys off the provider KIND (codex kinds carry reasoning_effort, agy
-    # carries print_timeout); a kind with no knob emits none. The opt-in executor
-    # seats are emitted below by the premium_off_seats() loop, so they are skipped
-    # here.
+    # comment keys off the provider KIND (codex kinds carry reasoning_effort); a
+    # kind with no knob emits none. print_timeout, the agy-only knob, is never
+    # emitted: it is read only from a config-declared agy row ([seats.<name>]
+    # with via = ["agy"]), declared seats are skipped here, and no shipped seat
+    # rides the agy channel. The opt-in executor seats are emitted below by the
+    # premium_off_seats() loop, so they are skipped here.
     for name, spec in seats.merged_catalog().items():
         if (not spec.has_executor or spec.kind.model_rule != "free"
                 or spec.declared or spec.opt_in):
@@ -4675,11 +4683,6 @@ def _render_config_template(
             L.append(
                 f'# reasoning_effort = "xhigh"     # codex-seat knob '
                 f'(read per seat: [seats.{name}] here)'
-            )
-        elif spec.provider == "agy":
-            L.append(
-                f'# print_timeout = "8m"           # agy-only knob '
-                f'(read only from [seats.{name}])'
             )
         L.append("")
     for seat in seats.premium_off_seats():
@@ -4744,9 +4747,9 @@ def _normalize_section(raw: str) -> str | None:
 
     Splits the dotted key into segments (a ``.`` inside a quoted segment does NOT
     separate), strips surrounding whitespace per segment, and strips matching
-    quotes from a quoted segment — so ``seats."cursor-glm"``, ``[ seats.codex ]``
-    and ``seats.'agy'`` compare equal to the bare ``seats.cursor-glm`` /
-    ``seats.codex`` / ``seats.agy`` targets. Returns ``None`` for a header the
+    quotes from a quoted segment, so ``seats."cursor-glm"``, ``[ seats.codex-luna ]``
+    and ``seats.'codex'`` compare equal to the bare ``seats.cursor-glm`` /
+    ``seats.codex-luna`` / ``seats.codex`` targets. Returns ``None`` for a header the
     parser cannot make sense of (empty / unterminated quote / stray char), so the
     caller treats it as UNRECOGNIZED rather than guessing."""
     s = raw.strip()
@@ -5565,7 +5568,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     coll.add_argument(
         "--seats", dest="seats", default="",
-        help="comma-separated resolved seat names: subprocess (codex/agy/cursor-*) "
+        help="comma-separated resolved seat names: subprocess (any external CLI seat: codex-*, cursor-*, or a config-declared agy seat) "
              "AND the Task seats (opus/sonnet/fable plus any config-declared "
              "claude-code seat). collect reads "
              "EXACTLY <seat>.json for each; a missing seat renders as a SKIPPED "
