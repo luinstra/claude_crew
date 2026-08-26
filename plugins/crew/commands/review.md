@@ -141,15 +141,21 @@ a future host-specific change lands on one channel alone instead of silently
 retargeting both. Any divergence must therefore be a recorded host fact in
 `docs/cursor-host.md`, with the reason on the fence that differs.
 
-On the `cursor` channel the issued model must be one the account has enabled for
-subagents. A model that is not enabled is refused loudly at spawn. Treat that
+On the `cursor` channel the issued model must be a slug the app's subagent
+surface offers: the family enabled on the account AND the exact variant the
+Task path accepts (see `docs/cursor-host.md`). A slug it does not offer is
+usually refused at spawn, but the same slug has also been accepted with its
+answering model unobserved, so a successful spawn is unattributed (substitution
+possible) until its badge is read.
+Treat a
 refusal as a lost action and recover it with the codes below; there is no CLI
 fallback for a reviewer seat issued native, so that seat settles FAILED and the
 panel degrades by one voice (quorum recounts the usable seats and the digest
 synthesizes from whatever returned). Never substitute a neighbouring model
 yourself, and never spawn a role the action did not name. If every native seat
-is refused this way, the fix is enabling those models in Cursor, not anything
-you can do from here.
+is refused this way, the fix is on the operator's side, not anything you can do
+from here: enable the model families in Cursor and repin each seat to the exact
+variant slug the Task path offers (`docs/cursor-host.md`).
 
 Also on the `cursor` channel: a spawned reviewer, formatter, or scribe INHERITS
 the tools of the session that spawned it, because that host offers no per-role

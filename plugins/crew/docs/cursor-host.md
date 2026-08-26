@@ -201,8 +201,10 @@ Claude-host operator will find them.
   boundary, ignored costs nothing, and rejected makes the roles resolve to
   nothing at the first probe, which is loud rather than silent. Per file, the
   reviewer carries it as its ONE unverified key (it deliberately pins no
-  `model`), while the formatter adds it beside a live `model: composer-2.5` pin,
-  so a rejection there would take a working pin down with it. The formatter's
+  `model`), while the formatter adds it beside a `model: composer-2.5` pin that
+  the Task path has since REFUSED (model-grammar section below), so that pin is
+  not a working one today and the fallback route is what has carried the
+  formatter and scribe. The formatter's
   blast radius is the smaller one even so: a lost formatter reroutes to the
   parent-context route, while a lost reviewer settles that seat failed. Until an
   app-surface capture exists, plan for the key being inert: the read-only
@@ -224,19 +226,21 @@ Claude-host operator will find them.
 - The two support roles (scribe, formatter) run at `composer-2.5`: first of the
   catalog's cursor models in cost order, because Cursor bills composer from the
   cheap bucket
-- Before native seats can run, the operator must ENABLE the seat models in
-  Cursor's subagent surface (see the enabled-models section below). Until then
-  those seats are `unentitled`, and the drop rule does NOT cover them: it keys
-  solely on whether the host can name the model, so an unentitled but nameable
-  model resolves native, is issued native, and is refused loudly at spawn. That
-  refusal is a lost action, recovered with `native_task_lost`, which SETTLES the
-  seat FAILED: no CLI fallback exists for a seat issued native. On the account
-  state recorded below, where all five seat models are rejected as subagent
-  models, every cursor-channel seat takes that path, so a cursor-only panel
-  yields nothing usable. The panel degrades rather than erroring (quorum
-  recounts usable seats and the digest synthesizes from whatever returned), and
-  enabling the models is the mitigation. This is a setup precondition, not a
-  code defect
+- Before native seats can run, the operator must ENABLE the seat model
+  families in Cursor's subagent surface AND each pin must be the exact variant
+  slug that surface offers (model-grammar section below). Until then those
+  seats are `unentitled` or variant-mismatched, and the drop rule does NOT
+  cover them: it keys solely on whether the host can name the model, so such a
+  seat resolves native, is issued native, and is usually refused at spawn,
+  though the same slug has also been accepted with its answering model
+  unobserved. A refusal is a lost action, recovered with `native_task_lost`,
+  which SETTLES the seat FAILED: no CLI fallback exists for a seat issued
+  native. On the account state recorded below, where all five seat models are
+  rejected as subagent models, every cursor-channel seat takes that path, so a
+  cursor-only panel yields nothing usable. The panel degrades rather than
+  erroring (quorum recounts usable seats and the digest synthesizes from
+  whatever returned), and enabling the families plus matching the pins is the
+  mitigation. This is a setup precondition, not a code defect
 - The two SUPPORT roles need no entitlement to keep a roster whole. The formatter is
   minted native on this host for every roster, an all-external one included, and
   the support model is `composer-2.5`, which the recorded session allowlist
@@ -389,13 +393,17 @@ no second edit and a retired pin is issued as-is rather than dropped.
   subagent, and is not the mechanism crew would drive (operator-reported,
   2026-08-20)
 
-## P8: the Task-subagent model set is the account's ENABLED models
+## P8: the Task-subagent model set is one variant slug per ENABLED family
 
 `cursor-agent --list-models` is the catalog the CLI accepts. The app's **Task
-subagent** surface offers a smaller set, and that set is what the operator has
-ENABLED in Cursor, not a platform limit (operator-confirmed, 2026-08-20). More
-models can be enabled at will, so a rejection here is `unentitled`, a setup
-state, never `unsupported`.
+subagent** surface offers a smaller set: one flattened variant slug per model
+family the operator has ENABLED in Cursor, chosen per session by the app, not a
+platform limit (enablement operator-confirmed 2026-08-20; the grammar is
+established in the model-grammar section below). Families can be enabled at
+will, so a family-off rejection is `unentitled`, a setup state. A rejection of
+an enabled family's OTHER variant (bare `composer-2.5` where the surface offers
+`composer-2.5-fast`) is a variant mismatch, fixed by repinning. `unsupported`
+is reserved for a string the app never offers on any account.
 
 Observed session allowlist, five slugs:
 `claude-opus-5-thinking-high`, `composer-2.5-fast`, `cursor-grok-4.5-high-fast`,
@@ -408,10 +416,14 @@ subagent model. (`gemini-3.1-pro` was the `cursor-gemini` pin on that date; the
 seat has since moved to `gemini-3.7-flash-high`, and whether the subagent
 surface accepts that slug has not been measured, so it carries no row here.)
 
-Rejection is LOUD and there is no silent substitution on this surface: the parent
-declined every unlisted slug and did not fall back to a neighbouring one (for
-example `composer-2.5-fast` for `composer-2.5`). That is the opposite of the
-retired-id hazard on the CLI, where a near-miss degrades quietly.
+In THIS session's observation the rejection was loud and nothing was
+substituted: the parent declined every unlisted slug and did not fall back to a
+neighbouring one (for example `composer-2.5-fast` for `composer-2.5`). That is
+a dated observation, not a guarantee: the model-grammar section below records
+the same bare slug being ACCEPTED in another session with its answering model
+unobserved, so the current contract is "an unlisted slug is usually refused,
+sometimes accepted with its answering model unobserved, and a successful spawn
+is unattributed until its badge is read".
 
 Requested slug to badge, for the four allowed slugs launched:
 
@@ -426,17 +438,25 @@ Every badge matched its requested slug exactly, so an allowed slug is honored
 without substitution and the badge remains a truthful oracle.
 
 Consequence: this is a SETUP PRECONDITION, not a design constraint and not a
-code defect. Before native seats can run, the operator enables the seat models
-in Cursor. Until then every cursor-channel seat here is `unentitled`, and
-warn-and-drop does NOT apply to it: the drop keys on attributability, and these
-five strings are all concrete models. Such a seat resolves native, is issued
-native, and is refused at spawn. `review-recover` then SETTLES it FAILED. There
-is no CLI fallback for a seat issued native, so on an unentitled account every
-cursor-channel seat takes that path and `--panel cursor` yields nothing usable.
+code defect. Before native seats can run, the operator enables the seat model
+FAMILIES in Cursor, and the seat pin must also be the exact variant slug the
+Task path offers for that family (see the model-grammar section below);
+enabling alone is necessary, not sufficient. Until then each cursor-channel
+seat here is `unentitled` (family off) or variant-mismatched (family on, pin is
+another variant), and warn-and-drop does NOT apply to either: the drop keys on
+attributability, and these five strings are all concrete models. Such a seat
+resolves native, is issued native, and is usually refused at spawn (the
+model-grammar section records one acceptance with the answering model
+unobserved). `review-recover` then SETTLES a refused seat FAILED. There is no
+CLI fallback for a seat issued native, so on an account where no seat slug is
+offered every cursor-channel seat takes that path and `--panel cursor` yields
+nothing usable.
 The panel degrades rather than dying: quorum recounts the usable seats and the
 digest synthesizes from whatever returned, so a mixed roster still produces a
-review from its other voices. Enabling the seat models in Cursor is the
-mitigation. Nothing here forces a repin. What is still worth recording, per string, is
+review from its other voices. Enabling the families in Cursor is the first
+mitigation; matching each pin to the Task path's variant slug is the second,
+and the shipped `composer-2.5` pin needs it (open decision in the model-grammar
+section). What is still worth recording, per string, is
 whether a rejection is `unentitled` (enable it and retry) or `unsupported` (the
 app will not honor it at all); only the latter would be a design input.
 
@@ -457,24 +477,41 @@ provenance, and no `cursor-agent` dependency for the native seat. Outcome:
 | `opus` | external `claude` CLI, `kind=subprocess` | ok, 243s (REVISE) |
 | `fable` | external `claude` CLI, `kind=subprocess` | ok, 180s (REVISE) |
 | `codex` | external `codex`, `kind=subprocess` | FAILED: timed out at 540s, empty output |
-| `codex-luna` | external `codex`, `kind=subprocess` | FAILED: timed out at 540s, empty output |
+| `codex-luna` | external, same channel as the row above, `kind=subprocess` | FAILED: timed out at 540s, empty output |
 
-Digest: 5 launched, 3 usable, quorum 3 MET; synthesis settled. **GATE PASSED**:
-the native seat and two Claude CLI seats completed, provenance is truthful, and
-the native seat was served by an in-session subagent, not a shell: the app's
-Tasks pane showed four external shells (codex, codex-luna, opus, fable) and one
-Subagent for `cursor-composer`, and its result entered through the scribe
-transport rather than a provider result file. That is UI plus run-record
-evidence, not the PATH-shim artifact the plan specified, so it is recorded as
-such.
+Digest: 5 launched, 3 usable, quorum 3 MET; synthesis settled. **ROUTE GATE
+PASSED, MODEL ATTRIBUTION NOT:** the native seat and two Claude CLI seats
+completed, route provenance is truthful, and the native seat was served by an
+in-session subagent, not a shell: the app's Tasks pane showed four external
+shells (the two codex-channel seats and the two Claude voices) and one Subagent for `cursor-composer`,
+and its result entered through the scribe transport rather than a provider
+result file. That is UI plus run-record evidence, not the PATH-shim artifact
+the plan specified, so it is recorded as such. What this run could NOT show is
+which model answered: its badge was not captured, and the string it recorded
+(`composer-2.5`) is one the Task path later refused outright, so the plan's
+oracle criterion (observed requested-model provenance) is unmet here.
+
+**LIVE-REVIEW CRITERION SATISFIED by `run-559dd5d1899d` (2026-08-25):**
+native `cursor-composer` at `composer-2.5-fast` with the app's chip reading
+exactly `Composer 2.5 Fast`, plus `opus` through the external `claude` CLI;
+both ok, quorum 2 of 2 MET, synthesis settled, and again one Subagent and one
+external shell in the Tasks pane. That run meets the roadmap's live-review
+criterion (a native seat and a Claude CLI seat, truthful route provenance, no
+`cursor-agent` for the native seat) AND the plan's model-oracle criterion in
+one observation; the c739 run stands as the first route-provenance pass. It is
+NOT phase acceptance: still owed are the installed-plugin validation through
+Cursor's marketplace refresh path, the installed Claude review regression run,
+the P12 and P13 captures (P12: an app-versus-`cursor-agent` environment
+discriminator, a marker present and non-empty only in the app's agent shell;
+P13: whether the Cursor hook process sees those markers), `readonly`
+enforcement on the app, and the seat-pin decision recorded in the model-grammar
+section.
 
 What this run settles: the role name resolves from the filename stem, and the
 driver's Task fence spawns the native reviewer (both previously the page's
-unverified assumptions). What it does NOT settle: `readonly: true` enforcement
-on the app (the reviewer never attempted a write); the per-run model badge on
-the `cursor-composer` chip, which the operator has not yet reported for this
-run, so its attribution rests on the request metadata until then; and the P12
-and P13 environment captures.
+unverified assumptions). What neither run settles: `readonly: true` enforcement
+on the app (no reviewer attempted a write) and the P12 and P13 environment
+captures. The model badge is settled by `run-559dd5d1899d` above.
 
 Anomaly. Root cause: the `codex` binary on this machine, not Cursor and not
 the codex service (verified live, 2026-08-25). BOTH codex seats hit the 540s provider timeout with
@@ -505,6 +542,82 @@ out at once with EMPTY output, run `codex --version` with a short timeout
 first; if it hangs, try the previous cask version's binary directly before
 blaming a host or the change under review.
 
+## App subagent model grammar is NOT the CLI's
+
+Three model-string surfaces exist, and they differ. Sources, read 2026-08-25
+(research-sourced except the rows that carry their own live tag): Cursor docs
+https://cursor.com/docs/agent/subagents; forum threads
+https://forum.cursor.com/t/parent-agent-overrides-subagent-model-settings-by-explicitly-passing-model-to-task-tool-it-used-all-of-my-api-budget/162601
+and https://forum.cursor.com/t/subagent-model-choice-not-respected/163645, both
+with replies from Cursor staff (Dean Rie).
+
+| surface | accepted strings | on an unavailable model |
+| --- | --- | --- |
+| CLI `cursor-agent --model` | the full flattened catalog (`composer-2.5`, `composer-2.5-fast`, `claude-opus-5-thinking-high`, ...) PLUS bracket overrides: `cursor-agent --help` documents `'claude-opus-4-8[context=1m,effort=high,fast=false]'`, and a live `--model 'composer-2.5[fast=false]'` reported `init.model` `Composer 2.5` (verified live, 2026-08-25, cursor-agent 2026.08.11-e8db854) | far-miss rejected; retired id fuzzy-matched down (above) |
+| app Task-call `model` (the path crew's driver uses) | a per-session allowlist of ONE flattened variant slug per ENABLED family, e.g. `composer-2.5-fast`, `cursor-grok-4.6-high`, `gpt-5.6-sol-medium`, `claude-opus-5-thinking-high` | REFUSED: `composer-2.5` was refused at spawn with Composer 2.5 enabled in the picker, and the driver settled the seat `native_task_lost` (verified live, 2026-08-25, run `run-64dbfe045d0f`) |
+| app frontmatter `model:` in `.cursor/agents/` | base id plus bracket parameters: `composer-2.5[]`, `composer-2.5[fast=false]`, `claude-opus-5[effort=high,context=300k]`; `inherit` is the default | "Cursor falls back to a compatible model" (docs), silently |
+
+Staff guidance (forum 163645): "Control the variant using bracket syntax in
+the `model` field: `model: composer-2.5[fast=false]` uses the normal non-fast
+variant." The same thread records a user who configured `composer-2.5` and had
+`composer-2.5-fast` run instead, and another whose Luna pin ran as Gemini;
+staff called it "a known bug" with no ETA. Forum 162601 confirms the Task tool
+carries a `model` argument that overrides the subagent file's frontmatter, and
+that parents pass flattened slugs on it.
+
+Consequences for crew:
+
+- A seat pin from `seats.toml` (CLI grammar) is not valid on the Task-call path
+  unless that exact variant is the one the app currently offers for its
+  family. Enabling a model in the picker is necessary but not sufficient.
+- The Task-call path is NOT reliably loud. The same bare slug `composer-2.5`
+  was accepted once (`run-c73927a5f904`, answering model unobserved and very
+  likely substituted) and refused outright later (`run-64dbfe045d0f`). A
+  refusal is self-evidencing; a successful Task call is UNATTRIBUTED until its
+  badge is read, so the badge check is required after every native spawn, not
+  a spot check. Its vocabulary is one variant per family, chosen by the app.
+- The two support roles share the mismatch: `CURSOR_SUPPORT_MODEL` in
+  `review_workflow.py` pins the scribe and formatter to bare `composer-2.5`, so
+  on the Task path the scribe is refused the same way the reviewer was. Run
+  `run-559dd5d1899d`'s native result landed through the host-write FALLBACK for
+  exactly that reason, while `run-c73927a5f904`'s went through the scribe. The
+  fallbacks held, but the support pins are inside the open decision below.
+- The frontmatter path honors variants through bracket syntax but substitutes
+  SILENTLY when the model is unavailable, so a per-file design makes the badge
+  oracle mandatory, not optional.
+- OPEN DECISION (operator's): `seats.toml` pins are written in CLI grammar and
+  feed BOTH surfaces, and `composer-2.5` is refused on the Task path today. The
+  choices are surface-specific pins (keep per-call, repin cursor seats to the
+  Task vocabulary such as `composer-2.5-fast`) or per-file bracket pins in the
+  role files with a mandatory badge check. Until decided, the interim is the
+  temporary `[seats.cursor-composer] model = "composer-2.5-fast"` table in
+  `.crew/config.toml`, and the shipped pin is known to be refused natively.
+  A review on 2026-08-25 put the gap precisely: the driver's submission records
+  the REQUESTED pin and never the observed badge, so an accepted-but-substituted
+  answer would enter quorum under the requested model's identity. Closing that
+  gap is what the decision must do, by persisting an observed-model field the
+  operator reads off the badge, by forcing external when attribution is
+  unavailable, or by moving to per-file bracket pins; until then the badge
+  check is a manual step the operator performs.
+- The exit-gate run `run-c73927a5f904` recorded its native seat as
+  `composer-2.5`; given the known bug, what answered was very likely
+  `Composer 2.5 Fast`. Its badge was not captured and that row is treated as a
+  substitution finding, not as a verified pin. In a later session the same
+  string was REFUSED outright (`run-64dbfe045d0f`), so acceptance of a bare
+  family id on the Task path is not even stable across sessions.
+- FIRST VERIFIED PER-CALL PIN ON A CREW SEAT: with a config repin to the Task
+  path's own slug (`[seats.cursor-composer] model = "composer-2.5-fast"` in
+  `.crew/config.toml`), run `run-559dd5d1899d` spawned the native reviewer and
+  the app's subagent chip read `cursor-composer reviewer  Composer 2.5 Fast`,
+  an exact match to the requested slug, attributed to that subagent's own run
+  (operator-reported with a UI capture, 2026-08-25). That is the P7 oracle,
+  and it shows a per-call pin honored on the shipped reviewer role, which pins
+  no model of its own and is the production shape. It is NOT the plan's P8
+  measurement-2 control (a per-call override against a role file that pins a
+  DIFFERENT model), which has not been run; only that control separates
+  "per-call honored" from "no file pin, so the call's model was the only one on
+  offer".
+
 ## Probe log
 
 - 2026-08-17: install/component-routing capture, env captures (both surfaces), hook payload captures, live `/crew:review` pipeline run, sk exposure check
@@ -516,14 +629,22 @@ blaming a host or the change under review.
   No app-surface probe ran; native execution remains unmeasured
 - 2026-08-25, cursor-agent 2026.08.11-e8db854: re-authenticated CLI. Fresh
   `--list-models` (204 models) re-confirms `gemini-3.7-flash-high` as the newest
-  Gemini; `crew probe cursor-gemini`, `cursor-auto`, and `cursor-composer` all
-  pass. Closes the cursor-gemini open item. No app-surface probe ran
+  Gemini; `crew probe` passes for cursor-gemini and for both default-panel
+  cursor seats. Closes the cursor-gemini open item. No app-surface probe ran
 - 2026-08-25, codex 0.149.1 cask upgrade: every codex seat on both hosts timed
   out with empty output; `codex --version` hung in every context (sandboxed or
   not, clean env, empty CODEX_HOME, pty, stdio to files) with no fds open and a
   valid signature; quarantine, TCC, keychain, Apple policy endpoints, and
   endpoint-security agents each ruled out; 0.147.0 launched instantly. Relinked
   to 0.147.0; probe 6s, review 275s
-- 2026-08-25, Cursor app: Phase 2 exit-gate run `run-c73927a5f904`, PASSED.
-  Native `cursor-composer` plus external opus/fable completed, both codex seats
-  timed out. Role-name-from-filename and the Task fence verified on the app
+- 2026-08-25, Cursor app: Phase 2 exit-gate run `run-c73927a5f904`: route
+  gate passed (native `cursor-composer` plus external opus/fable completed,
+  both codex seats timed out; role-name-from-filename and the Task fence
+  verified on the app); model attribution unmet, settled later by
+  `run-559dd5d1899d`
+- 2026-08-25, Cursor app: docs and forum establish that the Task-call model
+  vocabulary is one variant slug per enabled family, distinct from the CLI
+  catalog and from frontmatter bracket syntax. `composer-2.5` refused at spawn
+  (`run-64dbfe045d0f`); repinned to `composer-2.5-fast`, the subagent chip
+  read `Composer 2.5 Fast` (`run-559dd5d1899d`). P7 oracle confirmed on a
+  crew seat; first verified per-call pin

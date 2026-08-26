@@ -94,7 +94,8 @@ differ only in policy must not share a timeout envelope.
 
 **A lost native spawn: the SUPPORT role reroutes, the SEAT settles failed.** A
 seat can resolve native and still be refused at spawn (a host whose subagent
-surface has not been enabled for that model), which resolution cannot see, so
+surface does not offer that exact model slug: the family not enabled, or the
+pin not the variant the Task path accepts), which resolution cannot see, so
 `review-recover` splits the two cases:
 - `formatter_task_lost` rewrites the formatter to `driver=parent` (same action
   id, same paths, marked `rerouted_from="native"`), so a roster whose seats are
@@ -107,9 +108,11 @@ surface has not been enabled for that model), which resolution cannot see, so
   channel is one the host drives in-session rather than as a subprocess (the same
   policy `has_no_route_here` enforces at resolution). The panel degrades instead
   of erroring, since quorum recounts usable seats and the digest synthesizes
-  from whatever returned. So on a host whose seat models are not enabled
-  for subagents, every native seat settles failed and a panel of only such seats
-  yields nothing usable: a setup precondition, fixed by enabling those models.
+  from whatever returned. So on a host whose subagent surface does not offer
+  the seat models' exact slugs (family not enabled, or pin not the offered
+  variant), every native seat settles failed and a panel of only such seats
+  yields nothing usable: a setup precondition, fixed by enabling the families
+  AND matching each pin to the Task path's slug (`docs/cursor-host.md`).
 
 **The run record names the read-only TIER, not just "read-only".** An action's
 `access` is `read-only` when the constraint is MECHANICAL and

@@ -294,7 +294,8 @@ nothing to spawn or a role quietly stood in for.
 else from the host.** The formatter mint asks only whether the host HAS a role
 row, so on a Cursor host an all-external roster (`--panel quick` is codex plus a
 Claude voice, both external there) still mints a native `crew-formatter` at the
-support model. That model has to be enabled for subagents on the account, and
+support model. That model's exact slug has to be one the account's subagent
+surface offers (family enabled, variant matching), and
 the recorded live capture had every registered cursor seat model rejected on
 that surface, so an off-schema seat could lose its repair to a role the roster
 never asked for. The fix is a reroute, not a mint-time gate: `formatter_task_lost`
@@ -374,15 +375,23 @@ the live-verified alternative those seats would fall back to is the
 every cursor channel external by default would therefore ship a default that
 resolves to nothing runnable on the exact host it exists for, trading assumptions
 that may hold for a certainty that they cannot. Verified-elsewhere is not the
-same as usable-here. The assumptions also fail LOUDLY (a seat refused at spawn
-settles failed and the digest names it) rather than silently producing a wrong
-answer, and the cost of being wrong is one panel, recoverable by naming the
-channel in the opt-out. So the default optimizes for the host that has to use
+same as usable-here. The assumptions were expected to fail LOUDLY (a seat
+refused at spawn settles failed and the digest names it). The 2026-08-25 app
+runs qualified that: a refusal is loud, but the same slug was also accepted
+once with its answering model unobserved, so a native spawn can succeed
+unattributed. The attribution gate is therefore the app's per-subagent model
+badge, which `docs/cursor-host.md` now requires reading after every native
+spawn; whether that gate moves into the driver or cursor seats move to per-file
+bracket pins is the open seat-pin decision recorded there, and the
+default-native trade is reconsidered under that decision, not here. The cost of
+being wrong is still one panel, recoverable by naming the channel in the
+opt-out. So the default optimizes for the host that has to use
 it, and `crew review` prints one stderr note there naming
 `[review].force_external_channels` when a run actually mints native cursor
 seats, so the escape hatch is learned at the point it is needed rather than from
-this document. Do not re-derive this trade as a defect; if the app-surface
-captures ever land and contradict the assumptions, that is a different question
+this document. Do not re-derive this trade as a defect; the app-surface
+captures landed on 2026-08-25 and confirmed both assumptions while qualifying
+the loud-failure premise as above, and any further contradiction is a different question
 with different evidence.
 
 Support roles follow the seats: with a
@@ -391,8 +400,10 @@ rather than being minted native and needing a recovery call every run, and the
 scribe never mints at all because it rides only a native reviewer action.
 
 The consequence to state plainly is a SETUP one, not a code defect. A seat model
-that the host can name but is not yet enabled in its subagent surface resolves
-native, is issued native, and is refused at spawn (the drop rule cannot catch it,
+that the host can name but that its subagent surface does not offer (the family
+not enabled, or the pin not the variant slug the Task path accepts, such as
+`composer-2.5` where it offers `composer-2.5-fast`) resolves native, is issued
+native, and is refused at spawn (the drop rule cannot catch it,
 because the drop keys on attributability, not on enablement). On an
 account where none of the seat models are enabled, every cursor-channel seat
 takes that path, so a cursor-only panel returns nothing usable. Enabling those

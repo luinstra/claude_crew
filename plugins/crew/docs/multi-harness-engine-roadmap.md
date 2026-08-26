@@ -285,16 +285,23 @@ This is the first priority plateau.
 
 #### Scope
 
-Status: the routing and adapter items below have SHIPPED; the probe and
-validation items are still owed, and the exit gate has not been run.
+Status: the routing and adapter items below have SHIPPED. The exit gate's
+live-review criterion was run and met on 2026-08-25 (`run-c73927a5f904` and
+`run-559dd5d1899d`, recorded in `docs/cursor-host.md`). Still owed before the
+phase closes: the installed-plugin validation, the installed Claude review
+regression run, the P12 and P13 captures, app-side read-only enforcement and
+native cancellation validation, and a seat-pin decision, because the app's
+Task-call model vocabulary differs from the CLI catalog.
 
 - SHIPPED, PARTLY: the capability probe covering custom agent
   discovery, explicit role invocation, foreground result return, cancellation,
   read-only enforcement, requested-model handling, and observable route/model
-  provenance. `docs/cursor-host.md` carries a full EXTERNAL-CLI batch and no
-  app-surface capture, so the in-session surface these roles run on is still
-  unmeasured. Cursor documentation is design input; the current installed app
-  is the admission authority.
+  provenance. `docs/cursor-host.md` carries a full EXTERNAL-CLI batch plus two
+  live app-surface review runs (2026-08-25) that settle discovery, invocation,
+  foreground return, and route and model provenance; still unmeasured on the
+  app are read-only enforcement and the P12 and P13 environment captures.
+  Cursor documentation is design input; the current installed app is the
+  admission authority.
 - If the installed app cannot support a truthful native seat, stop the phase
   and reassess rather than substituting `cursor-agent`, silently changing the
   model, or claiming the priority plateau at a lower tier. The unverified
