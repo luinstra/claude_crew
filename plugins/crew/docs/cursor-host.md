@@ -150,11 +150,13 @@ Claude-host operator will find them.
   would be easy to shadow
 - The shipped files assume the agent NAME comes from the filename, so
   `crew-reviewer.md` is invoked as `crew-reviewer` and the role table's names are
-  those stems. That assumption is UNVERIFIED against the app: a source test pins
-  the file set to the role table, but only an app-surface capture can show whether the
-  app instead wants a `name:` frontmatter key. If it does, every role resolves to
-  nothing and the routing is inert, so this is the first thing to check when a
-  live run finds no role. Check it with one command:
+  those stems. VERIFIED on the app (exit-gate run `run-c73927a5f904`,
+  2026-08-25): the parent spawned `crew-reviewer` by that stem as the
+  `cursor-composer` seat and the seat returned a well-formed review. A source
+  test still pins the file set to the role table; if a future app build wants a
+  `name:` frontmatter key instead, every role resolves to nothing and the
+  routing is inert, so that is the first thing to check when a live run finds
+  no role. Check it with one command:
   `cursor-agent -p --trust --plugin-dir plugins/crew "list your available
   subagents by exact name"`, and look for the three stems verbatim. That is the
   external CLI surface (see the scope warning below), so it indicates rather than
@@ -173,8 +175,9 @@ Claude-host operator will find them.
   choice is frozen into the run identity as `force_external_channels`, so the
   record says which route the answers came from and a config edit mid-run cannot
   change how the run is judged. Native stays the default; this is the escape
-  hatch for exactly the two UNVERIFIED assumptions on this page (the role name
-  and the Task spawn form), and for an account whose seat models are not
+  hatch for a future app build that breaks either app-surface assumption (the
+  role name and the Task spawn form, both verified live 2026-08-25), and for an
+  account whose seat models are not
   enabled for subagents. It is a config FILE and not an env var because the agent
   shell here scrubs operator exports. It does NOT cover the bare-human
   integrated-terminal case: that one has no agent to perform the parent actions
@@ -215,8 +218,9 @@ Claude-host operator will find them.
   prose-only, and the file says so
 - The invocation form the driver writes is the app's Task call carrying the
   model, which is what the app-surface finding below records ("the parent passes
-  the model on the Task call"). It is UNVERIFIED as a shipped fence; an
-  app-surface capture is still owed
+  the model on the Task call"). VERIFIED as a shipped fence (exit-gate run
+  `run-c73927a5f904`, 2026-08-25): the driver's fence spawned the native
+  reviewer subagent, which landed its review through the scribe transport
 - The two support roles (scribe, formatter) run at `composer-2.5`: first of the
   catalog's cursor models in cost order, because Cursor bills composer from the
   cheap bucket
@@ -436,6 +440,51 @@ mitigation. Nothing here forces a repin. What is still worth recording, per stri
 whether a rejection is `unentitled` (enable it and retry) or `unsupported` (the
 app will not honor it at all); only the latter would be a design input.
 
+## Phase 2 exit gate (Cursor app, live)
+
+Run `run-c73927a5f904` under session segment
+`ef47bb67-91b7-4304-ab7c-337e2e0db822`, launched from the Cursor app as
+`/crew:review` on the Phase 2 plan (`kind=plan`, target sha `cab15c96...`),
+client cursor-agent 2026.08.11-e8db854 (verified live, 2026-08-25).
+
+The roadmap gate asks for a live review from the app that completes with at
+least one Cursor-native seat and one Claude CLI seat, truthful route
+provenance, and no `cursor-agent` dependency for the native seat. Outcome:
+
+| seat | route (frozen in `run.json` / `workflow.json`) | result |
+| --- | --- | --- |
+| `cursor-composer` | native: `kind=task`, `driver=native`, `channel=cursor`, role `crew-reviewer`, model `composer-2.5` | ok, full review (APPROVED), landed via scribe ingress |
+| `opus` | external `claude` CLI, `kind=subprocess` | ok, 243s (REVISE) |
+| `fable` | external `claude` CLI, `kind=subprocess` | ok, 180s (REVISE) |
+| `codex` | external `codex`, `kind=subprocess` | FAILED: timed out at 540s, empty output |
+| `codex-luna` | external `codex`, `kind=subprocess` | FAILED: timed out at 540s, empty output |
+
+Digest: 5 launched, 3 usable, quorum 3 MET; synthesis settled. **GATE PASSED**:
+the native seat and two Claude CLI seats completed, provenance is truthful, and
+the native seat was served by an in-session subagent, not a shell: the app's
+Tasks pane showed four external shells (codex, codex-luna, opus, fable) and one
+Subagent for `cursor-composer`, and its result entered through the scribe
+transport rather than a provider result file. That is UI plus run-record
+evidence, not the PATH-shim artifact the plan specified, so it is recorded as
+such.
+
+What this run settles: the role name resolves from the filename stem, and the
+driver's Task fence spawns the native reviewer (both previously the page's
+unverified assumptions). What it does NOT settle: `readonly: true` enforcement
+on the app (the reviewer never attempted a write); the per-run model badge on
+the `cursor-composer` chip, which the operator has not yet reported for this
+run, so its attribution rests on the request metadata until then; and the P12
+and P13 environment captures.
+
+Anomaly, attributed to the codex channel rather than this host: BOTH codex
+seats hit the 540s provider timeout with no output. In the same window a codex
+review seat on the Claude Code host timed out at 1800s and a `crew probe codex`
+there hung past 600s on a one-line prompt, so the codex service was
+unresponsive everywhere, not throttled by the Cursor agent shell. On
+2026-08-18 the same seats completed inside Cursor in roughly 80s
+(`run-18675bf73d80`). Not a Phase 2 defect; re-probe codex before reading a
+codex timeout on this host as a host effect.
+
 ## Probe log
 
 - 2026-08-17: install/component-routing capture, env captures (both surfaces), hook payload captures, live `/crew:review` pipeline run, sk exposure check
@@ -449,3 +498,6 @@ app will not honor it at all); only the latter would be a design input.
   `--list-models` (204 models) re-confirms `gemini-3.7-flash-high` as the newest
   Gemini; `crew probe cursor-gemini`, `cursor-auto`, and `cursor-composer` all
   pass. Closes the cursor-gemini open item. No app-surface probe ran
+- 2026-08-25, Cursor app: Phase 2 exit-gate run `run-c73927a5f904`, PASSED.
+  Native `cursor-composer` plus external opus/fable completed, both codex seats
+  timed out. Role-name-from-filename and the Task fence verified on the app

@@ -361,13 +361,13 @@ route the answers came from.
 
 The reason it exists NOW, rather than staying deferred with ordered `via`, is
 that the cursor-native route replaced a route verified live with one resting on
-two app-surface assumptions that are still UNVERIFIED (the role name resolving
-from the filename, and the app's Task spawn form; both are flagged in
-`cursor-host.md`). On the operator's only permitted surface that is the concrete
+two app-surface assumptions that were unverified when it shipped (the role
+name resolving from the filename, and the app's Task spawn form; both were
+verified live on 2026-08-25 by the exit-gate run recorded in `cursor-host.md`). On the operator's only permitted surface that is the concrete
 use case the deferral was waiting for.
 
 **Native stays the DEFAULT anyway, and the opt-out is an opt-out.** The obvious
-counter-move to two unverified assumptions is to invert the default and make
+counter-move to two then-unverified assumptions is to invert the default and make
 in-session cursor seats opt-IN. It was rejected on the one fact that decides it:
 the live-verified alternative those seats would fall back to is the
 `cursor-agent` CLI, and the operator's work policy forbids that CLI. Forcing
