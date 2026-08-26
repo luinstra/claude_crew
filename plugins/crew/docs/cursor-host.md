@@ -476,14 +476,34 @@ the `cursor-composer` chip, which the operator has not yet reported for this
 run, so its attribution rests on the request metadata until then; and the P12
 and P13 environment captures.
 
-Anomaly, attributed to the codex channel rather than this host: BOTH codex
-seats hit the 540s provider timeout with no output. In the same window a codex
-review seat on the Claude Code host timed out at 1800s and a `crew probe codex`
-there hung past 600s on a one-line prompt, so the codex service was
-unresponsive everywhere, not throttled by the Cursor agent shell. On
-2026-08-18 the same seats completed inside Cursor in roughly 80s
-(`run-18675bf73d80`). Not a Phase 2 defect; re-probe codex before reading a
-codex timeout on this host as a host effect.
+Anomaly. Root cause: the `codex` binary on this machine, not Cursor and not
+the codex service (verified live, 2026-08-25). BOTH codex seats hit the 540s provider timeout with
+no output, and in the same window a codex review seat on the Claude Code host
+timed out at 1800s and `crew probe codex` there failed at its 1800s ceiling.
+The `codex` Homebrew cask had been upgraded to 0.149.1 that evening (the old
+version dir was left as `0.147.0.upgrading/`, an interrupted upgrade), and the
+new binary hangs at startup in EVERY context: `codex --version` never returns,
+sandboxed or not, with a clean env, with an empty `CODEX_HOME`, under a pty,
+with stdio redirected to files. It sleeps (state S) with no files or sockets
+open. Its signature verifies valid, quarantine was removed, Apple's policy
+endpoints answer, no endpoint-security agent is installed, and no keychain or
+TCC prompt was pending. The previous binary at
+`/opt/homebrew/Caskroom/codex/0.147.0.upgrading/bin/codex` launched
+instantly, and relinking `/opt/homebrew/bin/codex` to it restored every codex
+seat (`crew probe codex` 6s, a full review 275s). That relink lasted minutes: a
+`brew reinstall` at 21:01 re-pointed the link to 0.149.1 and deleted the
+`.upgrading` dir, so a Caskroom relink is NOT a durable fallback. The durable
+one, in place since 2026-08-25: the 0.147.0 package extracted from Homebrew's
+download cache to `~/.local/opt/codex-0.147.0/` with `~/.local/bin/codex`
+symlinked to its `bin/codex`; `~/.local/bin` precedes `/opt/homebrew/bin` on
+PATH, so it shadows whatever the cask links until removed
+(`rm ~/.local/bin/codex`). Recheck `codex --version` after any brew activity
+anyway. Both hosts spawn the same `codex` from PATH, which is why it looked
+like a service outage. Not a Phase 2 defect. On 2026-08-18 the same seats completed
+inside Cursor in roughly 80s (`run-18675bf73d80`). When every codex seat times
+out at once with EMPTY output, run `codex --version` with a short timeout
+first; if it hangs, try the previous cask version's binary directly before
+blaming a host or the change under review.
 
 ## Probe log
 
@@ -498,6 +518,12 @@ codex timeout on this host as a host effect.
   `--list-models` (204 models) re-confirms `gemini-3.7-flash-high` as the newest
   Gemini; `crew probe cursor-gemini`, `cursor-auto`, and `cursor-composer` all
   pass. Closes the cursor-gemini open item. No app-surface probe ran
+- 2026-08-25, codex 0.149.1 cask upgrade: every codex seat on both hosts timed
+  out with empty output; `codex --version` hung in every context (sandboxed or
+  not, clean env, empty CODEX_HOME, pty, stdio to files) with no fds open and a
+  valid signature; quarantine, TCC, keychain, Apple policy endpoints, and
+  endpoint-security agents each ruled out; 0.147.0 launched instantly. Relinked
+  to 0.147.0; probe 6s, review 275s
 - 2026-08-25, Cursor app: Phase 2 exit-gate run `run-c73927a5f904`, PASSED.
   Native `cursor-composer` plus external opus/fable completed, both codex seats
   timed out. Role-name-from-filename and the Task fence verified on the app
