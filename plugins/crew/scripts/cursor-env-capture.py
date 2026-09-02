@@ -2,9 +2,13 @@
 """Capture Cursor hook environment names and a narrow safe value allowlist.
 
 Root selection prefers an inherited ``CLAUDE_PROJECT_DIR`` and then the first
-valid ``workspace_roots`` entry from the hook payload. Without either source,
-the hook skips because its installation-directory cwd is not a project root.
-The header records the host detector answer, payload-shape verdict, and caller.
+existing directory the hook payload names, read by ``crew_base()`` from these
+payload keys in order: a ``workspace_roots`` entry, then ``directory``, then
+``cwd``. Without either source, the hook skips because its
+installation-directory cwd is not a project root. The header records the host
+detector answer, payload-shape verdict, and caller. ``session-start.py`` loads
+this module in-process and reuses ``_has_cursor_payload_shape`` so both hooks
+judge a payload the same way.
 """
 
 import sys

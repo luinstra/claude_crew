@@ -177,6 +177,20 @@ a subagent disappears without an explicit cancellation, it instead settles as
 
 ### F2.6 Claude-host installed regression
 
+**DONE, 2026-09-02.** The plugin refreshed 0.75.0 -> 0.80.0 via
+`claude plugin update crew@claude-crew`, and the installed cache was
+byte-identical to the committed tree (`diff -rq` clean). `crew probe
+cursor-composer` through the installed dispatcher passed in 8.7 s. The review
+ran from Claude Code as `run-d067f1b5e3fa`: quorum 2 of 2; the external cursor
+seat landed ok with `reported_model` `Composer 2.5` and `model_attribution`
+`runtime-reported`; the sonnet seat ran native at `requested-only`; the digest
+header read `2 launched · 2 usable · 1 attributed · quorum 2: MET`; synthesis
+settled REVISE (the target's deliberate soft criterion was flagged).
+Observation, no code change: the cursor seat's answer was two lines of
+narrative with no review block, so its formatter pass yielded no findings and
+the digest carried it as unparsed; that is the known cursor-side shape,
+handled by never-choke. The original recipe follows for the record.
+
 From Claude Code at `<repo root>`, run these exact commands in order:
 
 ```

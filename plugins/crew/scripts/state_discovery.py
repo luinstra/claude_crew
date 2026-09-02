@@ -83,15 +83,22 @@ def crew_base(
     """THE one project-root resolver every `.crew` path derives from, so the
     state layer and the review engine cannot resolve `.crew` to different trees.
 
-    Returns ``CLAUDE_PROJECT_DIR`` when set, then the first usable root in a hook
-    payload, else the process cwd when ``fallback_to_cwd`` is true. The env var is
-    NOT set in the Bash-tool subprocess, so cwd is the real fallback for every
-    crew CLI call. On that fallback ONLY, a cwd that is itself
-    a terminal `.crew` artifact dir re-anchors to its parent (warn once): crew
-    never roots a project inside its own `.crew`. The optional payload supplies hook
-    roots, and ``fallback_to_cwd=False`` reserves a fail-closed result for callers
-    that require an explicit root. Otherwise the process cwd remains the final
-    fallback, with no second root knob for the state and review layers to disagree.
+    Three tiers, in order. First ``CLAUDE_PROJECT_DIR`` when set (an empty value
+    counts as unset). Then the payload tier: the first existing directory a hook
+    payload names under ``workspace_roots``, ``directory``, or ``cwd``, which is
+    how a Cursor hook finds the workspace when its shell inherits no env var and
+    its cwd is the plugin install dir. Then the process cwd when
+    ``fallback_to_cwd`` is true; the env var is NOT set in the Bash-tool
+    subprocess, so cwd is the real fallback for every crew CLI call.
+    ``fallback_to_cwd=False`` reserves a fail-closed ``None`` for callers that
+    require an explicit root, with no second root knob for the state and review
+    layers to disagree on.
+
+    The terminal-`.crew` re-anchor applies to BOTH the payload root and the cwd
+    fallback: a candidate that is itself a `.crew` artifact dir (or a nested
+    `.crew/.crew` run) re-anchors to its first non-`.crew` parent with a one-time
+    stderr note, because crew never roots a project inside its own `.crew`. The
+    explicit env var is taken as given.
     """
     # EMPTY string is treated as UNSET (falls to the cwd branch), preserving the
     # old `... or os.getcwd()` truthiness exactly; only a truthy value short-circuits.

@@ -21,7 +21,7 @@ scripts/
 ├── models.py            # Dataclasses for all JSON structures
 ├── persistent-mode.py   # Stop hook: enforces continuation
 ├── session-start.py     # SessionStart hook: restores state
-├── cursor-env-capture.py # In-process helper called by session-start.py; records probe metadata
+├── cursor-env-capture.py # In-process capture helper called by session-start.py: records Cursor hook env names, the safe-value allowlist, and probe metadata
 ├── host_detect.py       # Stdlib host detector for the hook entry points
 ├── artifact_prune.py    # ENUMERATE-only stale-artifact finder (single source shared by `crew swab` + the session-start reporter); never deletes
 ├── tests/               # Unit tests (test-review-workflow.py, test-hooks.py, test-multiagent.py, fixtures/)
@@ -317,9 +317,9 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
 
 **RESOLVED: all `.crew` paths anchor to CLAUDE_PROJECT_DIR via one resolver.**
 Every `.crew` root in the codebase now derives from the single `crew_base()`
-resolver (`state_discovery.py`: `CLAUDE_PROJECT_DIR or cwd`, except a fallback cwd
-that is itself a terminal `.crew` artifact dir re-anchors to its parent with a
-one-time stderr advisory). The engine
+resolver (`state_discovery.py`: `CLAUDE_PROJECT_DIR`, else a hook-payload root, else
+cwd, except a terminal `.crew` payload root or fallback cwd re-anchors to its parent
+with a one-time stderr advisory). The engine
 (review-prep/collect/run/swab, via `_reviews_base()` and the anchored
 `review_runs`/`rounds` defaults), the state layer (`crew state` verbs + `models`,
 via `get_project_dir()`), `config.py`, and the session-start sweeps all resolve
@@ -849,11 +849,12 @@ from pathlib import Path
 from models import LoopState
 from state_discovery import crew_base
 
-# Project root via the ONE resolver (CLAUDE_PROJECT_DIR, else cwd, except a
-# fallback cwd that is itself a terminal `.crew` artifact dir re-anchors to its
-# parent with a one-time stderr advisory); every `.crew`
-# path in the codebase derives from crew_base(), so the state layer and the review
-# engine can never resolve `.crew` to different trees.
+# Project root via the ONE resolver (CLAUDE_PROJECT_DIR, else the first usable
+# hook-payload root, else cwd, except a payload root or fallback cwd that is
+# itself a terminal `.crew` artifact dir re-anchors to its parent with a one-time
+# stderr advisory); every `.crew` path in the codebase derives from crew_base(),
+# so the state layer and the review engine can never resolve `.crew` to
+# different trees.
 directory = crew_base()
 
 # Load state (returns default if file missing; one dataclass serves both loops)
@@ -1325,9 +1326,10 @@ state_file = Path("/Users/me/project/.crew/state.json")
 ✅ **Resolve via the one `crew_base()` root**
 ```python
 from state_discovery import crew_base
-directory = crew_base()            # CLAUDE_PROJECT_DIR, else cwd, except a terminal
-                                   # `.crew` fallback cwd re-anchors to its parent
-                                   # with a one-time stderr advisory (the ONE resolver)
+directory = crew_base()            # CLAUDE_PROJECT_DIR, else a hook-payload root,
+                                   # else cwd, except a terminal `.crew` payload root
+                                   # or fallback cwd re-anchors to its parent with a
+                                   # one-time stderr advisory (the ONE resolver)
 state_file = directory / ".crew" / "state.json"
 ```
 
@@ -1430,7 +1432,7 @@ Tests cover:
 ## Working Here Checklist
 
 - [ ] Import models from `models.py`, don't duplicate dataclasses
-- [ ] Resolve the project root via `crew_base()` (the ONE resolver: CLAUDE_PROJECT_DIR, else cwd, except a terminal `.crew` fallback cwd re-anchors to its parent with a one-time stderr advisory), never a hand-rolled `os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())`
+- [ ] Resolve the project root via `crew_base()` (the ONE resolver: CLAUDE_PROJECT_DIR, else a hook-payload root, else cwd, except a terminal `.crew` payload root or fallback cwd re-anchors to its parent with a one-time stderr advisory), never a hand-rolled `os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())`
 - [ ] Handle missing state files gracefully (return defaults)
 - [ ] Mutate a live loop's state ONLY via `update_state_json` (locked read-modify-write, own keys only); `state.save` is a whole-state REPLACE, never an edit
 - [ ] Never hand-roll a write + chmod (`atomic_write_json` is 0600-from-birth, atomic)

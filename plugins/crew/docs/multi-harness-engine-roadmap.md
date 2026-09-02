@@ -292,7 +292,8 @@ admission gated on it, attribution stamped and rendered; recorded in
 tracked in `docs/operator-followups.md`: F2.1 read-only enforcement on the
 app, F2.2 the P12 app-side environment capture, F2.3 the P13 hook-environment
 reading, F2.4 the installed-plugin validation through the marketplace refresh
-path, F2.5 native cancellation, and F2.6 the Claude-host installed regression.
+path, and F2.5 native cancellation. F2.6, the Claude-host installed
+regression, passed on 2026-09-02 as `run-d067f1b5e3fa` and is no longer owed.
 
 - SHIPPED, PARTLY: the capability probe covering custom agent
   discovery, explicit role invocation, foreground result return, cancellation,

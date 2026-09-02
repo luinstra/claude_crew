@@ -186,6 +186,25 @@ def _has_json_object_line(stdout: str) -> bool:
     return False
 
 
+def _looks_like_json_payload(stdout: str) -> bool:
+    """Return whether stdout is JSON that produced no recognized events.
+
+    Only real parses count: the whole stripped stdout as one object or array
+    (a pretty-printed object or a top-level array never parses line by line),
+    or any single line as an object. A first-character guess would also match
+    a plain-text review that opens with a bracketed finding tag."""
+    text = (stdout or "").strip()
+    if not text:
+        return False
+    try:
+        whole = json.loads(text)
+    except (TypeError, ValueError):
+        whole = None
+    if isinstance(whole, (dict, list)):
+        return True
+    return _has_json_object_line(stdout)
+
+
 def _classify_stream(
     stream: _CursorStream,
     *,
@@ -218,7 +237,7 @@ def _classify_stream(
             ),
         )
     if stream.events == 0 and stdout.strip():
-        if _has_json_object_line(stdout):
+        if _looks_like_json_payload(stdout):
             return _StreamClassification(
                 output="",
                 error=(
@@ -347,18 +366,26 @@ class CursorProvider(Provider):
                 _HELP_PROBE_CACHE[path] = facts
                 return facts
             returncode, stdout, stderr = probe
-            if returncode != 0:
-                print(
-                    f"warning: agent --help exited with code {returncode}; "
-                    "stream-json capture and continuation are disabled for this process",
-                    file=sys.stderr,
-                )
             help_text = (stdout or "") + (stderr or "")
             facts = _HelpFacts(
                 resume=returncode == 0 and "--resume" in help_text,
                 output_format=returncode == 0 and "--output-format" in help_text,
                 stream_json=returncode == 0 and "stream-json" in help_text,
             )
+            if returncode != 0:
+                print(
+                    f"warning: agent --help exited with code {returncode}; "
+                    "stream-json capture and continuation are disabled for this process",
+                    file=sys.stderr,
+                )
+            elif not (facts.output_format and facts.stream_json):
+                # The cache makes this a once-per-process note, like the others.
+                print(
+                    "warning: agent --help does not advertise --output-format "
+                    "stream-json; stream-json capture and continuation are "
+                    "disabled for this process (both read the same flags)",
+                    file=sys.stderr,
+                )
             _HELP_PROBE_CACHE[path] = facts
             return facts
         except OSError as exc:

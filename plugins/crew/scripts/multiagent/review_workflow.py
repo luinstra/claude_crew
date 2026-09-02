@@ -2014,7 +2014,9 @@ def _validate_external_result(action: dict, ref: ReviewRef, raw: object) -> Prov
             "corrupt_result", "model_attribution must be a string or null"
         )
     derived_attribution = attribution_for(reported_model)
-    if "model_attribution" in raw and model_attribution != derived_attribution:
+    # An explicit null is absent, exactly as the type check above reads it, so
+    # only a non-null value has to agree with the derivation.
+    if model_attribution is not None and model_attribution != derived_attribution:
         raise WorkflowError(
             "corrupt_result",
             "model_attribution does not match reported_model",
@@ -2101,7 +2103,7 @@ def _validate_external_result(action: dict, ref: ReviewRef, raw: object) -> Prov
         reported_model=reported_model,
         model_attribution=(
             derived_attribution
-            if "model_attribution" not in raw
+            if model_attribution is None
             else model_attribution
         ),
     ))

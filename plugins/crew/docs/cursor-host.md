@@ -33,6 +33,7 @@ batches are EXTERNAL `cursor-agent` CLI evidence only; see the scope warning.
 - SessionStart and Stop both DELIVER, with Cursor-native payloads (verified live, 2026-08-17)
 - Payload keys observed: `conversation_id`, `cursor_version`, `composer_mode`, `generation_id`, `is_background_agent`, `model`, `model_id`, `model_params`, `session_id`, `status`, `loop_count`, token counts, `user_email`, `workspace_roots`. `session_id` arrives NON-EMPTY; `transcript_path` is empty at SessionStart (verified live, 2026-08-17)
 - The shipped relative hook commands (`python3 ./scripts/...`) resolve from the plugin root and work as shipped, unmodified (verified live, 2026-08-17)
+- Hooks anchor `.crew` to the payload's `workspace_roots` when `CLAUDE_PROJECT_DIR` is unset in the hook shell: `crew_base()` reads the payload tier before falling back to cwd, so the hook no longer roots in the plugin install dir (engine behavior under the hook tests; the live app confirmation is still owed under F2.3 in `operator-followups.md`)
 - The Stop hook is NOT invoked on every turn end: a pure-text turn ended with no Stop fire observed (verified live, 2026-08-17)
 
 ## Loops
@@ -644,3 +645,10 @@ Consequences for crew:
 - 2026-09-01: native pin admission and run-scoped attribution shipped; the
   side-by-side stream-vs-text capture established the shared extraction rule.
   No app-surface probe ran.
+- 2026-09-02, Claude Code host, installed plugin 0.80.0 (cache byte-identical
+  to the tree): `run-d067f1b5e3fa`, the Claude-host installed regression.
+  `crew probe cursor-composer` passed through the installed dispatcher in
+  8.7 s; `/crew:review --seats cursor-composer,sonnet` settled REVISE at quorum
+  2 of 2, the external cursor seat `runtime-reported` (`Composer 2.5`) and the
+  native sonnet seat `requested-only`. The cursor answer carried no review
+  block, so the digest listed it unparsed. No app-surface probe ran.

@@ -77,10 +77,22 @@ def _emit(result: SessionStartResult) -> None:
     print(result.to_cursor_json() if is_cursor else result.to_json())
 
 
-def _has_cursor_payload_shape(payload: object) -> bool:
-    return isinstance(payload, dict) and any(
-        key in payload for key in ("cursor_version", "workspace_roots")
+def _load_cursor_env_capture():
+    """Load cursor-env-capture.py by path: the hyphenated filename blocks a
+    plain import, and the module has no import-time side effects."""
+    capture_path = Path(__file__).with_name("cursor-env-capture.py")
+    spec = importlib.util.spec_from_file_location(
+        "crew_cursor_env_capture", capture_path
     )
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    with (
+        contextlib.redirect_stdout(io.StringIO()),
+        contextlib.redirect_stderr(io.StringIO()),
+    ):
+        spec.loader.exec_module(module)
+    return module
 
 
 def _capture_cursor_env(root: Path, payload: object) -> None:
@@ -88,23 +100,19 @@ def _capture_cursor_env(root: Path, payload: object) -> None:
         return
     try:
         detected_host = detect_host()
-        payload_shape = _has_cursor_payload_shape(payload)
         if detected_host in ("claude", "codex"):
             return
-        if detected_host != "cursor" and not payload_shape:
+        module = _load_cursor_env_capture()
+        if module is None:
             return
-        capture_path = Path(__file__).with_name("cursor-env-capture.py")
-        spec = importlib.util.spec_from_file_location(
-            "crew_cursor_env_capture", capture_path
-        )
-        if spec is None or spec.loader is None:
+        # The capture module owns the payload-shape rule, so both hooks judge
+        # a payload the same way.
+        if detected_host != "cursor" and not module._has_cursor_payload_shape(payload):
             return
-        module = importlib.util.module_from_spec(spec)
         with (
             contextlib.redirect_stdout(io.StringIO()),
             contextlib.redirect_stderr(io.StringIO()),
         ):
-            spec.loader.exec_module(module)
             module.capture(
                 root,
                 payload,

@@ -1163,6 +1163,26 @@ def test_cursor_continuation():
               "one nonzero-help warning and all capabilities false",
               warning.getvalue())
 
+    with tempfile.TemporaryDirectory() as td:
+        from multiagent.providers import cursor as cursor_mod
+        cursor_mod._reset_probe_cache_for_tests()
+        warning = io.StringIO()
+        probe_path = str(Path(td) / "agent")
+        with mock.patch.object(cursor_mod, "run_reaped",
+                               return_value=(0, "usage: agent [--resume <id>]", "")):
+            with contextlib.redirect_stderr(warning):
+                facts = cursor_mod.CursorProvider._probe_help(probe_path)
+                again = cursor_mod.CursorProvider._probe_help(probe_path)
+        no_stream_warning = (
+            "warning: agent --help does not advertise --output-format stream-json"
+        )
+        check("help probe exit 0 without stream flags warns once, keeps resume",
+              facts.resume and not facts.output_format and not facts.stream_json
+              and again is facts
+              and warning.getvalue().count(no_stream_warning) == 1,
+              "one no-stream-flags warning, resume true, stream capabilities false",
+              warning.getvalue())
+
     res, cap = _run_cursor_with_fake(
         continuation=ProviderContinuation("cursor-session-abc"),
         dispatch_options={"force": True, "approve_mcps": True},
@@ -1576,13 +1596,44 @@ def test_cursor_continuation():
             True,
         ),
         (
+            "prose beginning with a bracketed finding tag",
+            "[BLOCKING] a.py:1 the guard is inverted\n"
+            "[MINOR] b.py:2 nit\n",
+            None,
+            None,
+            True,
+        ),
+        (
             "unrecognized JSON stdout",
             json.dumps({"type": "error", "message": "bad stream"}),
             "no recognized stream-json events at exit 0; stdout head:",
             None,
             False,
         ),
+        (
+            "pretty-printed JSON stdout",
+            "\n" + json.dumps({"type": "error", "message": "bad stream"}, indent=2),
+            "no recognized stream-json events at exit 0; stdout head:",
+            None,
+            False,
+        ),
+        (
+            "top-level JSON array stdout",
+            json.dumps([{"type": "assistant", "message": {"content": "x"}}]),
+            "no recognized stream-json events at exit 0; stdout head:",
+            None,
+            False,
+        ),
     )
+    json_refused = {
+        "unrecognized JSON stdout",
+        "pretty-printed JSON stdout",
+        "top-level JSON array stdout",
+    }
+    plain_text = {
+        "non-json stdout",
+        "prose beginning with a bracketed finding tag",
+    }
     for label, stdout, expected, reported, expected_ok in failure_cases:
         result, _ = _run_cursor_with_fake(
             continuation=None,
@@ -1593,8 +1644,8 @@ def test_cursor_continuation():
               result.ok is expected_ok
               and (expected is None or result.error.startswith(expected))
               and result.reported_model == reported
-              and (label != "non-json stdout" or result.output == stdout)
-              and (label != "unrecognized JSON stdout" or result.output == ""),
+              and (label not in plain_text or result.output == stdout)
+              and (label not in json_refused or result.output == ""),
               f"ok={expected_ok}, output/error shape", repr(result))
 
     mismatched_init_stream = (

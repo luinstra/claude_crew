@@ -2454,6 +2454,54 @@ class ReviewWorkflowTest(unittest.TestCase):
             .startswith("PANEL: 1 launched · 1 usable · 0 attributed")
         )
 
+    def test_an_explicit_null_attribution_in_an_external_result_reads_as_absent(self) -> None:
+        for session, reported_model, expected in (
+            ("null-attribution-bare", None, "requested-only"),
+            ("null-attribution-reported", "Composer 2.5", "runtime-reported"),
+        ):
+            with self.subTest(session=session):
+                step = self._start(session=session)
+                item = step.work_items[0]
+                result_path = Path(item.result_path)
+                raw = ProviderResult(
+                    name=item.seat,
+                    model=item.model,
+                    ok=True,
+                    output=VALID_REVIEW,
+                    error=None,
+                    elapsed=0.01,
+                    run_id=step.ref.run_id,
+                    target_sha256=step.ref.target_sha256,
+                    action_id=item.action_id,
+                    attempt_id=step.ref.attempt_id,
+                    channel=item.channel,
+                    reported_model=reported_model,
+                ).to_dict()
+                raw["model_attribution"] = None
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                result_path.write_text(json.dumps(raw), encoding="utf-8")
+                reconciled = review_workflow.execute_external_review(
+                    step.ref,
+                    item.action_id,
+                )
+                _run, workflow = self._workflow(reconciled)
+                action = next(
+                    candidate
+                    for candidate in workflow["actions"]
+                    if candidate["action_id"] == item.action_id
+                )
+                self.assertEqual(
+                    (action["status"], action["model_attribution"], action["reported_model"]),
+                    ("settled", expected, reported_model),
+                )
+                projected = review_workflow._materialized_reviewer_result(
+                    workflow, action, _run
+                )
+                self.assertEqual(
+                    (projected.model_attribution, projected.reported_model),
+                    (expected, reported_model),
+                )
+
     def test_unavailable_result_write_observes_a_durable_exact_claim(self) -> None:
         step = self._start(session="unavailable-durable-claim")
         item = step.work_items[0]
