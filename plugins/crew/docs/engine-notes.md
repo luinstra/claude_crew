@@ -131,6 +131,14 @@ Debate stays under `.crew/reviews/<session>/<run>/` because the review seam's
 validated record is the synthesis authority and a second debate tree would
 duplicate unvalidated state.
 
+A live Claude-host run over the gate question (`run-82d1802f58b3`, 2026-09-02)
+exercised those claims instead of only asserting them, and its `--timeout 1`
+repeat (`run-aa9717b8f1b1`) lost the external seat to a real timeout and still
+reached a verdict-free synthesis at `quorum_not_met`, which is the never-choke
+claim under a failure rather than a simulated one. Both ran against the source
+tree, so they say nothing about the packaged plugin; the evidence and the
+outstanding gates live in docs/operator-followups.md.
+
 ## `collect --group` merge decisions (labels)
 
 - **Decision-C** — a finding is NEVER dropped: any non-parseable seat is rendered

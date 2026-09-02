@@ -350,7 +350,16 @@ creating another orchestration path.
 
 #### Scope
 
-Status: 3A (council) shipped: engine complete, app gate pending (F3.1 in docs/operator-followups.md); 3B (multi-round) not started.
+Status: 3A (council) shipped: engine complete, both live gates still owed. The
+engine was exercised live on the Claude host on 2026-09-02 over the G1 question,
+`run-82d1802f58b3` at full coverage (terminal `complete`, quorum MET, null
+judgment) and `run-aa9717b8f1b1` at `--timeout 1` (external seat timed out,
+terminal `quorum_not_met`, synthesis still minted). Those runs drove the SOURCE
+tree in the session that built the slice, so they are evidence about the engine,
+not the gate: G1 is defined over the updated installed plugin in a new session
+and remains PENDING until F3.0 runs. The evidence and both residuals are the
+canonical record in docs/operator-followups.md; do not restate them here. The
+Cursor gate for 3A (F3.1, same file) is also owed. 3B (multi-round) not started.
 
 - Move council and debate prompts, panelist instructions, round transitions,
   prior-round context, freshness, partial-failure behavior, and synthesis flow

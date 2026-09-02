@@ -212,6 +212,107 @@ run id, the cursor seat's `reported_model`, and the header line.
 
 ## Cursor-native debate
 
+**Claude-host source-engine exercise, 2026-09-02. The G1 gate itself is still
+owed.** This is the canonical record of what was actually run; the roadmap and
+engine-notes point here rather than repeat it. G1 is defined over the updated
+installed plugin in a NEW session, and these runs used the source tree in the
+session that built the slice, so they are evidence about engine behavior and not
+a cleared gate. F3.0 below is the gate.
+
+Preconditions observed before the runs: `codex --version` returned `codex-cli
+0.147.0` inside the 15-second probe budget (G1 asks for 10; the margin was not
+measured tightly), and `crew probe codex` passed in 4.26s.
+
+Full coverage, `run-82d1802f58b3`: `crew debate --seats codex,opus` started a
+`kind=question` target from a frozen `question.md` snapshot (`state=clean`, no
+working-tree involvement) and issued exactly two reviewer actions, the external
+`codex` seat on the codex channel at `gpt-5.6-sol` with `access: read-only` and
+the native seat in the `crew:panelist` role on the claude channel at model
+`opus` with `access: read-only-advisory`. Both prompt files were byte-equal to
+`crew render --mode discuss --seat-role <seat>` over the run's `question.md`.
+Both takes were discuss-shaped (DIRECT TAKE, STRONGEST OBJECTION,
+RISKS/TRADEOFFS) with no verdict and no rubric, no formatter action was minted
+for either seat, and the native submission landed through the issued scribe
+transport at the primary ingress path carrying a null judgment that was accepted.
+The digest read `PANEL: 2 launched · 2 usable · 0 attributed · quorum 2: MET` on
+line 1, an empty line 2, and a `### seat:` header on line 3, so no VERDICTS or
+CRITERIA MATRIX section rendered. The parent synthesis prompt asked for exactly
+Areas of agreement, Key disagreements and Recommendation and stated the record
+carries no verdict; the submitted synthesis with a null judgment was accepted and
+the workflow reached `status: complete`, `judgment: null`. The run used its own
+`current-standalone-debate.json` pointer, leaving the review pointer untouched.
+
+Partial failure, `run-aa9717b8f1b1` (same command plus `--timeout 1`): the
+external seat landed `ok=false` with "codex timed out after 1s" at 1.01s and
+empty output, the native seat completed, and the workflow still minted and
+accepted a verdict-free synthesis. Terminal `quorum_not_met` with
+`synthesis_path` present, digest line 1 `PANEL: 2 launched · 1 usable · 0
+attributed · quorum 2: NOT MET` and line 2 exactly the advisory sentence.
+
+Neither run took a fallback: no `claude -p`, no `crew run`, no `cursor-agent`, no
+flat seat file written in the session dir, and `ls .crew/debates` was
+byte-identical before and after both.
+
+RESIDUALS. Both runs drove the engine at the repo working tree, in the session
+that built the slice, so they validate the source engine and not the installed
+plugin in a fresh session; F3.0 is that gate. F3.1 is the Cursor gate and is also
+owed.
+
+### F3.0 The Claude G1 gate on the installed plugin
+
+Refresh the `claude-crew` marketplace, run `claude plugin update crew@claude-crew`,
+and open a NEW Claude session at the repo root. Confirm `codex --version` returns
+inside 10 seconds and that the plugin-root `crew probe codex` passes, then paste
+exactly:
+
+`/crew:debate --seats codex,opus Should a single-round council keep rendering the strict-majority quorum header when it produces no verdict?`
+
+Assert the observable route: one work batch with two reviewer items, one
+`driver=external channel=codex` at `gpt-5.6-sol` with `access: read-only`, and one
+`driver=native role=crew:panelist channel=claude model=opus` with `access:
+read-only-advisory`.
+
+Assert the action sequence: the external execute runs in the background while the
+native Task runs in the foreground, the native return lands through the issued
+scribe transport, `review-submit` accepts it, the next step carries exactly one
+`synthesis` item and no `formatter`, the synthesis is claimed as `perform` and
+submitted with `judgment` null, and the following step is terminal.
+
+Assert the invariants from the run directory:
+
+- `run.json` has `workflow_identity.kind` equal to `standalone_debate` and
+  snapshot `question.md`.
+- Each of `attempts/attempt-0001/prompts/reviewer-0001.txt` and `-0002.txt` is
+  byte-equal to what the plugin-root `crew render --mode discuss --seat-role
+  <seat>` writes from that run's `question.md`. This is the check that catches a
+  stale package: the installed render must produce the installed prompt.
+- `panel.md` line 1 starts `PANEL: 2 launched · 2 usable ·` and ends `quorum 2:
+  MET`, line 2 is empty, line 3 is a `### seat:` header.
+- The artifact at `outcome.synthesis_path` carries the three headings Areas of
+  agreement, Key disagreements, Recommendation.
+- `current-standalone-debate.json` names the run.
+- `workflow.json` holds zero `formatter` actions.
+
+Assert the forbidden fallback: no `claude -p`, no `crew run`, and no
+`cursor-agent` ran for a seat; no flat per-seat json appears in the session dir;
+and `ls .crew/debates` is byte-identical to a listing taken before the run.
+
+Then repeat the whole thing with the flag in the leading prefix, since the debate
+driver parses options only before the question:
+
+`/crew:debate --timeout 1 --seats codex,opus Should a single-round council keep rendering the strict-majority quorum header when it produces no verdict?`
+
+Expect the external seat to land `ok=false` with a timeout diagnostic while the
+native seat completes, terminal `quorum_not_met` with `synthesis_path` present,
+`panel.md` line 1 ending `quorum 2: NOT MET`, and line 2 exactly the advisory
+sentence.
+
+Report both run ids and both terminal statuses. If either run diverges from the
+record above, name the assertion that failed before diagnosing: the engine
+behavior is already established, so a divergence points at packaging, at the
+session's configuration, or at the provider, and the failing assertion is what
+separates them.
+
 ### F3.1 Council on the app
 
 Refresh the `claude-crew` marketplace, update the `crew` plugin, open a new
