@@ -1,7 +1,7 @@
 {
   "name": "crew",
   "description": "Persistence, specialized agents, and workflow commands",
-  "version": "0.79.0",
+  "version": "0.80.0",
   "author": {
     "name": "Jeremy Luinstra",
     "email": "luinstra@gmail.com"
