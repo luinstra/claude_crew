@@ -81,17 +81,17 @@ Four consequences worth stating plainly:
   the usable seats and the digest synthesizes from whatever returned. A retry
   mints a fresh attempt on the FROZEN native route, so it gets a fresh in-session
   spawn and no more.
-- **Only review is routed.** `/crew:analyze`, `/crew:code-search`,
+- **Only review and debate are routed.** `/crew:analyze`, `/crew:code-search`,
   `/crew:execute`, `/crew:deepinit`, and the loop commands' executor and advisor
   steps still run under the documented-unsupported silent substitution described
   in the routing row below: a Cursor-native agent answers in the role instead of
-  the named crew agent. This native admission change applies only to standalone
-  review. Build and measure-twice retain their `review-prep` orchestration and
+  the named crew agent. This native admission change applies to standalone
+  review and debate. Build and measure-twice retain their `review-prep` orchestration and
   existing admission until their later phases.
 - **Native role tools are inherited; `readonly: true` is SHIPPED but unverified
-  here.** A reviewer, formatter, or scribe spawned in-session gets the launching
-  session's tools: this host has no per-role tool field. The two roles that must
-  not write, `crew-reviewer` and `crew-formatter`, ship `readonly: true`, but the
+  here.** A reviewer, panelist, formatter, or scribe spawned in-session gets the launching
+  session's tools: this host has no per-role tool field. The three roles that must
+  not write, `crew-reviewer`, `crew-panelist`, and `crew-formatter`, ship `readonly: true`, but the
   only enforcement evidence for that key comes from the external CLI surface (see
   its scope warning below), not from the in-session surface these roles run on.
   The scribe does not carry it, because it exists to write. So plan for the key
@@ -148,8 +148,9 @@ Claude-host operator will find them.
 ## Subagents
 
 - Crew's Claude agent definitions are still never exposed to Cursor. What
-  `agents-cursor/` ships instead is three THIN role adapters written for this
-  host: `crew-reviewer.md`, `crew-formatter.md`, and `crew-scribe.md`. Each
+  `agents-cursor/` ships instead is four THIN role adapters written for this
+  host: `crew-reviewer.md`, `crew-panelist.md`, `crew-formatter.md`, and
+  `crew-scribe.md`. The panelist adapter is the debate seat. Each
   carries static metadata plus the host-safety prose its role needs, and nothing
   else: no rubric, no flow, no verdict vocabulary, no panel knowledge. All
   canonical instructions arrive through the issued `prompt_path`, exactly as on
@@ -168,10 +169,10 @@ Claude-host operator will find them.
   routing is inert, so that is the first thing to check when a live run finds
   no role. Check it with one command:
   `cursor-agent -p --trust --plugin-dir plugins/crew "list your available
-  subagents by exact name"`, and look for the three stems verbatim. That is the
+  subagents by exact name"`, and look for the four stems verbatim. That is the
   external CLI surface (see the scope warning below), so it indicates rather than
   settles; the app-surface confirmation is the Task subagent picker offering the
-  same three stems
+  same four stems
 - **What to do while a live run finds no role: force the channel external.** Put
   `force_external_channels = ["cursor"]` under `[review]` in the per-repo
   `.crew/config.toml` (or the global `~/.crew-config.toml`; per-repo wins, and

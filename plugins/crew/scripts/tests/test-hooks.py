@@ -1314,7 +1314,7 @@ def main():
     _agents_cursor_md = sorted(
         path.name for path in (PROJECT_DIR / "agents-cursor").glob("*.md")
     )
-    _expected_role_files = ["crew-formatter.md", "crew-reviewer.md", "crew-scribe.md"]
+    _expected_role_files = ["crew-formatter.md", "crew-panelist.md", "crew-reviewer.md", "crew-scribe.md"]
     if (_agents_cursor_md == _expected_role_files
             and (PROJECT_DIR / "agents-cursor" / ".gitkeep").is_file()):
         log_pass("agents-cursor ships exactly the Cursor role adapters (dir retained via .gitkeep)")
@@ -1333,6 +1333,8 @@ def main():
     _vocabulary_hits: dict[str, list[str]] = {}
     for _role_path in sorted((PROJECT_DIR / "agents-cursor").glob("*.md")):
         _lowered = _role_path.read_text(encoding="utf-8").casefold()
+        # Strip each adapter's own stem so its identity is not a vocabulary hit.
+        _lowered = _lowered.replace(_role_path.stem.casefold(), "")
         _hits = [token for token in _role_vocabulary if token in _lowered]
         if _hits:
             _vocabulary_hits[_role_path.name] = _hits

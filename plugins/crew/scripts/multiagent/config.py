@@ -4,10 +4,10 @@ Two small, optional, PERSONAL config files tune the default panel choice (when
 the user names no panel), the panel ROSTER (``[panels]``: what's *in* a preset),
 the SEAT catalog (``[seats.<name>]`` for availability, model pins, per-provider
 tunes, and whole new seats: resolved in ``seats.py`` over ``raw_layers()``, not
-by a getter here), the NON-DISPATCH (review/council/run/probe) seat wall-clock
+by a getter here), the NON-DISPATCH (review/run/probe) seat wall-clock
 ``[tuning].timeout`` (the raw standalone-review input, capped by that workflow
 at 540 seconds of external work plus 60 seconds settlement, and the ordinary
-council/run/probe seat wall clock), dispatch-WORK ``[dispatch].timeout``, and the
+run/probe seat wall clock), dispatch-WORK ``[dispatch].timeout``, and the
 standalone-review native opt-out ``[review].force_external_channels``.
 Provider floors raise the effective timeout only when the resolved value is
 below the floor; agy's floor is its print timeout plus grace, about 8 minutes
@@ -599,8 +599,8 @@ def default_timeout() -> int | None:
     """Resolve ``[tuning].timeout`` (per-repo over global).
 
     Standalone review treats this as its raw input and caps external work at
-    540 seconds with 60 seconds reserved for settlement; council, run, and
-    probe use the value as their ordinary seat wall-clock. Return ``None`` so
+    540 seconds with 60 seconds reserved for settlement; run and probe use the
+    value as their ordinary seat wall-clock. Return ``None`` so
     callers can keep their built-in default when it is unset.
     """
     return _first(

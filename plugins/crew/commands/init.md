@@ -17,7 +17,7 @@ $ARGUMENTS
 > grace, about 8 minutes by default, so the 1800-second default is not floored),
 > `[dispatch.<kind>]`,
 > per-seat `model`/`available`,
-> `[tuning].timeout` (review, council, run, and probe seats), `[build].executor`, `[build].executor_retries`,
+> `[tuning].timeout` (review, run, and probe seats), `[build].executor`, `[build].executor_retries`,
 > `[build].resume_executor` (default ON; `false` opts out; codex/cursor only),
 > `[panels]`). It DETECTS installed provider CLIs, then writes a **commented**
 > starter config. Not to be confused with `/crew:crew-config`, which copies
@@ -154,7 +154,7 @@ in the scaffold, since no shipped seat rides the agy channel; see the
 raise the effective timeout only when the resolved value is below the floor;
 agy's floor is its print timeout plus grace, about 8 minutes by default, so the
 1800-second default is not floored),
-`[tuning].timeout` (review, council, run, and probe seats), `[tuning].deadline_minutes` (the persistence loops' wall
+`[tuning].timeout` (review, run, and probe seats), `[tuning].deadline_minutes` (the persistence loops' wall
 clock, 1-1440, or 0 for no deadline, global file only), `[build].executor` /
 `executor_retries` / `[build].resume_executor` (default ON; `false` opts out;
 codex/cursor only), the `[dispatch.<kind>]` write-mode options

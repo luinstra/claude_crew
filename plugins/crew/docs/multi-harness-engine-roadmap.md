@@ -350,6 +350,8 @@ creating another orchestration path.
 
 #### Scope
 
+Status: 3A (council) shipped: engine complete, app gate pending (F3.1 in docs/operator-followups.md); 3B (multi-round) not started.
+
 - Move council and debate prompts, panelist instructions, round transitions,
   prior-round context, freshness, partial-failure behavior, and synthesis flow
   into Python. Python renders the synthesis request and decides when it runs;
@@ -371,6 +373,11 @@ creating another orchestration path.
 Claude and Cursor complete deterministic and bounded live council/debate
 scenarios through the same adapters, including fresh-seat and partial-failure
 cases. No debate or council phase tree remains in Markdown.
+
+#### Deferred
+
+Early-stop convergence, a `.crew/debates/` migration, and native Cursor advisor
+or executor roles.
 
 ### Phase 4 — Measure-twice and lifecycle driving
 

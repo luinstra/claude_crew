@@ -43,7 +43,7 @@ for _marker in (
     os.environ.pop(_marker, None)
 
 import artifact_prune
-from multiagent import channels, cli, config, review_runs, review_workflow, seats, targets
+from multiagent import channels, cli, config, prompts, review_runs, review_workflow, seats, targets
 from multiagent.providers import ProviderResult
 from review_workflow_fakes import InMemoryReviewDriver
 
@@ -531,7 +531,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         self.assertEqual(normal.ref.session_segment, "normal_1")
         self.assertEqual(sanitized.ref.session_segment, "still-safe")
 
-    def test_all_seven_review_commands_normalize_persistence_errors(self) -> None:
+    def test_all_eight_review_commands_normalize_persistence_errors(self) -> None:
         ref_args = {
             "session_segment": "session",
             "run_id": "run-123456789abc",
@@ -571,6 +571,10 @@ class ReviewWorkflowTest(unittest.TestCase):
                 diagnostic_code="native_task_lost",
             ), "recover_review_action"),
             (cli.cmd_review_retry, SimpleNamespace(**ref_args, seats=None), "retry_review"),
+            (cli.cmd_debate, SimpleNamespace(
+                question="question", file=None, panel=None, seats="codex",
+                session_id="session", timeout=1, force_external=None,
+            ), "start_debate"),
         ]
         for command, args, patched_name in cases:
             output = io.StringIO()
@@ -2195,6 +2199,7 @@ class ReviewWorkflowTest(unittest.TestCase):
 
     def test_reserved_stem_authority_is_global_except_workflow(self) -> None:
         self.assertIn("current-standalone-review", review_runs.RESERVED_STEMS)
+        self.assertIn("current-standalone-debate", review_runs.RESERVED_STEMS)
         self.assertEqual(
             review_workflow.STANDALONE_RESERVED_STEMS,
             review_runs.RESERVED_STEMS | {"workflow"},
@@ -4273,6 +4278,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             name
             for name in (
                 roles.reviewer_role_name,
+                roles.panelist_role_name,
                 roles.scribe_role,
                 roles.formatter_role,
             )
@@ -4305,6 +4311,8 @@ class ReviewWorkflowTest(unittest.TestCase):
         claude = review_workflow._HOST_ROLES["claude"]
         # Bash for git inspection, unsandboxed: read-only by convention only.
         self.assertIn("Bash", tools("reviewer"))
+        self.assertEqual(tools("panelist"), tools("reviewer"))
+        self.assertIn("Bash", tools("panelist"))
         self.assertEqual(claude.reviewer_access, review_workflow.ACCESS_ADVISORY)
         self.assertEqual(tools("formatter"), {"Read"})
         self.assertEqual(claude.formatter_access, review_workflow.ACCESS_ENFORCED)
@@ -4390,6 +4398,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         agents_dir = Path(__file__).resolve().parents[2] / "agents-cursor"
         for role in (
             roles.reviewer_role_name,
+            roles.panelist_role_name,
             roles.formatter_role,
         ):
             body = (agents_dir / f"{role}.md").read_text(encoding="utf-8")
@@ -4420,8 +4429,17 @@ class ReviewWorkflowTest(unittest.TestCase):
                 keys[key.strip()] = value.strip()
             return keys
 
-        for role in (roles.reviewer_role_name, roles.scribe_role, roles.formatter_role):
+        for role in (
+            roles.reviewer_role_name,
+            roles.panelist_role_name,
+            roles.scribe_role,
+            roles.formatter_role,
+        ):
             self.assertNotIn("model", frontmatter(role))
+        self.assertEqual(
+            set(frontmatter(roles.panelist_role_name)),
+            {"description", "readonly"},
+        )
         self.assertEqual(
             (roles.scribe_model, roles.formatter_model, review_workflow.CURSOR_SUPPORT_MODEL),
             ("composer-2.5-fast", "composer-2.5-fast", "composer-2.5-fast"),
@@ -6230,7 +6248,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 self.assertIn("60", text)
                 self.assertIn("matching-pointer", text)
                 self.assertIn("without warning", text)
-                self.assertIn("Council", text)
+                self.assertIn("Run and probe keep the ordinary", text)
 
     def test_matching_pointer_resume_adopts_frozen_timeout_without_warning(self) -> None:
         warning = io.StringIO()
@@ -6423,6 +6441,320 @@ class ReviewWorkflowTest(unittest.TestCase):
             self.assertEqual(len([queue.get(timeout=1) for _ in range(3)]), 3)
         finally:
             review_workflow.get_provider_for_channel = original
+
+
+class DebateWorkflowTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        os.environ["CLAUDE_PROJECT_DIR"] = self.tmp.name
+        os.environ["CREW_HOST"] = "codex"
+        self.plan = self.root / ".crew" / "plans" / "one.md"
+        self.plan.parent.mkdir(parents=True)
+        self.plan.write_text("# original plan\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        os.environ.pop("CREW_HOST", None)
+        config._reset_cache_for_tests()
+
+    def _start(
+        self,
+        question: str = "Should we ship this?",
+        *,
+        seats: str = "codex",
+        session: str = "d",
+        timeout: int | None = 1,
+        panel: str | None = None,
+        force_external: tuple[str, ...] | None = None,
+    ):
+        return review_workflow.start_debate(review_workflow.DebateRequest(
+            question,
+            panel=panel,
+            seats=seats,
+            session_id=session,
+            timeout_seconds=timeout,
+            force_external_channels=force_external,
+        ))
+
+    def _workflow(self, step) -> tuple[Path, dict]:
+        run = self.root / ".crew" / "reviews" / step.ref.session_segment / step.ref.run_id
+        return run, json.loads((run / "workflow.json").read_text(encoding="utf-8"))
+
+    def _submit(self, step, item, content: str, *, judgment=None):
+        review_workflow.claim_review_action(
+            review_workflow.ClaimRequest(step.ref, item.action_id)
+        )
+        artifact = Path(item.ingress_path or item.return_transport["primary"]["ingress_path"])
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(content, encoding="utf-8")
+        payload = {
+            "schema": 1,
+            "ref": review_workflow.review_ref_to_dict(step.ref),
+            "action_id": item.action_id,
+            "status": "ok",
+            "artifact": {"path": str(artifact), "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest()},
+            "judgment": judgment,
+            "diagnostic": None,
+        }
+        submission = Path(item.submission_path)
+        submission.parent.mkdir(parents=True, exist_ok=True)
+        submission.write_text(json.dumps(payload), encoding="utf-8")
+        return review_workflow.submit_review(review_workflow.SubmissionRequest(
+            str(submission), True, review_workflow.parse_host_result(payload),
+        ))
+
+    def _provider(self, name: str, _channel: str):
+        return _Provider(name=name, output="DIRECT TAKE: yes\n")
+
+    def test_debate_identity_is_question_scoped_and_never_shares_a_review_run(self) -> None:
+        os.environ["CREW_HOST"] = "codex"
+        first = self._start(timeout=None, session="identity")
+        second = self._start(timeout=None, session="identity")
+        self.assertEqual(first.ref, second.ref)
+        self.assertEqual(len(self._workflow(first)[1]["actions"]), 1)
+        changed = self._start("Should we wait?", timeout=None, session="identity")
+        self.assertNotEqual(first.ref.run_id, changed.ref.run_id)
+        question = "Should we ship this?"
+        self.plan.write_bytes(question.encode())
+        review = review_workflow.start_review(review_workflow.ReviewRequest(
+            str(self.plan), seats="codex", session_id="identity", timeout_seconds=1,
+        ))
+        self.assertNotEqual(first.ref.run_id, review.ref.run_id)
+        session_dir = self.root / ".crew" / "reviews" / "identity"
+        self.assertTrue((session_dir / review_workflow.STANDALONE_POINTER).is_file())
+        self.assertTrue((session_dir / review_workflow.DEBATE_POINTER).is_file())
+        review_pointer = review_workflow.read_standalone_pointer("identity")
+        debate_pointer = review_workflow.read_standalone_pointer(
+            "identity", kind="standalone_debate"
+        )
+        self.assertNotEqual(
+            review_pointer[1]["ref"]["run_id"], debate_pointer[1]["ref"]["run_id"]
+        )
+
+    def test_debate_identical_start_resumes_after_a_settled_seat_without_reissue(self) -> None:
+        with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
+            start = self._start(seats="codex,codex-luna", session="resume", timeout=None)
+            resumed = review_workflow.execute_external_review(
+                start.ref, start.work_items[0].action_id
+            )
+            identical = self._start(seats="codex,codex-luna", session="resume", timeout=None)
+        self.assertEqual(start.ref, identical.ref)
+        self.assertEqual(identical.in_flight, ())
+        self.assertEqual([item.seat for item in identical.work_items], ["codex-luna"])
+        self.assertEqual(len(self._workflow(identical)[1]["actions"]), 2)
+        self.assertEqual(resumed.work_items[0].seat, "codex-luna")
+
+    def test_debate_never_applies_the_review_target_grammar(self) -> None:
+        with mock.patch.object(review_workflow, "_newest_plan_target", side_effect=AssertionError):
+            step = self._start("latest plan", session="question-target")
+        run, workflow = self._workflow(step)
+        self.assertEqual((run / "question.md").read_bytes(), b"latest plan")
+        self.assertEqual(workflow["target"]["kind"], "question")
+        self.assertTrue(workflow["target"]["display"].startswith(
+            "RESOLVED TARGET: kind=question scope=latest plan"
+        ))
+
+    def test_debate_whitespace_question_is_needs_input_with_zero_writes(self) -> None:
+        step = self._start("  \n", session="empty-question")
+        self.assertEqual(step.type, "needs_input")
+        self.assertEqual(step.question, review_workflow.DEBATE_NEEDS_INPUT_QUESTION)
+        self.assertFalse((self.root / ".crew" / "reviews").exists())
+
+    def test_debate_panel_precedence_flag_over_debate_panel_over_default_panel(self) -> None:
+        os.environ["CREW_HOST"] = "claude"
+        config_path = self.root / ".crew" / "config.toml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text('default_panel = "quick"\n[debate]\npanel = "lite"\n', encoding="utf-8")
+        config._reset_cache_for_tests()
+        lite = self._start(seats=None, session="precedence-lite")
+        self.assertEqual([item.seat for item in lite.work_items], seats.merged_panels()["lite"])
+        config_path.write_text('default_panel = "quick"\n', encoding="utf-8")
+        config._reset_cache_for_tests()
+        quick = self._start(seats=None, session="precedence-quick")
+        self.assertEqual([item.seat for item in quick.work_items], seats.merged_panels()["quick"])
+        solo = self._start(seats=None, panel="solo", session="precedence-solo")
+        self.assertEqual([item.seat for item in solo.work_items], seats.merged_panels()["solo"])
+        explicit = self._start(seats="codex", session="precedence-seat")
+        self.assertEqual([item.seat for item in explicit.work_items], ["codex"])
+
+    def test_debate_native_panelist_is_issued_on_claude_and_cursor(self) -> None:
+        for host, seat in (("claude", "opus"), ("cursor", "cursor-composer")):
+            with self.subTest(host=host):
+                os.environ["CREW_HOST"] = host
+                step = self._start(seats=seat, session=f"native-{host}")
+                item = step.work_items[0]
+                roles = review_workflow.native_roles(review_workflow.RoutePolicy.resolve(host, ()))
+                self.assertEqual(item.driver, "native")
+                self.assertEqual(item.kind, "reviewer")
+                self.assertEqual(item.role, roles.seat_role_name("discuss"))
+                self.assertEqual(item.access, "read-only-advisory")
+                self.assertEqual(item.host_result_template["judgment"], None)
+                claim = review_workflow.claim_review_action(
+                    review_workflow.ClaimRequest(step.ref, item.action_id)
+                )
+                self.assertEqual(claim.authorization, "spawn")
+                synthesis = self._submit(step, item, "DIRECT TAKE: yes\n")
+                self.assertEqual([item.kind for item in synthesis.work_items], ["synthesis"])
+                review_workflow.claim_review_action(
+                    review_workflow.ClaimRequest(synthesis.ref, synthesis.work_items[0].action_id)
+                )
+                terminal = self._submit(synthesis, synthesis.work_items[0], "Recommendation: yes\n", judgment=None)
+                self.assertEqual(terminal.outcome["status"], "complete")
+                self.assertIsNone(terminal.outcome["judgment"])
+                self.assertEqual(review_workflow.next_review(step.ref).outcome, terminal.outcome)
+
+    def test_debate_external_seat_gets_the_council_prompt_with_its_label(self) -> None:
+        captured: list[str] = []
+
+        class CaptureProvider(_Provider):
+            def run(self, prompt: str, *, model: str | None = None, timeout: int) -> ProviderResult:
+                captured.append(prompt)
+                return super().run(prompt, model=model, timeout=timeout)
+
+        provider = CaptureProvider(name="codex", output="DIRECT TAKE: yes\n")
+        with mock.patch.object(review_workflow, "get_provider_for_channel", return_value=provider):
+            step = self._start(session="external-prompt")
+            run, _workflow = self._workflow(step)
+            expected = prompts.council("Should we ship this?", seat_role="codex")
+            self.assertEqual(Path(step.work_items[0].prompt_path).read_bytes(), expected.encode())
+            self.assertIn("acting as the **codex** seat", expected)
+            self.assertIn("DIRECT TAKE", expected)
+            self.assertIn("Give no verdict and no rubric score", expected)
+            self.assertIn("Should we ship this?", expected)
+            self.assertNotIn("APPROVED", expected)
+            self.assertNotIn("## FINDINGS", expected)
+            review_workflow.execute_external_review(step.ref, step.work_items[0].action_id)
+        self.assertEqual(captured, [expected])
+
+    def test_debate_prompt_bytes_match_render_discuss(self) -> None:
+        step = self._start(session="render-discuss")
+        run, _workflow = self._workflow(step)
+        out = self.root / "rendered.txt"
+        cli.main([
+            "render", "--mode", "discuss", "--seat-role", "codex",
+            "-f", str(run / "question.md"), "-o", str(out),
+        ])
+        self.assertEqual(out.read_bytes(), Path(step.work_items[0].prompt_path).read_bytes())
+
+    def test_debate_never_mints_a_formatter_for_a_take(self) -> None:
+        with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
+            step = self._start(session="no-formatter")
+            after = review_workflow.execute_external_review(step.ref, step.work_items[0].action_id)
+        run, workflow = self._workflow(after)
+        self.assertFalse(any(action["kind"] == "formatter" for action in workflow["actions"]))
+        self.assertIn("results/0001.json", json.dumps(review_workflow._effective_artifact_manifest(workflow, run)))
+
+    def test_debate_synthesis_rejects_a_verdict_and_review_still_requires_one(self) -> None:
+        with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
+            step = self._start(session="null-synthesis")
+            synthesis = review_workflow.execute_external_review(step.ref, step.work_items[0].action_id)
+        item = synthesis.work_items[0]
+        with self.assertRaises(review_workflow.WorkflowError) as ctx:
+            self._submit(synthesis, item, "text", judgment={"verdict": "APPROVED", "minor_only": False})
+        self.assertEqual(ctx.exception.code, "invalid_submission")
+        self.assertTrue(Path(item.submission_path).exists())
+        text = Path(item.prompt_path).read_text(encoding="utf-8")
+        for expected in ("Areas of agreement", "Key disagreements", "Recommendation", "leave the typed judgment null"):
+            self.assertIn(expected, text)
+        for forbidden in ("VERDICT", "APPROVED", "REVISE", "minor_only", "[BLOCKING]", "rubric", "PRIOR ROUNDS"):
+            self.assertNotIn(forbidden, text)
+        terminal = self._submit(synthesis, item, "Recommendation: yes\n", judgment=None)
+        self.assertEqual(terminal.outcome["status"], "complete")
+
+    def test_debate_partial_failure_mints_synthesis_and_is_non_certifying(self) -> None:
+        def provider(name: str, _channel: str):
+            return _Provider(ok=name == "codex", name=name, output="DIRECT TAKE: yes\n")
+
+        with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=provider):
+            step = self._start(seats="codex,codex-luna", session="partial")
+            after = review_workflow.execute_external_review(step.ref, step.work_items[0].action_id)
+            synthesis = review_workflow.execute_external_review(after.ref, after.work_items[0].action_id)
+        self.assertEqual([item.kind for item in synthesis.work_items], ["synthesis"])
+        terminal = self._submit(synthesis, synthesis.work_items[0], "Recommendation: uncertain\n", judgment=None)
+        run, _workflow = self._workflow(terminal)
+        self.assertEqual(terminal.outcome["status"], "quorum_not_met")
+        self.assertIsNone(terminal.outcome["judgment"])
+        self.assertEqual((run / "panel.md").read_text(encoding="utf-8").splitlines()[1], "the synthesis below is advisory and not backed by quorum from this panel")
+
+    def test_debate_all_failed_panel_matches_goldens(self) -> None:
+        self.maxDiff = None
+
+        def provider(name: str, _channel: str):
+            if name == "codex":
+                return _Provider(ok=False, name=name)
+            return _UnavailableProvider(name=name)
+
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=provider,
+        ):
+            step = self._start(
+                seats="codex,codex-luna",
+                session="debate-all-failed-golden",
+            )
+            terminal = step
+            for item in step.work_items:
+                terminal = review_workflow.execute_external_review(
+                    step.ref,
+                    item.action_id,
+                )
+
+        self.assertEqual(terminal.outcome["status"], "all_failed")
+        run, _workflow = self._workflow(terminal)
+        fixtures = Path(__file__).parent / "fixtures" / "review-workflow"
+        expected_full = (fixtures / "all-failed-full.md").read_bytes()
+        expected_panel = (
+            b"PANEL: 2 launched \xc2\xb7 0 usable \xc2\xb7 0 attributed \xc2\xb7 quorum 2: NOT MET\n"
+            b"the synthesis below is advisory and not backed by quorum from this panel\n\n"
+            + expected_full
+        )
+        self.assertEqual(
+            (run / "panel.md").read_bytes(),
+            expected_panel,
+        )
+        self.assertEqual(
+            (run / "panel-full.md").read_bytes(),
+            expected_full,
+        )
+
+    def test_debate_panel_never_renders_a_verdict_digest(self) -> None:
+        output = "## VERDICT\nAPPROVED\n\n## FINDINGS\n- [MINOR] x\n\n## CONFIDENCE\nhigh\n"
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            return_value=_Provider(output=output),
+        ):
+            step = self._start(session="verdict-free")
+            terminal = review_workflow.execute_external_review(step.ref, step.work_items[0].action_id)
+        run, _workflow = self._workflow(terminal)
+        header = "PANEL: 1 launched · 1 usable · 0 attributed · quorum 1: MET"
+        self.assertEqual(
+            (run / "panel.md").read_bytes(),
+            header.encode() + b"\n\n" + (run / "panel-full.md").read_bytes(),
+        )
+        panel = (run / "panel.md").read_text(encoding="utf-8")
+        self.assertNotIn("PANEL DIGEST", panel)
+        self.assertNotIn("## VERDICTS", panel)
+        self.assertNotIn("## CRITERIA MATRIX", panel)
+
+    def test_debate_unavailable_external_seat_is_skipped_and_all_failed(self) -> None:
+        provider = _UnavailableProvider(name="codex")
+        with mock.patch.object(review_workflow, "get_provider_for_channel", return_value=provider):
+            step = self._start(session="unavailable")
+            terminal = review_workflow.execute_external_review(step.ref, step.work_items[0].action_id)
+        self.assertEqual(terminal.outcome["status"], "all_failed")
+        self.assertFalse(any(action["kind"] == "synthesis" for action in self._workflow(terminal)[1]["actions"]))
+
+    def test_debate_forced_external_channel_keeps_the_seat_on_its_cli(self) -> None:
+        for host, seat, channel in (("claude", "opus", "claude"), ("cursor", "cursor-composer", "cursor")):
+            with self.subTest(host=host):
+                os.environ["CREW_HOST"] = host
+                step = self._start(seats=seat, force_external=(channel,), session=f"forced-{host}")
+                item = step.work_items[0]
+                self.assertEqual((item.driver, item.role, item.channel), ("external", None, channel))
 
 
 if __name__ == "__main__":

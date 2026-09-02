@@ -37,11 +37,17 @@ SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 SESSION_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _SAFE_ARG = re.compile(r"^[A-Za-z0-9_@%+=:,./-]+$")
 STANDALONE_POINTER = "current-standalone-review.json"
+DEBATE_POINTER = "current-standalone-debate.json"
+_POINTER_BY_KIND = {
+    "standalone_review": STANDALONE_POINTER,
+    "standalone_debate": DEBATE_POINTER,
+}
 STANDALONE_RESERVED_STEMS = review_runs.RESERVED_STEMS | {"workflow"}
 NEEDS_INPUT_QUESTION = (
     "Review the newest plan or which code scope? Reply with a .md path, "
     "working-tree, branch, commit:<rev>, or <left>..<right>."
 )
+DEBATE_NEEDS_INPUT_QUESTION = "What question should the panel debate? Reply with the question text."
 
 
 def quote_argv(value: str) -> str:
@@ -97,6 +103,18 @@ class ReviewRequest:
     session_id: str = ""
     timeout_seconds: int | None = None
     inline: bool = False
+    # None means "the caller named no channels", which is what lets the config
+    # layers answer; an empty tuple is an explicit "force nothing" that wins.
+    force_external_channels: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DebateRequest:
+    question: str
+    panel: str | None = None
+    seats: str | None = None
+    session_id: str = ""
+    timeout_seconds: int | None = None
     # None means "the caller named no channels", which is what lets the config
     # layers answer; an empty tuple is an explicit "force nothing" that wins.
     force_external_channels: tuple[str, ...] | None = None
@@ -605,7 +623,7 @@ def _write_run_text(run: Path, path: Path, text: str, label: str) -> None:
         raise WorkflowError("persistence_error", str(exc)) from exc
 
 
-def _session(request: ReviewRequest) -> str:
+def _session(request: ReviewRequest | DebateRequest) -> str:
     raw_session = request.session_id.strip()
     if not raw_session:
         raise WorkflowError("missing_session_id", "a harness session id is required")
@@ -851,7 +869,7 @@ def _resolve_target_intent(
         raise WorkflowError("target_error", str(exc)) from exc
 
 
-def _resolve_route_policy(request: ReviewRequest, host: str) -> RoutePolicy:
+def _resolve_route_policy(request: ReviewRequest | DebateRequest, host: str) -> RoutePolicy:
     """Resolve this run's route policy: flag > per-repo > global > built-in.
 
     The escape hatch is deliberately file-readable rather than env-driven: the
@@ -879,7 +897,10 @@ def _resolve_route_policy(request: ReviewRequest, host: str) -> RoutePolicy:
 
 
 def _resolve_seats(
-    request: ReviewRequest, policy: RoutePolicy
+    request: ReviewRequest | DebateRequest,
+    policy: RoutePolicy,
+    *,
+    default_panel: str | None = None,
 ) -> list[tuple[str, object, object]]:
     from multiagent import cli
 
@@ -894,6 +915,8 @@ def _resolve_seats(
             seats_arg=request.seats,
             strict_explicit=True,
             declared_native=policy.task_declared_native(),
+            default_panel=default_panel,
+            seats_over_panel=isinstance(request, DebateRequest),
         )
     except LookupError as exc:
         raise WorkflowError("unknown_seat", str(exc)) from exc
@@ -1006,16 +1029,31 @@ def _spent_model(
     return pin
 
 
+def _pointer_name_for_run(run: Path) -> str:
+    fallback = f"{STANDALONE_POINTER} or {DEBATE_POINTER}"
+    try:
+        record = review_runs.read_run_json(run)
+    except (OSError, review_runs.ReviewRunError, ValueError):
+        return fallback
+    identity = record.get("workflow_identity")
+    kind = identity.get("kind") if isinstance(identity, dict) else None
+    return _POINTER_BY_KIND.get(kind, fallback)
+
+
 def _verified_foundation(wf: dict, run: Path) -> tuple[dict, Path]:
     """Validate the immutable run/snapshot authority for mutable workflow state."""
     if not isinstance(wf.get("workflow_identity"), dict):
         raise WorkflowError(
             "obsolete_standalone_workflow",
             "standalone review record is missing workflow_identity; remove "
-            "current-standalone-review.json and start again",
+            f"{_pointer_name_for_run(run)} and start again",
         )
     if type(wf.get("schema")) is not int or wf.get("schema") != SCHEMA:
-        raise WorkflowError("obsolete_standalone_workflow", "standalone workflow has an unsupported schema")
+        raise WorkflowError(
+            "obsolete_standalone_workflow",
+            "standalone workflow has an unsupported schema; remove "
+            f"{_pointer_name_for_run(run)} and start again",
+        )
     try:
         ref = parse_review_ref(wf.get("ref"))
         record = review_runs.read_run_json(run)
@@ -1055,9 +1093,9 @@ def _verified_foundation(wf: dict, run: Path) -> tuple[dict, Path]:
         or (target_diff_cmd is not None and not isinstance(target_diff_cmd, str))
         or not isinstance(target_descriptor, str)
         or not isinstance(snapshot_name, str)
-        or snapshot_name not in {"target.md", "target.diff"}
+        or snapshot_name not in {"target.md", "target.diff", "question.md"}
         or not isinstance(target_kind, str)
-        or target_kind not in {"plan", "code"}
+        or target_kind not in {"plan", "code", "question"}
         or snapshot_name != review_runs.snapshot_name(target_kind)
         or not isinstance(prompt_metadata_sha, str)
         or SHA_RE.fullmatch(prompt_metadata_sha) is None
@@ -1163,7 +1201,9 @@ def _load_current_locked(ref: ReviewRef, run: Path | None = None) -> tuple[dict,
     return wf, run
 
 
-def _pointer_path(session: str) -> Path:
+def _pointer_path(session: str, *, kind: str = "standalone_review") -> Path:
+    if kind not in _POINTER_BY_KIND:
+        raise WorkflowError("corrupt_workflow", f"unsupported standalone workflow kind {kind!r}")
     segment = review_runs.session_segment(session)
     if not segment or not SESSION_RE.fullmatch(segment):
         raise WorkflowError(
@@ -1175,13 +1215,15 @@ def _pointer_path(session: str) -> Path:
         create=False,
         allow_missing=True,
     )
-    return session_dir / STANDALONE_POINTER
+    return session_dir / _POINTER_BY_KIND[kind]
 
 
-def read_standalone_pointer(session: str) -> tuple[dict, dict] | None:
+def read_standalone_pointer(
+    session: str, *, kind: str = "standalone_review"
+) -> tuple[dict, dict] | None:
     """Read the exact pointer, then derive its current attempt from workflow."""
     segment = review_runs.session_segment(session)
-    path = _pointer_path(session)
+    path = _pointer_path(session, kind=kind)
     try:
         if path.is_symlink():
             raise WorkflowError(
@@ -1281,7 +1323,11 @@ def _write_pointer_locked(wf: dict) -> None:
             "corrupt_workflow",
             "cannot write standalone pointer from a mismatched workflow reference",
         )
-    pointer = _pointer_path(ref.session_segment)
+    identity = wf.get("workflow_identity")
+    kind = identity.get("kind") if isinstance(identity, dict) else None
+    if not isinstance(kind, str) or kind not in _POINTER_BY_KIND:
+        raise WorkflowError("corrupt_workflow", "cannot write pointer for an unsupported workflow kind")
+    pointer = _pointer_path(ref.session_segment, kind=kind)
     try:
         if pointer.is_symlink() or (pointer.exists() and not pointer.is_file()):
             raise WorkflowError(
@@ -1351,6 +1397,10 @@ _ACTION_STATUSES = {"ready", "claimed", "settled"}
 _CLAIM_RE = re.compile(r"^[0-9a-f]{16}$")
 
 
+def _is_discuss(wf: Mapping) -> bool:
+    return wf.get("workflow_identity", {}).get("prompt_mode") == "discuss"
+
+
 def _authoritative_reviewer_prompt(
     run: Path,
     record: dict,
@@ -1365,6 +1415,9 @@ def _authoritative_reviewer_prompt(
             "corrupt_workflow",
             f"cannot read immutable target snapshot as UTF-8: {exc}",
         ) from exc
+    prompt_mode = record["workflow_identity"].get("prompt_mode")
+    if prompt_mode == "discuss":
+        return prompts.council(content, seat_role=seat, prior_round=None)
     kind = "plan" if snapshot.name == "target.md" else "code"
     target_spec = record.get("target_spec")
     descriptor = record.get("target_descriptor")
@@ -1384,7 +1437,6 @@ def _authoritative_reviewer_prompt(
         notes=list(record["target_notes"]),
         diff_cmd=record["target_diff_cmd"],
     )
-    prompt_mode = record["workflow_identity"].get("prompt_mode")
     return prompts.build_prompt(
         target,
         seat_role=seat,
@@ -1421,6 +1473,7 @@ class HostRoles:
     formatter_role: str
     formatter_model: str
     reviewer_role_name: str
+    panelist_role_name: str
     native_pin_field: str
     single_seat_per_native_pin: bool
     # How each in-session role is actually held to read-only. The run record
@@ -1436,6 +1489,9 @@ class HostRoles:
         pin = getattr(spec, self.native_pin_field, None)
         return pin if isinstance(pin, str) and pin else None
 
+    def seat_role_name(self, prompt_mode: str) -> str:
+        return self.panelist_role_name if prompt_mode == "discuss" else self.reviewer_role_name
+
 
 _HOST_ROLES: dict[str, HostRoles] = {
     "claude": HostRoles(
@@ -1445,6 +1501,7 @@ _HOST_ROLES: dict[str, HostRoles] = {
         formatter_role="crew:formatter",
         formatter_model="haiku",
         reviewer_role_name="crew:reviewer",
+        panelist_role_name="crew:panelist",
         native_pin_field="model",
         # Keep Claude behavior neutral. Config can explicitly declare duplicate
         # pins on this host, and admission does not reject them.
@@ -1465,6 +1522,7 @@ _HOST_ROLES: dict[str, HostRoles] = {
         formatter_role="crew-formatter",
         formatter_model=CURSOR_SUPPORT_MODEL,
         reviewer_role_name="crew-reviewer",
+        panelist_role_name="crew-panelist",
         native_pin_field="native_model",
         # Cursor's Task vocabulary has one flattened variant per enabled family;
         # one native pin is one model, so a duplicate must not vote twice.
@@ -1689,7 +1747,8 @@ def _reviewer_access(roles: HostRoles | None, *, native: bool, channel: str) -> 
 def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
                      model: str, channel: str, driver: str, provider: str,
                      policy: RoutePolicy,
-                     timeout_seconds: int | None, prompt: str) -> dict:
+                     timeout_seconds: int | None, prompt: str,
+                     prompt_mode: str) -> dict:
     native = driver == ActionDriver.NATIVE
     roles = native_roles(policy)
     reviewer_role = None
@@ -1698,7 +1757,7 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
         # already staged prompts would leave a run dir describing an action
         # nobody minted.
         reviewer_role = _require_native_role(
-            roles.reviewer_role_name if roles is not None else None,
+            roles.seat_role_name(prompt_mode) if roles is not None else None,
             kind="reviewer", seat=seat, model=model, host=policy.host,
         )
         _require_native_role(
@@ -1906,10 +1965,18 @@ def _synthesis_action(wf: dict, run: Path) -> dict:
     _write_run_text(
         run,
         prompt_path,
-        prompts.standalone_synthesis(
-            str(run / "panel.md"),
-            str(run / "panel-full.md"),
-            _effective_artifact_manifest(wf, run),
+        (
+            prompts.debate_synthesis(
+                str(run / "panel.md"),
+                str(run / "panel-full.md"),
+                _effective_artifact_manifest(wf, run),
+            )
+            if _is_discuss(wf)
+            else prompts.standalone_synthesis(
+                str(run / "panel.md"),
+                str(run / "panel-full.md"),
+                _effective_artifact_manifest(wf, run),
+            )
         ),
         f"synthesis action {action_id} prompt",
     )
@@ -2306,6 +2373,7 @@ def _canonical_panel_bytes(wf: dict, run: Path) -> _CanonicalPanelBytes:
             results,
             quorum=(panel["expected"], panel["usable"]),
             usable_seats=usable_seats,
+            verdict_free=_is_discuss(wf),
         ).encode("utf-8"),
         full=render.render_panel(results).encode("utf-8"),
     )
@@ -2374,11 +2442,12 @@ def _ensure_followups_locked(wf: dict, run: Path) -> None:
         _render_effective_panel_locked(wf, run)
         return
     by_source = {action.get("source_action_id"): action for action in _current_actions(wf, ActionKind.FORMATTER)}
-    for source, result in _effective_results(wf, run):
-        if result.ok and not findings.parse_seat(result).findings_parsed and source["action_id"] not in by_source:
-            formatter = _formatter_action(wf, run, source, result)
-            wf["actions"].append(formatter)
-            by_source[source["action_id"]] = formatter
+    if not _is_discuss(wf):
+        for source, result in _effective_results(wf, run):
+            if result.ok and not findings.parse_seat(result).findings_parsed and source["action_id"] not in by_source:
+                formatter = _formatter_action(wf, run, source, result)
+                wf["actions"].append(formatter)
+                by_source[source["action_id"]] = formatter
     formatters = _current_actions(wf, ActionKind.FORMATTER)
     if any(action.get("status") != "settled" for action in formatters):
         return
@@ -2698,19 +2767,24 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
             "kind", "host", "force_external_channels", "prompt_mode",
             "timeout_seconds", "provider_timeouts", "prompt_metadata_sha256",
         }
-        or identity.get("kind") != "standalone_review"
+        or identity.get("kind") not in {"standalone_review", "standalone_debate"}
         or not isinstance(identity.get("host"), str)
         or identity.get("host") not in HOSTS
         or not _valid_force_external_channels(identity.get("force_external_channels"))
         or not isinstance(identity.get("prompt_mode"), str)
-        or identity.get("prompt_mode") not in {"standard", "inline_diff"}
+        or identity.get("prompt_mode") not in {"standard", "inline_diff", "discuss"}
+        or (identity.get("kind"), identity.get("prompt_mode")) not in {
+            ("standalone_review", "standard"),
+            ("standalone_review", "inline_diff"),
+            ("standalone_debate", "discuss"),
+        }
         or not isinstance(identity.get("timeout_seconds"), int)
         or isinstance(identity.get("timeout_seconds"), bool)
         or not 0 < identity["timeout_seconds"] <= 540
         or not isinstance(identity.get("prompt_metadata_sha256"), str)
         or SHA_RE.fullmatch(identity["prompt_metadata_sha256"]) is None
         or not isinstance(record.get("snapshot"), str)
-        or record.get("snapshot") not in {"target.md", "target.diff"}
+        or record.get("snapshot") not in {"target.md", "target.diff", "question.md"}
         or not isinstance(record.get("target_descriptor"), str)
         or identity["prompt_metadata_sha256"]
         != _target_prompt_metadata_sha256(
@@ -2727,9 +2801,9 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
         not isinstance(target, dict)
         or set(target) != {"kind", "scope", "base", "state", "descriptor", "sha256", "display"}
         or not isinstance(target.get("kind"), str)
-        or target.get("kind") not in {"plan", "code"}
+        or target.get("kind") not in {"plan", "code", "question"}
         or record.get("snapshot") != review_runs.snapshot_name(target.get("kind"))
-        or target.get("kind") != ("plan" if snapshot.name == "target.md" else "code")
+        or review_runs.snapshot_name(target.get("kind")) != snapshot.name
         or not all(isinstance(target.get(field), str) for field in (
             "scope", "base", "state", "descriptor", "sha256", "display",
         ))
@@ -2897,7 +2971,7 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
                     )
             channel = seat_channels[seat]
             expected_role = (
-                host_roles.reviewer_role_name
+                host_roles.seat_role_name(identity["prompt_mode"])
                 if native and host_roles is not None
                 else None
             )
@@ -2961,6 +3035,8 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
                 if action["submission_path"] is not None or action["return_transport"] is not None:
                     _corrupt_workflow(f"external reviewer action {action_id!r} has native transport")
         elif kind == ActionKind.FORMATTER:
+            if _is_discuss(wf):
+                _corrupt_workflow("discuss workflows cannot contain formatter actions")
             prompt_path = _validate_issued_path(
                 run, action["prompt_path"], root / "prompts" / f"formatter-{ordinal:04d}.txt",
                 f"formatter action {action_id} prompt", required_file=True,
@@ -3040,14 +3116,26 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
             )
         elif action["kind"] == ActionKind.SYNTHESIS:
             attempt_number = _attempt_number(action["attempt_id"])
-            expected = prompts.standalone_synthesis(
-                str(run / "panel.md"),
-                str(run / "panel-full.md"),
-                _effective_artifact_manifest(
-                    wf,
-                    run,
-                    max_attempt_number=attempt_number,
-                ),
+            expected = (
+                prompts.debate_synthesis(
+                    str(run / "panel.md"),
+                    str(run / "panel-full.md"),
+                    _effective_artifact_manifest(
+                        wf,
+                        run,
+                        max_attempt_number=attempt_number,
+                    ),
+                )
+                if _is_discuss(wf)
+                else prompts.standalone_synthesis(
+                    str(run / "panel.md"),
+                    str(run / "panel-full.md"),
+                    _effective_artifact_manifest(
+                        wf,
+                        run,
+                        max_attempt_number=attempt_number,
+                    ),
+                )
             )
             _read_authoritative_prompt(
                 expected_prompt_paths[action_id],
@@ -3056,7 +3144,10 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
             )
             judgment = action["judgment"]
             if action["status"] == "settled" and action["ok"] is True:
-                if (
+                if _is_discuss(wf):
+                    if judgment is not None:
+                        _corrupt_workflow(f"synthesis action {action_id!r} has invalid judgment")
+                elif (
                     not isinstance(judgment, dict)
                     or set(judgment) != {"verdict", "minor_only"}
                     or judgment.get("verdict") not in {"APPROVED", "REVISE"}
@@ -3120,6 +3211,7 @@ def _advance_locked(wf: dict, run: Path, *, adopt_pointer: bool = False) -> Revi
 def _matching_pointer_identity(
     session: str,
     *,
+    kind: str = "standalone_review",
     target_sha: str,
     target_spec: str,
     target_base: str,
@@ -3137,7 +3229,7 @@ def _matching_pointer_identity(
     what the new start adopts its timeout envelope from; matching without the
     policy would carry one route's envelope into the other's run.
     """
-    pointer = read_standalone_pointer(session)
+    pointer = read_standalone_pointer(session, kind=kind)
     if pointer is None:
         return None
     _data, wf = pointer
@@ -3168,37 +3260,44 @@ def _matching_pointer_identity(
     return None
 
 
-@_public_workflow_boundary
-def start_review(request: ReviewRequest) -> ReviewStep:
-    if request.timeout_seconds is not None and request.timeout_seconds <= 0:
-        raise WorkflowError("invalid_timeout", "timeout must be a positive integer")
-    # Both refusals above and here are pure argument checks, so they run before
-    # the target work a mistyped channel name would otherwise pay for. Neither
-    # writes anything, so the zero-write behavior noted below is unchanged.
-    host = _host()
-    policy = _resolve_route_policy(request, host)
-    roles = native_roles(policy)
-    base = request.base or "main"
-    resolved_intent = _resolve_target_intent(request.target_input, base)
-    if resolved_intent is None:
-        return ReviewStep(StepType.NEEDS_INPUT, question=NEEDS_INPUT_QUESTION)
-    target, base = resolved_intent
-    if target.kind not in {"plan", "code"} or not isinstance(target.descriptor, str):
-        raise WorkflowError(
-            "target_error",
-            "resolved target carries invalid canonical prompt metadata",
-        )
-    snapshot_name = review_runs.snapshot_name(target.kind)
+def _question_target(question: str) -> targets.Target:
+    summary = re.sub(r"\s+", " ", question).strip()
+    if len(summary) > 72:
+        summary = summary[:72] + "..."
+    return targets.Target(
+        kind="question",
+        scope=summary,
+        content=question,
+        descriptor=f"question: {summary}",
+        replay_spec="question",
+    )
+
+
+def _start_run(
+    request: ReviewRequest | DebateRequest,
+    *,
+    host: str,
+    policy: RoutePolicy,
+    roles: HostRoles | None,
+    target: targets.Target,
+    snapshot_name: str,
+    kind: str,
+    prompt_mode: str,
+    default_panel: str | None,
+    base: str = "",
+) -> ReviewStep:
     session = _session(request)
-    # Validate the existing prefix before any seat/provider work, but retain
-    # the longstanding zero-write behavior for requests rejected later.
     _guard_review_path(
         session_segment=session,
         create=False,
         allow_missing=True,
     )
-    target_state = "dirty" if targets.is_dirty() else "clean"
-    resolved = _resolve_seats(request, policy)
+    target_state = (
+        "clean"
+        if target.kind == "question"
+        else ("dirty" if targets.is_dirty() else "clean")
+    )
+    resolved = _resolve_seats(request, policy, default_panel=default_panel)
     signatures: dict[str, dict] = {}
     for name, spec, execution in resolved:
         signatures[name] = {
@@ -3207,7 +3306,7 @@ def start_review(request: ReviewRequest) -> ReviewStep:
         }
         if not execution.native:
             signatures[name]["provider"] = seats.CHANNEL_TO_LEGACY_KIND[execution.channel]
-    target_sha, prompt_mode = review_runs.sha256_text(target.content), "inline_diff" if request.inline else "standard"
+    target_sha = review_runs.sha256_text(target.content)
     if (
         not isinstance(target.notes, list)
         or any(not isinstance(note, str) for note in target.notes)
@@ -3226,9 +3325,10 @@ def start_review(request: ReviewRequest) -> ReviewStep:
         target.descriptor,
     )
     target_base = base if target.replay_spec == "branch" else ""
-    frozen = (
+    match = (
         _matching_pointer_identity(
             session,
+            kind=kind,
             target_sha=target_sha,
             target_spec=target.replay_spec,
             target_base=target_base,
@@ -3241,6 +3341,7 @@ def start_review(request: ReviewRequest) -> ReviewStep:
         if request.timeout_seconds is None
         else None
     )
+    frozen = match
     timeout, raw_warning = _timeout(request.timeout_seconds, frozen)
     if raw_warning is not None:
         print(
@@ -3251,15 +3352,9 @@ def start_review(request: ReviewRequest) -> ReviewStep:
     if frozen is None and host == "cursor" and any(
         execution.native for _name, _spec, execution in resolved
     ):
-        # Named where the run is minted rather than left to the docs: a bare
-        # `crew review` typed into Cursor's integrated terminal mints in-session
-        # seats only a Cursor agent session can spawn, and by the time nothing
-        # answers the operator has already spent the panel. Gating on a seat
-        # actually resolving native covers the suppression too: with the channel
-        # forced external (or an all-external roster) none does, so there is no
-        # failure here to point at. A start that adopts a frozen identity stays
-        # silent; a start naming its own `--timeout` never consults the pointer,
-        # so it re-emits, which is the same shape the warning above has.
+        # Emit this note only for a fresh identity with a seat that actually
+        # resolves native, because that route cannot progress outside the host
+        # app without an explicit external-channel choice.
         print(
             "note: this panel issues in-session cursor seats, which nothing "
             "spawns outside a Cursor agent session; set [review]."
@@ -3278,7 +3373,7 @@ def start_review(request: ReviewRequest) -> ReviewStep:
                 timeout,
             )
         )
-        for name, spec, execution in resolved
+        for name, _spec, execution in resolved
     }
     frozen_provider_timeouts = (
         frozen.get("provider_timeouts")
@@ -3297,7 +3392,7 @@ def start_review(request: ReviewRequest) -> ReviewStep:
         for name, _spec, _execution in resolved
     }
     identity = {
-        "kind": "standalone_review",
+        "kind": kind,
         "host": host,
         # Provenance: which channels this run declined to drive in-session. Every
         # later step rebuilds its route policy from here, so the record is what
@@ -3308,9 +3403,13 @@ def start_review(request: ReviewRequest) -> ReviewStep:
         "provider_timeouts": provider_timeouts,
         "prompt_metadata_sha256": prompt_metadata_sha,
     }
-    run_id, digest = review_runs.mint_identity(target_sha256=target_sha, target_spec=target.replay_spec,
-        target_base=target_base, seat_signatures=signatures,
-        workflow_identity=identity)
+    run_id, digest = review_runs.mint_identity(
+        target_sha256=target_sha,
+        target_spec=target.replay_spec,
+        target_base=target_base,
+        seat_signatures=signatures,
+        workflow_identity=identity,
+    )
     ref = ReviewRef(session, run_id, "attempt-0001", target_sha)
     run = _guard_review_path(
         session_segment=ref.session_segment,
@@ -3322,7 +3421,11 @@ def start_review(request: ReviewRequest) -> ReviewStep:
             wf = _workflow(run)
             _verify_host(wf)
             if wf.get("workflow_identity") != identity:
-                raise WorkflowError("conflict", "standalone run identity differs; start a new review", "conflict")
+                raise WorkflowError(
+                    "conflict",
+                    "standalone run identity differs; start a new run",
+                    "conflict",
+                )
             step = _advance_locked(wf, run, adopt_pointer=True)
             if step.outcome and step.outcome.get("status") == "synthesis_failed":
                 step = _create_synthesis_restart_locked(
@@ -3335,20 +3438,36 @@ def start_review(request: ReviewRequest) -> ReviewStep:
                 return step
             return step
         snapshot_path = run / snapshot_name
-        record = {"run_id": run_id, "identity_digest": digest, "target_sha256": target_sha,
-            "target_spec": target.replay_spec, "target_base": base if target.replay_spec == "branch" else "",
-            "target_descriptor": target.descriptor, "snapshot": snapshot_name,
-            "target_notes": target_notes, "target_diff_cmd": target_diff_cmd,
-            "subprocess_seats": [name for name, _spec, execution in resolved if not execution.native],
-            "task_seats": [name for name, _spec, execution in resolved if execution.native],
+        record = {
+            "run_id": run_id,
+            "identity_digest": digest,
+            "target_sha256": target_sha,
+            "target_spec": target.replay_spec,
+            "target_base": target_base,
+            "target_descriptor": target.descriptor,
+            "snapshot": snapshot_name,
+            "target_notes": target_notes,
+            "target_diff_cmd": target_diff_cmd,
+            "subprocess_seats": [
+                name for name, _spec, execution in resolved if not execution.native
+            ],
+            "task_seats": [
+                name for name, _spec, execution in resolved if execution.native
+            ],
             "task_seat_models": {
                 name: _spent_model(name, spec, execution, roles)
                 for name, spec, execution in resolved
                 if execution.native
             },
-            "seat_signatures": signatures, "host": host,
-            "seat_channels": {name: execution.channel for name, _spec, execution in resolved},
-            "workflow_identity": identity, "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat()}
+            "seat_signatures": signatures,
+            "host": host,
+            "seat_channels": {
+                name: execution.channel
+                for name, _spec, execution in resolved
+            },
+            "workflow_identity": identity,
+            "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        }
         review_runs.write_run_json_once(run, record)
         _write_run_text(
             run,
@@ -3378,23 +3497,90 @@ def start_review(request: ReviewRequest) -> ReviewStep:
                     snapshot_path,
                     name,
                 ),
+                prompt_mode=prompt_mode,
             )
             for ordinal, (name, spec, execution) in enumerate(resolved, 1)
         ]
         display_base = base if target.replay_spec == "branch" else ""
-        display_state = target_state
-        wf = {"schema": SCHEMA, "workflow_identity": identity, "ref": review_ref_to_dict(ref),
-            "target": {"kind": target.kind, "scope": target.scope,
+        wf = {
+            "schema": SCHEMA,
+            "workflow_identity": identity,
+            "ref": review_ref_to_dict(ref),
+            "target": {
+                "kind": target.kind,
+                "scope": target.scope,
                 "base": base if target.replay_spec == "branch" else "",
-                "state": target_state, "descriptor": target.descriptor,
+                "state": target_state,
+                "descriptor": target.descriptor,
                 "sha256": target_sha,
                 "display": (
                     f"RESOLVED TARGET: kind={target.kind} scope={target.scope} "
-                    f"base={display_base} state={display_state}"
-                )},
-            "roster": [name for name, _spec, _execution in resolved], "actions": actions,
-            "retry_receipts": {}}
+                    f"base={display_base} state={target_state}"
+                ),
+            },
+            "roster": [name for name, _spec, _execution in resolved],
+            "actions": actions,
+            "retry_receipts": {},
+        }
         return _advance_locked(wf, run, adopt_pointer=True)
+
+
+@_public_workflow_boundary
+def start_review(request: ReviewRequest) -> ReviewStep:
+    if request.timeout_seconds is not None and request.timeout_seconds <= 0:
+        raise WorkflowError("invalid_timeout", "timeout must be a positive integer")
+    host = _host()
+    policy = _resolve_route_policy(request, host)
+    roles = native_roles(policy)
+    base = request.base or "main"
+    resolved_intent = _resolve_target_intent(request.target_input, base)
+    if resolved_intent is None:
+        return ReviewStep(StepType.NEEDS_INPUT, question=NEEDS_INPUT_QUESTION)
+    target, base = resolved_intent
+    if target.kind not in {"plan", "code"} or not isinstance(target.descriptor, str):
+        raise WorkflowError(
+            "target_error",
+            "resolved target carries invalid canonical prompt metadata",
+        )
+    snapshot_name = review_runs.snapshot_name(target.kind)
+    step = _start_run(
+        request,
+        host=host,
+        policy=policy,
+        roles=roles,
+        target=target,
+        snapshot_name=snapshot_name,
+        kind="standalone_review",
+        prompt_mode="inline_diff" if request.inline else "standard",
+        default_panel=None,
+        base=base,
+    )
+    return step
+
+
+@_public_workflow_boundary
+def start_debate(request: DebateRequest) -> ReviewStep:
+    if request.timeout_seconds is not None and request.timeout_seconds <= 0:
+        raise WorkflowError("invalid_timeout", "timeout must be a positive integer")
+    host = _host()
+    policy = _resolve_route_policy(request, host)
+    roles = native_roles(policy)
+    if not request.question.strip():
+        return ReviewStep(StepType.NEEDS_INPUT, question=DEBATE_NEEDS_INPUT_QUESTION)
+    target = _question_target(request.question)
+
+    step = _start_run(
+        request,
+        host=host,
+        policy=policy,
+        roles=roles,
+        target=target,
+        snapshot_name=review_runs.snapshot_name(target.kind),
+        kind="standalone_debate",
+        prompt_mode="discuss",
+        default_panel=config.debate_panel(),
+    )
+    return step
 
 
 @_public_workflow_boundary
@@ -3816,14 +4002,21 @@ def _validate_submission_locked(
     if kind != ActionKind.SYNTHESIS and result.judgment is not None:
         raise WorkflowError("invalid_submission", "reviewer and formatter results cannot carry judgment")
     if kind == ActionKind.SYNTHESIS:
-        judgment = result.judgment
-        if (not isinstance(judgment, dict) or judgment.get("verdict") not in {"APPROVED", "REVISE"}
-                or not isinstance(judgment.get("minor_only"), bool)
-                or (judgment["verdict"] == "APPROVED" and judgment["minor_only"])):
-            raise WorkflowError(
-                "invalid_submission",
-                "synthesis judgment must be APPROVED or REVISE with valid minor_only",
-            )
+        if _is_discuss(wf):
+            if result.judgment is not None:
+                raise WorkflowError(
+                    "invalid_submission",
+                    "a debate synthesis carries no judgment; leave the template's null in place",
+                )
+        else:
+            judgment = result.judgment
+            if (not isinstance(judgment, dict) or judgment.get("verdict") not in {"APPROVED", "REVISE"}
+                    or not isinstance(judgment.get("minor_only"), bool)
+                    or (judgment["verdict"] == "APPROVED" and judgment["minor_only"])):
+                raise WorkflowError(
+                    "invalid_submission",
+                    "synthesis judgment must be APPROVED or REVISE with valid minor_only",
+                )
         _require_canonical_synthesis_panels(wf, run)
 
     if kind == ActionKind.REVIEWER:
@@ -4131,6 +4324,7 @@ def retry_review(request: RetryRequest) -> ReviewStep:
                         else None
                     ),
                     prompt=Path(source["prompt_path"]).read_text(encoding="utf-8"),
+                    prompt_mode=wf["workflow_identity"]["prompt_mode"],
                 )
             )
         wf["ref"], wf["actions"] = review_ref_to_dict(next_ref), [*wf["actions"], *new_actions]

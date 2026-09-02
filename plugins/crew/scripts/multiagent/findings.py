@@ -477,9 +477,15 @@ def render_digest(
     repo_root: str | None = None,
     quorum: tuple[int, int] | None = None,
     usable_seats: set[str] | None = None,
+    *,
+    verdict_free: bool = False,
 ) -> str:
     """Render the grouped panel digest. Falls back to the byte-faithful
     ``render.render_panel`` when NO seat is findings-parsed.
+
+    When ``verdict_free`` is true, return the faithful panel rendering without
+    findings grouping or verdict rows. The flag also changes a NOT MET quorum
+    header to advisory synthesis wording.
 
     ``quorum`` is an optional ``(launched, usable)`` pair of quorum facts the
     CALLER computed from the run manifest (this module stays pure: no I/O, no
@@ -522,9 +528,14 @@ def render_digest(
         ]
         if usable < threshold:
             hdr.append(
-                "an APPROVED verdict is not backed by quorum from this panel"
+                "the synthesis below is advisory and not backed by quorum from this panel"
+                if verdict_free
+                else "an APPROVED verdict is not backed by quorum from this panel"
             )
         prefix = "\n".join(hdr) + "\n\n"
+
+    if verdict_free:
+        return prefix + render.render_panel(results)
 
     has_runtime_reported = any(
         attribution_for(result.reported_model) == ATTRIBUTION_RUNTIME_REPORTED

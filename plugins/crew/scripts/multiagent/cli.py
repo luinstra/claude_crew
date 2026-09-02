@@ -12,9 +12,7 @@ PARENT dir (``.../scripts``) onto ``sys.path`` so the package-relative imports
 the parent is already importable, e.g. under the dispatcher).
 
 Subcommands: ``review`` (start or resume the Python-owned standalone workflow),
-``council`` (one-shot fan-out of a free-form question — the engine half of
-/crew:debate's crew-native council), ``debate`` (scaffold-only: writes the debate dir + question.md + an
-empty subprocess.json; NEVER runs seats internally), ``run`` (one
+``debate`` (start or resume the Python-owned debate workflow), ``run`` (one
 seat ad-hoc), ``render`` (build ONE seat's prompt, no execution), ``seats``
 (print the resolved subprocess seat list, one per line, for per-seat fan-out),
 ``collect`` (collapse the named per-seat ``<seat>.json`` result files into
@@ -56,7 +54,6 @@ if _PKG_PARENT not in sys.path:
 # -----------------------------------------------------------------------------
 
 import argparse
-import concurrent.futures
 import contextlib
 import dataclasses
 import datetime
@@ -248,8 +245,8 @@ def _resolve_timeout(arg: int | None) -> int:
 
 
 def _resolve_dispatch_timeout(arg: int | None) -> int:
-    # Dispatch WORK can legitimately take longer than a NON-DISPATCH review,
-    # council, run, or probe seat, so it has its own thirty-minute built-in
+    # Dispatch WORK can legitimately take longer than a NON-DISPATCH seat, so
+    # it has its own thirty-minute built-in
     # wall-clock default. Provider floors raise the effective timeout only when
     # the resolved [dispatch].timeout is below the floor; agy's floor is its
     # print timeout plus grace, about 8 minutes by default, so the 1800-second
@@ -350,8 +347,15 @@ def resolve_review_selection(
     declared_native: str | None,
     task_seats_arg: str | None = None,
     strict_explicit: bool = False,
+    default_panel: str | None = None,
+    seats_over_panel: bool = False,
 ) -> ReviewSelection:
-    """Resolve independent panel/seats axes without running any provider."""
+    """Resolve the complete seat list without running any provider.
+
+    ``panel`` and ``seats_arg`` are independent by default. When
+    ``seats_over_panel`` is true, an explicit seat list is the whole roster and
+    the panel is ignored.
+    """
     seats_given = seats_arg is not None
     source_names = (
         [name.strip() for name in seats_arg.split(",") if name.strip()]
@@ -362,7 +366,7 @@ def resolve_review_selection(
     if panel_named:
         preset_names: list[str] | None = _panel_seat_list(panel)
     elif not seats_given:
-        preset_names = _panel_seat_list(config.default_panel() or "full")
+        preset_names = _panel_seat_list(default_panel or config.default_panel() or "full")
     else:
         preset_names = None
 
@@ -410,11 +414,16 @@ def resolve_review_selection(
         task_explicit: set[str] = set()
     else:
         source_native = [name for name in source_expanded if name in native_names]
-        if seats_given and source_native:
+        if seats_over_panel and seats_given:
+            task_raw = source_native
+            task_explicit = set(source_expanded)
+        elif seats_given and source_native:
             task_raw = source_native
             task_explicit = set(source_expanded)
         else:
-            task_raw = [name for name in preset_expanded if name in native_names]
+            task_raw = [
+                name for name in preset_expanded if name in native_names
+            ]
             task_explicit = set(preset_expanded) if panel_named else set()
 
     subprocess_kept = _drop_unavailable(subprocess_raw, subprocess_explicit)
@@ -451,7 +460,7 @@ def _resolve_seats(seats_arg: str | None) -> list[str]:
     ``--seats cursor,codex`` adds codex. When no ``--seats`` is given, the
     CONFIGURED default panel (``config.default_panel()`` + ``[panels]``)
     resolves through the single shared ``_panel_seat_list`` point (→ built-in
-    ``full``), so ad-hoc ``crew review``/``council``/``seats`` honor the roster
+    ``full``), so ad-hoc ``crew review``/``seats`` honor the roster
     too. Availability (``_filter_available``) is applied AFTER roster
     resolution.
     """
@@ -683,65 +692,6 @@ def _stage_path(session_id: str, seat_role: str | None) -> str:
     return str(_reviews_subdir(session_id) / f"prompt-{role}.txt")
 
 
-def _fan_out(seats: list[str], prompt: str, timeout: int) -> list[ProviderResult]:
-    """Run the ad-hoc council seats in parallel over one prompt.
-
-    Standalone ``review`` does not enter this pool; ``review_workflow`` issues
-    one independently claimable action per seat. Council keeps this one-shot
-    path with the same graceful degradation (one seat failing or hanging never
-    sinks the panel). Pool sized to absorb one hung thread (>= number of seats)
-    so a hung agy thread cannot block codex's result. Returns results in stable
-    seat order (as requested).
-    """
-    results_by_name: dict[str, ProviderResult] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(seats), 2)) as pool:
-        futures = {
-            pool.submit(_run_seat, name, prompt, timeout): name for name in seats
-        }
-        for fut in concurrent.futures.as_completed(futures):
-            name = futures[fut]
-            try:
-                results_by_name[name] = fut.result()
-            except Exception as exc:  # never let one seat sink the panel
-                from multiagent import seats as seat_catalog
-
-                spec = seat_catalog.seat_spec(name)
-                host = channels.current_host()
-                resolved = (
-                    channels.resolve_seat(
-                        spec,
-                        capabilities=channels.active_capabilities(),
-                        declared_native=channels.task_native_channel(host),
-                    )
-                    if spec is not None else None
-                )
-                results_by_name[name] = ProviderResult(
-                    name=name, model=None, ok=False, output="",
-                    error=f"seat raised: {exc}", elapsed=0.0,
-                    channel=resolved.channel if resolved is not None else None,
-                )
-    return [results_by_name[name] for name in seats]
-
-
-def _all_failed_exit(results: list[ProviderResult]) -> int:
-    """Never-choke guarantee: a partial panel (>=1 ok seat) is a success.
-
-    ONLY when EVERY seat failed/was skipped do we surface a clear all-failed
-    signal (nonzero exit + an stderr summary) — still a clean list of all-failed
-    results, never a traceback.
-    """
-    if results and not any(r.ok for r in results):
-        diags = "; ".join(
-            f"{r.name}: {(r.error or 'unknown error').strip()}" for r in results
-        )
-        print(
-            f"error: all {len(results)} seats failed: {diags}",
-            file=sys.stderr,
-        )
-        return 1
-    return 0
-
-
 def _emit(text: str, out_path: str | None) -> None:
     """Write engine output to a file (``--out``) or stdout.
 
@@ -792,6 +742,55 @@ def cmd_review(args: argparse.Namespace) -> int:
     try:
         step = review_workflow.start_review(request)
         print(json.dumps(review_workflow.review_step_to_dict(step), ensure_ascii=False))
+        return 0
+    except (review_workflow.WorkflowError, review_runs.ReviewRunError, OSError) as exc:
+        print(json.dumps(_review_command_error(exc), ensure_ascii=False))
+        return 2
+
+
+def cmd_debate(args: argparse.Namespace) -> int:
+    """Start or resume the engine-owned question workflow."""
+    if args.file is None and args.question is None:
+        print(json.dumps(review_workflow.workflow_error_dict(
+            review_workflow.WorkflowError(
+                "invalid_request",
+                "no question given; provide -f <question-file> or a positional question",
+            )
+        ), ensure_ascii=False))
+        return 2
+    if args.file is not None and args.question is not None:
+        print(json.dumps(review_workflow.workflow_error_dict(
+            review_workflow.WorkflowError(
+                "invalid_request",
+                "provide either -f <question-file> or one positional question, not both",
+            )
+        ), ensure_ascii=False))
+        return 2
+    try:
+        question = (
+            Path(args.file).read_text(encoding="utf-8")
+            if args.file is not None
+            else args.question
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        # A question file the user points at can be binary or mis-encoded, which
+        # is a caller mistake, not a crash: both failures leave through the one
+        # typed envelope every other bad argument does.
+        error = review_workflow.workflow_error_dict(
+            review_workflow.WorkflowError("invalid_request", str(exc))
+        )
+        print(json.dumps(error, ensure_ascii=False))
+        return 2
+    request = review_workflow.DebateRequest(
+        question=question,
+        panel=args.panel,
+        seats=args.seats,
+        session_id=args.session_id,
+        timeout_seconds=args.timeout,
+        force_external_channels=_parse_force_external(args.force_external),
+    )
+    try:
+        print(_workflow_step_json(review_workflow.start_debate(request)))
         return 0
     except (review_workflow.WorkflowError, review_runs.ReviewRunError, OSError) as exc:
         print(json.dumps(_review_command_error(exc), ensure_ascii=False))
@@ -896,195 +895,6 @@ def cmd_review_retry(args: argparse.Namespace) -> int:
     except (review_workflow.WorkflowError, review_runs.ReviewRunError, OSError) as exc:
         print(json.dumps(_review_command_error(exc), ensure_ascii=False))
         return 2
-
-
-def cmd_council(args: argparse.Namespace) -> int:
-    """Fan a free-form QUESTION across the subprocess council seats.
-
-    The engine half of the crew-native council (/crew:debate): single round,
-    free-form prompt using the retained ad-hoc ``ProviderResult`` + render path
-    with graceful degradation. No target resolution. Standalone review is a
-    separate action workflow. The orchestrator adds the opus/sonnet Task seats
-    and synthesizes.
-    """
-    # Exactly one prompt source: -f <file> XOR positional <question>.
-    if args.file and args.question is not None:
-        print(
-            "error: provide either -f <question-file> OR a positional "
-            "<question>, not both",
-            file=sys.stderr,
-        )
-        return 2
-    if not args.file and args.question is None:
-        print(
-            "error: no question given; provide -f <question-file> or a "
-            "positional <question>",
-            file=sys.stderr,
-        )
-        return 2
-
-    if args.file:
-        try:
-            question = Path(args.file).read_text(encoding="utf-8")
-        except OSError as exc:
-            print(f"error: cannot read question file {args.file!r}: {exc}", file=sys.stderr)
-            return 2
-    else:
-        question = args.question
-
-    prompt = prompts.council(question)
-
-    seats = _resolve_seats(args.seats)
-    if not seats:
-        print("error: no subprocess seats requested", file=sys.stderr)
-        return 2
-
-    timeout = _resolve_timeout(args.timeout)
-    results = _fan_out(seats, prompt, timeout)
-
-    if args.json:
-        body = render.render_json(results)
-    else:
-        body = "COUNCIL (single round)\n\n" + render.render_panel(results)
-    _emit(body, args.out)
-
-    return _all_failed_exit(results)
-
-
-def _slugify(text: str, max_words: int = 6) -> str:
-    """Derive a short kebab-case slug from the question's first words."""
-    words = re.findall(r"[a-z0-9]+", text.lower())
-    slug = "-".join(words[:max_words])
-    return slug[:60] or "debate"
-
-
-def cmd_debate(args: argparse.Namespace) -> int:
-    """Scaffold a debate dir in ONE allowlistable call — SCAFFOLD-ONLY, never runs seats.
-
-    Folds the shell steps /crew:debate used to do — `mkdir` the dir, a heredoc
-    to write the question — into a single allowlistable ``crew debate …`` call
-    (so it never prompts). Creates ``<base-dir>/<timestamp>-<slug>/``, writes
-    ``question.md`` + an ALWAYS-EMPTY ``subprocess.json`` into it, and prints a
-    JSON summary (``dir`` + ``seats: []``) so the orchestrator knows where to
-    drop the per-seat outputs + synthesis.
-
-    It NEVER fans out subprocess seats internally — that was a split-brain
-    foot-gun (review-prep forbids internal `_fan_out` for killability, but
-    debate used to call it). The orchestrator fans the subprocess seats out
-    per-seat via ``crew run <seat>`` (visible, killable shells) and spawns the
-    opus/sonnet Task seats (the engine cannot spawn in-session Claude agents).
-    ``--seats none``/`""` is the only meaning; a non-empty ``--seats`` does NOT
-    execute those seats — it prints a one-line stderr advisory and still
-    scaffolds (exit 0).
-    """
-    # Exactly one question source: -f <file> XOR positional <question>.
-    if args.file and args.question is not None:
-        print(
-            "error: provide either -f <question-file> OR a positional "
-            "<question>, not both",
-            file=sys.stderr,
-        )
-        return 2
-    if not args.file and args.question is None:
-        print(
-            "error: no question given; provide -f <question-file> or a "
-            "positional <question>",
-            file=sys.stderr,
-        )
-        return 2
-    if args.file:
-        try:
-            question = Path(args.file).read_text(encoding="utf-8")
-        except OSError as exc:
-            print(f"error: cannot read question file {args.file!r}: {exc}", file=sys.stderr)
-            return 2
-    else:
-        question = args.question
-
-    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    # Sanitize BOTH slug sources through _slugify so an explicit --slug like
-    # "../../etc/foo" can't escape --base-dir (path traversal) — the result is
-    # always restricted to [a-z0-9-].
-    slug = _slugify(args.slug) if args.slug else _slugify(question)
-
-    # anchor_path passes "" through as a sentinel; consumed here it would
-    # become Path(".") and silently scaffold into the shell cwd.
-    if not args.base_dir:
-        print("error: --base-dir cannot be empty", file=sys.stderr)
-        return 2
-
-    # Unique dir: NEVER silently overwrite a same-second/same-slug debate
-    # (exist_ok=True would merge two debates' question.txt/subprocess.json).
-    base = Path(args.base_dir)
-    debate_dir = base / f"{ts}-{slug}"
-    suffix = 2
-    while True:
-        try:
-            debate_dir.mkdir(parents=True, exist_ok=False)
-            break
-        except FileExistsError:
-            debate_dir = base / f"{ts}-{slug}-{suffix}"
-            suffix += 1
-        except OSError as exc:
-            print(f"error: cannot create debate dir {debate_dir}: {exc}", file=sys.stderr)
-            return 2
-
-    # Guard the writes: an IO failure (full disk, bad perms) must not dump a
-    # traceback or leave an orphan dir — clean up and exit nonzero cleanly.
-    try:
-        (debate_dir / "question.md").write_text(question, encoding="utf-8")
-    except OSError as exc:
-        shutil.rmtree(debate_dir, ignore_errors=True)
-        print(f"error: cannot write question.md: {exc}", file=sys.stderr)
-        return 2
-
-    # --consume: the question is now safely in the dir, so the CLI removes the
-    # transient -f staging file the orchestrator wrote (best-effort; the CLI was
-    # told to own it). Nothing lingers in .crew/debates/.
-    if args.consume and args.file:
-        try:
-            Path(args.file).unlink()
-        except OSError:
-            pass
-
-    # Scaffold-only: debate NEVER runs subprocess seats internally — that path
-    # was a split-brain foot-gun (one prep path killable, the other an opaque
-    # `_fan_out` thread pool). The orchestrator fans seats out per-seat via
-    # `crew run <seat>` (visible, killable shells), so the engine just writes an
-    # EMPTY subprocess.json here. ONLY an EXPLICIT `--seats none` (or "") is the
-    # silent no-op; ANY other case — a non-empty `--seats` (e.g. `--seats codex`)
-    # OR an OMITTED `--seats` (None, which pre-Step-5 ran the default panel) —
-    # no longer executes those seats: emit a one-line advisory and still scaffold
-    # (exit 0). Short-circuit-safe: when args.seats is None the first operand is
-    # True and `.strip()` is never evaluated.
-    if args.seats is None or args.seats.strip().lower() not in ("", "none"):
-        print(
-            "debate no longer runs subprocess seats internally — fan them out "
-            "per-seat via 'crew run <seat>'; scaffolding the dir only",
-            file=sys.stderr,
-        )
-    results: list[ProviderResult] = []
-    try:
-        (debate_dir / "subprocess.json").write_text(
-            render.render_json(results), encoding="utf-8"
-        )
-    except OSError as exc:
-        print(f"error: cannot write subprocess.json to {debate_dir}: {exc}", file=sys.stderr)
-        return 2
-
-    # The orchestrator reads this to find the dir, then fans the subprocess
-    # seats out per-seat (`crew run <seat>`) and spawns the opus/sonnet Task
-    # seats, writing the synthesis here. `seats` is always [] (scaffold-only).
-    print(json.dumps({
-        "dir": str(debate_dir),
-        "question_file": str(debate_dir / "question.md"),
-        "subprocess_results": str(debate_dir / "subprocess.json"),
-        "seats": [
-            {"name": r.name, "ok": r.ok, "elapsed": round(r.elapsed, 1)}
-            for r in results
-        ],
-    }, indent=2))
-    return 0
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -1215,7 +1025,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         in_run_dir = (results_dir / review_runs.RUN_JSON_NAME).is_file()
         if args.out is None and review_runs.is_reserved_stem(seat):
             # EVERY derived destination is guarded, flat included: a seat
-            # named current-run/current-standalone-review would overwrite a
+            # named current-run/current-standalone-review/current-standalone-debate would overwrite a
             # SESSION pointer in the flat dir, and run/seat would shadow
             # control filenames. Only an explicit -o keeps ad-hoc freedom.
             print(
@@ -2599,7 +2409,7 @@ def cmd_seats(args: argparse.Namespace) -> int:
 
     DEFAULT (no ``--debate``): the resolved SUBPROCESS seat list — ``--seats``
     (group tokens like ``cursor`` expanded, filtered to the registry, de-duped)
-    the SAME way ``review``/``council`` resolve it, but printed instead of run.
+    the SAME way ``review`` resolves it, but printed instead of run.
     This lets an orchestrator that fans out PER-SEAT — one ``run <seat>`` call
     each, every subprocess seat its own visible shell — obtain the expanded list
     without hardcoding the cursor group, keeping the registry the single source.
@@ -3486,7 +3296,7 @@ def cmd_repair_seat(args: argparse.Namespace) -> int:
             # Same guard, same chokepoint as run/persist-seat's derived
             # destinations (case-folded): the name supplies the filename stem,
             # so `repair-seat run` would derive and REWRITE the run dir's
-            # immutable run.json (current-run/current-standalone-review/seat
+            # immutable run.json (current-run/current-standalone-review/current-standalone-debate/seat
             # likewise shadow control files). Only review-prep may touch those.
             print(
                 f"error: seat name {seat_name!r} collides with a reserved crew "
@@ -3856,10 +3666,10 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
     reopen the drift window the snapshot closes).
 
     LOAD-BEARING — prep PREPARES; it does NOT run seats. This function MUST NOT
-    call ``_fan_out``, ``_run_seat``, ``_run_cli``, or any provider ``.run()``.
+    call ``_run_seat``, ``_run_cli``, or any provider ``.run()``.
     The per-seat ``crew run <seat>`` loop stays in the command markdown, where
     each seat is a SEPARATE, visible, individually-killable shell. Folding that
-    loop into ``_fan_out`` here is the EXACT regression this design reverses: it
+    loop into a thread pool here is the EXACT regression this design reverses: it
     re-hides every seat in one opaque thread pool and destroys per-shell
     killability. DO NOT add a run/fan-out call to this function.
 
@@ -3919,10 +3729,10 @@ def cmd_review_prep(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    # 2. --panel/--seats → subprocess + task seats. --seats and --panel are
-    #    INDEPENDENT axes: --seats overrides the SUBPROCESS subset (and supplies
-    #    task names found within it); --panel supplies the TASK seats when --seats
-    #    names none. Sentinel mechanics (--seats default None, --panel default None):
+    # 2. Review selection keeps --panel and --seats as INDEPENDENT axes.
+    #    --seats replaces only the SUBPROCESS subset and supplies task names found
+    #    within it; --panel supplies the TASK seats when --seats names none.
+    #    Sentinel mechanics (--seats default None, --panel default None):
     #      * --seats <given> (incl. "")  -> seats_given; classify ITS names
     #      * --panel P (named)           -> preset_names = _panel_seat_list(P)
     #      * BOTH omitted                -> preset_names = _panel_seat_list(
@@ -4622,7 +4432,7 @@ def _render_config_template(
     L.append("#   --timeout > [dispatch].timeout > builtin 1800")
     L.append("#   NON-DISPATCH [tuning].timeout is the raw standalone-review input;")
     L.append("#   standalone external work is capped at 540s + 60s settlement, while")
-    L.append("#   council/run/probe use it as their ordinary seat wall-clock.")
+    L.append("#   run/probe use it as their ordinary seat wall-clock.")
     L.append("")
     # Commented [dispatch.<kind>] blocks, sourced from the SAME provider
     # declarations the `dispatch --options` listing renders (one public map,
@@ -4719,7 +4529,7 @@ def _render_config_template(
 
     L.append("# [tuning].timeout: raw standalone-review input (positive integer seconds;")
     L.append("#   standalone external work is capped at 540s + 60s settlement).")
-    L.append("#   Council/run/probe otherwise use it as their ordinary seat wall-clock.")
+    L.append("#   Run/probe otherwise use it as their ordinary seat wall-clock.")
     L.append("# [tuning].deadline_minutes: the persistence loops' wall clock, read by")
     L.append(f"#   `crew state init` (1-{MAX_DEADLINE_MINUTES}; 0 = no deadline, honored from the")
     L.append("#   global ~/.crew-config.toml only, and the stop-fires cap still bounds")
@@ -5240,8 +5050,8 @@ def cmd_swab(args: argparse.Namespace) -> int:
 
     DRY-RUN BY DEFAULT, modelled on ``git clean -n``: the read-the-list moment IS
     the safety mechanism. Prunes three artifact families under the project ``.crew/``:
-    ORPHANED review-run dirs (no active loop, no current-run or
-    current-standalone-review pointer names them, and no nonterminal standalone
+    ORPHANED review-run dirs (no active loop, no current-run,
+    current-standalone-review, or current-standalone-debate pointer names them, and no nonterminal standalone
     workflow protects them; there is deliberately no review-run age threshold
     beyond the 1-day grace given to a standalone workflow that fails validation)
     and stale debate dirs (past the 1-day threshold, no synthesis), plus Cursor
@@ -5405,6 +5215,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     review.set_defaults(func=cmd_review)
 
+    debate = sub.add_parser(
+        "debate",
+        help="Start or resume the engine-owned debate workflow (single-round council).",
+    )
+    debate.add_argument(
+        "question",
+        nargs="?",
+        default=None,
+        help="the debate question (omit when using -f)",
+    )
+    debate.add_argument(
+        "-f", "--file",
+        default=None,
+        type=anchor_path,
+        help="read the question from this file instead of the positional string "
+             "(a relative path resolves against the project root, not the shell cwd)",
+    )
+    debate.add_argument("--seats", default=None, help="comma-separated registered seats")
+    debate.add_argument("--panel", default=None, help="named debate panel")
+    debate.add_argument("--session-id", dest="session_id", required=True, help="literal harness session id")
+    debate.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        help="raw requested/config timeout (s); external work is capped at 540s",
+    )
+    debate.add_argument(
+        "--force-external",
+        dest="force_external",
+        default=None,
+        help="comma-separated channels this run must run as external subprocesses",
+    )
+    debate.set_defaults(func=cmd_debate)
+
     def add_review_ref(parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--session-segment", required=True)
         parser.add_argument("--run-id", required=True)
@@ -5464,84 +5308,6 @@ def build_parser() -> argparse.ArgumentParser:
     review_retry.add_argument("--seats", default=None)
     review_retry.set_defaults(func=cmd_review_retry)
 
-    council = sub.add_parser(
-        "council",
-        help="Fan a free-form question across registered external seats "
-             "(host-resolved; single round).",
-    )
-    council.add_argument(
-        "question",
-        nargs="?",
-        default=None,
-        help="the council question (omit when using -f)",
-    )
-    council.add_argument(
-        "-f", "--file",
-        default=None, type=anchor_path,
-        help="read the question from this file instead of the positional string "
-             "(a relative path resolves against the project root, not the shell cwd)",
-    )
-    council.add_argument(
-        "--seats", default=None,
-        help="comma-separated registered external seats (host-resolved; e.g. "
-             "codex,cursor-auto,cursor-composer)",
-    )
-    council.add_argument("--json", action="store_true", help="emit a JSON array of results")
-    council.add_argument("--timeout", type=int, default=None, help="per-seat wall-clock timeout (s)")
-    council.add_argument(
-        "-o", "--out", default=None, type=anchor_path,
-        help="write results to this file instead of stdout (keeps the call "
-             "shell-redirect-free and allowlistable)",
-    )
-    council.set_defaults(func=cmd_council)
-
-    debate = sub.add_parser(
-        "debate",
-        help="Scaffold a debate dir (question.md + empty subprocess.json) in one "
-             "call — SCAFFOLD-ONLY, never runs subprocess seats internally "
-             "(no mkdir/heredoc to approve).",
-    )
-    debate.add_argument(
-        "question",
-        nargs="?",
-        default=None,
-        help="the debate question (omit when using -f)",
-    )
-    debate.add_argument(
-        "-f", "--file",
-        default=None, type=anchor_path,
-        help="read the question from this file instead of the positional string "
-             "(a relative path resolves against the project root, not the shell cwd)",
-    )
-    debate.add_argument(
-        "--slug",
-        default=None,
-        help="short kebab-case slug for the dir name (default: derived from the question)",
-    )
-    debate.add_argument(
-        "--base-dir",
-        default=str(crew_base() / ".crew" / "debates"), type=anchor_path,
-        help="parent dir for debate logs (default: <project>/.crew/debates, "
-             "anchored to CLAUDE_PROJECT_DIR; an explicit relative path anchors "
-             "the same way)",
-    )
-    debate.add_argument(
-        "--seats", default=None,
-        help="ignored for execution — debate is SCAFFOLD-ONLY and never runs "
-             "subprocess seats internally (fan them out per-seat via 'crew run "
-             "<seat>'). A non-empty value (e.g. codex) prints a one-line stderr "
-             "advisory and still scaffolds; 'none'/'' is the no-op default.",
-    )
-    debate.add_argument(
-        "--timeout", type=int, default=None,
-        help="ignored — debate is scaffold-only and runs no seats (compat only)",
-    )
-    debate.add_argument(
-        "--consume", action="store_true",
-        help="delete the -f staging file after copying the question into the "
-             "debate dir (so no transient question file lingers)",
-    )
-    debate.set_defaults(func=cmd_debate)
 
     seats_p = sub.add_parser(
         "seats",
@@ -5781,7 +5547,7 @@ def build_parser() -> argparse.ArgumentParser:
              "flat .crew/reviews/<id>/ dir. An empty/whitespace-only output "
              "lands as ok=false with error 'empty seat output' (never a "
              "fabricated success), and a slug matching a reserved crew "
-             "control filename stem (run/current-run/current-standalone-review/seat, "
+             "control filename stem (run/current-run/current-standalone-review/current-standalone-debate/seat, "
              "case-folded) is "
              "rejected (exit 2) since the destination is always derived. "
              "The engine owns slug derivation, "
@@ -5897,7 +5663,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run ONE registered seat resolved to external execution for the "
              "current host through the "
              "engine. A seat name matching a reserved crew control filename "
-             "stem (run/current-run/current-standalone-review/seat, case-folded) "
+             "stem (run/current-run/current-standalone-review/current-standalone-debate/seat, case-folded) "
              "is rejected (exit 2) "
              "whenever the output path is DERIVED, flat and run-scoped alike; "
              "an explicit -o keeps ad-hoc freedom.",
@@ -6227,8 +5993,9 @@ def build_parser() -> argparse.ArgumentParser:
     swab = sub.add_parser(
         "swab",
         help="swab the decks: review and prune stale crew artifacts (orphaned "
-             "review runs with no active loop, current-run/current-standalone-review "
-             "pointer, or nonterminal/ambiguous standalone workflow, and stale "
+             "review runs with no active loop, current-run, current-standalone-review, or "
+             "current-standalone-debate pointer, or nonterminal/ambiguous standalone "
+             "workflow, and stale "
              "debate transcripts). Dry-run by default; pass --yes to delete.",
     )
     swab.add_argument(

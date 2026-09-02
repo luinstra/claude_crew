@@ -32,7 +32,7 @@ resolver records the selected execution `channel` alongside its executor.
 > its print timeout plus grace, about 8 minutes by default, so the 1800-second
 > default is not floored;
 > `[dispatch].timeout` is dispatch-only and does not alter
-> the NON-DISPATCH (review/council/run/probe) seat wall-clock from
+> the NON-DISPATCH (review/run/probe) seat wall-clock from
 > `[tuning].timeout`. The authoritative resolved-seat line is read from the returned
 > envelope's `seat` field POST-run (step 4). Per-provider write-mode tuning
 > lives under `[dispatch.<kind>]`; `crew dispatch --options` (non-billable)

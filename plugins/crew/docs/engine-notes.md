@@ -35,9 +35,9 @@ channel, and the `print_timeout` knob stay; an agy seat is reached through a
 config-declared row (`[seats.<name>]` with `via = ["agy"]` and a `model`).
 With no shipped seat named `agy`, the channel mints an `agy` GROUP TOKEN, so
 `--seats agy` names a list (the declared agy seats), and with no declared agy
-seat that list is empty and each entry point handles it differently: `council`
-exits 2 with `error: no subprocess seats requested`, standalone review raises
-`WorkflowError("no_seats")`, and `review-prep` has no guard and emits an empty
+seat that list is empty and each entry point handles it differently: the debate
+workflow raises `WorkflowError("no_seats")` exactly as standalone review, and
+`review-prep` has no guard and emits an empty
 manifest silently, which only `crew state begin-review` refuses downstream.
 `[dispatch].seat = "agy"` resolves to `None` with the generic
 `[dispatch].seat='agy' is not a known registered seat (...); ignoring` warning.
@@ -82,13 +82,12 @@ Opt-in for COST (premium/metered Cursor buckets):
   was fuzzy-matched down to Cursor Grok 4.5 High instead of erroring, so the seat
   quietly ran a tier below its request while the result recorded the old pin.
 
-## Why the debate panel uses `seats --debate`, not a `debate-prep` mirror
+## Why the interim multi-round section still uses `seats --debate`
 
-`/crew:debate` cannot call `review-prep` (it resolves its panel in the command
-markdown), so `crew seats --debate` prints the FULL debate panel. Extending the
-existing `seats` subcommand is the lightest hook — not a heavyweight `debate-prep`
-mirror of `review-prep`. Note debate adds the `debate_panel` tier that
-`review-prep` has no equivalent for.
+The interim multi-round section of debate.md uses `crew seats --debate` because
+that Markdown transport still resolves its panel before it issues its per-seat
+actions. The single-round workflow passes `[debate].panel` into the shared
+resolver and does not use this command path.
 
 ## Why `crew state …` routes through the dispatcher instead of a plugin-root shim
 
@@ -98,14 +97,39 @@ plugin-root `crew-state.py` shim would put the plugin root (not `scripts/`) on
 `scripts/`, so routing `crew state …` through it resolves the import with NO edit
 to `crew-state.py`.
 
-## Why `debate` is scaffold-only
+## Why debate is workflow-owned
 
-The old internal `_fan_out` branch inside `debate` was a killability split-brain
-vs. `review-prep` (seats hidden in a thread pool instead of per-seat visible
-shells). Making `debate` scaffold-only — it writes the dir + `question.md` + an
-empty `subprocess.json` and never runs seats internally — removed that split-brain;
-the single-round path now fans seats out per-seat with `run <seat>`, same as the
-review-bearing commands.
+The scaffold verb and the killability split-brain are gone because the review
+seam issues one claimable action per seat, the same reason standalone review
+never enters an ad-hoc fan-out. The engine therefore owns the single-round
+question target, panelist actions, settlement, and advisory synthesis.
+
+## Debate on the review seam
+
+Debate gets a question target with an exact `question.md` snapshot because
+the question, not a plan or diff, is the material every seat must receive.
+
+Debate gets its own pointer because a shared standalone pointer would evict
+an in-flight review and remove the resume and pruning protection for that run.
+
+Formatter actions are suppressed because a panelist take is already the issued
+reviewer-kind artifact and has no findings repair path.
+
+Synthesis requires a null judgment because the advisory record must not
+pretend to certify or revise a target.
+
+The strict-majority header stays advisory and findings parsing is short-circuited because
+a panel shape that depends on seat prose is not deterministic.
+
+The inherited timeout envelope is reused because the same host transport and
+settlement boundary apply to debate seats.
+
+The existing external-channel policy stays because routing is one frozen
+workflow decision, not a separate debate configuration source.
+
+Debate stays under `.crew/reviews/<session>/<run>/` because the review seam's
+validated record is the synthesis authority and a second debate tree would
+duplicate unvalidated state.
 
 ## `collect --group` merge decisions (labels)
 

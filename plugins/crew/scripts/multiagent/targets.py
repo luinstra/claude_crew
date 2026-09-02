@@ -35,7 +35,7 @@ class TargetError(Exception):
 
 @dataclass
 class Target:
-    kind: str            # "plan" | "code"
+    kind: str            # "plan" | "code" | "question"
     scope: str           # human-readable scope, e.g. "working-tree", path
     content: str         # the text to review (plan body or diff)
     descriptor: str      # one-line header for the prompt

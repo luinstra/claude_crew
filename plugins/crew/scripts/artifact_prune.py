@@ -44,7 +44,10 @@ from multiagent.review_runs import (
 # guard. If review_runs ever changes the truncation length or charset, change this.
 MINTED_RUN_DIR_RE = re.compile(r"^run-[0-9a-f]{12}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-STANDALONE_POINTER_NAME = "current-standalone-review.json"
+STANDALONE_POINTER_NAMES = (
+    "current-standalone-review.json",
+    "current-standalone-debate.json",
+)
 
 # Coarse debate-dir ownership heuristic: a `run-` or `YYYYMMDD-HHMMSS` PREFIX. This
 # is a LOOSE prefix match, not proof the engine minted the name (it also admits a
@@ -179,10 +182,10 @@ def live_run_keys(crew_dir: Path) -> set:
     return keys
 
 
-def _standalone_pointer_data(session_dir: Path) -> dict | None:
+def _standalone_pointer_data(session_dir: Path, name: str) -> dict | None:
     """Parse only the exact schema-1 standalone pointer shape."""
     try:
-        data = json.loads((session_dir / STANDALONE_POINTER_NAME).read_text(encoding="utf-8"))
+        data = json.loads((session_dir / name).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if (
@@ -200,33 +203,36 @@ def _standalone_pointer_data(session_dir: Path) -> dict | None:
     return data
 
 
-def _standalone_pointer_run_id(session_dir: Path) -> str | None:
-    """Return the run id only when pointer and immutable run record agree."""
-    data = _standalone_pointer_data(session_dir)
-    if data is None:
-        return None
-    run = session_dir / data["run_id"]
-    if not own_dir(run):
-        return None
-    try:
-        record = read_run_json(run)
-        verify_run_record(
-            record,
-            expected_run_id=data["run_id"],
-            source=run / RUN_JSON_NAME,
-        )
-    except ReviewRunError:
-        return None
-    if (
-        data["identity_digest"] != record.get("identity_digest")
-        or data["target_sha256"] != record.get("target_sha256")
-    ):
-        return None
-    return data["run_id"]
+def _standalone_pointer_run_ids(session_dir: Path) -> list[str]:
+    """Return run ids whose standalone pointers agree with immutable records."""
+    run_ids: list[str] = []
+    for name in STANDALONE_POINTER_NAMES:
+        data = _standalone_pointer_data(session_dir, name)
+        if data is None:
+            continue
+        run = session_dir / data["run_id"]
+        if not own_dir(run):
+            continue
+        try:
+            record = read_run_json(run)
+            verify_run_record(
+                record,
+                expected_run_id=data["run_id"],
+                source=run / RUN_JSON_NAME,
+            )
+        except ReviewRunError:
+            continue
+        if (
+            data["identity_digest"] != record.get("identity_digest")
+            or data["target_sha256"] != record.get("target_sha256")
+        ):
+            continue
+        run_ids.append(data["run_id"])
+    return run_ids
 
 
 def pointer_protected_keys(reviews_root: Path) -> set:
-    """Run keys named by either supported current-review pointer.
+    """Run keys named by the standalone pointers.
 
     The pointer means "this is the run in play", so a run it names is NOT an
     orphan even when no loop state records it: it protects an in-flight standalone
@@ -242,18 +248,16 @@ def pointer_protected_keys(reviews_root: Path) -> set:
     flat = read_pointer_run_id(reviews_root)
     if flat:
         keys.add(("", flat))
-    standalone_flat = _standalone_pointer_run_id(reviews_root)
-    if standalone_flat:
-        keys.add(("", standalone_flat))
+    for rid in _standalone_pointer_run_ids(reviews_root):
+        keys.add(("", rid))
     for session_dir in reviews_root.iterdir():
         if not own_dir(session_dir):
             continue
         rid = read_pointer_run_id(session_dir)
         if rid:
             keys.add((session_dir.name, rid))
-        standalone = _standalone_pointer_run_id(session_dir)
-        if standalone:
-            keys.add((session_dir.name, standalone))
+        for rid in _standalone_pointer_run_ids(session_dir):
+            keys.add((session_dir.name, rid))
     return keys
 
 
@@ -567,9 +571,10 @@ def drop_dangling_pointer(session_dir: Path, removed_names: set) -> None:
             (session_dir / POINTER_NAME).unlink(missing_ok=True)
         except OSError:
             pass
-    standalone = _standalone_pointer_data(session_dir)
-    if standalone is not None and standalone["run_id"] in removed_names:
-        try:
-            (session_dir / STANDALONE_POINTER_NAME).unlink(missing_ok=True)
-        except OSError:
-            pass
+    for name in STANDALONE_POINTER_NAMES:
+        standalone = _standalone_pointer_data(session_dir, name)
+        if standalone is not None and standalone["run_id"] in removed_names:
+            try:
+                (session_dir / name).unlink(missing_ok=True)
+            except OSError:
+                pass

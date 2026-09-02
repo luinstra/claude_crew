@@ -209,3 +209,35 @@ provider result, and these route assertions:
 The run record must contain a non-empty `reported_model` on the cursor seat,
 and the rendered header must contain an `attributed` segment. Report the review
 run id, the cursor seat's `reported_model`, and the header line.
+
+## Cursor-native debate
+
+### F3.1 Council on the app
+
+Refresh the `claude-crew` marketplace, update the `crew` plugin, open a new
+Cursor app session at `<repo root>`, and paste exactly:
+
+```
+/crew:debate --seats cursor-composer,opus Should a single-round council keep rendering the strict-majority quorum header when it produces no verdict?
+```
+
+Assert in `.crew/reviews/<session>/<run-id>/` that the run record has
+`run.json.workflow_identity.kind == standalone_debate`, a `question.md`
+snapshot, one reviewer action with `driver=native`, `role=crew-panelist`,
+`model=composer-2.5-fast`, and `access=read-only-advisory`, one reviewer action
+with `driver=external`, `channel=claude`, and `model=opus`, zero formatter
+actions, one synthesis action with `judgment` null, and terminal `complete`
+with quorum `2` `MET`. Read the subagent chip after the spawn and record its
+text beside the run id.
+
+Repeat with `--timeout 1`; the external `opus` seat should time out while the
+native seat does not. Assert terminal `quorum_not_met`, a present
+`synthesis_path`, and `panel.md` line 2 equal to `the synthesis below is
+advisory and not backed by quorum from this panel`.
+
+Report the two run ids, the chip text, and both terminal statuses. Expected
+evidence includes the two route records and no `cursor-agent` process for the
+native seat. Run this alongside F2.1 (`readonly: true` enforcement) and F2.5
+(native cancellation) without waiting on either item. The panelist adapter
+carries the same `readonly: true` key as F2.1, so record whether the panelist
+wrote anything.

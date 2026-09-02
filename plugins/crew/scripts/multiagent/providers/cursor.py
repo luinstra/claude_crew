@@ -496,8 +496,8 @@ class CursorProvider(Provider):
     ) -> ProviderResult:
         """Invoke Cursor Agent and return a normalized ProviderResult.
 
-        ``sandbox="read-only"`` (the default, and what review/debate/council seats
-        use) runs the agent in ``--mode plan`` — analyse + read-only shell (it CAN
+        ``sandbox="read-only"`` (the default, and what standalone review and
+        question seats use) runs the agent in ``--mode plan``: analyse + read-only shell (it CAN
         run ``git diff`` and read files, and it produces its review text), but it
         does NOT apply edits. This is load-bearing and EMPIRICALLY verified: plain
         ``--print --sandbox enabled`` (no ``--mode``) actually WRITES to the

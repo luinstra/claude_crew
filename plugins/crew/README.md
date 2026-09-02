@@ -4,9 +4,10 @@ Persistence, specialized agents, and workflow commands for Claude Code.
 
 ## What's In Here
 
-Standalone `/crew:review` uses the Python-owned workflow engine through the
-Claude Code and Cursor host adapters. Cursor now issues its cursor-channel
-seats as native subagents (`agents-cursor/` ships the three role adapters) only
+Standalone `/crew:review` and `/crew:debate` use the Python-owned workflow
+engine through the Claude Code and Cursor host adapters. Cursor now issues its
+cursor-channel seats as native subagents (`agents-cursor/` ships four role
+adapters, including `crew-panelist.md`) only
 when a seat declares a `native_model`; the shipped composer seat uses
 `composer-2.5-fast`, while a seat without one is warned about and dropped. The
 app's subagent surface must offer the exact native variant, and an unoffered
@@ -19,6 +20,7 @@ expose standalone `/crew:review`; its app-native adapter remains deferred.
 Build and measure-twice continue to use `review-prep`.
 
 - **8 specialized agents** — advisor, executor, reader, document-writer, reviewer, panelist, formatter, scribe
+- **Cursor role adapters** in `agents-cursor/`: reviewer, panelist, formatter, scribe.
 - **Slash commands** — planning, execution, search, build/measure-twice loops
 - **2 lifecycle hooks** — SessionStart context restoration, Stop persistence enforcement
 - **Python state machine** — session-scoped JSON state files in `.crew/`

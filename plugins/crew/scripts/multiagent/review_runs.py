@@ -66,6 +66,7 @@ RESERVED_STEMS = frozenset({
     "run",
     "current-run",
     "current-standalone-review",
+    "current-standalone-debate",
     "seat",
 })
 
@@ -353,7 +354,7 @@ def verify_run_record(record: dict, *, expected_run_id: str, source: Path) -> No
 # ---------------------------------------------------------------------------
 
 def snapshot_name(kind: str) -> str:
-    return "target.md" if kind == "plan" else "target.diff"
+    return {"plan": "target.md", "code": "target.diff", "question": "question.md"}[kind]
 
 
 def ensure_snapshot(d: Path, name: str, content: str, target_sha256: str) -> str | None:

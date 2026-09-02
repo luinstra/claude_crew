@@ -3216,6 +3216,44 @@ def test_prompts():
     check("prompts has NO SEAT/ROUND header text",
           "SEAT:" not in code and "ROUND:" not in code, "no SEAT/ROUND", "present")
 
+    p1 = prompts.debate_synthesis("p", "f", [("codex", "a")])
+    check(
+        "debate synthesis headings are ordered",
+        p1.index("Areas of agreement") < p1.index("Key disagreements") < p1.index("Recommendation"),
+        "heading order",
+        p1,
+    )
+    check(
+        "debate synthesis omits prior-round headings when absent",
+        "How positions evolved" not in p1 and "PRIOR ROUNDS" not in p1,
+        "no prior-round headings",
+        p1,
+    )
+    check(
+        "debate synthesis lists frozen artifacts",
+        "1. codex: a" in p1 and "GROUPED PANEL: p" in p1 and "FULL PANEL: f" in p1,
+        "artifact manifest",
+        p1,
+    )
+    check(
+        "debate synthesis leaves the typed judgment null",
+        "leave the typed judgment null" in p1,
+        "null judgment instruction",
+        p1,
+    )
+    check(
+        "debate synthesis contains no verdict vocabulary",
+        all(tok not in p1 for tok in ("APPROVED", "REVISE", "VERDICT", "minor_only", "[BLOCKING]", "[MINOR]", "rubric")),
+        "verdict-free prompt",
+        p1,
+    )
+    check(
+        "debate synthesis has no em-dash",
+        chr(0x2014) not in p1,
+        "no em-dash",
+        p1,
+    )
+
     # council template — single-round structured-independent-critical stance.
     cncl = prompts.council("Is X better than Y?")
     check("council includes the question", "Is X better than Y?" in cncl,
@@ -3227,6 +3265,9 @@ def test_prompts():
     check("council forbids rubber-stamp / manufactured contrarianism",
           "rubber-stamp" in cncl.lower() and "contrarian" in cncl.lower(),
           "no-rubber-stamp/contrarian framing", cncl)
+    check("council states the no-verdict rule",
+          "Give no verdict and no rubric score" in cncl,
+          "no-verdict line", cncl[-300:])
     check("council is single-round (no SEAT/ROUND/rounds machinery)",
           "ROUND:" not in cncl and "SEAT:" not in cncl and "rebuttal" not in cncl.lower(),
           "no multi-round machinery", cncl[:200])
@@ -4372,535 +4413,6 @@ def test_run_subcommand():
     check("python -m multiagent.cli run --help works",
           proc.returncode == 0 and "run" in (proc.stdout + proc.stderr).lower(),
           "help ok", f"{proc.returncode}: {proc.stderr[:120]}")
-
-
-def test_council_subcommand():
-    log_section("council subcommand (free-form fan-out, bare-script cli.py)")
-
-    # A fake codex that echoes the stdin prompt body into the -o file, so we can
-    # confirm the council prompt (not a review prompt) reached the seat.
-    codex_echo = """
-    import sys
-    a = sys.argv[1:]
-    out = None
-    for i, x in enumerate(a):
-        if x == "-o":
-            out = a[i + 1]
-    body = sys.stdin.read()
-    with open(out, "w") as f:
-        f.write("COUNCIL-TAKE :: " + body[:60])
-    sys.exit(0)
-    """
-
-    # direct <question> string, single seat, --json six-field shape.
-    with tempfile.TemporaryDirectory() as td:
-        bins = Path(td) / "bin"
-        bins.mkdir()
-        make_fake_bin(bins, "codex", codex_echo)
-        env = path_with(bins)
-        proc = _run_cli(
-            ["council", "Is X better than Y?", "--seats", "codex", "--json"],
-            env=env, timeout=30,
-        )
-        check("council direct question -> exit 0",
-              proc.returncode == 0, "0", f"{proc.returncode}: {proc.stderr[:200]}")
-        ok_json = False
-        try:
-            arr = json.loads(proc.stdout)
-            ok_json = (
-                isinstance(arr, list) and len(arr) == 1
-                and set(arr[0].keys())
-                == {"name", "model", "ok", "output", "error", "elapsed", "channel"}
-                and arr[0]["name"] == "codex" and arr[0]["ok"] is True
-                and arr[0]["channel"] == "codex"
-            )
-        except Exception:
-            ok_json = False
-        check("council --json emits six-field array, one entry per seat",
-              ok_json, "six-field array len 1", f"{proc.stdout[:200]}")
-        check("council fed the council prompt (not a review prompt)",
-              "QUESTION" in proc.stdout or "council" in proc.stdout.lower(),
-              "council framing reached the seat", proc.stdout[:200])
-
-    # -f <file> reads the question from a file. Echo the FULL prompt body so we
-    # can confirm the file's question made it into the assembled council prompt.
-    codex_echo_full = """
-    import sys
-    a = sys.argv[1:]
-    out = None
-    for i, x in enumerate(a):
-        if x == "-o":
-            out = a[i + 1]
-    body = sys.stdin.read()
-    with open(out, "w") as f:
-        f.write("COUNCIL-TAKE :: " + body)
-    sys.exit(0)
-    """
-    with tempfile.TemporaryDirectory() as td:
-        d = Path(td)
-        bins = d / "bin"
-        bins.mkdir()
-        make_fake_bin(bins, "codex", codex_echo_full)
-        env = path_with(bins)
-        qf = d / "question.txt"
-        qf.write_text("Should we adopt approach Z?")
-        proc = _run_cli(
-            ["council", "-f", str(qf), "--seats", "codex", "--json"],
-            env=env, timeout=30,
-        )
-        ok = False
-        try:
-            arr = json.loads(proc.stdout)
-            ok = (proc.returncode == 0 and len(arr) == 1
-                  and "Should we adopt approach Z?" in arr[0]["output"])
-        except Exception:
-            ok = False
-        check("council -f reads the question file and fans it out",
-              ok, "exit0 + question in seat output", f"{proc.returncode}: {proc.stdout[:200]}")
-
-    # two fake external seats: codex plus a config-declared agy seat.
-    with tempfile.TemporaryDirectory() as td:
-        bins = Path(td) / "bin"
-        bins.mkdir()
-        make_fake_bin(bins, "codex", codex_echo)
-        # fake agy succeeds too
-        make_fake_bin(bins, "agy", """
-        import sys
-        sys.stdout.write("AGY COUNCIL TAKE")
-        sys.exit(0)
-        """)
-        # agy print_timeout via config; _run_cli has no cwd, so resolve the loader
-        # via CLAUDE_PROJECT_DIR (env retired — no 8m hang on the agy fake).
-        (Path(td) / ".crew").mkdir(parents=True, exist_ok=True)
-        (Path(td) / ".crew" / "config.toml").write_text(agy_seat_toml(print_timeout="1s"))
-        env = path_with(bins)
-        env["CLAUDE_PROJECT_DIR"] = td
-        # Pin the two fake subprocess seats EXPLICITLY via --seats so this exercises
-        # the council fan-out deterministically, independent of the default panel
-        # (CREW_MA_SEATS is retired — the flag is now the only override).
-        proc = _run_cli(
-            ["council", "Pick one.", "--seats", f"codex,{AGY_SEAT}", "--json", "--timeout", "5"],
-            env=env, timeout=60,
-        )
-        names = []
-        try:
-            arr = json.loads(proc.stdout)
-            names = sorted(r["name"] for r in arr)
-        except Exception:
-            names = []
-        check(f"council pinned seats fan out (codex,{AGY_SEAT})",
-              names == [AGY_SEAT, "codex"], f"['{AGY_SEAT}', 'codex']", str(names))
-
-    # one seat fails, the other still returns (graceful degradation).
-    with tempfile.TemporaryDirectory() as td:
-        bins = Path(td) / "bin"
-        bins.mkdir()
-        make_fake_bin(bins, "codex", codex_echo)
-        make_fake_bin(bins, "agy", """
-        import sys
-        sys.stderr.write("agy boom")
-        sys.exit(1)
-        """)
-        # agy print_timeout via config (CLAUDE_PROJECT_DIR; env retired).
-        (Path(td) / ".crew").mkdir(parents=True, exist_ok=True)
-        (Path(td) / ".crew" / "config.toml").write_text(agy_seat_toml(print_timeout="1s"))
-        env = path_with(bins)
-        env["CLAUDE_PROJECT_DIR"] = td
-        proc = _run_cli(
-            ["council", "Q?", "--seats", f"codex,{AGY_SEAT}", "--json", "--timeout", "5"],
-            env=env, timeout=60,
-        )
-        by_name = {}
-        try:
-            by_name = {r["name"]: r for r in json.loads(proc.stdout)}
-        except Exception:
-            by_name = {}
-        check("council one-seat-fails: codex still returns ok=True",
-              by_name.get("codex", {}).get("ok") is True,
-              "codex ok=True", str(by_name.get("codex")))
-        check("council one-seat-fails: agy ok=False, didn't sink the council",
-              by_name.get(AGY_SEAT, {}).get("ok") is False,
-              "agy ok=False", str(by_name.get(AGY_SEAT)))
-        check("council partial panel -> exit 0 (not all-failed)",
-              proc.returncode == 0, "0", f"{proc.returncode}: {proc.stderr[:200]}")
-
-    # ALL seats fail -> nonzero exit, clear all-failed signal, no traceback.
-    with tempfile.TemporaryDirectory() as td:
-        bins = Path(td) / "bin"
-        bins.mkdir()
-        make_fake_bin(bins, "codex", """
-        import sys
-        sys.stderr.write("codex boom")
-        sys.exit(1)
-        """)
-        make_fake_bin(bins, "agy", """
-        import sys
-        sys.stderr.write("agy boom")
-        sys.exit(1)
-        """)
-        # agy print_timeout via config (CLAUDE_PROJECT_DIR; env retired).
-        (Path(td) / ".crew").mkdir(parents=True, exist_ok=True)
-        (Path(td) / ".crew" / "config.toml").write_text(agy_seat_toml(print_timeout="1s"))
-        env = path_with(bins)
-        env["CLAUDE_PROJECT_DIR"] = td
-        proc = _run_cli(
-            ["council", "Q?", "--seats", f"codex,{AGY_SEAT}", "--json", "--timeout", "5"],
-            env=env, timeout=60,
-        )
-        check("council all-fail: no traceback",
-              "Traceback" not in proc.stderr, "no traceback", proc.stderr[:200])
-        check("council all-fail: nonzero exit",
-              proc.returncode != 0, "nonzero", str(proc.returncode))
-        check("council all-fail: clear 'all N seats failed' on stderr",
-              "all 2 seats failed" in proc.stderr, "all 2 seats failed", proc.stderr[:200])
-
-    # neither prompt source -> error; both -> error.
-    proc = _run_cli(["council"], timeout=30)
-    check("council with neither -f nor question -> nonzero error",
-          proc.returncode != 0 and "no question" in proc.stderr,
-          "nonzero + 'no question'", f"{proc.returncode}: {proc.stderr!r}")
-    with tempfile.TemporaryDirectory() as td:
-        qf = Path(td) / "q.txt"
-        qf.write_text("x")
-        proc = _run_cli(["council", "STR", "-f", str(qf)], timeout=30)
-        check("council with BOTH -f and question -> nonzero error",
-              proc.returncode != 0 and "not both" in proc.stderr,
-              "nonzero + 'not both'", f"{proc.returncode}: {proc.stderr!r}")
-
-    # --out writes results to a file (no shell redirect needed) and keeps stdout
-    # clean. This is what makes the whole call allowlistable: a literal-path
-    # `python cli.py council … --out <file>` with no `> "$dir/file"` redirect and
-    # no `$(…)`-derived path for the permission matcher to choke on.
-    with tempfile.TemporaryDirectory() as td:
-        d = Path(td)
-        bins = d / "bin"
-        bins.mkdir()
-        make_fake_bin(bins, "codex", codex_echo)
-        env = path_with(bins)
-        outf = d / "results.json"
-        proc = _run_cli(
-            ["council", "Q?", "--seats", "codex", "--json", "--out", str(outf)],
-            env=env, timeout=30,
-        )
-        check("council --out: exit 0",
-              proc.returncode == 0, "0", f"{proc.returncode}: {proc.stderr[:200]}")
-        check("council --out: stdout stays clean (nothing redirected by shell)",
-              proc.stdout.strip() == "", "empty stdout", repr(proc.stdout[:120]))
-        wrote_ok = False
-        try:
-            arr = json.loads(outf.read_text())
-            wrote_ok = (isinstance(arr, list) and len(arr) == 1
-                        and arr[0]["name"] == "codex" and arr[0]["ok"] is True)
-        except Exception:
-            wrote_ok = False
-        check("council --out: six-field JSON array written to the file",
-              wrote_ok, "results.json holds the panel", f"exists={outf.exists()}")
-
-    # -m invocation path reaches council too.
-    env3 = dict(os.environ)
-    env3["PYTHONPATH"] = str(SCRIPT_DIR) + os.pathsep + env3.get("PYTHONPATH", "")
-    proc = subprocess.run(
-        [sys.executable, "-m", "multiagent.cli", "council", "--help"],
-        capture_output=True, text=True, env=env3, timeout=30,
-    )
-    check("python -m multiagent.cli council --help works",
-          proc.returncode == 0 and "council" in (proc.stdout + proc.stderr).lower(),
-          "help ok", f"{proc.returncode}: {proc.stderr[:120]}")
-
-
-def test_debate_subcommand():
-    log_section("debate subcommand (SCAFFOLD-ONLY — never runs subprocess seats internally)")
-
-    # codex stub is present on PATH but must NEVER be invoked: debate is
-    # scaffold-only, so even `--seats codex` runs no seat. If cmd_debate ever
-    # regressed to internal fan-out this stub would write a non-empty
-    # subprocess.json and the [] assertions below would fail.
-    codex_echo = """
-    import sys
-    a = sys.argv[1:]
-    out = None
-    for i, x in enumerate(a):
-        if x == "-o":
-            out = a[i + 1]
-    body = sys.stdin.read()
-    with open(out, "w") as f:
-        f.write("COUNCIL-TAKE :: " + body[:60])
-    sys.exit(0)
-    """
-
-    # positional question + --slug + `--seats codex`: SCAFFOLD-ONLY. The dir +
-    # question.md are scaffolded, subprocess.json is ALWAYS [], the printed
-    # summary has `seats == []`, a stderr advisory is emitted, and exit is 0 —
-    # NO codex seat is run (the split-brain internal `_fan_out` is gone).
-    with tempfile.TemporaryDirectory() as td:
-        d = Path(td)
-        bins = d / "bin"
-        bins.mkdir()
-        make_fake_bin(bins, "codex", codex_echo)  # present, but must NOT be invoked
-        env = path_with(bins)
-        base = d / "debates"
-        proc = _run_cli(
-            ["debate", "Is X better than Y?", "--seats", "codex",
-             "--slug", "x-vs-y", "--base-dir", str(base)],
-            env=env, timeout=30,
-        )
-        check("debate --seats codex: exit 0 (scaffold-only, no seat run)",
-              proc.returncode == 0, "0", f"{proc.returncode}: {proc.stderr[:200]}")
-        info = {}
-        try:
-            info = json.loads(proc.stdout)
-        except Exception:
-            info = {}
-        ddir = Path(info["dir"]) if info.get("dir") else None
-        check("debate: prints JSON summary with a created dir path",
-              bool(ddir) and ddir.exists(), "dir created", proc.stdout[:200])
-        check("debate: dir name is <timestamp>-<slug>",
-              bool(ddir) and "x-vs-y" in ddir.name and ddir.name[:8].isdigit(),
-              "<ts>-x-vs-y", str(ddir.name if ddir else None))
-        check("debate: question.md written into the dir",
-              bool(ddir) and (ddir / "question.md").exists()
-              and "Is X better than Y?" in (ddir / "question.md").read_text(),
-              "question.md holds the question", "?")
-        check("debate --seats codex: summary seats == [] (no seat executed)",
-              info.get("seats") == [], "[]", repr(info.get("seats")))
-        is_empty = False
-        if ddir and (ddir / "subprocess.json").exists():
-            try:
-                is_empty = json.loads((ddir / "subprocess.json").read_text()) == []
-            except Exception:
-                is_empty = False
-        check("debate --seats codex: subprocess.json is [] (codex NEVER run)",
-              is_empty, "[]", "?")
-        check("debate --seats codex: stderr advisory printed (no internal fan-out)",
-              "no longer runs subprocess seats internally" in proc.stderr,
-              "advisory on stderr", repr(proc.stderr[:200]))
-
-    # -f + `--seats codex`: same scaffold-only contract via the question-file path
-    # (auto-slug when --slug omitted). subprocess.json [] + advisory + no seat run.
-    with tempfile.TemporaryDirectory() as td:
-        d = Path(td)
-        bins = d / "bin"
-        bins.mkdir()
-        make_fake_bin(bins, "codex", codex_echo)  # present, but must NOT be invoked
-        env = path_with(bins)
-        base = d / "debates"
-        qf = d / "q.txt"
-        qf.write_text("Should we adopt approach Zeta now?")
-        proc = _run_cli(
-            ["debate", "-f", str(qf), "--seats", "codex", "--base-dir", str(base)],
-            env=env, timeout=30,
-        )
-        ddir = None
-        try:
-            ddir = Path(json.loads(proc.stdout)["dir"])
-        except Exception:
-            ddir = None
-        check("debate -f --seats codex: reads question file and scaffolds the dir",
-              proc.returncode == 0 and bool(ddir) and ddir.exists()
-              and (ddir / "question.md").exists(),
-              "exit0 + dir + question.md", f"{proc.returncode}: {proc.stdout[:160]}")
-        check("debate: auto-slug derived from the question when --slug omitted",
-              bool(ddir) and "should-we-adopt" in ddir.name,
-              "slug from first words", str(ddir.name if ddir else None))
-        ff_empty = False
-        if ddir and (ddir / "subprocess.json").exists():
-            try:
-                ff_empty = json.loads((ddir / "subprocess.json").read_text()) == []
-            except Exception:
-                ff_empty = False
-        check("debate -f --seats codex: subprocess.json is [] (codex NEVER run)",
-              ff_empty, "[]", "?")
-        check("debate -f --seats codex: stderr advisory printed",
-              "no longer runs subprocess seats internally" in proc.stderr,
-              "advisory on stderr", repr(proc.stderr[:200]))
-
-    # malicious --slug is sanitized (no path traversal) + --consume deletes staging.
-    with tempfile.TemporaryDirectory() as td:
-        d = Path(td)
-        bins = d / "bin"
-        bins.mkdir()
-        make_fake_bin(bins, "codex", codex_echo)
-        env = path_with(bins)
-        base = d / "debates"
-        staging = d / "staged.txt"
-        staging.write_text("Traversal attempt?")
-        proc = _run_cli(
-            ["debate", "-f", str(staging), "--slug", "../../pwned",
-             "--seats", "codex", "--base-dir", str(base), "--consume"],
-            env=env, timeout=30,
-        )
-        ddir = None
-        try:
-            ddir = Path(json.loads(proc.stdout)["dir"])
-        except Exception:
-            ddir = None
-        check("debate: malicious --slug can't escape --base-dir (path traversal)",
-              bool(ddir) and base.resolve() in ddir.resolve().parents
-              and ".." not in ddir.parts,
-              "dir under base, no '..'", str(ddir))
-        check("debate: --slug sanitized to [a-z0-9-] (../../pwned -> ...-pwned)",
-              bool(ddir) and ddir.name.endswith("-pwned"),
-              "<ts>-pwned", str(ddir.name if ddir else None))
-        check("debate --consume: staging file deleted after copy into dir",
-              not staging.exists() and bool(ddir) and (ddir / "question.md").exists(),
-              "staging gone, question.md present", f"staging_exists={staging.exists()}")
-
-    # dir uniqueness: two same-slug debates never share a dir (no silent overwrite).
-    with tempfile.TemporaryDirectory() as td:
-        d = Path(td)
-        bins = d / "bin"
-        bins.mkdir()
-        make_fake_bin(bins, "codex", codex_echo)
-        env = path_with(bins)
-        base = d / "debates"
-        dirs = []
-        for _ in range(2):
-            proc = _run_cli(
-                ["debate", "Same question?", "--slug", "dup", "--seats", "codex",
-                 "--base-dir", str(base)],
-                env=env, timeout=30,
-            )
-            try:
-                dirs.append(json.loads(proc.stdout)["dir"])
-            except Exception:
-                pass
-        check("debate: two same-slug debates get distinct dirs (no overwrite)",
-              len(dirs) == 2 and dirs[0] != dirs[1]
-              and all(Path(x).exists() for x in dirs),
-              "two distinct dirs", str(dirs))
-
-    # Claude-only panel: --seats none scaffolds the dir but runs NO subprocess seats.
-    with tempfile.TemporaryDirectory() as td:
-        d = Path(td)
-        bins = d / "bin"
-        bins.mkdir()
-        make_fake_bin(bins, "codex", codex_echo)  # present, but must NOT be invoked
-        env = path_with(bins)
-        base = d / "debates"
-        proc = _run_cli(
-            ["debate", "Claude only?", "--seats", "none", "--base-dir", str(base)],
-            env=env, timeout=30,
-        )
-        ddir = None
-        try:
-            ddir = Path(json.loads(proc.stdout)["dir"])
-        except Exception:
-            ddir = None
-        is_empty = False
-        if ddir and (ddir / "subprocess.json").exists():
-            try:
-                is_empty = json.loads((ddir / "subprocess.json").read_text()) == []
-            except Exception:
-                is_empty = False
-        check("debate --seats none: scaffolds dir + question.md, exit 0",
-              proc.returncode == 0 and bool(ddir) and (ddir / "question.md").exists(),
-              "exit0 + dir + question.md", f"{proc.returncode}: {proc.stdout[:160]}")
-        check("debate --seats none: subprocess.json is [] (no codex/agy run)",
-              is_empty, "[]", str(ddir))
-        # NEGATIVE advisory assertion: an EXPLICIT `--seats none` is the silent
-        # no-op — the advisory must be ABSENT. Guards against an accidental flip
-        # of the inverted condition (which would otherwise pass silently).
-        check("debate --seats none: NO stderr advisory (explicit silent no-op)",
-              "no longer runs subprocess seats internally" not in proc.stderr,
-              "advisory ABSENT", repr(proc.stderr[:200]))
-
-    # OMITTED --seats (the BLOCKING-fix case): a bare `debate "q"` with NO --seats
-    # at all pre-Step-5 RAN the default panel; now it scaffolds-only AND prints the
-    # advisory (None falls through the `args.seats is None` branch). Still empty
-    # subprocess.json, seats == [], exit 0 — no seat is ever run.
-    with tempfile.TemporaryDirectory() as td:
-        d = Path(td)
-        bins = d / "bin"
-        bins.mkdir()
-        make_fake_bin(bins, "codex", codex_echo)  # present, but must NOT be invoked
-        env = path_with(bins)
-        base = d / "debates"
-        proc = _run_cli(
-            ["debate", "Omitted seats?", "--base-dir", str(base)],
-            env=env, timeout=30,
-        )
-        info = {}
-        try:
-            info = json.loads(proc.stdout)
-        except Exception:
-            info = {}
-        ddir = Path(info["dir"]) if info.get("dir") else None
-        is_empty = False
-        if ddir and (ddir / "subprocess.json").exists():
-            try:
-                is_empty = json.loads((ddir / "subprocess.json").read_text()) == []
-            except Exception:
-                is_empty = False
-        check("debate (omitted --seats): scaffolds dir + question.md, exit 0, seats []",
-              proc.returncode == 0 and bool(ddir) and (ddir / "question.md").exists()
-              and info.get("seats") == [],
-              "exit0 + dir + question.md + seats []",
-              f"{proc.returncode}: {proc.stdout[:160]}")
-        check("debate (omitted --seats): subprocess.json is [] (no codex/agy run)",
-              is_empty, "[]", str(ddir))
-        check("debate (omitted --seats): stderr advisory PRESENT (BLOCKING fix)",
-              "no longer runs subprocess seats internally" in proc.stderr,
-              "advisory PRESENT", repr(proc.stderr[:200]))
-
-    # anchor_path passes "" through as a sentinel; cmd_debate must reject it
-    # (consumed, it would become Path(".") and scaffold into the shell cwd).
-    proc = _run_cli(["debate", "Empty base?", "--base-dir", ""], timeout=30)
-    check("debate --base-dir '': exit 2 naming the flag (no cwd scaffold)",
-          proc.returncode == 2 and "--base-dir" in proc.stderr,
-          "exit 2 + '--base-dir' in stderr",
-          f"{proc.returncode}: {proc.stderr[:160]}")
-
-    # GUARD: cmd_debate must NEVER reach _fan_out, even with `--seats codex`.
-    # We monkeypatch cli._fan_out to RAISE and call cmd_debate IN-PROCESS — if it
-    # still calls _fan_out the exception would surface (nonzero / traceback);
-    # instead it must scaffold-only and exit 0 with empty results. This in-process
-    # stub also guarantees NO real codex/cursor seat is ever invoked here (no
-    # metered calls). (The subprocess sub-cases above can't monkeypatch the child,
-    # so this complements them by proving the call path itself never branches in.)
-    import argparse as _argparse
-    import contextlib as _contextlib
-    import io as _io
-    from multiagent import cli as _cli
-
-    with tempfile.TemporaryDirectory() as td:
-        base = Path(td) / "debates"
-
-        def _boom(*a, **k):  # pragma: no cover - must never be called
-            raise AssertionError("cmd_debate reached _fan_out (split-brain regression)")
-
-        orig_fan_out = _cli._fan_out
-        _cli._fan_out = _boom
-        try:
-            ns = _argparse.Namespace(
-                question="Guarded question?", file=None, slug="guard",
-                base_dir=str(base), seats="codex", timeout=None, consume=False,
-            )
-            buf = _io.StringIO()
-            try:
-                with _contextlib.redirect_stdout(buf):
-                    rc = _cli.cmd_debate(ns)
-                raised = False
-            except AssertionError:
-                rc = None
-                raised = True
-            summary = {}
-            try:
-                summary = json.loads(buf.getvalue())
-            except Exception:
-                summary = {}
-            check("debate guard: cmd_debate NEVER calls _fan_out (--seats codex)",
-                  not raised, "no _fan_out call", "AssertionError raised" if raised else "ok")
-            check("debate guard: cmd_debate exits 0 with empty results (scaffold-only)",
-                  rc == 0 and summary.get("seats") == [],
-                  "rc=0 + seats []", f"rc={rc} seats={summary.get('seats')!r}")
-        finally:
-            _cli._fan_out = orig_fan_out
-
-    # neither prompt source -> clean error.
-    proc = _run_cli(["debate"], timeout=30)
-    check("debate with neither -f nor question -> nonzero error",
-          proc.returncode != 0 and "no question" in proc.stderr,
-          "nonzero + 'no question'", f"{proc.returncode}: {proc.stderr!r}")
 
 
 def test_rounds():
@@ -7153,12 +6665,12 @@ def test_review_prep():
     with tempfile.TemporaryDirectory() as td:
         _write_plan(Path(td))
         proc, obj = _prep(["--panel", "full", "--seats", "codex", "--session-id", "ov2"], td)
-        check("review-prep --panel full --seats codex -> subprocess overridden, task still full preset",
+        check("review-prep --panel full --seats codex keeps the panel's native seats",
               proc.returncode == 0 and obj is not None
               and obj["subprocess_seats"] == ["codex"]
               and obj["task_seats"] == ["opus", "sonnet"]
               and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"},
-              "seats override subprocess, panel supplies task", str(obj))
+              "explicit subprocess seat plus panel native seats", str(obj))
 
     # 16. Staging<->spawn consistency: prep ITSELF stages one prompt per task
     #     seat (incl. the opt-in fable) into the run dir and prints the exact
@@ -7179,6 +6691,84 @@ def test_review_prep():
               and all_staged,
               "three staged prompts in the run dir",
               f"paths={paths} staged={all_staged}")
+
+
+def test_debate_argv_input_errors():
+    log_section("crew debate argv input errors")
+    with tempfile.TemporaryDirectory() as td:
+        question_file = Path(td) / "question.md"
+        question_file.write_text("question", encoding="utf-8")
+        binary_file = Path(td) / "question.bin"
+        binary_file.write_bytes(b"\xff\xfe\x00binary")
+        env = {**_neutral_env(), "CLAUDE_PROJECT_DIR": td}
+        cases = (
+            (
+                "neither source",
+                ["debate", "--session-id", "argv-neither"],
+                "no question given",
+            ),
+            (
+                "both sources",
+                ["debate", "--session-id", "argv-both", "-f", str(question_file), "question"],
+                "provide either",
+            ),
+            (
+                "unreadable file",
+                ["debate", "--session-id", "argv-unreadable", "-f", "missing-question.md"],
+                "missing-question.md",
+            ),
+            (
+                # A binary question file is a caller mistake, so it leaves
+                # through the same typed envelope, never a traceback.
+                "undecodable file",
+                ["debate", "--session-id", "argv-binary", "-f", str(binary_file)],
+                "decode",
+            ),
+        )
+        for label, argv, message in cases:
+            proc = _run_dispatcher(argv, env=env, cwd=td, timeout=30)
+            payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
+            check(
+                f"crew debate argv {label} -> typed invalid_request",
+                proc.returncode == 2
+                and payload.get("error") == "invalid_request"
+                and message in payload.get("message", ""),
+                "exit 2 and typed error",
+                f"rc={proc.returncode} payload={payload}",
+            )
+
+        roster_cases = (
+            (
+                "explicit seats alone",
+                ["debate", "--session-id", "argv-seats-alone", "--seats", "codex",
+                 "--", "question"],
+                ["codex"],
+            ),
+            (
+                "explicit seats plus panel",
+                ["debate", "--session-id", "argv-seats", "--panel", "solo",
+                 "--seats", "codex", "--", "question"],
+                ["codex"],
+            ),
+            (
+                "panel alone",
+                ["debate", "--session-id", "argv-panel", "--panel", "solo",
+                 "--", "question"],
+                ["opus"],
+            ),
+        )
+        for label, argv, expected_seats in roster_cases:
+            proc = _run_dispatcher(argv, env=env, cwd=td, timeout=30)
+            payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
+            work_items = payload.get("work_items", [])
+            check(
+                f"crew debate argv {label} -> exact roster",
+                proc.returncode == 0
+                and payload.get("type") == "work_batch"
+                and [item.get("seat") for item in work_items] == expected_seats,
+                f"work_batch seats {expected_seats}",
+                f"rc={proc.returncode} payload={payload}",
+            )
 
 
 def test_debate_panel_resolver():
@@ -7426,8 +7016,11 @@ def test_debate_oracle_removed():
     #     `seats --debate --json`, and cli.py implements that subcommand+flag.
     check("debate.md invokes `seats --debate --json`",
           "seats --debate --json" in debate_md, "present", "MISSING")
-    check("debate.md reads task_seat_models for the Task-seat model pin",
-          "task_seat_models[" in debate_md, "present", "MISSING")
+    check("debate.md uses the issued work-item model pin",
+          'model="<work_item.model>"' in debate_md, "present", "MISSING")
+    check("debate.md keeps task_seat_models in section B",
+          "task_seat_models[" in debate_md.split("# B)", 1)[1],
+          "present in section B", "MISSING")
 
 
 def test_panel_catalog():
@@ -7990,233 +7583,113 @@ def test_measure_twice_md_loop_sentinels():
     )
 
 
-def test_debate_md_mode_sentinels():
-    log_section("debate.md mode sentinels")
-    raw = (SCRIPT_DIR.parent / "commands" / "debate.md").read_text(encoding="utf-8")
-    # 73 "debate.md mode:" checks: 33 literals + 6 anchors + 26 ordering
-    # + 8 fence/argv pins. Deliberately not asserted in code; keep this
-    # number in sync when adding a check.
-    stripped_lines = []
-    for line in raw.splitlines():
-        if line.startswith(">"):
-            line = line[1:]
-            if line.startswith(" "):
-                line = line[1:]
-        stripped_lines.append(line)
-    norm = " ".join("\n".join(stripped_lines).split())
+def test_debate_md_driver_sync():
+    log_section("debate.md review-seam driver sync")
+    from multiagent import channels
+    review_raw = (SCRIPT_DIR.parent / "commands" / "review.md").read_text(encoding="utf-8")
+    debate_raw = (SCRIPT_DIR.parent / "commands" / "debate.md").read_text(encoding="utf-8")
+    review_fences = _fence_lines("review.md")
+    debate_fences = _fence_lines("debate.md")
+    start_line = '"${CLAUDE_PLUGIN_ROOT}/crew" debate --session-id \'<session-id>\' -- \'<question>\''
+    check("debate driver has the exact start fence", start_line in debate_fences, "start fence", start_line)
 
-    pins = [
-        ("literal 1", "**Mode**: inferred, not flagged."),
-        ("literal 2", "A free-form **question** = **discuss** mode (seats give a take; dispatch `crew:panelist`)."),
-        ("literal 3", "A **diff / branch / plan `.md`** = **review** mode (seats score it; dispatch `crew:reviewer`; single-round only; use `/crew:review` for the full review verdict). When in doubt it's discuss."),
-        ("literal 4", "**When the user named NEITHER `--panel` NOR `--seats`, do NOT assume `full`**: ask the engine for the config-aware split."),
-        ("literal 5", "`--rounds N` (1-5, default **1**)"),
-        ("literal 6", "**Always `--seats none` here**: `debate` is scaffold-only regardless of `--seats`"),
-        ("literal 7", "both paths write the question to **`question.md`**"),
-        # Literal 8 is plain in the post-rewrite A4 rendering; bold markers are omitted.
-        ("literal 8", "Spawn EXACTLY as written: a bare one-shot `Task(...)`, NO `name` argument."),
-        ("literal 9", "The Task RESULT is the only completion signal"),
-        # Literal 10 is blockquote-resident before the rewrite; the stripped norm handles its wrap.
-        ("literal 10", "NEVER judge a seat by a proxy"),
-        ("literal 11", "IGNORE the empty `subprocess.json` scaffold"),
-        # This is the post-rewrite guard rendering; the host-CLI qualifier is intentionally absent.
-        ("literal 12", "On another host, `seats --debate` resolves Claude seats into external `subprocess_seats`; do NOT emulate these seats with host-native subagents."),
-        ("literal 13", "**Claude Code host ONLY.**"),
-        ("literal 14", "Pick a run-id `run-<short-slug>` matching `^run-[A-Za-z0-9_-]+$`"),
-        ("literal 15", "(zero-padded: round-01.md, round-02.md, …)"),
-        ("literal 16", "a seat that failed in round n can still participate in round n+1 (re-rendered + re-dispatched fresh)."),
-        ("literal 17", "report: `could not convene — all seats failed: <per-seat diagnostics>`."),
-        ("literal 18", "This council is fully self-contained in crew: NEVER call `agy -p` / `codex exec` / `cursor-agent` directly, and NEVER hand off to any external debate plugin/shell."),
-        # Literal 19 is blockquote-resident before the rewrite; the stripped norm handles its wrap.
-        ("literal 19", "The two staging schemes are intentional, not an inconsistency to \"fix\"."),
-        ("literal 20", "**Skip this step if the resolved panel has no subprocess seat**"),
-        ("literal 21", "**Skip this step if `task_seats` is empty**"),
-        ("literal 22", "stop if positions have converged"),
-        # This is the post-rewrite B2 echo, with the resolver named explicitly.
-        ("literal 23", "on another host, the `seats --debate` split places it in the external subprocess list instead"),
-        # This is the post-rewrite continuation clause inside the guard block.
-        ("literal 24", "A missing external CLI becomes a named skipped result and the other seats continue."),
-        ("literal 25", "Gather every seat into the six-field core shape"),
-        ("literal 26", "**Areas of agreement / Key disagreements / Recommendation** (discuss)"),
-        ("literal 27", "the `APPROVED`/`REVISE` + `[BLOCKING]`/`[MINOR]` verdict (review)"),
-        ("literal 28", "**How positions evolved / Areas of agreement / Remaining disagreements / Recommendation**"),
-        # This is the post-rewrite replacement wording for the old resolver echo.
-        ("literal 29", "the same split fields the review flows consume"),
-        # This is the post-rewrite A4 wording, with debate replacing review.
-        ("literal 30", "never a reason to abort the debate"),
-        ("literal 31", "Review mode: render `--mode review <target>` and dispatch `crew:reviewer` instead."),
-        ("literal 32", "(for a review-mode debate, render `--mode review <target>` instead)"),
-        # Literal 33 is a post-rewrite frozen quote; matching uses whitespace normalization.
-        ("literal 33", "log each seat's output (at least one logged file per Task-seat take) plus `synthesis.md` into the debate `dir`"),
+    for verb in ("review-execute", "review-claim", "review-submit", "review-next", "review-recover", "review-retry"):
+        expected = {line for line in review_fences if '"${CLAUDE_PLUGIN_ROOT}/crew" ' + verb in line}
+        observed = {line for line in debate_fences if '"${CLAUDE_PLUGIN_ROOT}/crew" ' + verb in line}
+        check(f"debate driver copies {verb} fences", observed == expected, str(expected), str(observed))
+
+    hash_line = "python3 -c 'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' '<artifact-path>'"
+    check("debate driver copies the artifact hash fence", hash_line in debate_raw and hash_line in review_raw, "hash fence", hash_line)
+
+    section_a = debate_raw.split("# B)", 1)[0]
+    task_lines = [line for line in debate_raw.splitlines() if "Task(subagent_type=" in line]
+    review_task_lines = [line for line in review_raw.splitlines() if "Task(subagent_type=" in line]
+    section_task_lines = [line for line in section_a.splitlines() if "Task(subagent_type=" in line]
+    check("debate driver copies native Task fences", all(line in review_task_lines for line in section_task_lines), "all section A Task lines copied", str(section_task_lines))
+    reviewer_lines = [line for line in section_task_lines if 'subagent_type="<work_item.role>"' in line and "You are the <work_item.seat> seat." in line]
+    scribe_lines = [line for line in section_task_lines if 'subagent_type="<return_transport.primary.role>"' in line]
+    formatter_lines = [line for line in section_task_lines if "formatter" in line.lower() and 'subagent_type="<work_item.role>"' in line]
+    check("debate driver has two reviewer Task fences", len(reviewer_lines) == 2, "two reviewer fences", str(reviewer_lines))
+    check("debate driver has two scribe Task fences", len(scribe_lines) == 2, "two scribe fences", str(scribe_lines))
+    check("debate driver has no formatter Task fences", len(formatter_lines) == 0, "no formatter fences", str(formatter_lines))
+    check("debate section B keeps its panelist Task fence", sum('subagent_type="crew:panelist"' in line for line in task_lines) == 1, "one panelist fence", str(task_lines))
+    check("debate section B keeps the model expression", debate_raw.count('model="<task_seat_models[<seat>]>"') == 1, "one model expression", str(debate_raw.count('model="<task_seat_models[<seat>]>"')))
+    ownership = "With --rounds 1 (the default) the engine owns the whole round; with --rounds N greater than 1 follow section B below, the interim Markdown owner of multi-round debate until the engine takes it over."
+    check("debate driver has one ownership sentence", debate_raw.count(ownership) == 1, "one ownership sentence", str(debate_raw.count(ownership)))
+    for phrase in ("seats --debate", 'crew" render', 'crew" run', ".crew/debates", "spawn a native formatter", "formatter_task_lost", "parent_formatter_lost"):
+        check(f"debate section A omits {phrase}", phrase not in section_a, "absent", phrase)
+    protocol = "A debate never issues a formatter action; if a work item's kind is formatter, surface it as a protocol error and stop."
+    check("debate section A owns formatter protocol handling", section_a.count(protocol) == 1, "one protocol sentence", str(section_a.count(protocol)))
+    check("debate section A states the rounds bound before branching",
+          "Before branching, reject anything else: a supplied `--rounds` value must be an\ninteger from 1 through 5." in section_a,
+          "integer 1 through 5 before branching", section_a[:1200])
+    check("debate section A carries the inline POSIX quoting algorithm",
+          "reject NUL; emit a value matching" in section_a
+          and "`^[A-Za-z0-9_@%+=:,./-]+$` unchanged" in section_a
+          and ("the five characters `" + "'\"'\"'" + "`") in section_a,
+          "inline hostile-safe quoting algorithm", section_a[:1200])
+    check("debate section A limits force-external to the engine path",
+          "`--force-external` is accepted only on the single-round engine path." in section_a,
+          "single-round engine path", section_a[:1500])
+    check("debate driver advertises every section A option",
+          'argument-hint: "[--rounds N] [--panel ...] [--seats ...] [--timeout S] [--force-external ...] <question>"' in debate_raw,
+          "complete argument hint", debate_raw[:400])
+    section_a_normalized = " ".join(section_a.split())
+    debate_start_lines = [
+        line for line in debate_fences
+        if '"${CLAUDE_PLUGIN_ROOT}/crew" debate ' in line
     ]
-    offsets = {}
-    for label, phrase in pins:
-        normalized = " ".join(phrase.split())
-        offsets[label] = norm.find(normalized)
-        present = offsets[label] >= 0
-        check(
-            f"debate.md mode: {label} is present",
-            present,
-            "literal present in the required text space",
-            phrase,
-        )
-
-    anchors = [
-        ("A", "# A) Single round (`--rounds 1`, the default)"),
-        ("A2", "## A2 — Fan out subprocess seats (one visible shell PER SEAT)"),
-        ("A3", "## A3 — Fan out task seats (parallel)"),
-        ("A4", "## A4 — Normalize + synthesize + log"),
-        ("B", "# B) Multi-round (`--rounds N`, N > 1) — discuss mode"),
-        ("Never-choke", "## Never choke (both modes)"),
-    ]
-    anchor_offsets = {}
-    for label, phrase in anchors:
-        normalized = " ".join(phrase.split())
-        anchor_offsets[label] = norm.find(normalized)
-        check(
-            f"debate.md mode: {label} section anchor is present",
-            anchor_offsets[label] >= 0,
-            "normalized section anchor present",
-            phrase,
-        )
-
-    def offsets_present(*labels):
-        return all(
-            (offsets if label.startswith("literal") else anchor_offsets)[label] >= 0
-            for label in labels
-        )
-
-    for label in ("literal 1", "literal 3", "literal 29"):
-        check(
-            f"debate.md mode: {label} is before A",
-            offsets_present(label, "A") and offsets[label] < anchor_offsets["A"],
-            "literal offset before A anchor",
-            f"literal={offsets[label]} A={anchor_offsets['A']}",
-        )
-    for label in ("literal 6",):
-        check(
-            f"debate.md mode: {label} is between A and A2",
-            offsets_present("A", label, "A2")
-            and anchor_offsets["A"] < offsets[label] < anchor_offsets["A2"],
-            "literal offset between A and A2",
-            f"A={anchor_offsets['A']} literal={offsets[label]} A2={anchor_offsets['A2']}",
-        )
-    for label in ("literal 20", "literal 32"):
-        check(
-            f"debate.md mode: {label} is between A2 and A3",
-            offsets_present("A2", label, "A3")
-            and anchor_offsets["A2"] < offsets[label] < anchor_offsets["A3"],
-            "literal offset between A2 and A3",
-            f"A2={anchor_offsets['A2']} literal={offsets[label]} A3={anchor_offsets['A3']}",
-        )
-    for label in ("literal 13", "literal 12", "literal 24", "literal 21", "literal 31"):
-        check(
-            f"debate.md mode: {label} is between A3 and A4",
-            offsets_present("A3", label, "A4")
-            and anchor_offsets["A3"] < offsets[label] < anchor_offsets["A4"],
-            "literal offset between A3 and A4",
-            f"A3={anchor_offsets['A3']} literal={offsets[label]} A4={anchor_offsets['A4']}",
-        )
-    for label in ("literal 8", "literal 9", "literal 30", "literal 11",
-                  "literal 25", "literal 26", "literal 27", "literal 33"):
-        check(
-            f"debate.md mode: {label} is between A4 and B",
-            offsets_present("A4", label, "B")
-            and anchor_offsets["A4"] < offsets[label] < anchor_offsets["B"],
-            "literal offset between A4 and B",
-            f"A4={anchor_offsets['A4']} literal={offsets[label]} B={anchor_offsets['B']}",
-        )
-    for label in ("literal 14", "literal 15", "literal 23", "literal 28"):
-        check(
-            f"debate.md mode: {label} is between B and Never-choke",
-            offsets_present("B", label, "Never-choke")
-            and anchor_offsets["B"] < offsets[label] < anchor_offsets["Never-choke"],
-            "literal offset between B and Never-choke",
-            f"B={anchor_offsets['B']} literal={offsets[label]} Never-choke={anchor_offsets['Never-choke']}",
-        )
-    for label in ("literal 16", "literal 17"):
-        check(
-            f"debate.md mode: {label} is after Never-choke",
-            offsets_present(label, "Never-choke")
-            and offsets[label] > anchor_offsets["Never-choke"],
-            "literal offset after Never-choke",
-            f"literal={offsets[label]} Never-choke={anchor_offsets['Never-choke']}",
-        )
-    check(
-        "debate.md mode: literal 18 follows literal 17",
-        offsets_present("literal 18", "literal 17")
-        and offsets["literal 18"] > offsets["literal 17"],
-        "literal 18 offset after literal 17",
-        f"literal17={offsets['literal 17']} literal18={offsets['literal 18']}",
+    rounds_carveout = (
+        "`--rounds` selects which section of this file runs and is never appended "
+        "to the `crew debate` command."
     )
-
-    fence_lines = _fence_lines("debate.md")
-    check(
-        "debate.md mode: eight bash openers are present",
-        raw.count("```bash") == 8,
-        "eight unanchored bash openers",
-        str(raw.count("```bash")),
+    check("debate driver never forwards rounds",
+          len(debate_start_lines) == 2
+          and all("--rounds" not in line for line in debate_start_lines)
+          and rounds_carveout in section_a_normalized,
+          "two start fences without --rounds and explicit carve-out",
+          str(debate_start_lines))
+    parent_rules = (
+        "Read exactly `work_item.prompt_path`, perform the synthesis in the current host context",
+        "Write only `work_item.ingress_path`",
+        "leave the template's judgment null",
+        "replace BOTH `host_result_template.artifact.path`",
+        "Never pair fallback bytes with the unchanged primary path",
+        "an execution error becomes `status=failed`",
+        "an explicit timeout becomes `status=timeout`",
+        "a cancellation becomes `status=cancelled`",
+        "await handles still owned by this host",
+        "without polling or reclaiming",
+        "artifact_sha256_failed",
     )
-    # Three-line count depends on the Options bullet's inline mention staying prose; the unanchored count counts ALL opener lines.
-    seats_lines = [line for line in fence_lines if "seats --debate" in line]
-    check(
-        "debate.md mode: three seats resolver lines carry json",
-        len(seats_lines) == 3 and all("--json" in line for line in seats_lines),
-        "three resolver lines and json on each",
-        str(seats_lines),
-    )
-    scaffold_marker = '"${CLAUDE_PLUGIN_ROOT}/crew" debate -f'
-    scaffold_lines = [line for line in fence_lines if scaffold_marker in line]
-    check(
-        "debate.md mode: scaffold argv is pinned once",
-        len(scaffold_lines) == 1
-        and all(token in scaffold_lines[0] for token in ("--slug", "--seats none", "--consume")),
-        "one full debate scaffold argv with its three flags",
-        str(scaffold_lines),
-    )
-    run_lines = [line for line in fence_lines if " run <seat> " in line]
-    check(
-        "debate.md mode: two run argv lines are pinned",
-        len(run_lines) == 2
-        and all("--json" in line and " -o " in line for line in run_lines)
-        and any('".crew/debates/<dir-name>/<seat>.json"' in line for line in run_lines)
-        and any('".crew/debates/<run-id>/<seat>-r<n>.json"' in line for line in run_lines),
-        "single-round and round-scoped run argv lines",
-        str(run_lines),
-    )
-    render_lines = [
-        line for line in fence_lines
-        if 'render --mode discuss --seat-role <seat> -f ".crew/debates/<dir-name>/question.md"' in line
-    ]
-    check(
-        "debate.md mode: two discuss render argv lines are pinned",
-        len(render_lines) == 2,
-        "two A2 and A3 discuss render lines",
-        str(render_lines),
-    )
-    fence_norm = " ".join(" ".join(fence_lines).split())
-    run_id_pin = "--run-id <run-id> --round <n>"
-    check(
-        "debate.md mode: round render carries run and round",
-        fence_norm.count(run_id_pin) == 1,
-        "one normalized run-id and round pin",
-        fence_norm,
-    )
-    prompt_pin = '-o ".crew/debates/<run-id>/.prompt-<seat>-r<n>.txt"'
-    check(
-        "debate.md mode: round render carries prompt output",
-        fence_norm.count(prompt_pin) == 1,
-        "one normalized prompt output pin",
-        fence_norm,
-    )
-    spawn_lines = [line for line in raw.splitlines() if "subagent_type=" in line]
-    check(
-        "debate.md mode: only panelist Task spawns are present",
-        len(spawn_lines) == 2
-        and all('subagent_type="crew:panelist"' in line for line in spawn_lines),
-        "every subagent_type is crew:panelist",
-        str(spawn_lines),
-    )
+    check("debate driver carries the parent and failure transport rules",
+          all(rule in section_a_normalized for rule in parent_rules),
+          "parent synthesis, fallback, outcome, waiting, and hash failure rules",
+          str([rule for rule in parent_rules if rule not in section_a_normalized]))
+    section_b = "# B)" + debate_raw.split("# B)", 1)[1]
+    split_fences = [line for line in debate_fences if '"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --json' in line]
+    check("debate section B has one roster fence per form", section_b.count("seats --debate --json") == 3, "three split fences", str(section_b.count("seats --debate --json")))
+    check("debate section B forwards panel and seats forms", len(split_fences) == 3
+          and any("--panel '<panel>'" in line for line in split_fences)
+          and any("--seats '<seats>'" in line for line in split_fences)
+          and any(line.endswith("seats --debate --json") for line in split_fences),
+          "no-option, panel, and seats forms", str(split_fences))
+    check("debate section B states the rounds bound", "integer from 1 through 5" in section_b, "1 through 5", section_b[:300])
+    check("debate section B has one round render fence", " ".join(section_b.split()).count("--run-id <run-id> --round <n>") == 1, "one round pin", section_b)
+    run_lines = [line for line in debate_fences if '"${CLAUDE_PLUGIN_ROOT}/crew" run <seat>' in line]
+    check("debate section B has one run fence with timeout forwarding",
+          len(run_lines) == 1 and "--timeout '<seconds>'" in run_lines[0],
+          "one run fence with timeout", str(run_lines))
+    check("debate never-choke block is scoped to section B",
+          "## Never choke (section B)" in section_b and "## Never choke (both modes)" not in debate_raw,
+          "section B heading", section_b[:500])
+    check("debate section B carries the force-external stop line",
+          "--force-external is not available for multi-round mode yet" in section_b,
+          "force-external stop line", section_b[:500])
+    check("debate section B keeps the zero-usable rule", section_b.count("ONLY when **zero** seats produced usable output") == 1, "one zero-usable rule", str(section_b.count("ONLY when **zero** seats produced usable output")))
+    check("debate section B has no deleted heading references", "exactly as A3" not in section_b and "(see A4)" not in section_b, "no deleted references", section_b)
+    host_markers = ("CREW_HOST", *channels.codex_host_markers(), *channels.cursor_host_markers(), "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
+    check("debate driver branches only on issued values", all(marker not in debate_raw for marker in host_markers), "no host markers", str(host_markers))
 
 
 def test_persist_seat_doc_sync():
@@ -20914,8 +20387,6 @@ def main():
     test_build_executor_state_recovery()
     test_build_executor_placeholder_session_id()
     test_build_md_continuation_wiring()
-    test_council_subcommand()
-    test_debate_subcommand()
     test_rounds()
     test_discuss_and_modes()
     test_render_subcommand()
@@ -20934,6 +20405,7 @@ def main():
     test_workplan_contract_freeze()
     test_workplan_doc_sync()
     test_review_prep_never_clears_task_seat_file()
+    test_debate_argv_input_errors()
     test_debate_panel_resolver()
     test_debate_split_contract_freeze()
     test_debate_oracle_removed()
@@ -20955,7 +20427,7 @@ def main():
     test_no_dotkept_staged_filename()
     test_build_md_executor_fork_sentinels()
     test_measure_twice_md_loop_sentinels()
-    test_debate_md_mode_sentinels()
+    test_debate_md_driver_sync()
     test_persist_seat_doc_sync()
     test_roster_doc_sync()
     test_doctor()
@@ -21655,6 +21127,45 @@ def test_swab():
         _ap.drop_dangling_pointer(reviews, {run_id})
         check("drop_dangling_pointer removes the standalone pointer",
               not pointer.exists(), "removed", "present")
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        reviews = td / ".crew" / "reviews" / "standalone-question"
+        reviews.mkdir(parents=True)
+        target_sha = "1" * 64
+        workflow_identity = {"kind": "standalone_debate"}
+        run_id, identity_digest = _rr.mint_identity(
+            target_sha256=target_sha,
+            target_spec="question",
+            target_base="",
+            seat_signatures={},
+            workflow_identity=workflow_identity,
+        )
+        protected = reviews / run_id
+        protected.mkdir()
+        (protected / "run.json").write_text(json.dumps({
+            "run_id": run_id,
+            "identity_digest": identity_digest,
+            "target_sha256": target_sha,
+            "target_spec": "question",
+            "target_base": "",
+            "seat_signatures": {},
+            "workflow_identity": workflow_identity,
+        }))
+        pointer = reviews / "current-standalone-debate.json"
+        pointer.write_text(json.dumps({
+            "schema": 1,
+            "run_id": run_id,
+            "identity_digest": identity_digest,
+            "target_sha256": target_sha,
+        }))
+        rc, out, err = _swab_run(td, as_json=True)
+        names = {item["name"] for item in json.loads(out)["prunable"]}
+        check("current-standalone-debate pointer protects its run",
+              run_id not in names, "protected", str(names))
+        _swab_run(td, yes=True)
+        check("current-standalone-debate pointer keeps its run after --yes",
+              protected.exists(), "present", "deleted")
 
     # --- an unvalidatable workflow.json is protected only inside the grace window ---
     # Corrupt/obsolete-schema records used to be protected FOREVER, which hid them

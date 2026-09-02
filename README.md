@@ -88,8 +88,8 @@ To avoid permission prompts for loop state management, add this to your Claude C
 ```
 
 This allows the plugin-root `crew` dispatcher to run without confirmation. A
-single `*/crew *` rule covers BOTH the review/debate engine (`crew render`,
-`crew run`, `crew seats`, `crew debate`) AND loop state management
+single `*/crew *` rule covers BOTH the review/debate engine (crew review, crew
+debate, crew render, crew run, crew seats) AND loop state management
 (`crew state …`, used by `/crew:build`, `/crew:measure-twice`, and their cancel
 commands). A project-relative variant proven in live use is
 `Bash(plugins/crew/crew:*)`, which matches the dispatcher invoked by its
@@ -116,7 +116,7 @@ repo-relative path.
 | `/crew:plan "description"` | Start a planning session with the advisor agent |
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (keeps main context clean) |
 | `/crew:review "the plan \| diff"` | Multi-model review of a plan or code diff using the fixed target grammar below → `APPROVED`/`REVISE` verdict |
-| `/crew:debate "question"` | Crew-native council — single-round multi-model take on a question (the default review panel), synthesized into agreement/disagreement/recommendation |
+| `/crew:debate "question"` | Engine-owned council on a free-form question: a single round of independent takes from the configured debate panel, synthesized into areas of agreement, key disagreements, and a recommendation (no verdict); multi-round with --rounds |
 | `/crew:dispatch "[--seat <name>] <task>"` | Delegate a WORK task to ONE non-Claude seat (default `codex`) in write mode — it edits the working tree and leaves changes UNCOMMITTED + UNSTAGED for you to review (keep / revert / pipe into `/crew:review`) |
 | `/crew:build "task"` | Start a persistence loop: persists toward completion, also ending on a completing verdict, your cancel, or a safety bound |
 | `/crew:cancel-build` | Exit an active build loop early |
@@ -139,9 +139,8 @@ is accepted only when it stays within that cap; otherwise the start fails. A
 fresh over-cap resolution emits one stderr warning. When `--timeout` is
 omitted, a matching-pointer resume adopts its frozen timeout without warning.
 An explicit timeout re-resolves normally and may re-warn; only a different
-effective value creates a new identity. Council, `run`, and `probe`
-keep the ordinary `[tuning].timeout` behavior without this standalone settlement
-reservation.
+effective value creates a new identity. Run and probe keep the ordinary
+`[tuning].timeout` behavior without this standalone settlement reservation.
 
 ### Utilities
 
@@ -270,7 +269,7 @@ routine work.
 `.crew/config.toml` (already gitignored under `.crew/`) can override that default, tune per-seat
 models (plus cursor `native_model`, codex `reasoning_effort`, agy `print_timeout`) and the
 NON-DISPATCH `[tuning].timeout` (raw standalone-review resolution plus the
-ordinary council/run/probe seat wall clock),
+ordinary run/probe seat wall clock),
 while dispatch WORK has its own `[dispatch].timeout` wall-clock (default 1800
 seconds; provider floors raise the effective timeout only when the resolved
 `[dispatch].timeout` is below the floor; agy's floor is its print timeout plus
@@ -281,8 +280,11 @@ ignored with a one-time stderr note, so a config typo never takes down a panel.
 
 `/crew:debate` honors config too, with its own `[debate].panel` override so a
 repo can default its debates fuller than its reviews (debate's value is
-cross-model diversity). Debate precedence is **`--panel`/`--seats` (explicit) >
-`[debate].panel` > `default_panel` > built-in `full`**.
+cross-model diversity). For debate only, an explicit `--seats` is the whole
+roster and ignores `--panel`; review keeps those options as independent axes.
+Debate precedence is **`--panel`/`--seats` (explicit) >
+`[debate].panel` > `default_panel` > built-in `full`**. The engine resolves it
+inside the debate workflow.
 `/crew:dispatch` picks its default seat from `[dispatch].seat` (validated
 against the known seats — a panel name or group token like `cursor` is
 rejected), falling back to the built-in `codex`; an explicit `--seat` overrides.
@@ -292,9 +294,9 @@ lists them, non-billable).
 `[dispatch].timeout` supplies the dispatch-WORK wall-clock. Provider floors raise
 the effective timeout only when the resolved `[dispatch].timeout` is below the
 floor; agy's floor is its print timeout plus grace, about 8 minutes by default,
-so the 1800-second default is not floored. The NON-DISPATCH (review/council/run/probe)
+so the 1800-second default is not floored. The NON-DISPATCH (review/run/probe)
 uses `[tuning].timeout` as the raw standalone-review value and as the ordinary
-council/run/probe seat wall clock. Dispatch precedence is
+run/probe seat wall clock. Dispatch precedence is
 `--timeout` > `[dispatch].timeout` > builtin 1800.
 
 > **Migration:** `[dispatch].timeout` is a new behavior split: `crew dispatch`
@@ -358,7 +360,7 @@ model = "Gemini 3.1 Pro (High)"
 print_timeout = "8m"
 
 [tuning]
-timeout = 600                     # standalone-review raw value; ordinary council/run/probe wall clock
+timeout = 600                     # standalone-review raw value; ordinary run/probe wall clock
 deadline_minutes = 240            # the persistence loops' wall clock (1-1440); read by `crew state init`.
                                   # 0 = no deadline exists but is honored ONLY in the global
                                   # ~/.crew-config.toml (this repo file sits in the tree the agent edits)
@@ -458,7 +460,7 @@ for ad-hoc calls — never raw `agy -p` / `codex exec`.**
 #### Cleaning up stale artifacts (`crew swab`)
 
 Attended cleanup of stale crew artifacts under the project `.crew/`: orphaned
-review-run dirs (no active loop, current-run/current-standalone-review pointer,
+review-run dirs (no active loop, current-run, current-standalone-review, or current-standalone-debate pointer,
 or nonterminal/ambiguous standalone workflow names or protects them), stale
 debate dirs (past the 1-day threshold, no synthesis), and probe captures (past
 the 7-day threshold). It is DRY-RUN by default, modelled on `git clean -n`:
@@ -477,8 +479,9 @@ safety step. `--yes` rmtrees directory candidates and unlinks probe captures.
 also REFUSES (exit 2, deletes nothing) when run from a terminal `.crew` cwd with
 `CLAUDE_PROJECT_DIR` unset: the project root is only a guess there, so cd back to
 the project root or set the env var (the dry-run listing still works). A review
-run is protected while an active loop, a current-run/current-standalone-review
-pointer, or a nonterminal standalone workflow names or protects it. A standalone
+run is protected while an active loop, a current-run, current-standalone-review,
+or current-standalone-debate pointer, or a nonterminal standalone workflow names
+or protects it. A standalone
 workflow that FAILS VALIDATION (corrupt or obsolete schema) is protected for a
 1-day grace window and then becomes reclaimable, so a permanently unreadable
 record cannot pin disk forever; every other error stays fail-closed. Plans and loop state are never in scope, so swab only ever removes stale
@@ -496,7 +499,7 @@ Specialized agents for different tasks. Use via `Task(subagent_type="crew:agent-
 | **executor** | Implementing well-defined tasks (no delegation) | "Add createdAt field to User entity" |
 | **document-writer** | README, API docs, technical writing | "Document the OrderService API" |
 | **reviewer** | Panel seat for `/crew:review` (read-only by convention — has `Bash` for git inspection, not sandbox-enforced; spawned at `model: opus` / `model: sonnet`) | (driven by `/crew:review`) |
-| **panelist** | Discuss-mode council seat for `/crew:debate` (independent critical take — direct take, strongest objection, risks/tradeoffs; no verdict; read-only by convention) | (driven by `/crew:debate`) |
+| **panelist** | Discuss-mode council seat issued by the debate workflow (Claude host; the Cursor host issues crew-panelist) | (driven by `/crew:debate`) |
 | **formatter** | Reformats one review seat's raw output into the structured FINDINGS schema (faithful transform, read-only, `model: haiku`) for the per-seat repair fallback | (driven by the review/build/measure-twice repair step) |
 | **scribe** | Lands one native review seat's text at an engine-issued ingress path so the Write does not render in the terminal (verbatim transcribe, `Write`-only, `model: haiku`) | (driven by standalone review transport and the build/measure-twice persist step) |
 

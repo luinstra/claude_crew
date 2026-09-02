@@ -1567,6 +1567,8 @@ claims wait on this fence; Phases 1-4 read-only work do not.
    coverage and negative controls proving
    resolver-consuming commands do not reintroduce provider-name or Task-seat
    oracles.
+   (2026-09-02 note: the council verb was folded into the engine-owned debate
+   workflow.)
    Add version-keyed external stream-parser fixtures for Cursor/Claude init
    models, Codex/Agy exact-model null guarantees and invalid-model negatives,
    parser drift, and requested-model overwrite prevention. Include a test-only
@@ -1882,6 +1884,9 @@ selection, quorum, or verdict logic.
 The existing engine-only `council` subcommand remains an intentional ad-hoc
 external fan-out and is not advertised as a host-native public workflow. Giving
 it public parity is separate scope.
+
+(2026-09-02 note: the council verb was folded into the engine-owned debate
+workflow.)
 
 ### Phase 5 — Port measure-twice and build after read-only parity
 
