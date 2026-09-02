@@ -13,6 +13,11 @@
 #   model             the model string that the channel accepts (`codex exec
 #                     --model`, `agent --model`, `agy --model`); for a `claude`
 #                     channel it must be a Task-tool alias (TASK_MODEL_ALIASES).
+#   native_model      cursor only; the exact variant slug the app's Task path offers
+#                     for the seat's family, set after a one-time badge read on the
+#                     app (`docs/cursor-host.md` records the run id); unset means
+#                     the seat is dropped from standalone review on a Cursor host;
+#                     `model` still drives the CLI route.
 #   opt_in            true keeps the seat OUT of every built-in panel: it is
 #                     registered but only runs when named (--seats <name>). WHY
 #                     each one is opt-in (premium cost bucket, redundancy) lives
@@ -67,6 +72,7 @@ model = "auto"
 [seats.cursor-composer]
 via = ["cursor"]
 model = "composer-2.5"
+native_model = "composer-2.5-fast"
 
 # The Claude seats. Same catalog, host-resolved driver: the orchestrator spawns
 # them as native Task voices on a Claude host, while the engine uses the claude

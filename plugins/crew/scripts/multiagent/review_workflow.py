@@ -21,8 +21,11 @@ from pathlib import Path
 
 from multiagent import channels, config, findings, prompts, render, review_runs, seats, targets
 from multiagent.providers import (
+    ATTRIBUTION_REQUESTED_ONLY,
+    attribution_for,
     ProviderResult,
     get_provider_for_channel,
+    stamp_attribution,
 )
 
 SCHEMA = 1
@@ -927,14 +930,18 @@ def _resolve_seats(
                 else " with no model pinned"
             )
             roles = native_roles(policy)
-            # The predicate is broader than the attribution miss, so the message
-            # asks the role table itself rather than inferring the cause from the
-            # drop. A future cause reaching here gets the route-neutral wording
-            # instead of being reported as an unattributable model.
-            if roles is not None and roles.reviewer_role(spec.model) is None:
+            if roles is not None and roles.native_pin(spec) is None:
+                pin_field = roles.native_pin_field
+                pin_doc = (
+                    "plugins/crew/docs/cursor-host.md"
+                    if policy.host == "cursor"
+                    else "plugins/crew/docs/engine-notes.md"
+                )
                 reason = (
-                    f"whose model the {resolved.channel} host cannot attribute "
-                    "to a concrete model"
+                    f"which this host spawns in-session only at {pin_field} "
+                    "verified once against the app's subagent badge, and "
+                    f"[seats.{name}] sets none (add {pin_field} after the badge "
+                    f"check; see {pin_doc})"
                 )
             else:
                 reason = (
@@ -950,9 +957,53 @@ def _resolve_seats(
         if any(existing[0] == name for existing in answer):
             raise WorkflowError("duplicate_seat", f"duplicate review seat {name!r}")
         answer.append((name, spec, resolved))
+    roles = native_roles(policy)
+    if roles is not None and roles.single_seat_per_native_pin:
+        # Resolution order decides which seat survives, not catalog order. The
+        # selection puts subprocess seats first, then Task seats; explicit seat
+        # requests, groups, and presets preserve their catalog or list order.
+        first_by_pin: dict[str, str] = {}
+        deduped: list[tuple[str, object, object]] = []
+        for name, spec, execution in answer:
+            if execution.native:
+                pin = roles.native_pin(spec)
+                if pin is not None:
+                    first = first_by_pin.get(pin)
+                    if first is not None:
+                        print(
+                            f"warning: review seat {name!r} resolves in-session at "
+                            f"{roles.native_pin_field} "
+                            f"{pin!r}, the same pin as seat {first!r}; dropping it from this "
+                            "panel (one pin is one model, and it votes once)",
+                            file=sys.stderr,
+                        )
+                        continue
+                    first_by_pin[pin] = name
+            deduped.append((name, spec, execution))
+        answer = deduped
     if not answer:
         raise WorkflowError("no_seats", "no review seats resolved")
     return answer
+
+
+def _spent_model(
+    name: str,
+    spec: seats.SeatSpec,
+    execution: channels.ResolvedExecution,
+    roles: HostRoles | None,
+) -> str:
+    """The model string a seat's frozen identity records: the pin it actually spends."""
+    if not execution.native:
+        return spec.model or name
+    pin = roles.native_pin(spec) if roles is not None else None
+    if pin is None:
+        pin_field = roles.native_pin_field if roles is not None else "model"
+        raise WorkflowError(
+            "unresolved_native_role",
+            f"seat {name!r} resolved in-session with no {pin_field} to spend; "
+            "refusing to freeze it",
+        )
+    return pin
 
 
 def _verified_foundation(wf: dict, run: Path) -> tuple[dict, Path]:
@@ -1272,6 +1323,7 @@ _REVIEWER_ACTION_KEYS = {
     "ingress_path", "result_path", "submission_path", "timeout_seconds",
     "return_transport", "status", "ok", "diagnostic", "claim_id",
     "accepted_path", "accepted_sha256", "submission_sha256",
+    "reported_model", "model_attribution",
 }
 _FORMATTER_ACTION_KEYS = {
     "action_id", "attempt_id", "ordinal", "kind", "driver",
@@ -1340,17 +1392,9 @@ def _authoritative_reviewer_prompt(
     )
 
 
-# Model strings Cursor RESOLVES at run time instead of naming a model: it echoes
-# the alias back rather than the model it picked. A seat pinned to one has no
-# native route, because nothing could attribute its answer to a model. Any model
-# the host can name reaches the reviewer role, which pins no model of its own,
-# so this set is the whole admission rule and there is no per-model list to keep
-# in step with the seat catalog.
-CURSOR_UNATTRIBUTABLE_MODELS = frozenset({"auto"})
-
 # The model the two Cursor support roles run at. First of the catalog's cursor
 # models in cost order: Cursor bills composer from the cheap bucket.
-CURSOR_SUPPORT_MODEL = "composer-2.5"
+CURSOR_SUPPORT_MODEL = "composer-2.5-fast"
 
 # The two read-only tiers an action may be issued under. ENFORCED means
 # something mechanical stops the seat writing (a provider sandbox that refuses
@@ -1377,10 +1421,8 @@ class HostRoles:
     formatter_role: str
     formatter_model: str
     reviewer_role_name: str
-    # Model strings this host resolves at run time rather than naming. A seat
-    # pinned to one takes no native route: the record could not say which model
-    # produced its answer.
-    unattributable_models: frozenset[str]
+    native_pin_field: str
+    single_seat_per_native_pin: bool
     # How each in-session role is actually held to read-only. The run record
     # stamps these verbatim, so a reader can tell a mechanically enforced
     # boundary from one the role prose asks for. They are per ROLE, not per
@@ -1389,21 +1431,10 @@ class HostRoles:
     reviewer_access: str
     formatter_access: str
 
-    def reviewer_role(self, model: str | None) -> str | None:
-        """Return the reviewer role for ``model``, or None when none ships.
-
-        The reviewer role file pins no model, so every model this host can NAME
-        reaches the one name ``reviewer_role_name`` carries. That is what lets
-        the seat catalog stay the single place a model is declared: a repin
-        needs no matching edit here. What still answers None is a seat carrying
-        no model, or one pinned to a string the host only resolves at run time,
-        because neither can be attributed in the run record. Every role name
-        lives in the table, so a new host cannot inherit another host's name by
-        leaving a field out.
-        """
-        if not model or model in self.unattributable_models:
-            return None
-        return self.reviewer_role_name
+    def native_pin(self, spec: seats.SeatSpec) -> str | None:
+        """The pin an in-session seat spends on this host, or None for no native route."""
+        pin = getattr(spec, self.native_pin_field, None)
+        return pin if isinstance(pin, str) and pin else None
 
 
 _HOST_ROLES: dict[str, HostRoles] = {
@@ -1414,9 +1445,10 @@ _HOST_ROLES: dict[str, HostRoles] = {
         formatter_role="crew:formatter",
         formatter_model="haiku",
         reviewer_role_name="crew:reviewer",
-        # Claude seats are alias-validated at catalog load, so each one carries
-        # a model string the record can name.
-        unattributable_models=frozenset(),
+        native_pin_field="model",
+        # Keep Claude behavior neutral. Config can explicitly declare duplicate
+        # pins on this host, and admission does not reject them.
+        single_seat_per_native_pin=False,
         # `agents/reviewer.md` is `tools: Read, Grep, Glob, Bash`. The Bash is
         # for git inspection and the role is instructed never to mutate, but
         # nothing sandboxes it, so this seat is read-only by CONVENTION and the
@@ -1433,7 +1465,10 @@ _HOST_ROLES: dict[str, HostRoles] = {
         formatter_role="crew-formatter",
         formatter_model=CURSOR_SUPPORT_MODEL,
         reviewer_role_name="crew-reviewer",
-        unattributable_models=CURSOR_UNATTRIBUTABLE_MODELS,
+        native_pin_field="native_model",
+        # Cursor's Task vocabulary has one flattened variant per enabled family;
+        # one native pin is one model, so a duplicate must not vote twice.
+        single_seat_per_native_pin=True,
         # This host has no per-role tool field at all, so every in-session role
         # inherits the launching session's tools. The adapters ship
         # `readonly: true` and carry the discipline in prose, but no app-surface
@@ -1546,9 +1581,9 @@ def native_channel_for(spec: seats.SeatSpec, policy: RoutePolicy) -> str | None:
 
     ``channels`` answers whether a channel is native on a host; this answers
     whether the workflow can actually issue a native action for this seat,
-    which depends on whether the host can attribute the seat's model. Declaring
-    a native route for a seat it cannot would freeze it as a Task action and
-    then issue that action with no role to spawn.
+    which depends on the pin held in the host role row. Declaring a native route
+    for a seat with no native pin would freeze it as a Task action and then issue
+    that action with no pin to spend.
 
     A host absent from ``_HOST_ROLES`` answers None here even when it has a
     channel row, so a host that gained a channel without roles declares nothing
@@ -1556,9 +1591,9 @@ def native_channel_for(spec: seats.SeatSpec, policy: RoutePolicy) -> str | None:
     tables' agreement hold by construction; the test pinning their key sets
     equal is the second line of defense, not the only one.
 
-    Admission is keyed on the ROLE TABLE and does not consult the seat's own
-    ``via``: a seat whose model the host could name for a channel it cannot run
-    on would be declared native here. What keeps that harmless is
+    Admission is keyed on the role row's pin field, not on ``spec.model``, and
+    does not consult the seat's own ``via``. What keeps a channel mismatch
+    harmless is
     ``channels.resolve_seat``, which honors this declaration only for the
     channel it actually SELECTS from ``spec.via``, so a claude-via seat carrying
     a colliding model string still resolves external. Any change to
@@ -1570,7 +1605,7 @@ def native_channel_for(spec: seats.SeatSpec, policy: RoutePolicy) -> str | None:
     if channel is None or channel in policy.force_external:
         return None
     roles = native_roles(policy)
-    if roles is None or roles.reviewer_role(spec.model) is None:
+    if roles is None or roles.native_pin(spec) is None:
         return None
     return channel
 
@@ -1588,9 +1623,9 @@ def has_no_route_here(
     ask THIS question so neither can answer it differently: roster resolution
     drops such a seat before the freeze, and
     drift reconstruction refuses to re-run an action frozen external before the
-    native route existed. Without the shared answer, an unattributable model at drift
-    time is indistinguishable from a host with no native channel at all, and the
-    stale action runs.
+    native route existed. Without the shared answer, a seat with no native pin at
+    drift time is indistinguishable from a host with no native channel at all,
+    and the stale action runs.
 
     A channel the run forced external is exempt, which is what makes the opt-out
     an escape hatch rather than a way to empty the roster: the whole point of
@@ -1663,7 +1698,7 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
         # already staged prompts would leave a run dir describing an action
         # nobody minted.
         reviewer_role = _require_native_role(
-            roles.reviewer_role(model) if roles is not None else None,
+            roles.reviewer_role_name if roles is not None else None,
             kind="reviewer", seat=seat, model=model, host=policy.host,
         )
         _require_native_role(
@@ -1736,6 +1771,10 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
         "status": "ready", "ok": None, "diagnostic": None, "claim_id": None,
         "accepted_path": None, "accepted_sha256": None,
         "submission_sha256": None,
+        "reported_model": None,
+        "model_attribution": (
+            ATTRIBUTION_REQUESTED_ONLY if native else None
+        ),
     }
 
 
@@ -1771,7 +1810,7 @@ def _reroute_lost_formatter(action: dict) -> bool:
     a new one.
 
     A formatter is the one action that may change route this way. A reviewer
-    answer is attributed to the model that gave it, so a lost reviewer settles
+    answer belongs to the model that gave it, so a lost reviewer settles
     failed rather than moving transports. The formatter only reshapes an answer
     already given, and its output must still satisfy the findings parser before
     it is accepted. Paths and the action id are untouched, so nothing
@@ -1960,10 +1999,25 @@ def _validate_external_result(action: dict, ref: ReviewRef, raw: object) -> Prov
         "name", "model", "ok", "output", "error", "elapsed", "run_id",
         "target_sha256", "action_id", "attempt_id", "channel",
     }
-    if set(raw) != required:
+    optional = {"reported_model", "model_attribution"}
+    if not required.issubset(raw) or set(raw) - required - optional:
         raise WorkflowError(
             "corrupt_result",
             "external reviewer result has missing or unknown fields",
+        )
+    reported_model = raw.get("reported_model")
+    model_attribution = raw.get("model_attribution")
+    if reported_model is not None and not isinstance(reported_model, str):
+        raise WorkflowError("corrupt_result", "reported_model must be a string or null")
+    if model_attribution is not None and not isinstance(model_attribution, str):
+        raise WorkflowError(
+            "corrupt_result", "model_attribution must be a string or null"
+        )
+    derived_attribution = attribution_for(reported_model)
+    if "model_attribution" in raw and model_attribution != derived_attribution:
+        raise WorkflowError(
+            "corrupt_result",
+            "model_attribution does not match reported_model",
         )
     frozen = {
         "name": action.get("seat"),
@@ -2024,6 +2078,14 @@ def _validate_external_result(action: dict, ref: ReviewRef, raw: object) -> Prov
                 "corrupt_result",
                 f"external reviewer error does not match settled diagnostic for {action.get('action_id')!r}",
             )
+        if (
+            action.get("reported_model") != reported_model
+            or action.get("model_attribution") != derived_attribution
+        ):
+            raise WorkflowError(
+                "corrupt_result",
+                f"external reviewer attribution does not match settled action {action.get('action_id')!r}",
+            )
     return _normalize_reviewer_success(ProviderResult(
         name=raw["name"],
         model=raw["model"],
@@ -2036,6 +2098,12 @@ def _validate_external_result(action: dict, ref: ReviewRef, raw: object) -> Prov
         action_id=raw["action_id"],
         attempt_id=raw["attempt_id"],
         channel=raw["channel"],
+        reported_model=reported_model,
+        model_attribution=(
+            derived_attribution
+            if "model_attribution" not in raw
+            else model_attribution
+        ),
     ))
 
 
@@ -2099,6 +2167,8 @@ def _materialized_reviewer_result(wf: dict, action: dict, run: Path) -> Provider
     result.action_id = action["action_id"]
     result.attempt_id = action["attempt_id"]
     result.channel = action.get("channel")
+    result.reported_model = action.get("reported_model")
+    result.model_attribution = action.get("model_attribution")
 
     formatters = [
         candidate
@@ -2200,9 +2270,16 @@ def _effective_artifact_manifest(
     return manifest
 
 
+def _usable_seats(
+    effective_results: list[tuple[dict, ProviderResult]],
+) -> set[str]:
+    return {action["seat"] for action, result in effective_results if result.ok}
+
+
 def _panel(wf: dict, run: Path) -> dict:
-    effective = {action["seat"]: result for action, result in _effective_results(wf, run)}
-    successes = {seat for seat, result in effective.items() if result.ok}
+    effective_results = _effective_results(wf, run)
+    effective = {action["seat"]: result for action, result in effective_results}
+    successes = _usable_seats(effective_results)
     pending = [seat for seat in wf["roster"] if seat not in successes]
     failed = [seat for seat in wf["roster"] if seat in effective and seat not in successes]
     expected, usable = len(wf["roster"]), len(successes)
@@ -2218,12 +2295,15 @@ def _reviewer_barrier(wf: dict) -> bool:
 
 
 def _canonical_panel_bytes(wf: dict, run: Path) -> _CanonicalPanelBytes:
-    results = [result for _action, result in _effective_results(wf, run)]
+    effective_results = _effective_results(wf, run)
+    results = [result for _action, result in effective_results]
+    usable_seats = _usable_seats(effective_results)
     panel = _panel(wf, run)
     return _CanonicalPanelBytes(
         grouped=findings.render_digest(
             results,
             quorum=(panel["expected"], panel["usable"]),
+            usable_seats=usable_seats,
         ).encode("utf-8"),
         full=render.render_panel(results).encode("utf-8"),
     )
@@ -2277,6 +2357,8 @@ def _reconcile_external_results_locked(wf: dict, run: Path) -> None:
             diagnostic=result.error if result.error else (None if result.ok else "reviewer failed"),
             accepted_path=str(path),
             accepted_sha256=candidate["accepted_sha256"],
+            reported_model=result.reported_model,
+            model_attribution=result.model_attribution,
         )
 
 
@@ -2695,6 +2777,7 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
         if (
             set(signature) != expected_signature_keys
             or not isinstance(signature.get("model"), str)
+            or not signature["model"]
             or not isinstance(channel, str)
             or seats.CHANNEL_TO_LEGACY_KIND.get(channel) is None
             or (
@@ -2773,19 +2856,51 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
             reviewers_by_attempt[attempt_id].add(seat)
             signature = signatures[seat]
             native = signature["kind"] == "task"
+            reported_model = action.get("reported_model")
+            model_attribution = action.get("model_attribution")
+            if native:
+                if (
+                    reported_model is not None
+                    or model_attribution != ATTRIBUTION_REQUESTED_ONLY
+                ):
+                    _corrupt_workflow(
+                        f"native reviewer action {action_id!r} has invalid attribution"
+                    )
+            else:
+                if (
+                    reported_model is not None
+                    and not isinstance(reported_model, str)
+                ):
+                    _corrupt_workflow(
+                        f"external reviewer action {action_id!r} has invalid reported model"
+                    )
+                if (
+                    model_attribution is not None
+                    and not isinstance(model_attribution, str)
+                ):
+                    _corrupt_workflow(
+                        f"external reviewer action {action_id!r} has invalid attribution"
+                    )
+                if action["status"] != "settled" and (
+                    reported_model is not None or model_attribution is not None
+                ):
+                    _corrupt_workflow(
+                        f"external reviewer action {action_id!r} has premature attribution"
+                    )
+                if action["status"] == "settled" and model_attribution != attribution_for(
+                    reported_model
+                ):
+                    _corrupt_workflow(
+                        f"external reviewer action {action_id!r} has mismatched attribution"
+                    )
             channel = seat_channels[seat]
-            # Keyed off the FROZEN model, so a live catalog repin surfaces as
-            # route drift where that is judged, not as a corrupt record here.
             expected_role = (
-                host_roles.reviewer_role(signature["model"])
+                host_roles.reviewer_role_name
                 if native and host_roles is not None
                 else None
             )
             if (
                 action["driver"] != (ActionDriver.NATIVE if native else ActionDriver.EXTERNAL)
-                # A native action with no role has nothing to spawn. Resolution
-                # never mints one; a reloaded record could still carry one.
-                or (native and expected_role is None)
                 or action["model"] != signature["model"]
                 or action["channel"] != channel
                 or action["provider"] != seats.CHANNEL_TO_LEGACY_KIND[channel]
@@ -3060,6 +3175,7 @@ def start_review(request: ReviewRequest) -> ReviewStep:
     # writes anything, so the zero-write behavior noted below is unchanged.
     host = _host()
     policy = _resolve_route_policy(request, host)
+    roles = native_roles(policy)
     base = request.base or "main"
     resolved_intent = _resolve_target_intent(request.target_input, base)
     if resolved_intent is None:
@@ -3083,7 +3199,10 @@ def start_review(request: ReviewRequest) -> ReviewStep:
     resolved = _resolve_seats(request, policy)
     signatures: dict[str, dict] = {}
     for name, spec, execution in resolved:
-        signatures[name] = {"kind": "task" if execution.native else "subprocess", "model": spec.model or name}
+        signatures[name] = {
+            "kind": "task" if execution.native else "subprocess",
+            "model": _spent_model(name, spec, execution, roles),
+        }
         if not execution.native:
             signatures[name]["provider"] = seats.CHANNEL_TO_LEGACY_KIND[execution.channel]
     target_sha, prompt_mode = review_runs.sha256_text(target.content), "inline_diff" if request.inline else "standard"
@@ -3220,7 +3339,11 @@ def start_review(request: ReviewRequest) -> ReviewStep:
             "target_notes": target_notes, "target_diff_cmd": target_diff_cmd,
             "subprocess_seats": [name for name, _spec, execution in resolved if not execution.native],
             "task_seats": [name for name, _spec, execution in resolved if execution.native],
-            "task_seat_models": {name: spec.model or name for name, spec, execution in resolved if execution.native},
+            "task_seat_models": {
+                name: _spent_model(name, spec, execution, roles)
+                for name, spec, execution in resolved
+                if execution.native
+            },
             "seat_signatures": signatures, "host": host,
             "seat_channels": {name: execution.channel for name, _spec, execution in resolved},
             "workflow_identity": identity, "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat()}
@@ -3237,7 +3360,7 @@ def start_review(request: ReviewRequest) -> ReviewStep:
                 ref,
                 ordinal=ordinal,
                 seat=name,
-                model=spec.model or name,
+                model=_spent_model(name, spec, execution, roles),
                 channel=execution.channel,
                 driver=(
                     ActionDriver.NATIVE
@@ -3361,10 +3484,10 @@ def _frozen_external_provider(action: dict, policy: RoutePolicy):
         action.get("driver") == ActionDriver.EXTERNAL
         and execution is not None
         and not execution.native
-        # An unattributable model reads as "no native route for this seat", which
-        # is the same shape as "this host has no native channel". Asking the
-        # shared question keeps a stale external action on the host's own channel
-        # from running just because its model cannot be attributed.
+        # A missing native pin reads as "no native route for this seat", which is
+        # the same shape as "this host has no native channel". Asking the shared
+        # question keeps a stale external action on the host's own channel from
+        # running just because its pin is absent.
         and not has_no_route_here(execution, policy)
         and execution.engine_runnable
         and execution.channel == action.get("channel")
@@ -3437,6 +3560,9 @@ def _normalize_provider_return(
         output=result.output,
         error=result.error,
         elapsed=float(result.elapsed),
+        reported_model=(
+            None if result.reported_model is None else str(result.reported_model)
+        ),
     )
     return _normalize_reviewer_success(sanitized)
 
@@ -3544,6 +3670,7 @@ def execute_external_review(ref: ReviewRef, action_id: str) -> ReviewStep:
                 f"external reviewer action {action_id} result sink",
                 create_parents=False,
             )
+            stamp_attribution(result)
             _atomic(result_path, result.to_dict())
             return _advance_locked(wf, run)
     started = time.monotonic()
@@ -3592,6 +3719,7 @@ def execute_external_review(ref: ReviewRef, action_id: str) -> ReviewStep:
         f"external reviewer action {action_id} result sink",
         create_parents=False,
     )
+    stamp_attribution(result)
     _atomic(result_path, result.to_dict())
     with _workflow_lock(run):
         wf, run = _load_current_locked(ref, run)
@@ -3833,7 +3961,18 @@ def recover_review_action(request: RecoveryRequest) -> ReviewStep:
         if action.get("status") == "claimed":
             if _reroute_lost_formatter(action):
                 return _advance_locked(wf, run)
-            action.update(status="settled", ok=False, diagnostic=request.diagnostic_code)
+            extra = {}
+            if action.get("kind") == ActionKind.REVIEWER:
+                extra = {
+                    "reported_model": None,
+                    "model_attribution": ATTRIBUTION_REQUESTED_ONLY,
+                }
+            action.update(
+                status="settled",
+                ok=False,
+                diagnostic=request.diagnostic_code,
+                **extra,
+            )
         return _advance_locked(wf, run)
 
 

@@ -6,14 +6,13 @@ Persistence, specialized agents, and workflow commands for Claude Code.
 
 Standalone `/crew:review` uses the Python-owned workflow engine through the
 Claude Code and Cursor host adapters. Cursor now issues its cursor-channel
-seats as native subagents (`agents-cursor/` ships the three role adapters);
-a cursor seat pinned to a run-time alias such as `auto` is warned about and
-dropped from the panel, and one whose exact model slug the app's subagent
-surface does not offer (the family must be enabled in Cursor AND the pin must be
-the variant the Task path accepts, such as `composer-2.5-fast`) is usually
-refused at spawn and settles failed, with no CLI fallback; the same slug has also been
-accepted with its answering model unobserved, so substitution is possible and a
-native seat's answering model is verified only by its badge in the app.
+seats as native subagents (`agents-cursor/` ships the three role adapters) only
+when a seat declares a `native_model`; the shipped composer seat uses
+`composer-2.5-fast`, while a seat without one is warned about and dropped. The
+app's subagent surface must offer the exact native variant, and an unoffered
+slug is usually refused at spawn and settles failed, with no CLI fallback. The
+run record also reports whether the answering model was runtime-reported or
+only requested.
 Codex-host all-external protocol compatibility is covered
 deterministically through the Python CLI, but the Codex plugin does not yet
 expose standalone `/crew:review`; its app-native adapter remains deferred.

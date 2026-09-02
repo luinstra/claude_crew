@@ -1,6 +1,5 @@
 ---
 description: Writes the text handed to it verbatim to the one path named in its prompt, and nothing else. Never reformats, judges, or summarizes. Used by crew's review workflow to keep a large persist-write out of the parent transcript.
-model: composer-2.5
 ---
 
 # crew-scribe

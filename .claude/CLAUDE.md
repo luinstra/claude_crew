@@ -3,8 +3,10 @@
 > **Type:** Claude Code Plugin Marketplace
 > **Plugins:** `crew` (agents, commands, persistence), `sk` (tech-stack skills)
 > **Python:** 3.11+, everywhere, one floor. The engine needs it for stdlib
-> `tomllib`; the lifecycle hooks (crew's two and sk's) hold the same line so
-> there is only ever one number to remember. Every entry point enforces it with
+> `tomllib`; crew's Claude and Cursor manifests each register two lifecycle
+> entries, while `cursor-env-capture.py` is an in-process helper called by
+> `session-start.py`, not a hook entry. The same Python floor holds everywhere
+> so there is only ever one number to remember. Every entry point enforces it with
 > a stdlib-only, old-parseable guard placed BEFORE its real imports, degrading
 > to a visible no-op (exit 0 + a loud diagnostic) rather than a traceback: the
 > shebang resolves to whatever `python3` PATH hands over, which on macOS can
@@ -242,14 +244,14 @@ loop is turned off in place by flipping `active: false` (plus a `completed_at`
 timestamp), so the record survives for inspection. `session-start` cleanup later
 sweeps inactive files older than a day.
 
-**Orphan Cleanup (report-only for dirs).** `session-start` still auto-cleans the
-ephemeral bookkeeping classes (stale state files, context snapshots, lock/temp
-set-asides, and aged agent signal markers). But it NO LONGER deletes review-run
-or debate directories: destructive rmtree of the user's disk from an unattended
-hook was the wrong venue. Instead it REPORTS those orphans (a one-line count,
-pointing at `crew swab`; exact sizing is deferred to the attended command),
-enumerated by the one shared `artifact_prune` finder. The attended `crew swab` command OWNS their deletion (dry-run by default,
-`--yes` to remove).
+**Orphan Cleanup (report-only for dirs and probe captures).** `session-start`
+still auto-cleans the ephemeral bookkeeping classes (stale state files, context
+snapshots, lock/temp set-asides, and aged agent signal markers). It reports
+three families through the shared `artifact_prune` finder: review-run dirs,
+debate dirs, and probe captures. It does not delete any of them from an
+unattended hook. The attended `crew swab` command owns removal (dry-run by
+default, `--yes` to remove); it rmtrees the two directory families and unlinks
+probe capture files.
 
 **State files** (in project's `.crew/`):
 - `build-state-<session-id>.json` — Build loop (legacy unsuffixed `build-state.json` still read)

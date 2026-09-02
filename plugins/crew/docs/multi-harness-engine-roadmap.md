@@ -285,13 +285,14 @@ This is the first priority plateau.
 
 #### Scope
 
-Status: the routing and adapter items below have SHIPPED. The exit gate's
-live-review criterion was run and met on 2026-08-25 (`run-c73927a5f904` and
-`run-559dd5d1899d`, recorded in `docs/cursor-host.md`). Still owed before the
-phase closes: the installed-plugin validation, the installed Claude review
-regression run, the P12 and P13 captures, app-side read-only enforcement and
-native cancellation validation, and a seat-pin decision, because the app's
-Task-call model vocabulary differs from the CLI catalog.
+Status: engine complete, app gates pending. Every engine item below has
+shipped, including the seat-pin decision (`native_model` on the catalog row,
+admission gated on it, attribution stamped and rendered; recorded in
+`docs/cursor-host.md` and `docs/engine-notes.md`). Pending, all app-only,
+tracked in `docs/operator-followups.md`: F2.1 read-only enforcement on the
+app, F2.2 the P12 app-side environment capture, F2.3 the P13 hook-environment
+reading, F2.4 the installed-plugin validation through the marketplace refresh
+path, F2.5 native cancellation, and F2.6 the Claude-host installed regression.
 
 - SHIPPED, PARTLY: the capability probe covering custom agent
   discovery, explicit role invocation, foreground result return, cancellation,
@@ -324,8 +325,6 @@ Task-call model vocabulary differs from the CLI catalog.
   still substitute silently.
 - SHIPPED: the same Python review workflow and deterministic fixture Claude
   drives.
-- STILL OWED: validate the installed plugin using Cursor's actual
-  marketplace/cache refresh path.
 
 #### Exit gate
 

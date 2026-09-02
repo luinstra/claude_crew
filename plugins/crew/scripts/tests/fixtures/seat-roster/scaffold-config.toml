@@ -74,6 +74,7 @@ seat = "codex"
 
 [seats.cursor-composer]
 # model = "composer-2.5"
+# native_model = "composer-2.5-fast"   # cursor-seat knob: the app Task-path variant slug (read per seat: [seats.cursor-composer] here)
 
 # [seats.codex-terra]   # opt-in; see docs/engine-notes.md for why
 

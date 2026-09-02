@@ -18,7 +18,9 @@ batches are EXTERNAL `cursor-agent` CLI evidence only; see the scope warning.
 ## Detection and environment
 
 - Two distinct env surfaces exist in this host. Agent-spawned shells are sandbox-scrubbed to a whitelist: operator exports like `CREW_HOST` are DROPPED, and `__CURSOR_SANDBOX_ENV_RESTORE` is present as evidence of the scrub. Hook processes, by contrast, DO inherit the app's launch-shell env (verified live, 2026-08-17)
-- Native env markers observed in the agent shell: `CURSOR_AGENT`, `CURSOR_CONVERSATION_ID`, `CURSOR_INVOKED_AS`, `CURSOR_RIPGREP_PATH` (verified live, 2026-08-17)
+- Native env markers observed in the agent shell: `CURSOR_AGENT`, `CURSOR_CONVERSATION_ID`, `CURSOR_INVOKED_AS`, `CURSOR_RIPGREP_PATH` (verified live, 2026-09-01, cursor-agent 2026.08.31-4057e58)
+- A `cursor-agent -p` shell sets `CURSOR_AGENT=1`, `CURSOR_INVOKED_AS=cursor-agent`, `CURSOR_CONVERSATION_ID`, `CURSOR_REQUEST_ID`, `CURSOR_RIPGREP_PATH`, and `__CURSOR_SANDBOX_ENV_RESTORE`; a plain terminal sets none of them. The app-side capture remains owed as F2.2 in `operator-followups.md`.
+- The P13 SessionStart capture runs from `session-start.py`, which calls `scripts/cursor-env-capture.py` when the payload has Cursor-native keys or host detection returns `cursor`, except for Claude and Codex hosts. It writes `.crew/probes/cursor-hook-env-<YYYY-MM-DD>.txt` with mode 0600, one file per UTC day through `O_EXCL` on the dated name, records the detector answer and payload-shape verdict, refuses symlinked `.crew` components, and unlinks its own file after a failed write. The reading is F2.3 in `operator-followups.md`; the call can be removed after that reading.
 - No `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, or `CODEX_*` markers appear: Cursor emulates neither the Claude Code host nor the Codex host (verified live, 2026-08-17)
 - The marker table ships FILLED with `CURSOR_AGENT` and `CURSOR_CONVERSATION_ID`, two of the four agent-shell names on the line above (verified live, 2026-08-17). The other two are deliberately left out: detection matches on ANY name, so a wider table adds no detection power and only more chances for a non-Cursor shell to collide. It follows from the fill, not from a capture, that unaided detection now reads `cursor` in the agent shell: no live run has been captured since the table was empty, when it demonstrably read `unknown`. That shell keeps these markers even though it drops `CREW_HOST`, which is what puts an unaided signal exactly where the override cannot survive. Provenance, stated plainly: the fill rests on ONE live capture (2026-08-17) and the second capture it was once parked pending has NOT been taken. What a second one would confirm is that both names appear in a FRESH agent shell on a different client build and a different conversation, rather than being artifacts of that one session, since detection matching on ANY name means a single absent-in-general marker would still be covered by the other but both being session-local would send this host back to reading `unknown`
 - The cursor tier is DELIBERATELY the LAST marker tier: `CREW_HOST` first, then the codex markers, then the Claude markers, then these. The reason is the other Cursor env surface, the INTEGRATED TERMINAL a human types into, which is not the agent shell the line above describes: it hands `CURSOR_AGENT` to anything launched from it, another harness included. A `claude` session started there carries `CLAUDECODE` and `CURSOR_AGENT` at once and the harness executing crew is Claude Code, so a cursor answer would mint native cursor actions Claude Code cannot spawn. Ranking claude above cursor does not touch pure-cursor detection: the agent shell carries no Claude marker at all. Codex keeps its standing above claude because its reachable collision runs the opposite way (crew scrubs codex and cursor markers from a `claude` child but nothing scrubs `CLAUDECODE` from a codex child, so a codex seat re-invoking crew is a genuine codex executor)
@@ -55,20 +57,26 @@ different matter, and the next bullets say how.
 
 Four consequences worth stating plainly:
 
-- **Unattributable models are warned about and dropped, not silently rerouted.**
-  A cursor-channel seat whose model the host cannot NAME (`cursor-auto` at
-  `auto`, which Cursor echoes back rather than resolving, or a seat carrying no
-  model) prints one warning naming the seat and its model and is removed from
-  the roster before the run is minted. Any concrete model string is admitted,
-  so a config `model` override keeps its seat native. The surviving seats run
-  and the quorum denominator counts only them; a roster reduced to zero fails
-  with the ordinary `no_seats` error. The drop happens BEFORE the freeze, so
-  such a seat never becomes an action at all.
+- **Native admission uses `native_model`, and missing pins are warned about and dropped.**
+  A cursor-channel seat is issued in-session only at its `native_model`. A seat
+  with no `native_model` is dropped before the freeze with one warning naming
+  the field and the required badge check. The shipped catalog has one cursor
+  seat with this pin; a `cursor-auto` row whose `native_model` value is `auto`
+  is refused at load. A `cursor-auto` row with a valid `native_model` that differs
+  from the `cursor-composer` pin is admitted and kept. When its valid pin collides
+  with `cursor-composer`, it is admitted and then removed by duplicate-pin
+  deduplication with its own warning. Two
+  cursor seats at one `native_model` drop the later seat in
+  resolution order. The built-in `full` panel and the `cursor` group both place
+  `cursor-auto` first. When that row is pinned to the composer slug, the later
+  seat is `cursor-composer`, so it is the one dropped. The surviving seats run
+  and the quorum denominator counts
+  only them; a roster reduced to zero fails with the ordinary `no_seats` error.
 - **A lost native reviewer settles FAILED. There is no CLI fallback for it.**
   `review-recover` with `native_task_lost` settles the action, because a seat's
   answer belongs to the model that gave it and its own channel is one this host
   drives in-session rather than as a subprocess (the same routing policy that
-  drops an unattributable seat). The panel degrades rather than dying: quorum recounts
+  drops a seat with no `native_model`). The panel degrades rather than dying: quorum recounts
   the usable seats and the digest synthesizes from whatever returned. A retry
   mints a fresh attempt on the FROZEN native route, so it gets a fresh in-session
   spawn and no more.
@@ -76,8 +84,9 @@ Four consequences worth stating plainly:
   `/crew:execute`, `/crew:deepinit`, and the loop commands' executor and advisor
   steps still run under the documented-unsupported silent substitution described
   in the routing row below: a Cursor-native agent answers in the role instead of
-  the named crew agent. Build and measure-twice retain their `review-prep`
-  orchestration until their later phases.
+  the named crew agent. This native admission change applies only to standalone
+  review. Build and measure-twice retain their `review-prep` orchestration and
+  existing admission until their later phases.
 - **Native role tools are inherited; `readonly: true` is SHIPPED but unverified
   here.** A reviewer, formatter, or scribe spawned in-session gets the launching
   session's tools: this host has no per-role tool field. The two roles that must
@@ -122,13 +131,13 @@ assumptions it exists to answer.
 
 ### In-flight reviews across this change
 
-A standalone review started before the native routing landed froze its seats as
-`subprocess` and its host as whatever detection returned then. Finish or abandon
-ANY in-flight standalone review before adopting these bytes, on any host: a run
-frozen with `host=unknown` returns `conflict/host_mismatch`, and one frozen
-`host=cursor` with external seats hits `provider_config_drift` at
-`review-execute`. Both are guards working; the remedy is a fresh review, not a
-migration.
+A standalone review frozen before these bytes fails `corrupt_workflow` at its
+next command on every host because the reviewer action key set is exact and
+gained two keys. On a Cursor host, `cursor-composer` now freezes at
+`composer-2.5-fast`, so an identical restart returns `conflict`. Finish or
+abandon any in-flight review first; the remedy is a fresh review. An earlier
+change left two Cursor-specific cases, `host=unknown` and `host=cursor` with
+external seats, documented below as historical guards.
 
 Two more in-flight cases are NOT Cursor-specific (a formatter action minted
 before the reroute mark existed, and a run identity frozen before it carried
@@ -183,37 +192,14 @@ Claude-host operator will find them.
   integrated-terminal case: that one has no agent to perform the parent actions
   either, and its remedy is in the detection section above
 - There is no per-model reviewer map: the reviewer role file pins no model, so
-  the host admits any model string it can name and `seats.toml` stays the one
-  place a cursor seat's model is declared. Repinning a seat needs no second
-  edit; only a run-time alias (`auto`) or a missing model drops a seat
-- Frontmatter is `description`, plus `model` on the two support roles only.
-  The reviewer file deliberately omits `model`: it is shared by every model the
-  host can name, so any single pin would be wrong for all but one seat, and if
-  a pin beat the model the Task call carries, every seat would run one model
-  while the run record named several. Omitting the key inherits the caller's
-  model, which is exactly what a shared role file needs. The scribe and formatter DO pin,
-  because each is a single-model role and its pin is the same string the role
-  table drives it at. `readonly: true` IS SHIPPED on
-  the reviewer and the formatter, and its app-surface enforcement is UNVERIFIED:
-  the only evidence for that key is from the external `cursor-agent` CLI surface
-  (see the scope warning below), and no app-surface capture has tested it. It is
-  shipped anyway because all three outcomes are acceptable: enforced restores a
-  boundary, ignored costs nothing, and rejected makes the roles resolve to
-  nothing at the first probe, which is loud rather than silent. Per file, the
-  reviewer carries it as its ONE unverified key (it deliberately pins no
-  `model`), while the formatter adds it beside a `model: composer-2.5` pin that
-  the Task path has since REFUSED (model-grammar section below), so that pin is
-  not a working one today and the fallback route is what has carried the
-  formatter and scribe. The formatter's
-  blast radius is the smaller one even so: a lost formatter reroutes to the
-  parent-context route, while a lost reviewer settles that seat failed. Until an
-  app-surface capture exists, plan for the key being inert: the read-only
-  constraint here is prose plus an unverified key, a weaker tier than the Claude
-  SUPPORT roles hold (those are tool-scoped, `tools: Read` on the formatter and
-  `tools: Write` on the scribe) though not weaker than the Claude reviewer's,
-  which is read-only by convention over an unsandboxed `Bash`. The run record
-  says which is which by stamping `access: read-only-advisory` on every native
-  action here. Revisit when app-surface evidence exists
+  admission keys on the seat's `native_model` and the catalog remains the CLI
+  source for `model`. A cursor seat with no `native_model` is dropped before
+  the freeze; `auto` is refused at load. The role files carry no `model` pins.
+- Frontmatter is `description` plus the read-only marker on the reviewer and
+  formatter adapters. The driver supplies the issued model on the Task call,
+  while the support roles run at the host-level `composer-2.5-fast` constant.
+  The app-side read-only enforcement remains an operator check. The run record
+  identifies whether a native answer was runtime-reported or requested-only.
 - Cursor subagents have no `tools` frontmatter field and inherit the parent's
   tools, so the Cursor scribe cannot be tool-restricted to write-only the way
   `agents/scribe.md` is. Its single-path, verbatim, no-other-tool constraint is
@@ -223,32 +209,21 @@ Claude-host operator will find them.
   the model on the Task call"). VERIFIED as a shipped fence (exit-gate run
   `run-c73927a5f904`, 2026-08-25): the driver's fence spawned the native
   reviewer subagent, which landed its review through the scribe transport
-- The two support roles (scribe, formatter) run at `composer-2.5`: first of the
-  catalog's cursor models in cost order, because Cursor bills composer from the
-  cheap bucket
-- Before native seats can run, the operator must ENABLE the seat model
-  families in Cursor's subagent surface AND each pin must be the exact variant
-  slug that surface offers (model-grammar section below). Until then those
-  seats are `unentitled` or variant-mismatched, and the drop rule does NOT
-  cover them: it keys solely on whether the host can name the model, so such a
-  seat resolves native, is issued native, and is usually refused at spawn,
-  though the same slug has also been accepted with its answering model
-  unobserved. A refusal is a lost action, recovered with `native_task_lost`,
-  which SETTLES the seat FAILED: no CLI fallback exists for a seat issued
-  native. On the account state recorded below, where all five seat models are
-  rejected as subagent models, every cursor-channel seat takes that path, so a
-  cursor-only panel yields nothing usable. The panel degrades rather than
-  erroring (quorum recounts usable seats and the digest synthesizes from
-  whatever returned), and enabling the families plus matching the pins is the
-  mitigation. This is a setup precondition, not a code defect
-- The two SUPPORT roles need no entitlement to keep a roster whole. The formatter is
-  minted native on this host for every roster, an all-external one included, and
-  the support model is `composer-2.5`, which the recorded session allowlist
-  REJECTED. So a lost native formatter is REROUTED to a parent-context action by
-  `review-recover` instead of failing: a repair step is never the reason a panel
-  loses a seat. The scribe needs no equivalent because it rides only a native
-  reviewer action, whose seat already depends on this host, and it keeps its
-  host-write fallback
+- The two support roles (scribe, formatter) run at `composer-2.5-fast`, the
+  host-level support pin, because Cursor bills composer from the cheap bucket
+- Before native seats can run, the operator must enable the seat model families
+  in Cursor's subagent surface and each `native_model` must be the exact
+  variant slug that surface offers. A nameable but unoffered slug is issued
+  native, can be refused at spawn, and settles the seat failed with no CLI
+  fallback. The panel degrades rather than erroring, and enabling the families
+  plus matching the pins is the setup precondition. A seat with no
+  `native_model` is already removed during resolution.
+- The two SUPPORT roles need no seat entitlement to keep a roster whole. The
+  formatter is minted native on this host for every roster, an all-external one
+  included, and uses the host-level `composer-2.5-fast` support pin. A lost
+  native formatter reroutes to a parent-context action by `review-recover`
+  instead of failing. The scribe needs no equivalent because it rides only a
+  native reviewer action and keeps its host-write fallback.
 
 ## sk plugin
 
@@ -314,12 +289,35 @@ error, while a never-valid one is rejected outright (see below), so a pin cannot
 be trusted to keep meaning what it meant. `test-multiagent.py` pins today's
 answer for every cursor seat, which stops a silent near-miss edit; only the
 recheck catches tomorrow's retirement. The catalog pin is the ONLY place the
-recheck applies: native admission in `review_workflow.py` keeps no per-model
-list, it admits any model string the host can name and excludes only the
-run-time aliases in `CURSOR_UNATTRIBUTABLE_MODELS` (`auto`), so a repin needs
-no second edit and a retired pin is issued as-is rather than dropped.
+recheck applies: native admission keys on `native_model`, and `auto` is refused
+at load. A `native_model` repin needs the badge read plus its run id here and
+the badge-verified list in `test-multiagent.py`; a retired CLI pin is issued as
+written rather than silently changed.
 
 ### Model attribution on this surface
+
+- The external route records `system/init.model` as raw `reported_model` on the
+  seat result and reviewer action when the init event arrives, including failed
+  runs. Display text is never compared with the requested pin. `reported_model`
+  and the run-scoped `model_attribution` stamp are additive on every read, and
+  readers derive the stamp from the report instead of trusting stored text. An
+  older seat file reads as `requested-only`; a flat result may carry
+  `reported_model` but never the stamp.
+- A live side-by-side capture from 2026-09-01 on this machine used
+  `composer-2.5`, `--mode plan`, and one short prompt. Text stdout was
+  `b'PROBE-ALPHA\n\n  PROBE-BETA\n'`; stream-json reported init.model `Composer
+  2.5`, and both the assistant event text and `result.result` were
+  `b'PROBE-ALPHA\n\n  PROBE-BETA'`. Leading spaces and the interior blank line
+  survive both paths. The only difference is the text printer's final LF,
+  which stream extraction does not reproduce because no consumer reads it:
+  `render_block`, the line-based findings parser,
+  `_normalize_reviewer_success`, and the `crew probe` line match.
+- The extraction rule for both stream branches is one sentence: terminal
+  `result` text wins when a terminal event was seen, otherwise joined assistant
+  text is used, ANSI is stripped, and nothing else is added. A degraded-probe
+  stderr line naming the `agent --help` warning identifies a plain-branch run,
+  not a capture failure. Raw files live under the machine-local
+  `.crew/reviews/<session>/stream-vs-text/`.
 
 - `--output-format stream-json` emits a `system/init` line carrying `model`, a
   runtime-reported value rather than a subagent self-report (verified live,
@@ -327,11 +325,11 @@ no second edit and a retired pin is issued as-is rather than dropped.
 - An unknown model string is REJECTED before any run with the valid-model list on
   stderr, so far-miss strings are validated rather than echoed (verified live,
   2026-08-20, same client)
-- `init.model` attributes the SESSION. A parent at `composer-2.5` delegating to an
+- `init.model` identifies the CLI SESSION. A parent at `composer-2.5` delegating to an
   agent pinned `gemini-3.1-pro` returned the subagent's token while `init.model`
   still read `Composer 2.5`, and no emitted surface named the subagent's model
-  (verified live, 2026-08-20, same client). Whether the APP can attribute a
-  native subagent is UNRESOLVED and cannot be inferred from this
+  (verified live, 2026-08-20, same client). Native attribution is a separate
+  app-surface question and is not inferred from this CLI evidence
 - Per-invocation `--model` is reflected in `init.model` for a top-level call
   (verified live, 2026-08-20, same client):
 
@@ -441,22 +439,23 @@ Consequence: this is a SETUP PRECONDITION, not a design constraint and not a
 code defect. Before native seats can run, the operator enables the seat model
 FAMILIES in Cursor, and the seat pin must also be the exact variant slug the
 Task path offers for that family (see the model-grammar section below);
-enabling alone is necessary, not sufficient. Until then each cursor-channel
-seat here is `unentitled` (family off) or variant-mismatched (family on, pin is
-another variant), and warn-and-drop does NOT apply to either: the drop keys on
-attributability, and these five strings are all concrete models. Such a seat
-resolves native, is issued native, and is usually refused at spawn (the
-model-grammar section records one acceptance with the answering model
-unobserved). `review-recover` then SETTLES a refused seat FAILED. There is no
-CLI fallback for a seat issued native, so on an account where no seat slug is
-offered every cursor-channel seat takes that path and `--panel cursor` yields
+enabling alone is necessary, not sufficient. An unpinned cursor-channel seat is
+warned and dropped from native admission before the signature freeze, so it is
+eligible only when the caller selects its external CLI route. A pinned seat can
+still be `unentitled` (family off) or variant-mismatched (family on, pin is
+another variant); it is admitted and issued as native, then refused at spawn if
+the Task path does not offer that pin. `review-recover` settles that refused
+seat FAILED, with no CLI fallback for a seat already issued native. The
+model-grammar section records one such acceptance with the answering model
+unobserved. If every pinned native seat is unavailable, `--panel cursor` yields
 nothing usable.
 The panel degrades rather than dying: quorum recounts the usable seats and the
 digest synthesizes from whatever returned, so a mixed roster still produces a
 review from its other voices. Enabling the families in Cursor is the first
 mitigation; matching each pin to the Task path's variant slug is the second,
-and the shipped `composer-2.5` pin needs it (open decision in the model-grammar
-section). What is still worth recording, per string, is
+and the shipped `cursor-composer` seat now uses its verified
+`composer-2.5-fast` native pin, recorded in the model-grammar section. What is
+still worth recording, per string, is
 whether a rejection is `unentitled` (enable it and retry) or `unsupported` (the
 app will not honor it at all); only the latter would be a design input.
 
@@ -486,10 +485,11 @@ in-session subagent, not a shell: the app's Tasks pane showed four external
 shells (the two codex-channel seats and the two Claude voices) and one Subagent for `cursor-composer`,
 and its result entered through the scribe transport rather than a provider
 result file. That is UI plus run-record evidence, not the PATH-shim artifact
-the plan specified, so it is recorded as such. What this run could NOT show is
-which model answered: its badge was not captured, and the string it recorded
-(`composer-2.5`) is one the Task path later refused outright, so the plan's
-oracle criterion (observed requested-model provenance) is unmet here.
+requested by the earlier measurement, so it is recorded as such. What this run
+could NOT show is which model answered: its badge was not captured, and the
+string it recorded (`composer-2.5`) is one the Task path later refused outright,
+so the model-oracle criterion (observed requested-model provenance) is unmet
+here.
 
 **LIVE-REVIEW CRITERION SATISFIED by `run-559dd5d1899d` (2026-08-25):**
 native `cursor-composer` at `composer-2.5-fast` with the app's chip reading
@@ -497,15 +497,12 @@ exactly `Composer 2.5 Fast`, plus `opus` through the external `claude` CLI;
 both ok, quorum 2 of 2 MET, synthesis settled, and again one Subagent and one
 external shell in the Tasks pane. That run meets the roadmap's live-review
 criterion (a native seat and a Claude CLI seat, truthful route provenance, no
-`cursor-agent` for the native seat) AND the plan's model-oracle criterion in
-one observation; the c739 run stands as the first route-provenance pass. It is
-NOT phase acceptance: still owed are the installed-plugin validation through
-Cursor's marketplace refresh path, the installed Claude review regression run,
-the P12 and P13 captures (P12: an app-versus-`cursor-agent` environment
-discriminator, a marker present and non-empty only in the app's agent shell;
-P13: whether the Cursor hook process sees those markers), `readonly`
-enforcement on the app, and the seat-pin decision recorded in the model-grammar
-section.
+`cursor-agent` for the native seat) AND the model-oracle criterion in one
+observation; the c739 run stands as the first route-provenance pass. Separate
+operator checks remain for installed-plugin validation through Cursor's
+marketplace refresh path, the installed Claude review regression run, the P12
+and P13 captures, and `readonly` enforcement on the app. The surface-specific
+seat pins are recorded in the model-grammar section.
 
 What this run settles: the role name resolves from the filename stem, and the
 driver's Task fence spawns the native reviewer (both previously the page's
@@ -573,32 +570,25 @@ Consequences for crew:
 - The Task-call path is NOT reliably loud. The same bare slug `composer-2.5`
   was accepted once (`run-c73927a5f904`, answering model unobserved and very
   likely substituted) and refused outright later (`run-64dbfe045d0f`). A
-  refusal is self-evidencing; a successful Task call is UNATTRIBUTED until its
-  badge is read, so the badge check is required after every native spawn, not
-  a spot check. Its vocabulary is one variant per family, chosen by the app.
-- The two support roles share the mismatch: `CURSOR_SUPPORT_MODEL` in
-  `review_workflow.py` pins the scribe and formatter to bare `composer-2.5`, so
-  on the Task path the scribe is refused the same way the reviewer was. Run
-  `run-559dd5d1899d`'s native result landed through the host-write FALLBACK for
-  exactly that reason, while `run-c73927a5f904`'s went through the scribe. The
-  fallbacks held, but the support pins are inside the open decision below.
+  refusal is self-evidencing. The shipped native pin is accepted only after a
+  one-time badge read for that pin change; native run records remain
+  `requested-only` because the app does not supply a crew-owned runtime report.
+  Its vocabulary is one variant per family, chosen by the app.
+- `CURSOR_SUPPORT_MODEL` in `review_workflow.py` has been repinned to
+  `composer-2.5-fast`. Run `run-559dd5d1899d`'s native result landed through
+  the host-write FALLBACK, while `run-c73927a5f904`'s went through the scribe.
+  The fallbacks held, and the support roles now use the app's accepted variant.
 - The frontmatter path honors variants through bracket syntax but substitutes
   SILENTLY when the model is unavailable, so a per-file design makes the badge
   oracle mandatory, not optional.
-- OPEN DECISION (operator's): `seats.toml` pins are written in CLI grammar and
-  feed BOTH surfaces, and `composer-2.5` is refused on the Task path today. The
-  choices are surface-specific pins (keep per-call, repin cursor seats to the
-  Task vocabulary such as `composer-2.5-fast`) or per-file bracket pins in the
-  role files with a mandatory badge check. Until decided, the interim is the
-  temporary `[seats.cursor-composer] model = "composer-2.5-fast"` table in
-  `.crew/config.toml`, and the shipped pin is known to be refused natively.
-  A review on 2026-08-25 put the gap precisely: the driver's submission records
-  the REQUESTED pin and never the observed badge, so an accepted-but-substituted
-  answer would enter quorum under the requested model's identity. Closing that
-  gap is what the decision must do, by persisting an observed-model field the
-  operator reads off the badge, by forcing external when attribution is
-  unavailable, or by moving to per-file bracket pins; until then the badge
-  check is a manual step the operator performs.
+- DECIDED (2026-09-01): pins are surface-specific. `native_model` on
+  `[seats.<name>]` supplies the Task-path pin while `model` remains the CLI
+  route, and admission is gated on `native_model`. Run-scoped results stamp
+  `model_attribution` and `reported_model` and render them, while quorum is
+  unchanged. There is no ledger and no observed-model stamping from submit.
+  The pointer is `.crew/debates/run-attribution-gate/synthesis.md`, which is
+  machine-local and gitignored; the decision and rejected alternatives are
+  reproduced in `engine-notes.md`.
 - The exit-gate run `run-c73927a5f904` recorded its native seat as
   `composer-2.5`; given the known bug, what answered was very likely
   `Composer 2.5 Fast`. Its badge was not captured and that row is treated as a
@@ -609,14 +599,15 @@ Consequences for crew:
   path's own slug (`[seats.cursor-composer] model = "composer-2.5-fast"` in
   `.crew/config.toml`), run `run-559dd5d1899d` spawned the native reviewer and
   the app's subagent chip read `cursor-composer reviewer  Composer 2.5 Fast`,
-  an exact match to the requested slug, attributed to that subagent's own run
+  an exact match to the requested slug, recorded for that subagent's own run
   (operator-reported with a UI capture, 2026-08-25). That is the P7 oracle,
   and it shows a per-call pin honored on the shipped reviewer role, which pins
   no model of its own and is the production shape. It is NOT the plan's P8
   measurement-2 control (a per-call override against a role file that pins a
   DIFFERENT model), which has not been run; only that control separates
   "per-call honored" from "no file pin, so the call's model was the only one on
-  offer".
+  offer". `composer-2.5-fast` is now the shipped `native_model`, and the
+  badge-verified list in `test-multiagent.py` names this run id.
 
 ## Probe log
 
@@ -647,4 +638,9 @@ Consequences for crew:
   catalog and from frontmatter bracket syntax. `composer-2.5` refused at spawn
   (`run-64dbfe045d0f`); repinned to `composer-2.5-fast`, the subagent chip
   read `Composer 2.5 Fast` (`run-559dd5d1899d`). P7 oracle confirmed on a
-  crew seat; first verified per-call pin
+  crew seat; first verified per-call pin. `composer-2.5-fast` is now the
+  shipped `native_model`, and the badge-verified list in `test-multiagent.py`
+  names this run id.
+- 2026-09-01: native pin admission and run-scoped attribution shipped; the
+  side-by-side stream-vs-text capture established the shared extraction rule.
+  No app-surface probe ran.

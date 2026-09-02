@@ -39,6 +39,30 @@ class KindCapability:
     probe_available: Callable[[], bool]
 
 
+ATTRIBUTION_REQUESTED_ONLY = "requested-only"
+ATTRIBUTION_RUNTIME_REPORTED = "runtime-reported"
+
+
+def attribution_for(reported_model: str | None) -> str:
+    """Classify a result from the model identifier returned at runtime."""
+    return (
+        ATTRIBUTION_RUNTIME_REPORTED
+        if reported_model
+        else ATTRIBUTION_REQUESTED_ONLY
+    )
+
+
+def stamp_attribution(result: "ProviderResult") -> "ProviderResult":
+    """Stamp a run-scoped result beside its run identity fields.
+
+    Flat results never carry this record-only key. Readers treat both
+    attribution fields as optional and derive the classification from
+    ``reported_model``.
+    """
+    result.model_attribution = attribution_for(result.reported_model)
+    return result
+
+
 # =============================================================================
 # Normalized result shape (Step 1.0 / 1.1) — the ONE shape both seat kinds use
 # =============================================================================
@@ -91,6 +115,10 @@ class ProviderResult:
     # writer populates this when the resolved channel is known.
     channel: str | None = None
 
+    # OPTIONAL runtime model report and its run-scoped derived attribution.
+    reported_model: str | None = None
+    model_attribution: str | None = None
+
     # OPTIONAL continuation fields.  The structured outcome is the classifier's
     # input; a chain-store PERSIST writes the classified
     # continuation.conversation_id, while the flat continuation_id is the
@@ -105,7 +133,8 @@ class ProviderResult:
 
         Mirrors the ``models.py`` convention (``asdict(self)``) BUT drops each
         optional field (``repaired_output``, ``run_id``, ``target_sha256``,
-        ``action_id``, ``attempt_id``, ``channel``, ``continuation``,
+        ``action_id``, ``attempt_id``, ``channel``, ``reported_model``,
+        ``model_attribution``, ``continuation``,
         ``continuation_id``) when
         it is None, so an un-repaired/un-stamped seat's JSON keeps the
         byte-identical SIX-field shape existing consumers expect. The CLI/render
@@ -117,7 +146,8 @@ class ProviderResult:
         d = dataclasses.asdict(self)
         for opt in (
             "repaired_output", "run_id", "target_sha256",
-            "action_id", "attempt_id", "channel", "continuation", "continuation_id",
+            "action_id", "attempt_id", "channel", "reported_model",
+            "model_attribution", "continuation", "continuation_id",
         ):
             if getattr(self, opt) is None:
                 d.pop(opt, None)
@@ -194,6 +224,17 @@ class ProviderResult:
         attempt_id = None if atid is None else str(atid)
         channel_value = d.get("channel")
         channel = None if channel_value is None else str(channel_value)
+        reported_value = d.get("reported_model")
+        reported_model = None if reported_value is None else str(reported_value)
+        # A stamp is a run-scoped record field. Derive it for run-scoped reads
+        # and for records that explicitly carry the field, while keeping flat
+        # result reserialization free of a run-only key.
+        run_scoped = run_id is not None or target_sha256 is not None
+        model_attribution = (
+            attribution_for(reported_model)
+            if run_scoped or "model_attribution" in d
+            else None
+        )
 
         continuation_data = d.get("continuation")
         continuation = None
@@ -218,6 +259,8 @@ class ProviderResult:
                    error=error, elapsed=elapsed, repaired_output=repaired_output,
                    run_id=run_id, target_sha256=target_sha256, channel=channel,
                    action_id=action_id, attempt_id=attempt_id,
+                   reported_model=reported_model,
+                   model_attribution=model_attribution,
                    continuation=continuation, continuation_id=continuation_id)
 
 

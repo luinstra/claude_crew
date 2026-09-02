@@ -18,9 +18,18 @@ like ``2026.06.24-...`` with NO literal "cursor", so the date-stamp regex is the
 load-bearing check).
 
 CLI signature (read-only review default):
-    agent --print --mode plan --sandbox enabled --trust --workspace <cwd> --model <model> <prompt>
+    agent --print --mode plan --output-format stream-json --sandbox enabled --trust --workspace <cwd> --model <model> <prompt>
 ``--mode plan`` is the read-only enforcement (see ``run``): it applies no edits,
-which plain ``--print`` does NOT guarantee. Dropped only for workspace-write.
+which plain ``--print`` does NOT guarantee. The stream-json output captures the
+runtime-reported model; both stream branches use the terminal result when one
+is present, otherwise joined assistant text, with ANSI removed and no other
+normalization. The text printer's trailing linefeed is not synthesized. Every
+read-only run pays one ``agent --help`` capability probe, capped at 10 seconds
+and memoized per process; that probe time is excluded from the seat's elapsed
+value. A binary whose help advertises stream-json but prints plain text at exit
+0 falls back to raw text with no reported model; terminal error results and
+mixed-session streams fail the seat with named diagnostics.
+Dropped only for workspace-write.
 """
 
 from __future__ import annotations
@@ -29,6 +38,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import time
 from dataclasses import dataclass
 
@@ -54,9 +64,16 @@ _ARG_MAX_BYTES = 256 * 1024
 # not a "cursor" substring, is what positively identifies the binary.
 _VERSION_DATESTAMP_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}-")
 
-# Per-process continuation capability memo, keyed by the resolved agent binary.
-_CONTINUATION_PROBE_CACHE: dict[str, bool] = {}
+# Per-process help capability memo, keyed by the resolved agent binary.
+_HELP_PROBE_CACHE: dict[str, "_HelpFacts"] = {}
 PROBE_TIMEOUT = 10
+
+
+@dataclass(frozen=True)
+class _HelpFacts:
+    resume: bool
+    output_format: bool
+    stream_json: bool
 
 
 @dataclass(frozen=True)
@@ -64,10 +81,20 @@ class _CursorStream:
     session_id: str | None
     mismatched_id: str | None
     ids_mismatched: bool
+    model: str | None
     terminal_seen: bool
     terminal_success: bool
     terminal_result: str
+    terminal_error: str
     assistant_deltas: str
+    events: int
+
+
+@dataclass(frozen=True)
+class _StreamClassification:
+    output: str
+    error: str | None
+    auth_failure: bool = False
 
 
 _valid_resume_id = valid_conversation_id
@@ -75,7 +102,7 @@ _valid_resume_id = valid_conversation_id
 
 def _reset_probe_cache_for_tests() -> None:
     # Test-only reset for isolation of the module-level probe cache.
-    _CONTINUATION_PROBE_CACHE.clear()
+    _HELP_PROBE_CACHE.clear()
 
 
 def _text_from_value(value: object) -> str:
@@ -137,6 +164,90 @@ def _auth_failure_marker(text: str) -> str | None:
         if marker in low:
             return marker
     return None
+
+
+def _stream_text(stream: _CursorStream) -> str:
+    """Return terminal result text, or joined assistant text without trimming."""
+    text = stream.terminal_result if stream.terminal_seen else stream.assistant_deltas
+    return _strip_ansi(text)
+
+
+def _has_json_object_line(stdout: str) -> bool:
+    """Return whether any nonempty stdout line parses as a JSON object."""
+    for line in (stdout or "").splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(event, dict):
+            return True
+    return False
+
+
+def _classify_stream(
+    stream: _CursorStream,
+    *,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+) -> _StreamClassification:
+    """Apply one failure and output policy to every parsed Cursor stream."""
+    output = _stream_text(stream)
+    stderr_clean = _strip_ansi(stderr).strip()
+    scan_text = output if stream.events else _strip_ansi(stdout)
+    auth_marker = _auth_failure_marker(
+        scan_text + stderr_clean + stream.terminal_error
+    )
+    if auth_marker is not None:
+        return _StreamClassification(
+            output=output,
+            error=(
+                f"Cursor Agent authentication required (detected: {auth_marker!r}). "
+                "Sign in at cursor.com/login."
+            ),
+            auth_failure=True,
+        )
+    if returncode != 0:
+        return _StreamClassification(
+            output=output,
+            error=(
+                f"agent exited with code {returncode}. "
+                f"stderr: {stderr_clean[:500]}"
+            ),
+        )
+    if stream.events == 0 and stdout.strip():
+        if _has_json_object_line(stdout):
+            return _StreamClassification(
+                output="",
+                error=(
+                    "no recognized stream-json events at exit 0; stdout head: "
+                    f"{_strip_ansi(stdout)[:200]!r}"
+                ),
+            )
+        return _StreamClassification(output=_strip_ansi(stdout), error=None)
+    if stream.terminal_seen and not stream.terminal_success:
+        error = "agent reported an error result at exit 0"
+        if stream.terminal_error:
+            error += f": {stream.terminal_error[:500]}"
+        if stderr_clean:
+            error += f"; stderr: {stderr_clean[:500]}"
+        return _StreamClassification(output="", error=error)
+    if not output.strip():
+        error = "agent returned empty output at exit 0"
+        if stderr_clean:
+            error += f"; stderr: {stderr_clean[:500]}"
+        return _StreamClassification(output="", error=error)
+    return _StreamClassification(output=output, error=None)
+
+
+def _stream_identity_error(stream: _CursorStream) -> str:
+    """Describe a stream that mixed events from more than one session."""
+    return (
+        "agent stream session ID mismatch: "
+        f"expected {stream.session_id!r}, encountered {stream.mismatched_id!r}"
+    )
 
 
 class CursorProvider(Provider):
@@ -209,29 +320,56 @@ class CursorProvider(Provider):
         path = shutil.which("agent")
         if not path:
             return False
-        cached = _CONTINUATION_PROBE_CACHE.get(path)
-        if cached is not None:
-            return cached
-        supported = self._probe_continuation(path)
-        _CONTINUATION_PROBE_CACHE[path] = supported
-        return supported
+        facts = self._probe_help(os.path.realpath(path))
+        return facts.resume and facts.output_format and facts.stream_json
+
+    def _supports_stream_json_runtime(self) -> bool:
+        path = shutil.which("agent")
+        if not path:
+            return False
+        facts = self._probe_help(os.path.realpath(path))
+        return facts.output_format and facts.stream_json
 
     @staticmethod
-    def _probe_continuation(path: str) -> bool:
+    def _probe_help(path: str) -> _HelpFacts:
+        cached = _HELP_PROBE_CACHE.get(path)
+        if cached is not None:
+            return cached
         try:
             probe = run_reaped([path, "--help"], timeout=PROBE_TIMEOUT)
             if probe is TIMEOUT:
-                return False
+                print(
+                    f"warning: agent --help probe timed out after {PROBE_TIMEOUT}s; "
+                    "stream-json capture and continuation are disabled for this process",
+                    file=sys.stderr,
+                )
+                facts = _HelpFacts(False, False, False)
+                _HELP_PROBE_CACHE[path] = facts
+                return facts
             returncode, stdout, stderr = probe
+            if returncode != 0:
+                print(
+                    f"warning: agent --help exited with code {returncode}; "
+                    "stream-json capture and continuation are disabled for this process",
+                    file=sys.stderr,
+                )
             help_text = (stdout or "") + (stderr or "")
-            return (
-                returncode == 0
-                and "--resume" in help_text
-                and "--output-format" in help_text
-                and "stream-json" in help_text
+            facts = _HelpFacts(
+                resume=returncode == 0 and "--resume" in help_text,
+                output_format=returncode == 0 and "--output-format" in help_text,
+                stream_json=returncode == 0 and "stream-json" in help_text,
             )
-        except OSError:
-            return False
+            _HELP_PROBE_CACHE[path] = facts
+            return facts
+        except OSError as exc:
+            print(
+                f"warning: agent --help probe failed to launch: {exc}; "
+                "stream-json capture and continuation are disabled for this process",
+                file=sys.stderr,
+            )
+            facts = _HelpFacts(False, False, False)
+            _HELP_PROBE_CACHE[path] = facts
+            return facts
 
     @staticmethod
     def _parse_stream(stdout: str) -> _CursorStream:
@@ -239,10 +377,13 @@ class CursorProvider(Provider):
         mismatched_id: str | None = None
         ids_mismatched = False
         initialized = False
+        model: str | None = None
         terminal_seen = False
         terminal_success = False
         terminal_result = ""
+        terminal_error = ""
         assistant_deltas: list[str] = []
+        events = 0
 
         for line in (stdout or "").splitlines():
             line = line.strip()
@@ -269,9 +410,13 @@ class CursorProvider(Provider):
                     initialized = True
                     if _valid_resume_id(event_id):
                         session_id = event_id
+                    reported = event.get("model")
+                    if isinstance(reported, str) and reported:
+                        model = reported
 
             if not (is_init or is_assistant or is_result):
                 continue
+            events += 1
 
             if is_assistant:
                 delta = _text_from_value(event.get("delta"))
@@ -293,15 +438,23 @@ class CursorProvider(Provider):
                 )
                 if terminal_success:
                     terminal_result = _text_from_value(event.get("result"))
+                else:
+                    terminal_error = (
+                        _text_from_value(event.get("result"))
+                        or _text_from_value(event.get("error"))
+                    )
 
         return _CursorStream(
             session_id=session_id,
             mismatched_id=mismatched_id,
             ids_mismatched=ids_mismatched,
+            model=model,
             terminal_seen=terminal_seen,
             terminal_success=terminal_success,
             terminal_result=terminal_result,
+            terminal_error=terminal_error,
             assistant_deltas="".join(assistant_deltas),
+            events=events,
         )
 
     def run(
@@ -335,6 +488,7 @@ class CursorProvider(Provider):
         requested_resume_id = continuation.conversation_id if want_continuation else None
 
         capable = False
+        stream_enabled = False
         phase = "fresh"
         capability = "unsupported"
 
@@ -347,6 +501,7 @@ class CursorProvider(Provider):
             failure: str = "none",
             conversation_id: str | None = None,
             continuation_id: str | None = None,
+            reported_model: str | None = None,
         ) -> ProviderResult:
             values = {
                 "name": self.name,
@@ -355,6 +510,7 @@ class CursorProvider(Provider):
                 "output": output,
                 "error": error,
                 "elapsed": time.monotonic() - start,
+                "reported_model": reported_model,
             }
             if want_continuation:
                 values["continuation"] = ContinuationOutcome(
@@ -397,6 +553,13 @@ class CursorProvider(Provider):
                 continuation_id=None,
             )
         capable = want_continuation and self._supports_continuation_runtime()
+        if sandbox != "workspace-write":
+            probe_start = time.monotonic()
+            stream_supported = self._supports_stream_json_runtime()
+            start += time.monotonic() - probe_start
+        else:
+            stream_supported = False
+        stream_enabled = capable or stream_supported
         resume_id = requested_resume_id if capable else None
         phase = "resume" if resume_id is not None else "fresh"
         capability = "supported" if capable else "unsupported"
@@ -439,7 +602,7 @@ class CursorProvider(Provider):
                 cmd += ["--force"]
             if dispatch_options.get("approve_mcps") is True:
                 cmd += ["--approve-mcps"]
-        if capable:
+        if stream_enabled:
             cmd += ["--output-format", "stream-json"]
         cmd += [
             "--sandbox", "enabled", "--trust",
@@ -470,39 +633,24 @@ class CursorProvider(Provider):
                 if stream.ids_mismatched
                 else stream.session_id
             )
-            if stream.terminal_seen:
-                output = stream.terminal_result if stream.terminal_success else ""
-            else:
-                output = stream.assistant_deltas
-            output = _strip_ansi(output).strip()
-            stderr_clean = _strip_ansi(proc_stderr).strip()
-            auth_marker = _auth_failure_marker(output + stderr_clean)
-            if auth_marker is not None:
+            classification = _classify_stream(
+                stream,
+                returncode=returncode,
+                stdout=proc_stdout,
+                stderr=proc_stderr,
+            )
+            if classification.error is not None:
                 return make_continuation_result(
                     ok=False,
-                    output=output,
-                    error=(f"Cursor Agent authentication required (detected: {auth_marker!r}). "
-                           "Sign in at cursor.com/login."),
+                    output=classification.output,
+                    error=classification.error,
                     failure="error",
+                    conversation_id=(
+                        None if classification.auth_failure else reported_id
+                    ),
+                    reported_model=stream.model,
                 )
-            if returncode != 0:
-                return make_continuation_result(
-                    ok=False,
-                    output="",
-                    error=stderr_clean or f"agent exited with code {returncode}",
-                    failure="error",
-                    conversation_id=reported_id,
-                )
-
-            if not output:
-                return make_continuation_result(
-                    ok=False,
-                    output="",
-                    error=("agent returned empty stream result at exit 0"
-                           + (f"; stderr: {stderr_clean[:500]}" if stderr_clean else "")),
-                    failure="error",
-                    conversation_id=reported_id,
-                )
+            output = classification.output
 
             failure = "none"
             if (
@@ -522,6 +670,39 @@ class CursorProvider(Provider):
                 failure=failure,
                 conversation_id=reported_id,
                 continuation_id=persisted_id,
+                reported_model=stream.model,
+            )
+
+        if stream_enabled:
+            parsed = self._parse_stream(proc_stdout)
+            if parsed.ids_mismatched:
+                return make_continuation_result(
+                    ok=False,
+                    output="",
+                    error=_stream_identity_error(parsed),
+                    failure="error",
+                    reported_model=None,
+                )
+            classification = _classify_stream(
+                parsed,
+                returncode=returncode,
+                stdout=proc_stdout,
+                stderr=proc_stderr,
+            )
+            if classification.error is not None:
+                return make_continuation_result(
+                    ok=False,
+                    output=classification.output,
+                    error=classification.error,
+                    failure="error",
+                    reported_model=parsed.model,
+                )
+            return make_continuation_result(
+                ok=True,
+                output=classification.output,
+                error=None,
+                continuation_id=None,
+                reported_model=parsed.model,
             )
 
         raw_output = _strip_ansi(proc_stdout)

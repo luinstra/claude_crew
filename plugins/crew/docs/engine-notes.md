@@ -237,34 +237,28 @@ prep calls a subprocess seat, `crew run` has to be willing to run.
 **The workflow decides per SEAT (`review_workflow.native_channel_for`).** A
 channel-level answer is too coarse here. At `host=cursor` every `via=["cursor"]`
 seat would resolve native, including one pinned to `auto`, and the run would
-freeze it as `kind=task` before anything asked whether its answer could be
-attributed to a model,
+freeze it as `kind=task` before anything checked its native pin,
 then issue a native action with no role to spawn. So `review_workflow` computes
-the declared route per seat: the host's native channel when the host can NAME
-that seat's model, otherwise none. `channels` answers "is this channel native
+the declared route per seat: the host's native channel when the seat has a
+native pin, otherwise none. `channels` answers "is this channel native
 on this host"; `review_workflow` answers "can this workflow drive a native
 action for this seat", which depends on the host role table (`_HOST_ROLES`: the
-reviewer role name plus `unattributable_models`, the run-time aliases such as
-`auto` that the host echoes back instead of naming a model) and so cannot live
+reviewer role name plus `native_pin_field`, which is `model` on Claude and
+`native_model` on Cursor) and so cannot live
 anywhere else without moving review policy out of the engine. There is no
-per-model allowlist: the reviewer role file pins no model, so `seats.toml` is
-the one place a cursor seat's model is declared and a repin needs no second
-edit.
+per-model allowlist: the reviewer role file pins no model, so `seats.toml`
+supplies both surface-specific fields: `model` for the CLI route and
+`native_model` for the Cursor Task route. Those pins are independent and must
+be repinned independently.
 
-**A seat whose model cannot be attributed is warned about and dropped, not
-rerouted.** A
-cursor-channel seat that resolves external on a Cursor host has nowhere to go
-under review's routing policy: a channel the host drives in-session is not also
-opened as a subprocess from resolution. That is a choice, not a capability
-limit. The `cursor-agent` CLI is installed and authenticated inside Cursor (the
-live capture records it running there); what resolution declines to do is pick
-it for a channel this host drives natively. Such a seat gets one warning naming the seat and
-its model and is removed from the roster BEFORE the identity freeze, so
-`run.json` records only seats that run and the quorum denominator counts only
-them. A roster reduced to zero fails with the existing `no_seats` error rather
-than starting an empty review. The alternative, keeping the seat and letting it
-fail at execute, would have spent a provider call to learn something resolution
-already knew.
+**Native admission keys on `native_model`, not runtime attribution.** A
+cursor-channel seat without a native pin is warned about and dropped before the
+identity freeze, rather than being rerouted. A seat with a native pin resolves
+to the host-native Task route; the shipped `cursor-composer` seat uses
+`composer-2.5-fast`. A Cursor host does not also open that channel as a
+subprocess during resolution, so a native seat has no CLI fallback. A roster
+reduced to zero fails with the existing `no_seats` error rather than starting
+an empty review.
 
 The role names, the two support-role models, and the channel come from one
 literal `_HOST_ROLES` table beside `_reviewer_action`, which replaced five
@@ -281,8 +275,8 @@ row (codex, unknown) drives no native work, which is exactly what
 no route on this host" is asked in exactly one place (`has_no_route_here`) by
 both the roster resolver and the drift reconstruction. Two copies of that
 question is how a stale EXTERNAL cursor action survived on a Cursor host: the
-per-seat native declaration returns `None` both for an unattributable model and for a
-host with no native channel at all, so the drift check could not tell the two
+per-seat native declaration returns `None` both for a seat without
+`native_model` and for a host with no native channel at all, so the drift check could not tell the two
 apart and re-ran an action against a CLI this host does not use for its own
 channel. Downstream of resolution, the reviewer and formatter mints REFUSE
 (`unresolved_native_role`) before preparing any path when a native action's role
@@ -309,7 +303,7 @@ account's current enablement as a permanent design fact, which is exactly what
 the P8 evidence says it is not.
 
 The formatter is the ONE action that changes route this way; a SEAT never does.
-A seat's answer is attributed to the model that gave it, so `channels` never
+A seat's answer belongs to the model that gave it, so `channels` never
 reroutes a resolved seat once it starts and a lost native reviewer settles
 FAILED rather than moving transports. The formatter only reshapes an answer
 already given, and its output must still satisfy `findings.parse_seat` before it
@@ -378,12 +372,11 @@ that may hold for a certainty that they cannot. Verified-elsewhere is not the
 same as usable-here. The assumptions were expected to fail LOUDLY (a seat
 refused at spawn settles failed and the digest names it). The 2026-08-25 app
 runs qualified that: a refusal is loud, but the same slug was also accepted
-once with its answering model unobserved, so a native spawn can succeed
-unattributed. The attribution gate is therefore the app's per-subagent model
-badge, which `docs/cursor-host.md` now requires reading after every native
-spawn; whether that gate moves into the driver or cursor seats move to per-file
-bracket pins is the open seat-pin decision recorded there, and the
-default-native trade is reconsidered under that decision, not here. The cost of
+once with its answering model unobserved, so a native spawn can succeed without
+a runtime report. The attribution gate is now a non-gating runtime stamp:
+external stream-json captures `init.model` as `reported_model`, and the digest
+renders the derived `model_attribution` without changing quorum. The
+surface-specific pin decision is recorded in `docs/cursor-host.md`, and the cost of
 being wrong is still one panel, recoverable by naming the channel in the
 opt-out. So the default optimizes for the host that has to use
 it, and `crew review` prints one stderr note there naming
@@ -399,15 +392,14 @@ channel forced external the formatter mints on the parent-context route directly
 rather than being minted native and needing a recovery call every run, and the
 scribe never mints at all because it rides only a native reviewer action.
 
-The consequence to state plainly is a SETUP one, not a code defect. A seat model
-that the host can name but that its subagent surface does not offer (the family
-not enabled, or the pin not the variant slug the Task path accepts, such as
-`composer-2.5` where it offers `composer-2.5-fast`) resolves native, is issued
-native, and is refused at spawn (the drop rule cannot catch it,
-because the drop keys on attributability, not on enablement). On an
-account where none of the seat models are enabled, every cursor-channel seat
-takes that path, so a cursor-only panel returns nothing usable. Enabling those
-models in Cursor is the mitigation; there is no CLI fallback for a native seat.
+The consequence to state plainly is a SETUP one, not a code defect. The shipped
+`native_model` pin is `composer-2.5-fast`; the Cursor Task surface still must
+offer that exact variant for the account. A cursor seat without that pin is
+warned and dropped before the signature freeze, leaving only its external CLI
+route. A pinned seat whose family or variant is unavailable resolves native,
+is issued native, and can be refused at spawn. There is no CLI fallback after a
+native seat is issued, so a cursor-only panel with no available pinned seat
+returns nothing usable. Enabling the families in Cursor is the mitigation.
 
 **Finish or abandon an in-flight standalone review before adopting these bytes,
 on EVERY host, Claude included.** Two guards catch a run frozen by an older
@@ -424,9 +416,54 @@ A Cursor host has two further in-flight cases of its own (a run frozen
 `host=unknown`, and one frozen `host=cursor` with external seats); they are in
 `docs/cursor-host.md`, because only that host can reach them.
 
-There is no per-model reviewer map. The reviewer role file pins no model, so
-admission asks only whether the host can NAME the model: a config `model`
-override to any concrete string keeps its seat native, a repin needs no second
-edit, and `seats.toml` stays the one place a cursor seat's model is declared.
-`auto` is excluded (`CURSOR_UNATTRIBUTABLE_MODELS`): it names no concrete
-model, so nothing can attribute the answer to one.
+### Native pins are a second field, and attribution is stamped rather than gated
+
+The host role table names the reviewer role and the field that supplies an
+in-session pin. `HostRoles.native_pin` returns `model` on Claude and
+`native_model` on Cursor. An unset Cursor `native_model` means no native route,
+so resolution warns and drops the seat; `auto` is refused at catalog load.
+Duplicate Cursor seats at one native pin drop the later seat in resolution
+order. The frozen signature key remains `model`, and it records the pin the
+seat actually spends. `_spent_model`, `task_seat_models`, and the reviewer
+action all use that value. The support pin stays host-level at
+`composer-2.5-fast`, the two support role files carry no model frontmatter,
+and an in-session execution without a pin is refused before any run directory
+exists.
+
+External Cursor results capture `system/init.model` as raw `reported_model`
+through stream-json on the read-only branch. Both stream branches use one
+extraction rule: terminal result text wins when a terminal result was seen,
+otherwise joined assistant text is used, ANSI is stripped, and no other
+normalization is added. The text printer's trailing linefeed is not reproduced.
+The model report is retained on failures when the init event arrived and is
+never compared with the requested pin.
+
+`model_attribution` is derived from `reported_model`: a non-empty report is
+`runtime-reported`, otherwise it is `requested-only`. The pair is stamped on
+run-scoped result files beside `run_id` and `target_sha256`, copied onto
+reviewer actions at external settle and reviewer recovery, and rendered in the
+digest. Native reviewer actions are `requested-only` at mint. The fields are
+optional on read, and flat results may carry `reported_model` but never the
+stamp. The validator rejects a stored run-scoped stamp that disagrees with its
+derivation. Formatter and synthesis actions remain unchanged. Quorum continues
+to use `ok` only: the attributed count is display-only and never gates a panel.
+
+The rejected alternatives each fail for a concrete reason. A seat with no
+native pin has no permitted native route on the policy-forbidden-CLI machine,
+so resolution drops it. Bracket pins in frontmatter use a surface that
+silently substitutes. Excluding unreported seats from the quorum numerator
+would create two quorum consumers that must agree forever and would make the
+real panel routinely fail. A verified-pin tier or ledger could stamp a later
+run from a past session's observation. `--observed-model` on submit is
+unfillable for unattended work. A mismatch branch is dead on native and fuzzy
+on external. Digit-suffix and strict-prefix heuristics are speculative once
+the badge-verified pin is the contract. Deriving the support pin from a seat
+row makes the formatter disappear when no Cursor reviewer is in the roster.
+Stamping flat results would make a claim about no run.
+
+One known cost is left visible: a native-only roster of one seat meets strict
+majority quorum trivially because `len(expected) // 2 + 1` is 1. The digest's
+attributed count is the available signal, and no arbitrary floor is added.
+An in-flight standalone run frozen before these bytes fails action validation
+at its next command because the action key set is exact. Finish or abandon it
+first, then start a fresh review.

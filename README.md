@@ -18,9 +18,9 @@ A Claude Code plugin for persistence, specialized agents, and tech-stack guidanc
 
 Standalone `/crew:review` is backed by one Python-owned workflow protocol in
 Claude Code and Cursor. Both may use native reviewer Tasks: Claude for its
-Claude voice seats, Cursor for the cursor-channel seats whose model it can
-name (a cursor seat pinned to a run-time alias such as `auto` is warned about
-and dropped from the panel, never rerouted). Phase 1 also covers Codex-host all-external
+Claude voice seats, Cursor for cursor-channel seats whose `native_model` is
+set (the shipped composer seat uses `composer-2.5-fast`; a seat without one
+is warned about and dropped from the panel, never rerouted). Phase 1 also covers Codex-host all-external
 protocol compatibility deterministically through the Python CLI, but the Codex
 plugin does not yet expose standalone `/crew:review`; its app-native adapter
 remains deferred.
@@ -268,7 +268,7 @@ routine work.
 
 `full` is the **built-in** default panel. An optional, personal per-repo
 `.crew/config.toml` (already gitignored under `.crew/`) can override that default, tune per-seat
-models (plus codex `reasoning_effort`, agy `print_timeout`) and the
+models (plus cursor `native_model`, codex `reasoning_effort`, agy `print_timeout`) and the
 NON-DISPATCH `[tuning].timeout` (raw standalone-review resolution plus the
 ordinary council/run/probe seat wall clock),
 while dispatch WORK has its own `[dispatch].timeout` wall-clock (default 1800
@@ -348,6 +348,9 @@ resume_executor = true             # default ON; codex/cursor reuse conversation
 [seats.codex]
 model = "gpt-5.5"
 reasoning_effort = "high"
+
+[seats.cursor-composer]
+native_model = "composer-2.5-fast"
 
 [seats.agy-gemini]                # no shipped seat rides the agy channel; declaring one is how it runs
 via = ["agy"]
@@ -456,10 +459,11 @@ for ad-hoc calls — never raw `agy -p` / `codex exec`.**
 
 Attended cleanup of stale crew artifacts under the project `.crew/`: orphaned
 review-run dirs (no active loop, current-run/current-standalone-review pointer,
-or nonterminal/ambiguous standalone workflow names or protects them) and stale
-debate dirs (past the 1-day threshold, no synthesis). It is DRY-RUN by default,
-modelled on `git clean -n`: with no flag it only lists what it would remove, so
-reading the list is the safety step.
+or nonterminal/ambiguous standalone workflow names or protects them), stale
+debate dirs (past the 1-day threshold, no synthesis), and probe captures (past
+the 7-day threshold). It is DRY-RUN by default, modelled on `git clean -n`:
+with no flag it only lists what it would remove, so reading the list is the
+safety step. `--yes` rmtrees directory candidates and unlinks probe captures.
 
 ```bash
 # list candidates, delete nothing (default)

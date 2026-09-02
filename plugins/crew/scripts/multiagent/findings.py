@@ -33,7 +33,21 @@ from dataclasses import dataclass, field
 
 from state_discovery import crew_base  # the ONE `.crew` / project-root resolver
 from . import render
-from .providers import ProviderResult
+from .providers import (
+    ATTRIBUTION_RUNTIME_REPORTED,
+    ProviderResult,
+    attribution_for,
+)
+
+
+def _one_line(text: str) -> str:
+    """Escape controls so runtime model text remains one safe display line."""
+    bounded = text[:80]
+    return re.sub(
+        r"[\x00-\x1f\x7f]",
+        lambda match: f"\\x{ord(match.group()):02x}",
+        bounded,
+    )
 
 
 # =============================================================================
@@ -462,6 +476,7 @@ def render_digest(
     results: list[ProviderResult],
     repo_root: str | None = None,
     quorum: tuple[int, int] | None = None,
+    usable_seats: set[str] | None = None,
 ) -> str:
     """Render the grouped panel digest. Falls back to the byte-faithful
     ``render.render_panel`` when NO seat is findings-parsed.
@@ -477,14 +492,32 @@ def render_digest(
     completion verb (build.md / measure-twice.md) carry the --force guidance. The
     header prepends in the no-parse fallback
     too (the quorum facts hold regardless of parseability); with ``quorum``
-    omitted, output is byte-identical to before the header existed.
+    omitted, no header is added. When given,
+    the header also reports the number of successful results whose runtime
+    model report is non-empty. That display-only count is separate from the
+    caller-supplied usable count, and the quorum threshold never uses it. If
+    any seat has a runtime-reported model, each non-skipped verdict row carries
+    either ``[runtime-reported: ...]`` with control characters
+    escaped by ``_one_line`` or ``[requested-only]``. Otherwise rows have no
+    attribution suffix.
     """
     prefix = ""
     if quorum is not None:
         launched, usable = quorum
         threshold = launched // 2 + 1
+        usable_names = (
+            usable_seats
+            if usable_seats is not None
+            else {result.name for result in results if result.ok}
+        )
+        attributed = len({
+            result.name
+            for result in results
+            if result.ok and result.name in usable_names
+            and attribution_for(result.reported_model) == ATTRIBUTION_RUNTIME_REPORTED
+        })
         hdr = [
-            f"PANEL: {launched} launched · {usable} usable · quorum "
+            f"PANEL: {launched} launched · {usable} usable · {attributed} attributed · quorum "
             f"{threshold}: {'MET' if usable >= threshold else 'NOT MET'}"
         ]
         if usable < threshold:
@@ -493,6 +526,10 @@ def render_digest(
             )
         prefix = "\n".join(hdr) + "\n\n"
 
+    has_runtime_reported = any(
+        attribution_for(result.reported_model) == ATTRIBUTION_RUNTIME_REPORTED
+        for result in results
+    )
     parses = [parse_seat(r) for r in results]
     parsed_idx = [i for i, p in enumerate(parses) if p.findings_parsed]
 
@@ -530,7 +567,15 @@ def render_digest(
         else:
             vlabel = "(unparsed)"
         conf = f"  ({p.confidence})" if p.confidence else ""
-        lines.append(f"- {r.name}  {vlabel}{conf}")
+        if render.is_skipped(r):
+            attribution = ""
+        elif attribution_for(r.reported_model) == ATTRIBUTION_RUNTIME_REPORTED:
+            attribution = f"  [runtime-reported: {_one_line(r.reported_model or '')}]"
+        elif has_runtime_reported:
+            attribution = "  [requested-only]"
+        else:
+            attribution = ""
+        lines.append(f"- {r.name}  {vlabel}{conf}{attribution}")
     lines.append(f"Tally: {n_appr} APPROVED / {n_rev} REVISE   (roster = {R} ran)")
     lines.append("")
 

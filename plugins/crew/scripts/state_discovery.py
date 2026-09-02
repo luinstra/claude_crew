@@ -9,6 +9,7 @@ from pathlib import Path
 import json
 import os
 import sys
+from typing import Literal, overload
 
 
 _warned: set[str] = set()
@@ -36,23 +37,72 @@ def cwd_reanchored() -> bool:
     )
 
 
-def crew_base() -> Path:
+def _payload_root(payload: object | None) -> Path | None:
+    if not isinstance(payload, dict):
+        return None
+    candidates: list[Path] = []
+    roots = payload.get("workspace_roots")
+    if isinstance(roots, list):
+        for value in roots:
+            if isinstance(value, str) and value:
+                candidates.append(Path(value))
+    for key in ("directory", "cwd"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            candidates.append(Path(value))
+    for root in candidates:
+        if not root.is_dir():
+            continue
+        if _should_reanchor(None, root):
+            drifted = root
+            while root.name == ".crew" and root.parent != root:
+                root = root.parent
+            _warn_once(
+                f"payload-root:{drifted}",
+                f"payload root {drifted} ends in .crew; using {root} as the project root.",
+            )
+        return root
+    return None
+
+
+@overload
+def crew_base(
+    payload: object | None = None, *, fallback_to_cwd: Literal[True] = True
+) -> Path: ...
+
+
+@overload
+def crew_base(
+    payload: object | None = None, *, fallback_to_cwd: Literal[False]
+) -> Path | None: ...
+
+
+def crew_base(
+    payload: object | None = None, *, fallback_to_cwd: bool = True
+) -> Path | None:
     """THE one project-root resolver every `.crew` path derives from, so the
     state layer and the review engine cannot resolve `.crew` to different trees.
 
-    Returns ``CLAUDE_PROJECT_DIR`` when set (hooks get it), else the process cwd.
-    The env var is NOT set in the Bash-tool subprocess, so cwd is the real
-    fallback for every crew CLI call. On that fallback ONLY, a cwd that is itself
+    Returns ``CLAUDE_PROJECT_DIR`` when set, then the first usable root in a hook
+    payload, else the process cwd when ``fallback_to_cwd`` is true. The env var is
+    NOT set in the Bash-tool subprocess, so cwd is the real fallback for every
+    crew CLI call. On that fallback ONLY, a cwd that is itself
     a terminal `.crew` artifact dir re-anchors to its parent (warn once): crew
-    never roots a project inside its own `.crew`. One identical fallback for every
-    caller: no hint, no override env var, because a second knob is a second way for
-    the two layers to disagree.
+    never roots a project inside its own `.crew`. The optional payload supplies hook
+    roots, and ``fallback_to_cwd=False`` reserves a fail-closed result for callers
+    that require an explicit root. Otherwise the process cwd remains the final
+    fallback, with no second root knob for the state and review layers to disagree.
     """
     # EMPTY string is treated as UNSET (falls to the cwd branch), preserving the
     # old `... or os.getcwd()` truthiness exactly; only a truthy value short-circuits.
     explicit = os.environ.get("CLAUDE_PROJECT_DIR")
     if explicit:
         return Path(explicit)
+    payload_root = _payload_root(payload)
+    if payload_root is not None:
+        return payload_root
+    if not fallback_to_cwd:
+        return None
     cwd = Path(os.getcwd())
     # Drift signature: the Bash-tool cwd PERSISTS across calls, so an earlier
     # `cd <root>/.crew` (or the `.crew/.crew` this bug mints) leaves cwd terminal-

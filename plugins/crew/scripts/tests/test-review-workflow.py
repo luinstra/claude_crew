@@ -65,12 +65,14 @@ class _Provider:
         name: str = "codex",
         returned_name: str | None = None,
         returned_model: str | None = None,
+        reported_model: str | None = None,
     ) -> None:
         self.ok = ok
         self.output = output
         self.name = name
         self.returned_name = returned_name
         self.returned_model = returned_model
+        self.reported_model = reported_model
         self.calls = 0
         self.models: list[str | None] = []
 
@@ -91,6 +93,7 @@ class _Provider:
             self.output if self.ok else "",
             None if self.ok else "seat failed",
             0.01,
+            reported_model=self.reported_model,
         )
 
 
@@ -632,6 +635,16 @@ class ReviewWorkflowTest(unittest.TestCase):
         step = driver.start(str(self.plan), seats=seat, timeout_seconds=1)
         reviewer = step.work_items[0]
         self.assertEqual(reviewer.driver, "native")
+        run, workflow = self._workflow(step)
+        action = next(
+            candidate
+            for candidate in workflow["actions"]
+            if candidate["action_id"] == reviewer.action_id
+        )
+        self.assertEqual(
+            (action["model_attribution"], action.get("reported_model")),
+            ("requested-only", None),
+        )
         self.assertEqual(driver.claim(step.ref, reviewer.action_id).authorization, "spawn")
 
         def submit(item, content: str, *, judgment=None):
@@ -653,6 +666,18 @@ class ReviewWorkflowTest(unittest.TestCase):
             return driver.submit(str(submission))
 
         synthesis_step = submit(reviewer, VALID_REVIEW)
+        _run, workflow = self._workflow(synthesis_step)
+        action = next(
+            candidate
+            for candidate in workflow["actions"]
+            if candidate["action_id"] == reviewer.action_id
+        )
+        self.assertEqual(
+            (action["model_attribution"], action.get("reported_model")),
+            ("requested-only", None),
+        )
+        panel = (run / "panel.md").read_text(encoding="utf-8")
+        self.assertNotIn("[requested-only]", panel)
         synthesis = next(
             item for item in synthesis_step.work_items if item.kind == "synthesis"
         )
@@ -664,6 +689,176 @@ class ReviewWorkflowTest(unittest.TestCase):
         )
         self.assertEqual(terminal.outcome["status"], "complete")
         self.assertEqual(driver.next(terminal.ref), terminal)
+
+    def test_attribution_is_stamped_and_never_changes_quorum(self) -> None:
+        def run_case(session: str, *, reported_model: str | None, ok: bool = True):
+            provider = _Provider(
+                name="codex",
+                ok=ok,
+                reported_model=reported_model,
+            )
+            with mock.patch.object(
+                review_workflow,
+                "get_provider_for_channel",
+                return_value=provider,
+            ):
+                step = self._start(
+                    seats="cursor-composer,codex",
+                    session=session,
+                )
+                native = next(item for item in step.work_items if item.driver == "native")
+                external = next(item for item in step.work_items if item.driver == "external")
+                review_workflow.claim_review_action(
+                    review_workflow.ClaimRequest(step.ref, native.action_id)
+                )
+                after_native = self._submit(step, native, VALID_REVIEW)
+                after_external = review_workflow.execute_external_review(
+                    after_native.ref,
+                    external.action_id,
+                )
+            run, workflow = self._workflow(after_external)
+            return run, workflow, external
+
+        os.environ["CREW_HOST"] = "cursor"
+        reported_run, reported_workflow, reported_item = run_case(
+            "attribution-reported", reported_model="GPT Test"
+        )
+        actions = {
+            action["seat"]: action
+            for action in reported_workflow["actions"]
+            if action["kind"] == review_workflow.ActionKind.REVIEWER
+        }
+        self.assertEqual(
+            (actions["cursor-composer"]["model_attribution"],
+             actions["cursor-composer"]["reported_model"]),
+            ("requested-only", None),
+        )
+        self.assertEqual(
+            (actions["codex"]["model_attribution"], actions["codex"]["reported_model"]),
+            ("runtime-reported", "GPT Test"),
+        )
+        raw = json.loads(Path(reported_item.result_path).read_text(encoding="utf-8"))
+        self.assertEqual(
+            (raw["model_attribution"], raw["reported_model"]),
+            ("runtime-reported", "GPT Test"),
+        )
+        self.assertEqual(
+            review_workflow._panel(reported_workflow, reported_run),
+            {"expected": 2, "usable": 2, "quorum_met": True, "pending": [], "failed": []},
+        )
+        reported_panel = (reported_run / "panel.md").read_text(encoding="utf-8")
+        self.assertTrue(
+            reported_panel.startswith("PANEL: 2 launched · 2 usable · 1 attributed · quorum 2: MET")
+        )
+        self.assertIn("[runtime-reported: GPT Test]", reported_panel)
+        self.assertIn("[requested-only]", reported_panel)
+
+        unreported_run, unreported_workflow, _unreported_item = run_case(
+            "attribution-unreported", reported_model=None
+        )
+        self.assertEqual(
+            review_workflow._panel(unreported_workflow, unreported_run),
+            review_workflow._panel(reported_workflow, reported_run),
+        )
+        unreported_panel = (unreported_run / "panel.md").read_text(encoding="utf-8")
+        self.assertTrue(
+            unreported_panel.startswith("PANEL: 2 launched · 2 usable · 0 attributed · quorum 2: MET")
+        )
+        self.assertNotIn("[requested-only]", unreported_panel)
+        codex_action = next(
+            action for action in unreported_workflow["actions"]
+            if action.get("seat") == "codex"
+            and action["kind"] == review_workflow.ActionKind.REVIEWER
+        )
+        self.assertEqual(
+            (codex_action["model_attribution"], codex_action["reported_model"]),
+            ("requested-only", None),
+        )
+
+        _failed_run, failed_workflow, _failed_item = run_case(
+            "attribution-failed", reported_model="GPT Test", ok=False
+        )
+        failed_run = self._workflow(
+            review_workflow.next_review(
+                review_workflow.parse_review_ref(failed_workflow["ref"])
+            )
+        )[0]
+        failed_panel = (failed_run / "panel.md").read_text(encoding="utf-8")
+        self.assertTrue(
+            failed_panel.startswith("PANEL: 2 launched · 1 usable · 0 attributed · quorum 2: NOT MET")
+        )
+        self.assertIn("- codex  (unparsed)", failed_panel)
+        self.assertIn("[runtime-reported: GPT Test]", failed_panel)
+
+    def test_native_actions_are_requested_only_on_every_host(self) -> None:
+        for host, seat in (("claude", "opus"), ("cursor", "cursor-composer")):
+            with self.subTest(host=host):
+                os.environ["CREW_HOST"] = host
+                driver = InMemoryReviewDriver(f"native-attribution-{host}")
+                step = driver.start(str(self.plan), seats=seat, timeout_seconds=1)
+                reviewer = step.work_items[0]
+                run, workflow = self._workflow(step)
+                action = next(
+                    item for item in workflow["actions"]
+                    if item["action_id"] == reviewer.action_id
+                )
+                self.assertEqual(
+                    (action["model_attribution"], action["reported_model"]),
+                    ("requested-only", None),
+                )
+                driver.claim(step.ref, reviewer.action_id)
+                artifact = Path(reviewer.return_transport["primary"]["ingress_path"])
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_text(VALID_REVIEW, encoding="utf-8")
+                payload = json.loads(json.dumps(reviewer.host_result_template))
+                payload["artifact"] = {
+                    "path": str(artifact),
+                    "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                }
+                submission = Path(reviewer.submission_path)
+                submission.parent.mkdir(parents=True, exist_ok=True)
+                submission.write_text(json.dumps(payload), encoding="utf-8")
+                after = driver.submit(str(submission))
+                _run, workflow = self._workflow(after)
+                action = next(
+                    item for item in workflow["actions"]
+                    if item["action_id"] == reviewer.action_id
+                )
+                self.assertEqual(
+                    (action["model_attribution"], action["reported_model"]),
+                    ("requested-only", None),
+                )
+                self.assertNotIn(
+                    "[requested-only]",
+                    (run / "panel.md").read_text(encoding="utf-8"),
+                )
+
+    def test_digest_row_escapes_a_control_character_in_reported_model(self) -> None:
+        provider = _Provider(name="codex", reported_model="GPT\nTest")
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            return_value=provider,
+        ):
+            step = self._start(session="attribution-control")
+            terminal = review_workflow.execute_external_review(
+                step.ref,
+                step.work_items[0].action_id,
+            )
+        run, workflow = self._workflow(terminal)
+        action = next(
+            item for item in workflow["actions"]
+            if item["action_id"] == step.work_items[0].action_id
+        )
+        self.assertEqual(action["reported_model"], "GPT\nTest")
+        raw = json.loads(Path(step.work_items[0].result_path).read_text(encoding="utf-8"))
+        self.assertEqual(raw["reported_model"], "GPT\nTest")
+        panel = (run / "panel.md").read_text(encoding="utf-8")
+        self.assertIn("[runtime-reported: GPT\\x0aTest]", panel)
+        self.assertEqual(
+            len([line for line in panel.splitlines() if line.startswith("- codex")]),
+            1,
+        )
 
     def test_plan_and_code_prompts_use_durable_snapshot(self) -> None:
         step = self._start()
@@ -2197,6 +2392,68 @@ class ReviewWorkflowTest(unittest.TestCase):
             ("settled", str(result_path), original_sha),
         )
 
+    def test_a_run_scoped_result_without_attribution_keys_reads_as_requested_only(self) -> None:
+        step = self._start(session="missing-attribution")
+        item = step.work_items[0]
+        result_path = Path(item.result_path)
+        orphan = ProviderResult(
+            name=item.seat,
+            model=item.model,
+            ok=True,
+            output=VALID_REVIEW,
+            error=None,
+            elapsed=0.01,
+            run_id=step.ref.run_id,
+            target_sha256=step.ref.target_sha256,
+            action_id=item.action_id,
+            attempt_id=step.ref.attempt_id,
+            channel=item.channel,
+        )
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(json.dumps(orphan.to_dict()), encoding="utf-8")
+        reconciled = review_workflow.execute_external_review(
+            step.ref,
+            item.action_id,
+        )
+        self.assertNotIn("model_attribution", json.loads(result_path.read_text()))
+        self.assertNotIn("reported_model", json.loads(result_path.read_text()))
+        _run, workflow = self._workflow(reconciled)
+        action = next(
+            candidate
+            for candidate in workflow["actions"]
+            if candidate["action_id"] == item.action_id
+        )
+        self.assertEqual(
+            (action["model_attribution"], action["reported_model"]),
+            ("requested-only", None),
+        )
+        projected = review_workflow._materialized_reviewer_result(
+            workflow, action, _run
+        )
+        self.assertEqual(
+            (projected.model_attribution, projected.reported_model),
+            ("requested-only", None),
+        )
+        next_step = review_workflow.next_review(reconciled.ref)
+        synthesis = next(
+            work for work in next_step.work_items if work.kind == "synthesis"
+        )
+        review_workflow.claim_review_action(
+            review_workflow.ClaimRequest(next_step.ref, synthesis.action_id)
+        )
+        terminal = self._submit(
+            next_step,
+            synthesis,
+            "synthesis",
+            judgment={"verdict": "APPROVED", "minor_only": False},
+        )
+        self.assertEqual(terminal.outcome["status"], "complete")
+        self.assertTrue(
+            (self._workflow(terminal)[0] / "panel.md")
+            .read_text(encoding="utf-8")
+            .startswith("PANEL: 1 launched · 1 usable · 0 attributed")
+        )
+
     def test_unavailable_result_write_observes_a_durable_exact_claim(self) -> None:
         step = self._start(session="unavailable-durable-claim")
         item = step.work_items[0]
@@ -3280,7 +3537,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         )
         self.assertEqual((run / "workflow.json").read_bytes(), before)
 
-    def test_unattributable_cursor_model_warns_and_drops_before_the_freeze(self) -> None:
+    def test_cursor_auto_without_native_model_warns_and_drops_before_the_freeze(self) -> None:
         os.environ["CREW_HOST"] = "cursor"
         stderr = io.StringIO()
         with mock.patch.object(
@@ -3291,7 +3548,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             with redirect_stderr(stderr):
                 step = self._start(
                     seats="cursor-auto,cursor-composer",
-                    session="cursor-unattributable",
+                    session="cursor-no-native",
                 )
         warnings = [
             line for line in stderr.getvalue().splitlines()
@@ -3299,6 +3556,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         ]
         self.assertEqual(len(warnings), 1, stderr.getvalue())
         self.assertIn("'auto'", warnings[0])
+        self.assertIn("native_model", warnings[0])
         run, wf = self._workflow(step)
         record = json.loads((run / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(list(record["seat_signatures"]), ["cursor-composer"])
@@ -3306,7 +3564,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         self.assertEqual([item.seat for item in step.work_items], ["cursor-composer"])
         self.assertTrue(all(item.role is not None for item in step.work_items))
 
-    def test_unattributable_cursor_seat_still_runs_external_on_a_claude_host(self) -> None:
+    def test_cursor_auto_without_native_model_still_runs_external_on_a_claude_host(self) -> None:
         os.environ["CREW_HOST"] = "claude"
         stderr = io.StringIO()
         with mock.patch.object(
@@ -3323,17 +3581,11 @@ class ReviewWorkflowTest(unittest.TestCase):
             ("cursor-auto", "external", "cursor", None),
         )
 
-    def test_config_model_override_keeps_the_seat_native(self) -> None:
-        # A config repin is just a different model string, and the reviewer role
-        # pins no model, so the seat still resolves native. The catalog stays the
-        # ONE place a cursor seat's model is declared: nothing here needs editing
-        # when a seat is repinned, which is what an allowlist used to demand (it
-        # dropped the repinned seat instead, with a warning that read like a
-        # missing role file).
+    def test_config_native_model_override_keeps_the_seat_native(self) -> None:
         os.environ["CREW_HOST"] = "cursor"
         repo_config = self.root / ".crew" / "config.toml"
         repo_config.write_text(
-            "[seats.cursor-composer]\nmodel = \"composer-2.4\"\n",
+            "[seats.cursor-composer]\nnative_model = \"composer-2.4-fast\"\n",
             encoding="utf-8",
         )
         config._reset_cache_for_tests()
@@ -3352,11 +3604,6 @@ class ReviewWorkflowTest(unittest.TestCase):
             self.assertNotIn("dropping it from this panel", stderr.getvalue())
             roles = self._cursor_roles()
             self.assertEqual(
-                roles.reviewer_role("composer-2.4"), roles.reviewer_role_name
-            )
-            # The repinned seat is still issued, in-session at its new model,
-            # rather than dropped from the panel.
-            self.assertEqual(
                 [item.seat for item in step.work_items], ["cursor-composer", "codex"]
             )
             native = next(
@@ -3364,7 +3611,50 @@ class ReviewWorkflowTest(unittest.TestCase):
             )
             self.assertEqual(
                 (native.driver, native.channel, native.role, native.model),
-                ("native", "cursor", roles.reviewer_role_name, "composer-2.4"),
+                ("native", "cursor", roles.reviewer_role_name, "composer-2.4-fast"),
+            )
+            run, workflow = self._workflow(step)
+            record = json.loads((run / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                record["seat_signatures"]["cursor-composer"],
+                {"kind": "task", "model": "composer-2.4-fast"},
+            )
+            self.assertEqual(record["task_seat_models"], {"cursor-composer": "composer-2.4-fast"})
+            self.assertEqual(
+                next(a for a in workflow["actions"] if a["seat"] == "cursor-composer")["model"],
+                "composer-2.4-fast",
+            )
+        finally:
+            repo_config.unlink()
+            config._reset_cache_for_tests()
+
+    def test_config_model_override_does_not_move_the_native_pin(self) -> None:
+        os.environ["CREW_HOST"] = "cursor"
+        repo_config = self.root / ".crew" / "config.toml"
+        repo_config.write_text(
+            "[seats.cursor-composer]\nmodel = \"composer-2.4\"\n",
+            encoding="utf-8",
+        )
+        config._reset_cache_for_tests()
+        try:
+            with mock.patch.object(
+                review_workflow,
+                "get_provider_for_channel",
+                side_effect=self._no_cursor_provider(),
+            ):
+                step = self._start(
+                    seats="cursor-composer,codex",
+                    session="cursor-model-override",
+                )
+            native = next(item for item in step.work_items if item.seat == "cursor-composer")
+            self.assertEqual(native.model, "composer-2.5-fast")
+            run, workflow = self._workflow(step)
+            record = json.loads((run / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(record["seat_signatures"]["cursor-composer"]["model"], "composer-2.5-fast")
+            self.assertEqual(record["task_seat_models"], {"cursor-composer": "composer-2.5-fast"})
+            self.assertEqual(
+                next(a for a in workflow["actions"] if a["seat"] == "cursor-composer")["model"],
+                "composer-2.5-fast",
             )
         finally:
             repo_config.unlink()
@@ -3378,6 +3668,81 @@ class ReviewWorkflowTest(unittest.TestCase):
                 self._start(seats="cursor-auto", session="cursor-empty")
         self.assertEqual(ctx.exception.code, "no_seats")
         self.assertIn("cursor-auto", stderr.getvalue())
+
+    def test_opt_in_cursor_seat_without_native_model_is_dropped_on_a_cursor_host(self) -> None:
+        os.environ["CREW_HOST"] = "cursor"
+        stderr = io.StringIO()
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=self._no_cursor_provider(),
+        ), redirect_stderr(stderr):
+            step = self._start(seats="cursor-gpt,codex", session="cursor-opt-in-drop")
+        self.assertEqual([item.seat for item in step.work_items], ["codex"])
+        self.assertIn("cursor-gpt", stderr.getvalue())
+        self.assertIn("native_model", stderr.getvalue())
+        self.assertIn("badge", stderr.getvalue())
+
+        os.environ["CREW_HOST"] = "claude"
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            side_effect=lambda name, channel: _Provider(output="RAW", name=name),
+        ):
+            step = self._start(seats="cursor-gpt", session="cursor-opt-in-claude")
+        self.assertEqual(
+            (step.work_items[0].driver, step.work_items[0].channel),
+            ("external", "cursor"),
+        )
+
+    def test_two_native_cursor_seats_at_one_native_pin_drop_the_second(self) -> None:
+        os.environ["CREW_HOST"] = "cursor"
+        self._write_repo_config(
+            "[seats.cursor-twin]\n"
+            "via = [\"cursor\"]\n"
+            "model = \"composer-2.5\"\n"
+            "native_model = \"composer-2.5-fast\"\n"
+        )
+        for seats_request, survivor, session in (
+            ("cursor-composer,cursor-twin", "cursor-composer", "cursor-twin-forward"),
+            ("cursor-twin,cursor-composer", "cursor-twin", "cursor-twin-reverse"),
+        ):
+            stderr = io.StringIO()
+            with self.subTest(seats=seats_request), mock.patch.object(
+                review_workflow,
+                "get_provider_for_channel",
+                side_effect=self._no_cursor_provider(),
+            ), redirect_stderr(stderr):
+                step = self._start(seats=seats_request, session=session)
+            self.assertEqual([item.seat for item in step.work_items], [survivor])
+            self.assertIn("composer-2.5-fast", stderr.getvalue())
+            self.assertIn("cursor-composer", stderr.getvalue())
+            self.assertIn("cursor-twin", stderr.getvalue())
+
+    def test_native_signature_holds_the_spent_pin(self) -> None:
+        for host, seat, expected in (
+            ("cursor", "cursor-composer", "composer-2.5-fast"),
+            ("claude", "opus", "opus"),
+        ):
+            with self.subTest(host=host):
+                os.environ["CREW_HOST"] = host
+                provider_patch = (
+                    mock.patch.object(
+                        review_workflow,
+                        "get_provider_for_channel",
+                        side_effect=self._no_cursor_provider(),
+                    )
+                    if host == "cursor"
+                    else mock.patch.object(review_workflow, "get_provider_for_channel")
+                )
+                with provider_patch:
+                    step = self._start(seats=seat, session=f"spent-pin-{host}")
+                run, workflow = self._workflow(step)
+                record = json.loads((run / "run.json").read_text(encoding="utf-8"))
+                self.assertEqual(record["seat_signatures"][seat]["model"], expected)
+                self.assertEqual(record["task_seat_models"], {seat: expected})
+                action = next(a for a in workflow["actions"] if a["kind"] == "reviewer")
+                self.assertEqual(action["model"], expected)
 
     # --- forced-external opt-out ------------------------------------------
 
@@ -3600,15 +3965,16 @@ class ReviewWorkflowTest(unittest.TestCase):
             self.assertEqual(config.review_force_external_channels(), ())
 
     def test_the_drop_warning_names_the_role_miss_only_when_it_is_one(self) -> None:
-        # The drop predicate is broader than the role miss, so the message asks
-        # the role table rather than inferring the cause. No shipped row reaches
-        # the route-neutral branch today, hence the patched resolution.
+        # The drop predicate is broader than the native pin miss, so the message
+        # names the pin rule rather than inferring the cause. No shipped row
+        # reaches the route-neutral branch today, hence the patched resolution.
         os.environ["CREW_HOST"] = "cursor"
         stderr = io.StringIO()
         with redirect_stderr(stderr):
             with self.assertRaises(review_workflow.WorkflowError):
                 self._start(seats="cursor-auto", session="drop-role-miss")
-        self.assertIn("cannot attribute to a concrete model", stderr.getvalue())
+        self.assertIn("native_model", stderr.getvalue())
+        self.assertIn("badge", stderr.getvalue())
         stderr = io.StringIO()
         with mock.patch.object(
             review_workflow, "native_channel_for", return_value=None,
@@ -3658,6 +4024,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             name="cursor-composer",
             via=("cursor", "codex"),
             model="composer-2.5",
+            native_model="composer-2.5-fast",
         )
         original_spec = seats.seat_spec
 
@@ -3796,11 +4163,9 @@ class ReviewWorkflowTest(unittest.TestCase):
         )
         self.assertIsNotNone(provider)
 
-    def test_external_cursor_action_at_an_unattributable_model_also_drifts(self) -> None:
-        # The seat whose model cannot be attributed is the one that used to slip
-        # through: its live resolution declares no native route, which looks
-        # exactly like a host that drives no channel in-session, so the stale
-        # external action matched and ran through the CLI this host does not use.
+    def test_external_cursor_action_without_native_pin_also_drifts(self) -> None:
+        # A cursor seat without a native pin has no in-session route on this host,
+        # so a stale external action must still fail frozen-route validation.
         os.environ["CREW_HOST"] = "cursor"
         action = {
             "seat": "cursor-auto",
@@ -3809,7 +4174,8 @@ class ReviewWorkflowTest(unittest.TestCase):
             "provider": "cursor",
             "model": "auto",
         }
-        self.assertIn("auto", review_workflow.CURSOR_UNATTRIBUTABLE_MODELS)
+        self.assertIn("auto", seats.NATIVE_UNRESOLVED_MODELS)
+        self.assertIsNone(seats.seat_spec("cursor-auto").native_model)
         with self.assertRaises(review_workflow.WorkflowError) as ctx:
             review_workflow._frozen_external_provider(action, _route_policy("cursor"))
         self.assertEqual(
@@ -3822,30 +4188,32 @@ class ReviewWorkflowTest(unittest.TestCase):
         )
 
     def test_a_roleless_native_action_is_refused_before_anything_is_written(self) -> None:
-        # Resolution never declares a native route for an unattributable model, so
-        # reaching the mint with one means the two views disagree. The mint
-        # refuses by name rather than issuing an action with nothing to spawn.
+        # Resolution never issues a native execution without a pin. A patched
+        # native result stands in for the two views disagreeing, and the freeze
+        # refuses by name before minting anything.
         os.environ["CREW_HOST"] = "cursor"
         with mock.patch.object(
             review_workflow,
-            "get_provider_for_channel",
-            side_effect=self._no_cursor_provider(),
+            "_resolve_seats",
+            return_value=[(
+                "cursor-auto",
+                seats.seat_spec("cursor-auto"),
+                channels.ResolvedExecution(
+                    seat="cursor-auto",
+                    model="auto",
+                    channel="cursor",
+                    native=True,
+                    engine_runnable=False,
+                    supports_workspace_write=False,
+                ),
+            )],
         ):
-            step = self._start(seats="cursor-composer", session="roleless-mint")
-        run, _wf = self._workflow(step)
-        attempts_before = sorted(p.name for p in (run / "attempts").rglob("*"))
-        with self.assertRaises(review_workflow.WorkflowError) as ctx:
-            review_workflow._reviewer_action(
-                run, step.ref, ordinal=1, seat="cursor-auto", model="auto",
-                channel="cursor", driver=review_workflow.ActionDriver.NATIVE,
-                provider="cursor", policy=_route_policy("cursor"), timeout_seconds=None,
-                prompt="unused",
-            )
+            with self.assertRaises(review_workflow.WorkflowError) as ctx:
+                self._start(seats="cursor-auto", session="roleless-mint")
         self.assertEqual(ctx.exception.code, "unresolved_native_role")
-        self.assertEqual(
-            sorted(p.name for p in (run / "attempts").rglob("*")),
-            attempts_before,
-        )
+        self.assertIn("cursor-auto", str(ctx.exception))
+        self.assertIn("native_model", str(ctx.exception))
+        self.assertFalse((self.root / ".crew" / "reviews" / "roleless-mint").exists())
 
     def test_shipped_cursor_role_files_match_the_host_role_table(self) -> None:
         roles = self._cursor_roles()
@@ -3989,12 +4357,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             (review_workflow.ACCESS_ADVISORY, review_workflow.ACCESS_ADVISORY),
         )
 
-    def test_cursor_role_frontmatter_pins_only_the_support_models(self) -> None:
-        # The reviewer file is shared by every model the host can name, so a
-        # `model:` pin in it would be wrong for all but one of them: if the pin
-        # beat the model the caller passes, every seat would run one model while
-        # the run record named several. The two support roles are single-model
-        # by construction and pin the exact model the table drives them at.
+    def test_cursor_role_frontmatter_pins_no_model(self) -> None:
         roles = self._cursor_roles()
         agents_dir = Path(__file__).resolve().parents[2] / "agents-cursor"
 
@@ -4009,39 +4372,32 @@ class ReviewWorkflowTest(unittest.TestCase):
                 keys[key.strip()] = value.strip()
             return keys
 
-        self.assertNotIn("model", frontmatter(roles.reviewer_role_name))
-        for role, model in (
-            (roles.scribe_role, roles.scribe_model),
-            (roles.formatter_role, roles.formatter_model),
-        ):
-            self.assertEqual(frontmatter(role).get("model"), model)
+        for role in (roles.reviewer_role_name, roles.scribe_role, roles.formatter_role):
+            self.assertNotIn("model", frontmatter(role))
+        self.assertEqual(
+            (roles.scribe_model, roles.formatter_model, review_workflow.CURSOR_SUPPORT_MODEL),
+            ("composer-2.5-fast", "composer-2.5-fast", "composer-2.5-fast"),
+        )
 
-    def test_every_named_cursor_catalog_model_reaches_the_reviewer_role(self) -> None:
-        # The catalog is the ONE place a cursor seat's model is declared. The
-        # role file pins no model, so admission asks only whether the host can
-        # NAME the model, and a repin needs no second edit anywhere. Anything
-        # that reintroduced a per-model list would fail here the first time a
-        # seat was repinned to a string nobody remembered to add.
+    def test_only_a_seat_with_a_native_model_gets_a_native_pin(self) -> None:
         roles = self._cursor_roles()
         for spec in seats.merged_catalog().values():
             if tuple(spec.via) != ("cursor",):
                 continue
-            expected = (
-                None
-                if spec.model in review_workflow.CURSOR_UNATTRIBUTABLE_MODELS
-                else roles.reviewer_role_name
-            )
-            self.assertEqual(roles.reviewer_role(spec.model), expected, spec.model)
-        # A model string nothing in the catalog carries still resolves: there is
-        # no allowlist for a config repin to fall outside of.
+            self.assertEqual(roles.native_pin(spec), spec.native_model, spec.model)
         self.assertEqual(
-            roles.reviewer_role("a-model-shipped-after-this-test-was-written"),
-            roles.reviewer_role_name,
+            {
+                spec.name
+                for spec in seats.shipped_catalog().values()
+                if roles.native_pin(spec) is not None
+            },
+            {"cursor-composer"},
         )
-        # A seat carrying no model at all cannot be attributed, so it takes no
-        # native route.
-        self.assertIsNone(roles.reviewer_role(None))
-        self.assertIsNone(roles.reviewer_role(""))
+        self.assertEqual(
+            review_workflow.native_roles(_route_policy("claude")).native_pin(seats.seat_spec("opus")),
+            "opus",
+        )
+        self.assertIsNone(roles.native_pin(replace(seats.seat_spec("cursor-composer"), native_model="")))
 
     def test_review_md_branches_only_on_issued_values(self) -> None:
         review_md = Path(__file__).resolve().parents[2] / "commands" / "review.md"
@@ -4079,6 +4435,10 @@ class ReviewWorkflowTest(unittest.TestCase):
             self.assertEqual(raw["action_id"], step.work_items[0].action_id)
             self.assertEqual(raw["attempt_id"], step.ref.attempt_id)
             self.assertTrue(raw["error"].startswith("skipped:"))
+            self.assertEqual(
+                (raw["model_attribution"], raw.get("reported_model")),
+                ("requested-only", None),
+            )
             _run, wf = self._workflow(step)
             action = next(item for item in wf["actions"] if item["action_id"] == step.work_items[0].action_id)
             self.assertEqual(action["accepted_path"], step.work_items[0].result_path)
@@ -4116,9 +4476,15 @@ class ReviewWorkflowTest(unittest.TestCase):
         self.assertEqual(action["status"], "settled")
         self.assertFalse(action["ok"])
         self.assertEqual(action["diagnostic"], raw["error"])
+        self.assertEqual(
+            (action["model_attribution"], action.get("reported_model")),
+            ("requested-only", None),
+        )
 
     def test_external_provider_result_is_sanitized_to_the_exact_standalone_shape(self) -> None:
-        provider = _Provider(output="RAW", name="codex")
+        provider = _Provider(
+            output="RAW", name="codex", reported_model="Composer 2.5"
+        )
         def injected_run(prompt, *, model=None, timeout):
             injected = ProviderResult(
                 "codex",
@@ -4134,6 +4500,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 attempt_id="attempt-9999",
                 channel="agy",
                 continuation_id="injected",
+                reported_model="injected model",
             )
             injected.extra = "not part of ProviderResult"
             return injected
@@ -4153,10 +4520,13 @@ class ReviewWorkflowTest(unittest.TestCase):
         self.assertEqual(set(raw), {
             "name", "model", "ok", "output", "error", "elapsed", "run_id",
             "target_sha256", "action_id", "attempt_id", "channel",
+            "reported_model", "model_attribution",
         })
         self.assertEqual(raw["run_id"], step.ref.run_id)
         self.assertEqual(raw["channel"], "codex")
         self.assertEqual(raw["output"], "RAW")
+        self.assertEqual(raw["reported_model"], "injected model")
+        self.assertEqual(raw["model_attribution"], "runtime-reported")
         self.assertTrue(any(item.kind == "formatter" for item in formatter_step.work_items))
 
     def test_external_result_exact_shape_and_types_fail_without_workflow_mutation(self) -> None:
@@ -4167,6 +4537,10 @@ class ReviewWorkflowTest(unittest.TestCase):
             "nonfinite-elapsed": lambda raw: raw.update(elapsed=float("inf")),
             "negative-elapsed": lambda raw: raw.update(elapsed=-1),
             "invalid-error": lambda raw: raw.update(error=[]),
+            "attribution-mismatch": lambda raw: raw.update(
+                model_attribution="runtime-reported"
+            ),
+            "attribution-type": lambda raw: raw.update(reported_model=5),
         }
         for label, mutate in mutations.items():
             with self.subTest(case=label):
@@ -4196,6 +4570,10 @@ class ReviewWorkflowTest(unittest.TestCase):
                     review_workflow.next_review(step.ref)
                 self.assertEqual(failure.exception.code, "corrupt_result")
                 self.assertEqual((run / "workflow.json").read_bytes(), before)
+                self.assertEqual(
+                    (action["model_attribution"], action.get("reported_model")),
+                    (None, None),
+                )
 
         for label, ok, output, error, expected in (
             ("success", True, VALID_REVIEW, None, "synthesis"),
@@ -4562,6 +4940,8 @@ class ReviewWorkflowTest(unittest.TestCase):
                     claim_id="a" * 16,
                     accepted_path=str(result_path),
                     accepted_sha256=hashlib.sha256(result_path.read_bytes()).hexdigest(),
+                    reported_model=None,
+                    model_attribution="requested-only",
                 )
                 review_workflow._atomic(run / "workflow.json", workflow)
                 before = (run / "workflow.json").read_bytes()
@@ -4621,7 +5001,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         self.assertEqual(canonical.grouped, panel)
         self.assertEqual(canonical.full, full)
         header = (
-            b"PANEL: 2 launched \xc2\xb7 0 usable \xc2\xb7 quorum 2: NOT MET\n"
+            b"PANEL: 2 launched \xc2\xb7 0 usable \xc2\xb7 0 attributed \xc2\xb7 quorum 2: NOT MET\n"
             b"an APPROVED verdict is not backed by quorum from this panel\n\n"
         )
         self.assertEqual(panel, header + full)

@@ -1,6 +1,5 @@
 ---
 description: Reads the one crew-issued prompt file it is handed, performs that transform, and returns the result as text. Writes nothing. Used by crew's review workflow.
-model: composer-2.5
 readonly: true
 ---
 

@@ -89,6 +89,7 @@ from multiagent.providers import (
     dispatch_options_by_kind,
     get_provider,
     known_seat_names,
+    stamp_attribution,
 )
 import artifact_prune
 from state_discovery import (  # the ONE `.crew` root resolver (state layer shares it)
@@ -1405,6 +1406,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             tsha = run_record.get("target_sha256")
             result.run_id = None if rid is None else str(rid)
             result.target_sha256 = None if tsha is None else str(tsha)
+            stamp_attribution(result)
             try:
                 _written, note = review_runs.preserve_valid_write(
                     Path(args.out),
@@ -2957,7 +2959,11 @@ def cmd_collect(args: argparse.Namespace) -> int:
                 "the grouped digest (they need a run manifest)",
                 file=sys.stderr,
             )
-        text = findings.render_digest(results, quorum=quorum)
+        text = findings.render_digest(
+            results,
+            quorum=quorum,
+            usable_seats=usable_names if quorum is not None else None,
+        )
         if getattr(args, "full", None):
             full_text = render.render_panel(results)
             _emit(full_text, args.full)
@@ -3778,6 +3784,7 @@ def cmd_persist_seat(args: argparse.Namespace) -> int:
             tsha = record.get("target_sha256")
             result.run_id = None if rid is None else str(rid)
             result.target_sha256 = None if tsha is None else str(tsha)
+            stamp_attribution(result)
             path = out_dir / f"{slug}.json"
             _written, note = review_runs.preserve_valid_write(
                 path,
@@ -4570,7 +4577,8 @@ def _render_config_template(
 ) -> str:
     """Render the COMMENTED starter config: ONLY keys the loader reads.
 
-    ``reasoning_effort`` is emitted under the codex seat tables (``[seats.codex]``
+    ``native_model`` and ``reasoning_effort`` are emitted as per-seat knobs under
+    the relevant seat tables (``[seats.codex]``
     / ``[seats.codex-luna]``, resolved per seat). ``print_timeout`` is NOT emitted
     by the scaffold (no line, no comment): the getters read it only from a
     config-declared agy-channel seat table, and the seat loop below skips
@@ -4679,6 +4687,11 @@ def _render_config_template(
         if a is not None:
             L.append(_avail_line(a))
         L.append(f'# model = "{spec.model}"')
+        if spec.provider == "cursor" and spec.native_model:
+            L.append(
+                f'# native_model = "{spec.native_model}"   # cursor-seat knob: '
+                f'the app Task-path variant slug (read per seat: [seats.{name}] here)'
+            )
         if spec.provider == "codex":
             L.append(
                 f'# reasoning_effort = "xhigh"     # codex-seat knob '
@@ -4686,10 +4699,16 @@ def _render_config_template(
             )
         L.append("")
     for seat in seats.premium_off_seats():
+        spec = seats.seat_spec(seat)
         a = av(seat)
         if a is not None:
             L.append(f"[seats.{seat}]")
             L.append(_avail_line(a))
+            if spec.provider == "cursor" and spec.native_model:
+                L.append(
+                    f'# native_model = "{spec.native_model}"   # cursor-seat knob: '
+                    f'the app Task-path variant slug (read per seat: [seats.{seat}] here)'
+                )
         else:
             L.append(f"# [seats.{seat}]   # {_OPT_IN_COMMENT}")
         L.append("")
@@ -5220,12 +5239,13 @@ def cmd_swab(args: argparse.Namespace) -> int:
     """swab the decks: list (dry-run) or prune (--yes) stale crew artifacts.
 
     DRY-RUN BY DEFAULT, modelled on ``git clean -n``: the read-the-list moment IS
-    the safety mechanism. Prunes two artifact families under the project ``.crew/``:
+    the safety mechanism. Prunes three artifact families under the project ``.crew/``:
     ORPHANED review-run dirs (no active loop, no current-run or
     current-standalone-review pointer names them, and no nonterminal standalone
     workflow protects them; there is deliberately no review-run age threshold
     beyond the 1-day grace given to a standalone workflow that fails validation)
-    and stale debate dirs (past the 1-day threshold, no synthesis).
+    and stale debate dirs (past the 1-day threshold, no synthesis), plus Cursor
+    environment captures older than seven days.
     Signal markers are deliberately left
     untouched: they carry no clean orphan signal at an attended moment, so this
     command does not delete them (session-start's aged sweep still reaps them).
@@ -5269,7 +5289,10 @@ def cmd_swab(args: argparse.Namespace) -> int:
         removed_run_names: dict = {}
         for item in items:
             try:
-                shutil.rmtree(str(item.path))
+                if item.kind == "probe":
+                    item.path.unlink()
+                else:
+                    shutil.rmtree(str(item.path))
             except OSError as exc:
                 print(f"error removing {item.path}: {exc}", file=sys.stderr)
                 failed.append(item)
@@ -5320,6 +5343,7 @@ def cmd_swab(args: argparse.Namespace) -> int:
 
     review = [it for it in items if it.kind == "review-run"]
     debate = [it for it in items if it.kind == "debate"]
+    probes = [it for it in items if it.kind == "probe"]
     if review:
         print("Review runs (orphaned, no active loop owns them):")
         for it in review:
@@ -5327,6 +5351,10 @@ def cmd_swab(args: argparse.Namespace) -> int:
     if debate:
         print("Debate dirs (stale, no synthesis):")
         for it in debate:
+            print(f"  {it.path} ({_fmt_bytes(it.bytes)})")
+    if probes:
+        print("Probe captures (older than seven days):")
+        for it in probes:
             print(f"  {it.path} ({_fmt_bytes(it.bytes)})")
     print(
         f"{len(items)} items, {_fmt_bytes(total)} total; "

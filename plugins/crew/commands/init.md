@@ -146,7 +146,7 @@ command -v diff && diff -u <target> <target>.new
 ## Step 6 — What's next
 
 Point the user at the knobs, documented inline in the file they just got:
-per-seat tuning (`model`, codex `reasoning_effort`), agy `print_timeout` (not
+per-seat tuning (`model`, cursor `native_model`, codex `reasoning_effort`), agy `print_timeout` (not
 in the scaffold, since no shipped seat rides the agy channel; see the
 `seats.toml` header key list and the README's config-declared
 `[seats.agy-gemini]` example),

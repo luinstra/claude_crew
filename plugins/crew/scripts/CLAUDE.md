@@ -21,6 +21,7 @@ scripts/
 ├── models.py            # Dataclasses for all JSON structures
 ├── persistent-mode.py   # Stop hook: enforces continuation
 ├── session-start.py     # SessionStart hook: restores state
+├── cursor-env-capture.py # In-process helper called by session-start.py; records probe metadata
 ├── host_detect.py       # Stdlib host detector for the hook entry points
 ├── artifact_prune.py    # ENUMERATE-only stale-artifact finder (single source shared by `crew swab` + the session-start reporter); never deletes
 ├── tests/               # Unit tests (test-review-workflow.py, test-hooks.py, test-multiagent.py, fixtures/)
@@ -41,36 +42,38 @@ review on a Cursor host, where `review_workflow` issues them natively; the
 skipped result.
 
 **Standalone review's per-seat native admission.** `review_workflow` declares
-its route per SEAT (`native_channel_for`), not per host, because a seat resolved
-native is frozen `kind=task` before anything asks whether its model can be
-attributed. Every route
+its route per SEAT (`native_channel_for`), not per host, and asks
+`HostRoles.native_pin(spec)` for the pin that the in-session seat spends. A
+Claude row uses `spec.model`; a Cursor row uses `spec.native_model`. Every route
 question is asked of ONE `RoutePolicy` (the host plus the channels this run
 forced external), resolved once at start and rebuilt from the FROZEN identity
 afterwards, so no two call sites can hold half the answer and live config cannot
-change how an already-minted run is judged. On a Cursor
-host a cursor-channel seat is native whenever the host can NAME its model: the
-reviewer role file pins no model, so `seats.toml` stays the ONE place a cursor
-seat's model is declared and a repin needs no second edit. What is NOT nameable
-is a run-time alias (`auto`, which Cursor echoes back rather than resolving) or
-a seat carrying no model, since neither can be attributed in the run record;
-`CURSOR_UNATTRIBUTABLE_MODELS` holds that set. Such a seat gets ONE stderr warning naming
-the seat and its model and is DROPPED from the roster before the freeze, so the
-quorum denominator counts only seats that run and an all-dropped roster fails
-with the existing `no_seats` error. The role names, the two support-role models,
-and each host's channel come from the one `_HOST_ROLES` table beside
-`_reviewer_action`, the TOTAL reviewer name included; a host with no row (codex,
-unknown) drives no native work and gets parent-context formatter/synthesis. The
-drop is one shared predicate (`has_no_route_here`, a routing POLICY, not a claim
-that the channel's CLI is absent): roster resolution drops on it and drift
-reconstruction refuses on it, so an unattributable model can never read
-as "this host has no native channel" at one site and "unrunnable" at the other.
-Minting is fail-closed on top of that: a native reviewer or formatter action
-whose role does not resolve raises `unresolved_native_role` BEFORE any prompt
-path is prepared, so no action is ever issued with nothing to spawn and nothing
-is ever substituted for a missing role. The drop message asks the role table
-directly rather than inferring the cause from the predicate, which is broader
-than the role miss, so a future cause reaching it cannot be reported as a
-missing role file.
+change how an already-minted run is judged. On a Cursor host, an unset
+`native_model` means no native route: the seat gets ONE stderr warning naming
+the field and the one-time app badge check, then is DROPPED before the freeze.
+`auto` is refused as a `native_model` at catalog load by
+`seats.NATIVE_UNRESOLVED_MODELS`. Two Cursor seats at one native pin drop the
+later seat in resolution order. The role names, support-role model, and each
+host's channel come from the one `_HOST_ROLES` table beside `_reviewer_action`;
+a host with no row (codex, unknown) drives no native work and gets parent-context
+formatter/synthesis. The drop is one shared predicate (`has_no_route_here`, a
+routing POLICY, not a claim that the channel's CLI is absent): roster resolution
+drops on it and drift reconstruction refuses on it, so a seat with no native pin
+cannot read as "this host has no native channel" at one site and "unrunnable" at
+the other. Minting is fail-closed on top of that: `_spent_model` refuses a native
+execution with no pin as `unresolved_native_role` BEFORE any run directory or
+prompt path is prepared. The frozen signature key `model`, `task_seat_models`,
+and the reviewer action all record the pin actually spent.
+
+**Standalone review's model attribution.** External reviewer results capture
+raw `reported_model` from the Cursor stream's `system/init.model` when present.
+`model_attribution` is `requested-only` for native seats and empty reports, and
+`runtime-reported` for a non-empty runtime report, including failed runs. The
+pair lives on reviewer actions and run-scoped results, is rendered in the
+digest, and is optional on every read; a flat result may carry `reported_model`
+but never the stamp. Formatter and synthesis actions never carry either field,
+and the pair is never read by `result_valid`, `_usable_seats`, or `_panel`.
+Quorum remains the `ok` count. The digest's attributed count is display-only.
 
 **The native opt-out is `[review].force_external_channels`.** Naming a channel
 there routes its seats through their ordinary external provider instead of
@@ -104,7 +107,7 @@ pin not the variant the Task path accepts), which resolution cannot see, so
   reroute, and validation all read. One reroute at most: the rerouted action is
   PARENT, and `parent_formatter_lost` settles.
 - `native_task_lost` SETTLES the reviewer failed. There is no CLI fallback for a
-  seat issued native: a seat's answer is attributed to its model, and its own
+  seat issued native: a seat's answer belongs to the model that gave it, and its own
   channel is one the host drives in-session rather than as a subprocess (the same
   policy `has_no_route_here` enforces at resolution). The panel degrades instead
   of erroring, since quorum recounts usable seats and the digest synthesizes
@@ -298,9 +301,10 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
 - `doctor` — `/crew:init` provider probe (NON-billable: installed-CLI detection).
 - `probe` — opt-in BILLABLE live seat smoke test (doctor proves the CLI is installed; probe proves it returns usable output).
 - `scaffold-config` — `/crew:init` commented-config generator.
-- `swab` — attended cleanup of stale crew artifacts (orphaned review-run dirs +
-  stale debate dirs). DRY-RUN BY DEFAULT (lists only, like `git clean -n`);
-  `--yes` is the DESTRUCTIVE step (rmtree), scoped to enumerated candidates from
+- `swab`: attended cleanup of stale crew artifacts (orphaned review-run dirs,
+  stale debate dirs, and probe captures). DRY-RUN BY DEFAULT (lists only, like
+  `git clean -n`); `--yes` is the DESTRUCTIVE step, scoped to enumerated
+  candidates from
   `artifact_prune.collect_prunable` and exiting nonzero if any delete failed. A
   `--yes` from a terminal `.crew` cwd with no `CLAUDE_PROJECT_DIR` is refused
   because the resolver's re-anchored artifact root is only a guess; dry-run still
@@ -576,7 +580,7 @@ Key contracts (do NOT regress):
     seat) + CRITERIA MATRIX + GROUPED FINDINGS (`M/N` agreement, N = findings-parsed seats only, `⚠
     SINGLETON` for lone dissents) + a RAW / UNPARSED SEATS section that renders any non-parseable
     seat verbatim (a finding is NEVER dropped). A RUN-SCOPED grouped digest opens with one quorum
-    header, `PANEL: <N> launched · <usable> usable · quorum <N//2+1>: MET|NOT MET` (N = distinct
+    header, `PANEL: <N> launched · <usable> usable · <attributed> attributed · quorum <N//2+1>: MET|NOT MET` (N = distinct
     manifest names from `run.json`; usable = the success-only `result_valid` tier; NOT MET adds
     "an APPROVED verdict is not backed by quorum from this panel", a capability-NEUTRAL statement
     of fact, since this rubric is SHARED with standalone `/crew:review`, which has no override verb;
@@ -587,7 +591,12 @@ Key contracts (do NOT regress):
     digest reader's summary); `crew state
     record-verdict` recounts usable seats itself against the identity frozen in loop state, and that
     count is what decides (a below-quorum completion is exit 3, clearable with `--force`, not a hard
-    refusal). Flat-mode
+    refusal). Non-skipped VERDICTS rows carry `[runtime-reported: <model>]` or,
+    when any result in the digest has a runtime report, including failed or
+    skipped results, `[requested-only]`, keyed
+    on the derived `model_attribution`; otherwise they have no suffix. Control
+    characters in the raw model report are escaped for the row. The attributed
+    count is display-only and the threshold compares `usable`. Flat-mode
     `--group` renders NO header plus a one-line stderr note (quorum facts need a run manifest).
     Merge predicate: severity is the only hard partition;
     within it, COMPLETE-LINKAGE clustering on `path_compatible AND line_compatible AND jaccard>=0.5`.
@@ -708,7 +717,7 @@ Key contracts (do NOT regress):
   name; the valid keys are declared by each provider class's `DISPATCH_OPTIONS`
   and `crew dispatch --options` lists them; applied only in workspace-write, so
   read-only review/debate argv is unchanged even when configured), `[seats.<name>]`
-  (tunes an existing seat's `model`/`reasoning_effort`/`print_timeout`/`available`,
+  (tunes an existing seat's `model`/`native_model`/`reasoning_effort`/`print_timeout`/`available`,
   OR declares a brand-new first-class seat by giving `via = ["<channel>"]` +
   `model` (`provider` remains the accepted legacy spelling), plus
   optional `opt_in` to keep it out of the built-in panels), `[tuning].timeout`
@@ -1376,11 +1385,12 @@ The `session-start.py` hook cleans up stale state files on every session start:
     the age threshold: deleting one mid-use would split that loop's writers across
     two inodes.
 
-**Review-run + debate dirs: REPORTED, never deleted here.** `session-start` no
-longer `rmtree`s review-run dirs (`.crew/reviews/<session>/run-*`) or stale debate
-dirs (`.crew/debates/`): destructive removal of the user's disk from an unattended
-hook was the wrong venue. Instead `report_stale_artifacts` enumerates the orphans
-through the ONE shared `artifact_prune.collect_prunable` finder (the same list
+**Review-run dirs, debate dirs, and probe captures: REPORTED, never deleted here.**
+`session-start` no longer deletes review-run dirs (`.crew/reviews/<session>/run-*`),
+stale debate dirs (`.crew/debates/`), or probe captures: destructive removal of
+the user's disk from an unattended hook was the wrong venue. Instead
+`report_stale_artifacts` enumerates all three families through the ONE shared
+`artifact_prune.collect_prunable` finder (the same list
 `crew swab` acts on, with the same active-loop / current-run and
 current-standalone-review pointer protections plus nonterminal/ambiguous
 standalone-workflow fail-closed guards and mint-grammar/symlink guards) and
@@ -1390,7 +1400,8 @@ reliably-delivered carrier, not stderr). It enumerates count-only
 (`with_sizes=False`), so the notice names the orphan COUNT + the `crew swab` hint
 with NO byte total: exact per-dir sizing is the attended swab's job, never a walk
 on every session start. It deletes NOTHING. The attended `crew
-swab` command OWNS the deletion (dry-run by default; `--yes` removes). Removing the
+swab` command OWNS the deletion (dry-run by default; `--yes` removes). It rmtrees
+the directory candidates and unlinks probe capture files. Removing the
 old delete path also retired the three data-loss bugs the review-run sweep carried
 (over-broad `RUN_ID_RE`, symlink-follow, live-run-swept).
 

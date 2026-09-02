@@ -19,6 +19,9 @@ Covers Step 1.7:
   7. production invocation path: bare-script cli.py runs w/o ModuleNotFoundError.
 """
 
+import contextlib
+import dataclasses
+import io
 import json
 import os
 import re
@@ -28,6 +31,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import unittest.mock as mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -575,6 +579,9 @@ args = sys.argv[1:]
 # runs no model turn; a test proves that by asserting the probe log holds only
 # --help argv while the real-run capture is written exactly once.
 if "--help" in args:
+    if os.environ.get("FAKE_HELP_SLEEP"):
+        import time
+        time.sleep(float(os.environ["FAKE_HELP_SLEEP"]))
     probe_log = os.environ.get("FAKE_PROBE_LOG")
     if probe_log:
         with open(probe_log, "a") as f:
@@ -964,6 +971,9 @@ if "--version" in args:
     sys.exit(0)
 
 if "--help" in args:
+    if os.environ.get("FAKE_HELP_SLEEP"):
+        import time
+        time.sleep(float(os.environ["FAKE_HELP_SLEEP"]))
     probe_log = os.environ.get("FAKE_PROBE_LOG")
     if probe_log:
         with open(probe_log, "a") as f:
@@ -990,15 +1000,19 @@ if "--output-format" in args:
         stdout = os.environ["FAKE_STDOUT"]
     else:
         session_id = os.environ.get("FAKE_SESSION_ID", "cursor-session-xyz")
+        init = {"type": "system", "subtype": "init",
+                "session_id": session_id}
+        if os.environ.get("FAKE_REPORTED_MODEL"):
+            init["model"] = os.environ["FAKE_REPORTED_MODEL"]
         stdout = (
-            json.dumps({"type": "system", "subtype": "init",
-                        "session_id": session_id}) + "\\n"
+            json.dumps(init) + "\\n"
             + json.dumps({"type": "result", "subtype": "success",
-                          "is_error": False, "result": "CURSOR EDIT DONE",
+                          "is_error": False,
+                          "result": os.environ.get("FAKE_BODY", "CURSOR EDIT DONE"),
                           "session_id": session_id}) + "\\n"
         )
 else:
-    stdout = "CURSOR LEGACY OUTPUT"
+    stdout = os.environ.get("FAKE_BODY", "CURSOR LEGACY OUTPUT") + "\\n"
 sys.stdout.write(stdout)
 
 if os.environ.get("FAKE_STDERR"):
@@ -1010,10 +1024,11 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 
 def _run_cursor_with_fake(*, continuation, sandbox="workspace-write", model="m1",
                           dispatch_options=None, timeout=10, env_extra=None,
-                          prompt="PROMPT-BODY"):
+                          prompt="PROMPT-BODY", reset_probe_cache=True):
     """Drive CursorProvider.run() against the continuation fake."""
     from multiagent.providers import cursor as cursor_mod
-    cursor_mod._reset_probe_cache_for_tests()
+    if reset_probe_cache:
+        cursor_mod._reset_probe_cache_for_tests()
     prov = cursor_mod.CursorProvider(name="cursor-test", default_model=model)
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
@@ -1051,7 +1066,7 @@ def test_cursor_continuation():
     check("fresh chained run: terminal result.result becomes output",
           res.ok and res.output == "CURSOR EDIT DONE",
           "ok=True 'CURSOR EDIT DONE'", f"ok={res.ok} output={res.output!r}")
-    check("fresh chained run: stream-json is continuation-only",
+    check("fresh chained run: stream-json on the chained write run",
           cap is not None and "--output-format" in cap["args"]
           and cap["args"][cap["args"].index("--output-format") + 1] == "stream-json"
           and cap["args"][-1] == "PROMPT-BODY",
@@ -1096,6 +1111,57 @@ def test_cursor_continuation():
               "help-only probe and successful runs", str(first))
         check("capability probe: memoized per resolved binary path",
               len(second) == len(first), f"{len(first)} probe calls", str(second))
+
+    with tempfile.TemporaryDirectory() as td:
+        from multiagent.providers import cursor as cursor_mod
+        d = Path(td)
+        capture = d / "capture.json"
+        make_fake_bin(d, "agent", f"CAPTURE = {str(capture)!r}\n" + _CURSOR_CONTINUATION_FAKE)
+        env_path = os.environ["PATH"]
+        os.environ["PATH"] = str(d) + os.pathsep + env_path
+        try:
+            cursor_mod._reset_probe_cache_for_tests()
+            prov = cursor_mod.CursorProvider(name="cursor-test", default_model="m1")
+            warning = io.StringIO()
+            real_run_reaped = cursor_mod.run_reaped
+
+            def _timeout_help(command, *args, **kwargs):
+                if command and command[-1] == "--help":
+                    return cursor_mod.TIMEOUT
+                return real_run_reaped(command, *args, **kwargs)
+
+            with mock.patch.object(cursor_mod, "PROBE_TIMEOUT", 0.2):
+                with mock.patch.object(cursor_mod, "run_reaped", side_effect=_timeout_help):
+                    with contextlib.redirect_stderr(warning):
+                        first = prov.run("PROMPT-BODY", sandbox="read-only", timeout=10)
+                        second = prov.run("PROMPT-BODY", sandbox="read-only", timeout=10)
+        finally:
+            os.environ["PATH"] = env_path
+        warning_text = warning.getvalue()
+        check("help probe timeout degrades read-only capture to the plain branch",
+              "--output-format" not in json.loads(capture.read_text())["args"]
+              and first.ok and second.ok
+              and first.reported_model is None and second.reported_model is None
+              and "warning: agent --help probe timed out after 0.2s" in warning_text,
+              "plain branch with one timeout warning", warning_text)
+        check("help probe timeout warning is memoized per binary path",
+              warning_text.count("warning: agent --help probe") == 1,
+              "one warning", warning_text)
+
+    with tempfile.TemporaryDirectory() as td:
+        from multiagent.providers import cursor as cursor_mod
+        cursor_mod._reset_probe_cache_for_tests()
+        warning = io.StringIO()
+        probe_path = str(Path(td) / "agent")
+        with mock.patch.object(cursor_mod, "run_reaped",
+                               return_value=(3, "", "bad help")):
+            with contextlib.redirect_stderr(warning):
+                facts = cursor_mod.CursorProvider._probe_help(probe_path)
+        check("help probe nonzero exit warns and disables capabilities",
+              not facts.resume and not facts.output_format and not facts.stream_json
+              and "warning: agent --help exited with code 3" in warning.getvalue(),
+              "one nonzero-help warning and all capabilities false",
+              warning.getvalue())
 
     res, cap = _run_cursor_with_fake(
         continuation=ProviderContinuation("cursor-session-abc"),
@@ -1363,13 +1429,211 @@ def test_cursor_continuation():
         sandbox="read-only", dispatch_options={"force": True, "approve_mcps": True},
     )
     args = cap["args"]
-    check("read-only continuation: legacy argv unchanged and no outcome",
-          args[0:3] == ["--print", "--mode", "plan"]
-          and "--output-format" not in args and "--resume" not in args
+    check("read-only continuation: streams for model capture, never resumes, no outcome",
+          args[0:5] == ["--print", "--mode", "plan", "--output-format", "stream-json"]
+          and "--resume" not in args
           and "--force" not in args and "--approve-mcps" not in args
           and res.continuation is None and res.continuation_id is None
+          and res.ok and res.output == "CURSOR EDIT DONE"
+          and res.reported_model is None
           and args[-1] == "PROMPT-BODY",
-          "legacy read-only argv", str(args))
+          "stream-json read-only argv", str(args))
+
+    session = "cursor-session-xyz"
+    def event_stream(*, assistant=(), result=None, result_subtype="success",
+                     is_error=False, model=None):
+        init = {"type": "system", "subtype": "init", "session_id": session}
+        if model is not None:
+            init["model"] = model
+        events = [init]
+        for text in assistant:
+            events.append({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+                "session_id": session,
+            })
+        if result is not None:
+            events.append({
+                "type": "result", "subtype": result_subtype,
+                "is_error": is_error, "result": result, "session_id": session,
+            })
+        return "\n".join(json.dumps(item) for item in events) + "\n"
+
+    terminal, _ = _run_cursor_with_fake(
+        continuation=None,
+        sandbox="read-only",
+        env_extra={
+            "FAKE_STDOUT": event_stream(assistant=("DRAFT",), result="FINAL",
+                                         model="GLM 5.2 Max"),
+        },
+    )
+    deltas, _ = _run_cursor_with_fake(
+        continuation=None,
+        sandbox="read-only",
+        env_extra={
+            "FAKE_STDOUT": event_stream(assistant=("one", " two"), model=None),
+        },
+    )
+    capable, _ = _run_cursor_with_fake(
+        continuation=ProviderContinuation(),
+        sandbox="workspace-write",
+        env_extra={
+            "FAKE_STDOUT": event_stream(assistant=("DRAFT",), result="FINAL",
+                                         model="GLM 5.2 Max"),
+        },
+    )
+    check("stream extraction prefers the terminal result",
+          terminal.ok and terminal.output == "FINAL",
+          "FINAL", repr(terminal))
+    check("stream extraction joins assistant deltas without a terminal result",
+          deltas.ok and deltas.output == "one two",
+          "one two", repr(deltas))
+    check("the same extraction rule applies to chained output",
+          capable.ok and capable.output == "FINAL",
+          "FINAL", repr(capable))
+
+    body = (
+        "## VERDICT\n\x1b[32mAPPROVED\x1b[0m\n\n## FINDINGS\n"
+        "- [MINOR] a.py:1 nit\n  continued on an indented line"
+    )
+    stream_result, _ = _run_cursor_with_fake(
+        continuation=None,
+        sandbox="read-only",
+        env_extra={
+            "FAKE_STDOUT": event_stream(
+                assistant=(body,), result=body, model="GLM 5.2 Max"
+            ),
+        },
+    )
+    plain_result, plain_cap = _run_cursor_with_fake(
+        continuation=None,
+        sandbox="read-only",
+        env_extra={"FAKE_NO_STREAM_JSON": "1", "FAKE_BODY": body},
+    )
+    from multiagent.providers import cursor as cursor_mod
+    check("stream and text outputs differ only by the text printer linefeed",
+          stream_result.output == cursor_mod._strip_ansi(body)
+          and plain_result.output == stream_result.output + "\n"
+          and stream_result.reported_model == "GLM 5.2 Max"
+          and plain_result.reported_model is None
+          and "--output-format" not in plain_cap["args"],
+          "ANSI-clean stream plus one plain trailing linefeed", repr((stream_result, plain_result)))
+    plain_result.reported_model = stream_result.reported_model
+    plain_result.model_attribution = stream_result.model_attribution
+    stream_digest = dataclasses.replace(
+        stream_result, output=stream_result.output.rstrip("\n")
+    )
+    plain_digest = dataclasses.replace(
+        plain_result, output=plain_result.output.rstrip("\n")
+    )
+    check("stream and text outputs produce the same parsed review",
+          findings.parse_seat(stream_result) == findings.parse_seat(plain_result)
+          and findings.render_digest([stream_digest]) == findings.render_digest([plain_digest])
+          and any(line.strip() == "APPROVED" for line in stream_result.output.splitlines())
+          and any(line.strip() == "APPROVED" for line in plain_result.output.splitlines()),
+          "same parser, digest, and verdict line", repr((stream_result, plain_result)))
+
+    failure_cases = (
+        (
+            "auth result",
+            event_stream(
+                result="Not logged in. Please sign in at cursor.com/login",
+                result_subtype="error", is_error=True, model="GLM 5.2 Max",
+            ),
+            "Cursor Agent authentication required",
+            "GLM 5.2 Max",
+            False,
+        ),
+        (
+            "empty result",
+            event_stream(result="", model="GLM 5.2 Max"),
+            "agent returned empty output at exit 0",
+            "GLM 5.2 Max",
+            False,
+        ),
+        (
+            "error result without assistant text",
+            event_stream(result="model overloaded", result_subtype="error",
+                         is_error=True, model="GLM 5.2 Max"),
+            "agent reported an error result at exit 0: model overloaded",
+            "GLM 5.2 Max",
+            False,
+        ),
+        (
+            "error result with assistant text",
+            event_stream(assistant=("partial",), result="model overloaded",
+                         result_subtype="error", is_error=True,
+                         model="GLM 5.2 Max"),
+            "agent reported an error result at exit 0: model overloaded",
+            "GLM 5.2 Max",
+            False,
+        ),
+        (
+            "non-json stdout",
+            "usage: agent [options]",
+            None,
+            None,
+            True,
+        ),
+        (
+            "unrecognized JSON stdout",
+            json.dumps({"type": "error", "message": "bad stream"}),
+            "no recognized stream-json events at exit 0; stdout head:",
+            None,
+            False,
+        ),
+    )
+    for label, stdout, expected, reported, expected_ok in failure_cases:
+        result, _ = _run_cursor_with_fake(
+            continuation=None,
+            sandbox="read-only",
+            env_extra={"FAKE_STDOUT": stdout},
+        )
+        check(f"stream output shape: {label}",
+              result.ok is expected_ok
+              and (expected is None or result.error.startswith(expected))
+              and result.reported_model == reported
+              and (label != "non-json stdout" or result.output == stdout)
+              and (label != "unrecognized JSON stdout" or result.output == ""),
+              f"ok={expected_ok}, output/error shape", repr(result))
+
+    mismatched_init_stream = (
+        json.dumps({"type": "system", "subtype": "init",
+                    "session_id": "cursor-session-first", "model": "Model One"})
+        + "\n"
+        + json.dumps({"type": "system", "subtype": "init",
+                      "session_id": "cursor-session-second", "model": "Model Two"})
+        + "\n"
+        + json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                      "result": "WRONG SESSION OUTPUT",
+                      "session_id": "cursor-session-second"})
+        + "\n"
+    )
+    mismatched_init, _ = _run_cursor_with_fake(
+        continuation=None,
+        sandbox="read-only",
+        env_extra={"FAKE_STDOUT": mismatched_init_stream},
+    )
+    check("read-only stream rejects mismatched init sessions without attribution",
+          not mismatched_init.ok
+          and "session ID mismatch" in (mismatched_init.error or "")
+          and mismatched_init.output == ""
+          and mismatched_init.reported_model is None
+          and "reported_model" not in mismatched_init.to_dict(),
+          "failed mismatch with no reported model", repr(mismatched_init))
+
+    exited, _ = _run_cursor_with_fake(
+        continuation=None,
+        sandbox="read-only",
+        env_extra={
+            "FAKE_STDOUT": event_stream(model="GLM 5.2 Max"),
+            "FAKE_EXIT": "3",
+        },
+    )
+    check("stream nonzero exit preserves the captured model",
+          not exited.ok and exited.error.startswith("agent exited with code 3")
+          and exited.reported_model == "GLM 5.2 Max",
+          "exit 3 with runtime model", repr(exited))
 
     res, cap = _run_cursor_with_fake(continuation=None, sandbox="workspace-write")
     args = cap["args"]
@@ -2185,6 +2449,46 @@ def test_registry():
           == CURSOR_CATALOGUED_MODELS,
           str(CURSOR_CATALOGUED_MODELS),
           str({name: spec.model for name, spec in CURSOR_SEATS.items()}))
+    from multiagent import seats as seat_catalog
+    BADGE_VERIFIED_NATIVE_MODELS = {
+        # Add a slug only with the run id whose app badge read it exactly.
+        "composer-2.5-fast": "run-559dd5d1899d",
+    }
+    shipped_native = {
+        n: spec.native_model
+        for n, spec in seat_catalog.shipped_catalog().items()
+        if spec.native_model
+    }
+    check("shipped cursor native pins match badge-verified slugs",
+          shipped_native == {"cursor-composer": "composer-2.5-fast"}
+          and all(pin in BADGE_VERIFIED_NATIVE_MODELS for pin in shipped_native.values()),
+          "cursor-composer: composer-2.5-fast with a badge run id", str(shipped_native))
+    from contextlib import redirect_stderr
+    from io import StringIO
+    with project_config('[seats.cursor-composer]\nnative_model = "auto"\n'):
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            auto_spec = seat_catalog.seat_spec("cursor-composer")
+        check("native_model=auto warns and keeps the shipped native pin",
+              auto_spec.native_model == "composer-2.5-fast"
+              and "native_model" in stderr.getvalue()
+              and "'auto'" in stderr.getvalue(),
+              "shipped native pin + warning", f"spec={auto_spec} stderr={stderr.getvalue()!r}")
+    with project_config('[seats.cursor-composer]\nnative_model = "composer-2.6-fast"\n'):
+        override_spec = seat_catalog.seat_spec("cursor-composer")
+        check("native_model override keeps the CLI model",
+              override_spec.native_model == "composer-2.6-fast"
+              and override_spec.model == "composer-2.5",
+              "composer-2.6-fast + composer-2.5", str(override_spec))
+    with project_config('[seats.codex]\nnative_model = "x"\n'):
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            codex_spec = seat_catalog.seat_spec("codex")
+        check("native_model on a non-cursor seat warns and is ignored",
+              codex_spec.native_model is None
+              and "native_model" in stderr.getvalue()
+              and "codex" in stderr.getvalue(),
+              "no native_model + channel warning", f"spec={codex_spec} stderr={stderr.getvalue()!r}")
     # Codex model-seats mirror cursor: one CodexProvider per CODEX_SEATS entry,
     # each pinned to its model (codex + codex-luna default, codex-terra opt-in).
     CODEX_SEATS = shipped_seats("codex")
@@ -2219,7 +2523,8 @@ def test_result_contract():
     import dataclasses
     _OPTIONAL = {
         "repaired_output", "run_id", "target_sha256",
-        "action_id", "attempt_id", "channel", "continuation", "continuation_id",
+        "action_id", "attempt_id", "channel", "reported_model",
+        "model_attribution", "continuation", "continuation_id",
     }
     check("to_dict equals asdict MINUS the None optional fields",
           d == {k: v for k, v in dataclasses.asdict(r).items() if k not in _OPTIONAL},
@@ -4785,10 +5090,25 @@ def test_cursor():
     if "--version" in sys.argv:
         print("2026.06.24-00-45-58-9f61de7")
         sys.exit(0)
+    if "--help" in sys.argv:
+        print("  --resume <chatId>\\n  --output-format <format>\\n  stream-json")
+        sys.exit(0)
     cap = os.environ.get("CURSOR_CAPTURE")
     if cap:
         json.dump(sys.argv[1:], open(cap, "w"))
-    sys.stdout.write("\\x1b[32mPASS\\x1b[0m review body")
+    body = os.environ.get("CURSOR_BODY", "\\x1b[32mPASS\\x1b[0m review body")
+    if "--output-format" in sys.argv:
+        session = "cursor-session"
+        print(json.dumps({"type": "system", "subtype": "init",
+                          "session_id": session, "model": "GLM 5.2 Max"}))
+        print(json.dumps({"type": "assistant", "message": {
+            "role": "assistant", "content": [{"type": "text", "text": body}],
+        }, "session_id": session}))
+        print(json.dumps({"type": "result", "subtype": "success",
+                          "is_error": False, "result": body,
+                          "session_id": session}))
+    else:
+        sys.stdout.write(body)
     sys.exit(0)
     '''
     with tempfile.TemporaryDirectory() as td:
@@ -4807,16 +5127,17 @@ def test_cursor():
 
             r = prov.run("REVIEW-PROMPT", timeout=10)
             argv = json.loads(cap.read_text())
-            # Read-only default: --mode plan is REQUIRED (plain --print writes to
-            # disk — empirically verified). Order: --print --mode plan --sandbox …
+            # The read-only branch streams to capture the runtime model.
             check("cursor run() read-only argv leads with --print --mode plan --sandbox enabled",
-                  argv[:5] == ["--print", "--mode", "plan", "--sandbox", "enabled"]
+                  argv[:7] == ["--print", "--mode", "plan", "--output-format",
+                                "stream-json", "--sandbox", "enabled"]
                   and "--trust" in argv and "--model" in argv and "glm-5.2-max" in argv
                   and argv[-1] == "REVIEW-PROMPT",
                   "--print --mode plan --sandbox …", str(argv))
             check("cursor run() strips ANSI, returns ok=True with the resolved model",
                   r.ok is True and "PASS" in r.output and "\x1b" not in r.output
-                  and r.model == "glm-5.2-max",
+                  and r.model == "glm-5.2-max"
+                  and r.reported_model == "GLM 5.2 Max",
                   "ok + clean output + model", f"ok={r.ok} out={r.output!r} model={r.model}")
             # workspace-write drops --mode plan (writes permitted); read-only keeps it.
             prov.run("X", sandbox="workspace-write", timeout=10)
@@ -5213,16 +5534,53 @@ def test_from_dict_and_escaping():
                          output="hello", error=None, elapsed=1.5)
     rfail = ProviderResult(name="cursor-glm", model=None, ok=False,
                           output="", error="boom", elapsed=0.0)
-    check("from_dict(to_dict(r)) round-trips an ok result",
-          ProviderResult.from_dict(rok.to_dict()) == rok,
-          repr(rok), repr(ProviderResult.from_dict(rok.to_dict())))
-    check("from_dict(to_dict(r)) round-trips a failed result",
-          ProviderResult.from_dict(rfail.to_dict()) == rfail,
-          repr(rfail), repr(ProviderResult.from_dict(rfail.to_dict())))
+    rok_back = ProviderResult.from_dict(rok.to_dict())
+    rfail_back = ProviderResult.from_dict(rfail.to_dict())
+    check("from_dict(to_dict(r)) preserves an ok flat result without a stamp",
+          rok_back.name == rok.name and rok_back.ok is rok.ok
+          and rok_back.output == rok.output
+          and rok_back.model_attribution is None,
+          repr(rok), repr(rok_back))
+    check("from_dict(to_dict(r)) preserves a failed flat result without a stamp",
+          rfail_back.name == rfail.name and rfail_back.ok is rfail.ok
+          and rfail_back.error == rfail.error
+          and rfail_back.model_attribution is None,
+          repr(rfail), repr(rfail_back))
     check("from_dict preserves exactly the six field names",
           set(rok.to_dict().keys())
           == {"name", "model", "ok", "output", "error", "elapsed"},
           "six fields", str(set(rok.to_dict().keys())))
+
+    attributed = ProviderResult(
+        name="codex", model="gpt-5", ok=True, output="hello", error=None,
+        elapsed=1.5, reported_model="GPT Test",
+        model_attribution="runtime-reported",
+    )
+    check("ProviderResult omits both attribution fields when unset",
+          "reported_model" not in rok.to_dict()
+          and "model_attribution" not in rok.to_dict(),
+          "both omitted", str(rok.to_dict()))
+    check("ProviderResult round-trips both attribution fields when set",
+          ProviderResult.from_dict(attributed.to_dict()) == attributed,
+          repr(attributed), repr(ProviderResult.from_dict(attributed.to_dict())))
+    derived_report = ProviderResult.from_dict({
+        "reported_model": "X",
+        "model_attribution": "requested-only",
+    })
+    check("from_dict derives runtime attribution instead of trusting the stamp",
+          derived_report.model_attribution == "runtime-reported",
+          "runtime-reported", repr(derived_report.model_attribution))
+    derived_empty = ProviderResult.from_dict({
+        "reported_model": None,
+        "model_attribution": "runtime-reported",
+    })
+    check("from_dict derives requested-only for an empty runtime report",
+          derived_empty.model_attribution == "requested-only",
+          "requested-only", repr(derived_empty.model_attribution))
+    coerced_report = ProviderResult.from_dict({"reported_model": 5})
+    check("from_dict coerces reported_model to a string",
+          coerced_report.reported_model == "5",
+          "5", repr(coerced_report.reported_model))
 
     # 2. partial/corrupt degradation.
     try:
@@ -17266,6 +17624,38 @@ def test_run_scoped_reviews():
               cf.returncode == 0 and "FLAT OK" in cf.stdout,
               "FLAT OK rendered", cf.stdout[:150])
 
+    # A flat run may carry the adapter's runtime report, but never the
+    # run-scoped attribution stamp.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        flat = tdp / ".crew" / "reviews" / "F"
+        flat.mkdir(parents=True)
+        (flat / "prompt-seat.txt").write_text("PROMPT", encoding="utf-8")
+        bins = tdp / "bin"
+        bins.mkdir()
+        capture = tdp / "capture.json"
+        make_fake_bin(bins, "agent", f"CAPTURE = {str(capture)!r}\n" + _CURSOR_CONTINUATION_FAKE)
+        env = path_with(bins)
+        env["CLAUDE_PROJECT_DIR"] = td
+        env["FAKE_REPORTED_MODEL"] = "Composer 2.5"
+        rf = _run_dispatcher(
+            ["run", "cursor-composer", "--session-id", "F", "--json"],
+            cwd=td,
+            env=env,
+            timeout=30,
+        )
+        data = json.loads((flat / "cursor-composer.json").read_text()) if (flat / "cursor-composer.json").exists() else {}
+        check("flat stream run carries reported_model but no attribution stamp",
+              rf.returncode == 0
+              and set(data) == {
+                  "name", "model", "ok", "output", "error", "elapsed",
+                  "channel", "reported_model",
+              }
+              and data.get("reported_model") == "Composer 2.5"
+              and "model_attribution" not in data,
+              "eight-field flat result with reported_model only",
+              f"rc={rf.returncode} data={data}")
+
     # 7. Hostile/contradictory inputs.
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
@@ -19169,9 +19559,9 @@ def test_quorum_header():
               and len(o1["task_seats"]) == 2, "5 + 2", str(o1 and roster))
         _land(td, o1, "opus")
         cq = _grouped(td, o1, roster)
-        check("1-of-7 usable renders `PANEL: 7 launched · 1 usable · quorum 4: NOT MET`",
+        check("1-of-7 usable renders `PANEL: 7 launched · 1 usable · 0 attributed · quorum 4: NOT MET`",
               cq.returncode == 0
-              and "PANEL: 7 launched · 1 usable · quorum 4: NOT MET" in cq.stdout,
+              and "PANEL: 7 launched · 1 usable · 0 attributed · quorum 4: NOT MET" in cq.stdout,
               "the exact header line", cq.stdout[:200])
         check("NOT MET adds the capability-neutral quorum line (no --force verb)",
               "an APPROVED verdict is not backed by quorum from this panel"
@@ -19205,9 +19595,9 @@ def test_quorum_header():
                             "--session-id", "S"], td)
         _land(td, o1, "opus")
         c1 = _grouped(td, o1, "opus")
-        check("N=1: `PANEL: 1 launched · 1 usable · quorum 1: MET` and no cannot-record line",
+        check("N=1: `PANEL: 1 launched · 1 usable · 0 attributed · quorum 1: MET` and no cannot-record line",
               c1.returncode == 0
-              and "PANEL: 1 launched · 1 usable · quorum 1: MET" in c1.stdout
+              and "PANEL: 1 launched · 1 usable · 0 attributed · quorum 1: MET" in c1.stdout
               and "cannot be recorded" not in c1.stdout,
               "quorum 1 MET", c1.stdout[:150])
     with tempfile.TemporaryDirectory() as td:
@@ -19219,20 +19609,20 @@ def test_quorum_header():
         c2 = _grouped(td, o2, "opus,sonnet")
         check("N=2 with 1 usable: `quorum 2: NOT MET` (strict majority of 2 is 2)",
               c2.returncode == 0
-              and "PANEL: 2 launched · 1 usable · quorum 2: NOT MET" in c2.stdout,
+              and "PANEL: 2 launched · 1 usable · 0 attributed · quorum 2: NOT MET" in c2.stdout,
               "quorum 2 NOT MET", c2.stdout[:150])
         # A duplicated --seats entry re-renders one result but counts it ONCE:
         # `opus,opus` over one landed seat must not fake a met 2-seat quorum.
         cdup = _grouped(td, o2, "opus,opus")
         check("--seats opus,opus over one landed seat renders `1 usable` and NOT MET (distinct usable names)",
               cdup.returncode == 0
-              and "PANEL: 2 launched · 1 usable · quorum 2: NOT MET" in cdup.stdout,
+              and "PANEL: 2 launched · 1 usable · 0 attributed · quorum 2: NOT MET" in cdup.stdout,
               "1 usable despite the duplicate", cdup.stdout[:150])
         _land(td, o2, "sonnet")
         c2b = _grouped(td, o2, "opus,sonnet")
         check("N=2 with 2 usable: `quorum 2: MET`",
               c2b.returncode == 0
-              and "PANEL: 2 launched · 2 usable · quorum 2: MET" in c2b.stdout,
+              and "PANEL: 2 launched · 2 usable · 0 attributed · quorum 2: MET" in c2b.stdout,
               "quorum 2 MET", c2b.stdout[:150])
         # 3. Distinct-name counting comes from seat_signatures (inside the
         #    hashed identity, verified), so the untyped roster LISTS are inert:
@@ -19278,8 +19668,59 @@ def test_quorum_header():
         ce = _grouped(td, oe, "opus")
         check("the empty result does not count toward quorum (0 usable, NOT MET)",
               ce.returncode == 0
-              and "PANEL: 1 launched · 0 usable · quorum 1: NOT MET" in ce.stdout,
+              and "PANEL: 1 launched · 0 usable · 0 attributed · quorum 1: NOT MET" in ce.stdout,
               "0 usable NOT MET", ce.stdout[:150])
+
+    # A runtime report drives the display count, while a missing stamp remains
+    # a valid requested-only read and quorum still uses ok.
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        _write_plan(tdp)
+        _, oa = _prep_json(["plan.md", "--seats", "", "--task-seats", "opus,sonnet",
+                            "--session-id", "S"], td)
+        run_dir = tdp / oa["run_dir"]
+        common = {
+            "ok": True,
+            "output": _SCHEMA_REVIEW,
+            "error": None,
+            "elapsed": 1.0,
+            "run_id": oa["run_id"],
+            "target_sha256": oa["target_sha256"],
+        }
+        (run_dir / "opus.json").write_text(json.dumps({
+            **common,
+            "name": "opus",
+            "model": "opus",
+            "reported_model": "X",
+            "model_attribution": "runtime-reported",
+        }), encoding="utf-8")
+        (run_dir / "sonnet.json").write_text(json.dumps({
+            **common,
+            "name": "sonnet",
+            "model": "sonnet",
+        }), encoding="utf-8")
+        attributed = _grouped(td, oa, "opus,sonnet")
+        check("collect derives one attributed seat from reported_model",
+              attributed.returncode == 0
+              and "PANEL: 2 launched · 2 usable · 1 attributed · quorum 2: MET" in attributed.stdout
+              and "[runtime-reported: X]" in attributed.stdout
+              and "[requested-only]" in attributed.stdout,
+              "one attributed row and one requested-only row",
+              attributed.stdout[:300])
+        (run_dir / "sonnet.json").write_text(json.dumps({
+            **common,
+            "name": "sonnet",
+            "model": "sonnet",
+            "model_attribution": "runtime-reported",
+        }), encoding="utf-8")
+        wrong_stamp = _grouped(td, oa, "opus,sonnet")
+        check("collect derives requested-only when a stored stamp disagrees",
+              wrong_stamp.returncode == 0
+              and "PANEL: 2 launched · 2 usable · 1 attributed · quorum 2: MET" in wrong_stamp.stdout
+              and "[requested-only]" in wrong_stamp.stdout
+              and "corrupt" not in wrong_stamp.stderr.lower(),
+              "one attributed row and requested-only row",
+              wrong_stamp.stdout[:300])
 
     # 4. Flat mode: no resolvable run identity -> no header, one stderr note.
     with tempfile.TemporaryDirectory() as td:
@@ -20947,7 +21388,20 @@ def test_swab():
         user_deb.mkdir()
         _old_mtime(user_deb)
 
-        # --- dry-run: lists the two real orphans, deletes NOTHING ---
+        # Probe captures: only the aged generated file is prunable.
+        probes = crew / "probes"
+        probes.mkdir()
+        probe_old = probes / "cursor-hook-env-2026-08-28.txt"
+        probe_old.write_text("old")
+        probe_fresh = probes / f"cursor-hook-env-{time.strftime('%Y-%m-%d', time.gmtime())}.txt"
+        probe_fresh.write_text("fresh")
+        probe_foreign = probes / "notes.txt"
+        probe_foreign.write_text("foreign")
+        probe_link = probes / "cursor-hook-env-2026-08-27.txt"
+        os.symlink(str(probe_old), str(probe_link))
+        _old_mtime(probe_old)
+
+        # --- dry-run: lists the three real candidates, deletes NOTHING ---
         rc, out, err = _swab_run(td)
         check("swab dry-run exits 0", rc == 0, "0", str(rc))
         check("swab dry-run names the orphaned review run",
@@ -20955,8 +21409,8 @@ def test_swab():
         check("swab dry-run names the stale debate dir",
               "20200101-120000-old" in out, "stale debate listed", out)
         check("swab dry-run closing line points at --yes",
-              "crew swab --yes" in out and "2 items" in out,
-              "2 items ... --yes", out)
+              "crew swab --yes" in out and "3 items" in out,
+              "3 items ... --yes", out)
         check("swab dry-run deletes nothing (orphan survives)", orphan.exists(),
               "orphan present", "gone")
         check("swab dry-run deletes nothing (stale debate survives)",
@@ -20973,9 +21427,12 @@ def test_swab():
         check("swab --json dry-run failed is empty", payload["failed"] == [],
               "[]", str(payload["failed"]))
         names = {i["name"] for i in payload["prunable"]}
-        check("swab --json prunable = exactly the two orphans",
-              names == {"run-abc123def456", "20200101-120000-old"},
-              "{run-abc123def456, 20200101-120000-old}", str(names))
+        check("swab --json prunable = exactly the three candidates",
+              names == {"run-abc123def456", "20200101-120000-old", "cursor-hook-env-2026-08-28.txt"},
+              "{run-abc123def456, 20200101-120000-old, cursor-hook-env-2026-08-28.txt}", str(names))
+        check("swab --json has one probe candidate",
+              sum(i["kind"] == "probe" for i in payload["prunable"]) == 1,
+              "one probe item", str(payload["prunable"]))
         check("swab --json items carry kind/name/path/bytes",
               all(set(i) == {"kind", "name", "path", "bytes"} for i in payload["prunable"]),
               "kind/name/path/bytes", str(payload["prunable"][:1]))
@@ -20990,8 +21447,8 @@ def test_swab():
               "orphan gone", "still present")
         check("swab --yes removes the stale debate", not stale_deb.exists(),
               "debate gone", "still present")
-        check("swab --yes reports removed count", "removed 2 items" in out,
-              "removed 2 items", out)
+        check("swab --yes reports removed count", "removed 3 items" in out,
+              "removed 3 items", out)
 
         # Everything the guards protect SURVIVES --yes:
         check("foreign run-backup survives --yes", (reviews / "run-backup").exists(),
@@ -21020,6 +21477,12 @@ def test_swab():
               "present", "deleted")
         check("user-named debate dir survives --yes", user_deb.exists(),
               "present", "deleted")
+        check("fresh probe capture survives --yes", probe_fresh.exists(),
+              "present", "deleted")
+        check("foreign probe file survives --yes", probe_foreign.exists(),
+              "present", "deleted")
+        check("symlinked probe capture survives --yes", probe_link.is_symlink(),
+              "link present", "deleted")
 
         # --- clean tree: nothing left to swab ---
         rc, out, err = _swab_run(td)

@@ -141,21 +141,16 @@ a future host-specific change lands on one channel alone instead of silently
 retargeting both. Any divergence must therefore be a recorded host fact in
 `docs/cursor-host.md`, with the reason on the fence that differs.
 
-On the `cursor` channel the issued model must be a slug the app's subagent
-surface offers: the family enabled on the account AND the exact variant the
-Task path accepts (see `docs/cursor-host.md`). A slug it does not offer is
-usually refused at spawn, but the same slug has also been accepted with its
-answering model unobserved, so a successful spawn is unattributed (substitution
-possible) until its badge is read.
-Treat a
-refusal as a lost action and recover it with the codes below; there is no CLI
-fallback for a reviewer seat issued native, so that seat settles FAILED and the
-panel degrades by one voice (quorum recounts the usable seats and the digest
-synthesizes from whatever returned). Never substitute a neighbouring model
-yourself, and never spawn a role the action did not name. If every native seat
-is refused this way, the fix is on the operator's side, not anything you can do
-from here: enable the model families in Cursor and repin each seat to the exact
-variant slug the Task path offers (`docs/cursor-host.md`).
+On the `cursor` channel, only a Cursor host issues a native Task, and its model
+is the seat's `native_model` pin. A seat without that pin is dropped during
+resolution. On any other host, a cursor seat runs externally through the
+`cursor-agent` CLI at its `model`, and no native work item is issued for it. The
+native pin must be a slug the app's subagent surface offers: enable the family
+and set the exact variant accepted by the Task path (see
+`docs/cursor-host.md`). A nameable but unoffered slug is usually refused at
+spawn, with no CLI fallback for a reviewer seat issued native, so recover the
+lost action with the codes below and let the panel degrade. Never substitute a
+neighbouring model yourself or spawn a role the action did not name.
 
 Also on the `cursor` channel: a spawned reviewer, formatter, or scribe INHERITS
 the tools of the session that spawned it, because that host offers no per-role
@@ -195,9 +190,11 @@ and never run the scribe against the fallback path. The fallback is
 the exact issued `return_transport.fallback.ingress_path`, written by the host
 with the same returned review bytes. Formatter and synthesis actions have no fallback transport.
 The Task RESULT is the sole completion signal, while the landed file and hash
-remain the result authority. The issued model values are requested model pins;
-do not infer, substitute, or report them as proof of the model the harness
-actually ran.
+remain the result authority. Native actions are stamped
+`model_attribution: requested-only` by the engine for exactly this reason, and
+nothing the host submits can change that stamp. The issued model values are
+requested model pins; do not infer, substitute, or report them as proof of the
+model the harness actually ran.
 
 When a claimed formatter instead has `driver=parent` and
 `access=parent-context`, do not spawn or emulate a formatter Task. Read exactly

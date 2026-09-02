@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Claude Crew Session Start Hook
-Restores persistent mode states and injects crew's own agent guidance.
+Restores persistent mode states, injects crew's own agent guidance, and reports
+stale probe captures.
 """
 
 # --- Version guard: stdlib-only, old-parseable, BEFORE any project import.
@@ -15,6 +16,7 @@ Restores persistent mode states and injects crew's own agent guidance.
 # SessionStart's documented hookSpecificOutput.additionalContext channel.
 # The systemMessage fallback is Claude-shaped and inert on Cursor by design; stderr remains the carrier there.
 import json
+import os
 import sys
 
 if sys.version_info < (3, 11):
@@ -30,6 +32,9 @@ if sys.version_info < (3, 11):
 
 import re
 import time
+import contextlib
+import importlib.util
+import io
 from pathlib import Path
 
 import artifact_prune
@@ -70,6 +75,43 @@ def _emit(result: SessionStartResult) -> None:
     except Exception:
         is_cursor = False
     print(result.to_cursor_json() if is_cursor else result.to_json())
+
+
+def _has_cursor_payload_shape(payload: object) -> bool:
+    return isinstance(payload, dict) and any(
+        key in payload for key in ("cursor_version", "workspace_roots")
+    )
+
+
+def _capture_cursor_env(root: Path, payload: object) -> None:
+    if os.environ.get("CREW_CURSOR_ENV_CAPTURE") == "0":
+        return
+    try:
+        detected_host = detect_host()
+        payload_shape = _has_cursor_payload_shape(payload)
+        if detected_host in ("claude", "codex"):
+            return
+        if detected_host != "cursor" and not payload_shape:
+            return
+        capture_path = Path(__file__).with_name("cursor-env-capture.py")
+        spec = importlib.util.spec_from_file_location(
+            "crew_cursor_env_capture", capture_path
+        )
+        if spec is None or spec.loader is None:
+            return
+        module = importlib.util.module_from_spec(spec)
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            spec.loader.exec_module(module)
+            module.capture(
+                root,
+                payload,
+                invocation_source="session-start.py",
+            )
+    except Exception:
+        return
 
 
 def cleanup_stale_files(directory: Path) -> None:
@@ -258,7 +300,7 @@ def sweep_signal_markers_all(crew_dir: Path | None = None) -> None:
 
 
 def report_stale_artifacts(crew_dir: Path | None = None) -> str:
-    """RETURN a one-line COUNT-ONLY notice about stale review-run + debate orphans, or "".
+    """RETURN a COUNT-ONLY notice about stale review runs, debates, or probe captures, or "".
 
     Destructive rmtree of the user's disk from the unattended session-start hook
     is the wrong venue: an unattended sweep has no human reading the list before
@@ -568,11 +610,8 @@ def main():
     cleanup_stale_files(home / ".claude")
     crew_dir = directory / ".crew"
     cleanup_stale_files(crew_dir)
-    # Pass the SAME resolved `.crew` the state cleanup used to the artifact
-    # sweeps. `directory` came from the ONE resolver (models `_get_project_dir`
-    # delegates to crew_base), and the sweeps' own bare crew_base() default
-    # resolves IDENTICALLY, so passing crew_dir explicitly just avoids
-    # re-resolving the same root (it does not change which tree they act on).
+    # Pass the resolved `.crew` used by state cleanup to the artifact sweeps.
+    # Supplying it explicitly keeps every operation in this hook on one root.
     sweep_signal_markers_all(crew_dir)
     swab_notice = report_stale_artifacts(crew_dir)
 
@@ -595,6 +634,9 @@ def main():
 
     # Output using SessionStartResult for proper context injection
     _emit(SessionStartResult.with_context(full_context))
+    capture_root = crew_base(data, fallback_to_cwd=False)
+    if capture_root is not None:
+        _capture_cursor_env(capture_root, data)
 
 
 if __name__ == "__main__":

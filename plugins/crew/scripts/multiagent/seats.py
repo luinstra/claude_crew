@@ -115,6 +115,10 @@ class SeatSpec:
     the registry factory, so no provider reads the config itself and a declared
     seat gets the same tunes a shipped one does.
 
+    native_model: the exact variant slug the host's in-session subagent surface
+    offers for this seat's family; read only for cursor-channel seats; unset means
+    the seat has no in-session route on that host.
+
     declared: the seat is ABSENT from the shipped catalog, i.e. a config layer
     introduced it. Tuning a shipped seat does NOT set it: the scaffold filter and
     the premium-off derivation key on it, and pinning a knob on a built-in seat
@@ -123,6 +127,7 @@ class SeatSpec:
     name: str
     via: tuple[str, ...]
     model: str | None = None
+    native_model: str | None = None
     opt_in: bool = False
     available: bool = True
     reasoning_effort: str | None = None
@@ -158,6 +163,11 @@ class _NoExecutionKey:
 
 
 _NO_KEY = _NoExecutionKey()
+
+
+# A run-time alias that the host echoes back instead of naming a model cannot
+# pin an in-session seat.
+NATIVE_UNRESOLVED_MODELS: frozenset[str] = frozenset({"auto"})
 
 
 # Keys of warnings already emitted this process (one-time-note guard, mirroring
@@ -368,10 +378,24 @@ def _spec_from_table(name: str, tbl: dict, layer: str, base: SeatSpec | None) ->
     fields: dict[str, Any] = {}
     if via is not _NO_KEY:
         fields["via"] = via
-    for key in ("model", "reasoning_effort", "print_timeout"):
+    for key in ("model", "native_model", "reasoning_effort", "print_timeout"):
         val = _str_field(tbl, key, name, layer)
         if val is not None:
             fields[key] = val
+    if fields.get("native_model") in NATIVE_UNRESOLVED_MODELS:
+        shipped_pin = getattr(spec, "native_model", None)
+        consequence = (
+            "the shipped native_model stays in force; the seat keeps its native route"
+            if shipped_pin
+            else "no shipped native_model exists; the seat has no native route and is dropped before the freeze"
+        )
+        _warn_once(
+            f"native-model-unresolved:{layer}:{name}",
+            f"[seats.{name}].native_model={fields['native_model']!r} names a run-time alias "
+            f"the host echoes back instead of a model, so it cannot pin an in-session seat; "
+            f"ignoring the key ({consequence})",
+        )
+        del fields["native_model"]
     opt_in = _bool_field(tbl, "opt_in", name, layer, on_bad=False)
     if opt_in is not None:
         fields["opt_in"] = opt_in
@@ -571,6 +595,14 @@ def merged_catalog() -> dict[str, SeatSpec]:
                         via=shipped_specs[name].via,
                         model=shipped_specs[name].model,
                     )
+        for name, spec in list(catalog.items()):
+            if spec.native_model is not None and spec.provider != "cursor":
+                _warn_once(
+                    f"native-model-channel:{name}",
+                    f"[seats.{name}].native_model is read only for cursor-channel seats; "
+                    f"ignoring it on channel {spec.via[0]!r}",
+                )
+                catalog[name] = replace(spec, native_model=None)
         _catalog = catalog
     return _catalog
 

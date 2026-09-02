@@ -65,16 +65,16 @@ class PreToolUseInput:
         return self.tool_input.get("url", "")
 
 
-def _get_project_dir() -> str:
+def _get_project_dir(payload: object | None = None) -> str:
     """Get the project directory via the ONE shared resolver.
 
     Delegates to ``crew_base`` so the state layer resolves `.crew` through the
     SAME function the review engine and the session-start sweeps do (no
     models-vs-crew_base pair that can pick different trees). A hook runs with
-    CLAUDE_PROJECT_DIR set and its cwd AT the project root, so the resolver never
-    needs the payload's `directory`/`cwd`.
+    CLAUDE_PROJECT_DIR set and its cwd AT the project root. A hook payload is
+    passed through when the environment does not identify the project root.
     """
-    return str(crew_base())
+    return str(crew_base(payload))
 
 
 @dataclass
@@ -86,7 +86,7 @@ class SessionStartInput:
     @classmethod
     def from_dict(cls, data: dict) -> "SessionStartInput":
         return cls(
-            directory=_get_project_dir(),
+            directory=_get_project_dir(data),
             session_id=data.get("session_id", data.get("sessionId", "")),
         )
 
@@ -137,7 +137,7 @@ class StopInput:
         tasks = data.get("background_tasks")
         crons = data.get("session_crons")
         return cls(
-            directory=_get_project_dir(),
+            directory=_get_project_dir(data),
             session_id=data.get("session_id", data.get("sessionId", "")),
             # A non-list (older or future harness) reads as "no signal" rather
             # than crashing the hook.
@@ -901,7 +901,7 @@ def record_hook_payload_keys(event, payload, extra=None) -> None:
         if is_stop and extra:
             parts.extend(_render_debug_keys(extra, _STOP_EXTRA_VALUE_KEYS))
         line = f"{utc_now_iso()} {event}: {','.join(parts)}\n"
-        target = crew_base() / ".crew" / "hook-payload-keys.txt"
+        target = crew_base(payload) / ".crew" / "hook-payload-keys.txt"
         target.parent.mkdir(parents=True, exist_ok=True)
         # O_NOFOLLOW: a symlinked capture file must not redirect this
         # unattended append outside the tree (refusal lands in the except).

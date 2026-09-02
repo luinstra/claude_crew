@@ -6,10 +6,13 @@ Run from project root: python3 plugins/crew/scripts/tests/test-hooks.py
 
 import json
 import os
+import resource
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Colors
@@ -422,6 +425,33 @@ def main():
                  f"stop_hook_active={_bare_in.stop_hook_active!r}, "
                  f"is_parked={_bare_in.is_parked!r}")
 
+    with tempfile.TemporaryDirectory() as _stop_root_td:
+        _stop_root = Path(_stop_root_td)
+        (_stop_root / ".crew").mkdir()
+        _saved_stop_cwd = os.getcwd()
+        _saved_stop_project = os.environ.get("CLAUDE_PROJECT_DIR")
+        os.chdir(str(PROJECT_DIR))
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        try:
+            _payload_stop = StopInput.from_dict({
+                "workspace_roots": [str(_stop_root)],
+                "session_id": "payload-root",
+            })
+        finally:
+            os.chdir(_saved_stop_cwd)
+            if _saved_stop_project is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = _saved_stop_project
+    if _payload_stop.directory == str(_stop_root):
+        log_pass("StopInput uses workspace_roots when cwd is the plugin root and project env is unset")
+    else:
+        log_fail(
+            "StopInput uses workspace_roots when cwd is the plugin root and project env is unset",
+            str(_stop_root),
+            _payload_stop.directory,
+        )
+
     _empty_in = StopInput.from_dict({"directory": "/tmp/crew-x", "background_tasks": []})
     if _empty_in.is_parked is False:
         log_pass("StopInput.is_parked: an EMPTY background_tasks list is not parked")
@@ -706,6 +736,189 @@ def main():
     )
     _session_module = importlib.util.module_from_spec(_session_spec)
     _session_spec.loader.exec_module(_session_module)
+    _capture_today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def _capture_check(name: str, condition: bool, expected: str, got: str) -> None:
+        if condition:
+            log_pass(name)
+        else:
+            log_fail(name, expected, got)
+
+    def _run_session_start_in_process(
+        root: Path,
+        host: str | None,
+        payload: dict,
+        capture_enabled: bool,
+        project_env: bool = True,
+        cwd: Path | None = None,
+    ) -> str:
+        saved_env = {
+            key: os.environ.get(key)
+            for key in (
+                "CLAUDE_PROJECT_DIR", "CREW_HOST", "HOME",
+                "CREW_CURSOR_ENV_CAPTURE", *_AMBIENT_HOST_MARKERS,
+            )
+        }
+        saved_stdin = sys.stdin
+        saved_capture = _session_module._capture_cursor_env
+        saved_cwd = Path.cwd()
+        output = io.StringIO()
+        try:
+            if project_env:
+                os.environ["CLAUDE_PROJECT_DIR"] = str(root)
+            else:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            if host is None:
+                os.environ.pop("CREW_HOST", None)
+            else:
+                os.environ["CREW_HOST"] = host
+            os.environ["HOME"] = _NEUTRAL_HOME
+            for marker in _AMBIENT_HOST_MARKERS:
+                os.environ.pop(marker, None)
+            if cwd is not None:
+                os.chdir(cwd)
+            sys.stdin = io.StringIO(json.dumps(payload))
+            if not capture_enabled:
+                _session_module._capture_cursor_env = lambda *_args: None
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                _session_module.main()
+        finally:
+            _session_module._capture_cursor_env = saved_capture
+            sys.stdin = saved_stdin
+            os.chdir(saved_cwd)
+            for key, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        return output.getvalue()
+
+    with tempfile.TemporaryDirectory() as _session_capture_td:
+        _session_capture_root = Path(_session_capture_td)
+        (_session_capture_root / ".crew").mkdir()
+        _cursor_context_enabled = _run_session_start_in_process(
+            _session_capture_root,
+            None,
+            {
+                "workspace_roots": [str(_session_capture_root)],
+                "session_id": "capture-session",
+            },
+            True,
+        )
+        _cursor_capture_file = (
+            _session_capture_root / ".crew" / "probes"
+            / f"cursor-hook-env-{_capture_today}.txt"
+        )
+        _cursor_context_disabled = _run_session_start_in_process(
+            _session_capture_root,
+            None,
+            {
+                "workspace_roots": [str(_session_capture_root)],
+                "session_id": "capture-session",
+            },
+            False,
+        )
+        try:
+            _cursor_context_obj = json.loads(_cursor_context_enabled)
+        except json.JSONDecodeError:
+            _cursor_context_obj = {}
+        _cursor_additional_context = _cursor_context_obj.get("additional_context")
+        if _cursor_additional_context is None:
+            _cursor_additional_context = _cursor_context_obj.get(
+                "hookSpecificOutput", {}
+            ).get("additionalContext")
+        _cursor_capture_text = _cursor_capture_file.read_text(encoding="utf-8")
+        _capture_check(
+            "Cursor-shaped SessionStart captures without changing additionalContext",
+            _cursor_capture_file.is_file()
+            and _cursor_context_enabled == _cursor_context_disabled
+            and isinstance(_cursor_additional_context, str)
+            and "detect_host: unknown" in _cursor_capture_text
+            and "cursor_payload_shape: true" in _cursor_capture_text
+            and "invocation_source: session-start.py" in _cursor_capture_text,
+            "capture file and byte-identical Cursor hook output",
+            repr((_cursor_context_enabled, _cursor_context_disabled)),
+        )
+
+    with tempfile.TemporaryDirectory() as _capture_no_root_td:
+        _capture_no_root = Path(_capture_no_root_td)
+        _no_root_payload = {
+            "cursor_version": "1.0",
+            "session_id": "capture-no-root",
+        }
+        _no_root_disabled = _run_session_start_in_process(
+            _capture_no_root,
+            None,
+            _no_root_payload,
+            False,
+            project_env=False,
+            cwd=_capture_no_root,
+        )
+        _no_root_enabled = _run_session_start_in_process(
+            _capture_no_root,
+            None,
+            _no_root_payload,
+            True,
+            project_env=False,
+            cwd=_capture_no_root,
+        )
+        _capture_check(
+            "Cursor-shaped SessionStart without a usable root skips capture",
+            _no_root_enabled == _no_root_disabled
+            and not (_capture_no_root / ".crew" / "probes").exists(),
+            "byte-identical hook output and no capture directory",
+            repr((_no_root_enabled, _no_root_disabled)),
+        )
+
+    with tempfile.TemporaryDirectory() as _capture_failure_td:
+        _capture_failure_root = Path(_capture_failure_td)
+        (_capture_failure_root / ".crew").mkdir()
+        _capture_failure_disabled = _run_session_start_in_process(
+            _capture_failure_root,
+            None,
+            {
+                "cursor_version": "1.0",
+                "session_id": "capture-failure",
+            },
+            False,
+        )
+        _capture_failure_probes = _capture_failure_root / ".crew" / "probes"
+        _capture_failure_probes.write_bytes(b"keep")
+        _capture_failure_enabled = _run_session_start_in_process(
+            _capture_failure_root,
+            None,
+            {
+                "cursor_version": "1.0",
+                "session_id": "capture-failure",
+            },
+            True,
+        )
+        _capture_check(
+            "Cursor capture failure leaves SessionStart output unchanged",
+            _capture_failure_enabled == _capture_failure_disabled
+            and _capture_failure_probes.read_bytes() == b"keep",
+            "byte-identical output and unchanged probes file",
+            repr((_capture_failure_enabled, _capture_failure_disabled)),
+        )
+
+    with tempfile.TemporaryDirectory() as _claude_capture_td:
+        _claude_capture_root = Path(_claude_capture_td)
+        (_claude_capture_root / ".crew").mkdir()
+        _run_session_start_in_process(
+            _claude_capture_root,
+            None,
+            {
+                "claude_version": "1.0",
+                "session_id": "claude-session",
+            },
+            True,
+        )
+        _capture_check(
+            "Claude SessionStart does not write a Cursor capture",
+            not (_claude_capture_root / ".crew" / "probes").exists(),
+            "no probes directory",
+            str(_claude_capture_root / ".crew" / "probes"),
+        )
 
     def _raise_detect_host():
         raise RuntimeError("host detection failed")
@@ -835,6 +1048,263 @@ def main():
     else:
         log_fail("Cursor hook manifest pins python3 commands and 10/5 second timeouts",
                  "sessionStart=10, stop=5, loop_limit=3", repr(_cursor_hooks))
+
+    log_section("Cursor env capture hook")
+    _capture_script = PROJECT_DIR / "scripts" / "cursor-env-capture.py"
+
+    def _run_capture(root: Path, input_data: str, extra_env: dict = None, preexec_fn=None):
+        _env = _neutral_env()
+        _env.pop("CLAUDE_PROJECT_DIR", None)
+        if extra_env:
+            _env.update(extra_env)
+        return subprocess.run(
+            [sys.executable, str(_capture_script)],
+            input=input_data,
+            capture_output=True,
+            text=True,
+            cwd=SCRIPT_DIR,
+            env=_env,
+            preexec_fn=preexec_fn,
+        )
+
+    with tempfile.TemporaryDirectory() as _capture_td:
+        _capture_root = Path(_capture_td)
+        _capture_env = {
+            "CREW_HOST": "cursor",
+            "CURSOR_AGENT": "1",
+            "CURSOR_INVOKED_AS": "cursor-agent",
+            "CURSOR_CONVERSATION_ID": "c-1",
+            "CURSOR_API_TOKEN": "abc123",
+            "VSCODE_PID": "42",
+            "VSCODE_CREDENTIAL_URL": "https://user:secret@example.com",
+            "ELECTRON_RUN_AS_NODE": "1",
+            "TERM_PROGRAM": "vscode",
+            "TERM_PROGRAM_VERSION": "1.0",
+            "__CURSOR_SANDBOX_ENV_RESTORE": "blob",
+            "HOME": _NEUTRAL_HOME,
+        }
+        _capture_input = json.dumps({
+            "workspace_roots": [str(_capture_root)],
+            "session_id": "x",
+        })
+        _capture_proc = _run_capture(_capture_root, _capture_input, _capture_env)
+        _capture_files = list((_capture_root / ".crew" / "probes").glob("*"))
+        _capture_file = _capture_root / ".crew" / "probes" / f"cursor-hook-env-{_capture_today}.txt"
+        _capture_text = _capture_file.read_text(encoding="utf-8") if _capture_file.is_file() else ""
+        if (
+            _capture_proc.returncode == 0
+            and _capture_proc.stdout.strip() == "{}"
+            and _capture_files == [_capture_file]
+            and stat.S_IMODE(_capture_file.stat().st_mode) == 0o600
+            and "payload_keys: session_id, workspace_roots" in _capture_text
+            and "detect_host: cursor" in _capture_text
+            and "cursor_payload_shape: true" in _capture_text
+            and "invocation_source: cursor-env-capture.py" in _capture_text
+            and "CURSOR_AGENT=1" in _capture_text
+            and "CURSOR_INVOKED_AS=cursor-agent" in _capture_text
+            and "TERM_PROGRAM_VERSION=1.0" in _capture_text
+            and "TERM_PROGRAM=vscode" in _capture_text
+            and "CURSOR_CONVERSATION_ID=(set)" in _capture_text
+            and "CURSOR_API_TOKEN=(set)" in _capture_text
+            and "VSCODE_PID=(set)" in _capture_text
+            and "VSCODE_CREDENTIAL_URL=(set)" in _capture_text
+            and "ELECTRON_RUN_AS_NODE=(set)" in _capture_text
+            and "__CURSOR_SANDBOX_ENV_RESTORE=(set)" in _capture_text
+            and "abc123" not in _capture_text
+            and "https://user:secret@example.com" not in _capture_text
+            and "secret" not in _capture_text
+            and "blob" not in _capture_text
+            and "HOME=" not in _capture_text
+            and "PATH=" not in _capture_text
+        ):
+            log_pass("Cursor env capture writes allowlisted values in a 0600 payload-root file")
+        else:
+            log_fail("Cursor env capture writes allowlisted values in a 0600 payload-root file",
+                     "one dated 0600 file with allowlisted values and set markers",
+                     f"rc={_capture_proc.returncode} stdout={_capture_proc.stdout!r} files={_capture_files} text={_capture_text!r}")
+
+        _before = _capture_file.read_bytes() if _capture_file.is_file() else b""
+        _second = _run_capture(_capture_root, _capture_input, _capture_env)
+        _after = _capture_file.read_bytes() if _capture_file.is_file() else b""
+        if (
+            _second.returncode == 0
+            and _second.stdout.strip() == "{}"
+            and _before == _after
+            and len(list((_capture_root / ".crew" / "probes").glob("*"))) == 1
+            and _second.stderr == ""
+        ):
+            log_pass("Cursor env capture skips a second capture for the same day")
+        else:
+            log_fail("Cursor env capture skips a second capture for the same day",
+                     "unchanged file and dated-exists diagnostic", _second.stderr)
+
+        _capture_file.unlink()
+        _capture_file.touch()
+        _occupied = _run_capture(_capture_root, _capture_input, _capture_env)
+        if (
+            _occupied.returncode == 0
+            and _occupied.stderr == ""
+            and _capture_file.read_bytes() == b""
+        ):
+            log_pass("Cursor env capture O_EXCL preserves an occupied empty file")
+        else:
+            log_fail("Cursor env capture O_EXCL preserves an occupied empty file",
+                     "empty file and dated-exists diagnostic", _occupied.stderr)
+        _capture_file.unlink()
+        _retry = _run_capture(_capture_root, _capture_input, _capture_env)
+        _capture_check("Cursor env capture writes after the occupied name is removed",
+              _retry.returncode == 0 and _capture_file.is_file()
+              and _capture_file.stat().st_size > 0,
+              "full capture file", f"rc={_retry.returncode} exists={_capture_file.exists()}")
+
+    with tempfile.TemporaryDirectory() as _no_root_td:
+        _no_root = Path(_no_root_td)
+        _no_root_proc = _run_capture(_no_root, "{}")
+        _capture_check("Cursor env capture skips without a project root",
+              _no_root_proc.returncode == 0
+              and _no_root_proc.stdout.strip() == "{}"
+              and _no_root_proc.stderr == ""
+              and not (_no_root / ".crew").exists(),
+              "rc 0, {}, no artifact", _no_root_proc.stderr)
+
+    with tempfile.TemporaryDirectory() as _env_root_td:
+        _env_root = Path(_env_root_td)
+        _env_proc = _run_capture(
+            _env_root,
+            "[1, 2]",
+            {"CLAUDE_PROJECT_DIR": str(_env_root)},
+        )
+        _env_file = _env_root / ".crew" / "probes" / f"cursor-hook-env-{_capture_today}.txt"
+        _capture_check("Cursor env capture accepts a non-object payload with env root",
+              _env_proc.returncode == 0 and _env_proc.stdout.strip() == "{}"
+              and _env_file.is_file()
+              and "root: " + str(_env_root) in _env_file.read_text(encoding="utf-8"),
+              "rc 0, {}, env-root capture", _env_proc.stderr)
+
+    with tempfile.TemporaryDirectory() as _symlink_td:
+        _symlink_root = Path(_symlink_td)
+        _outside = _symlink_root.parent / f"{_symlink_root.name}-outside"
+        _outside.mkdir()
+        (_symlink_root / ".crew").mkdir()
+        os.symlink(str(_outside), str(_symlink_root / ".crew" / "probes"))
+        _symlink_proc = _run_capture(
+            _symlink_root,
+            "{}",
+            {"CLAUDE_PROJECT_DIR": str(_symlink_root)},
+        )
+        _capture_check("Cursor env capture refuses a symlinked probes directory",
+              _symlink_proc.returncode == 0
+              and _symlink_proc.stdout.strip() == "{}"
+              and _symlink_proc.stderr == ""
+              and not list(_outside.iterdir()),
+              "rc 0, {}, empty stderr, empty target", _symlink_proc.stderr)
+        shutil.rmtree(str(_outside))
+
+    with tempfile.TemporaryDirectory() as _crew_link_td:
+        _crew_link_root = Path(_crew_link_td)
+        _crew_link_outside = _crew_link_root.parent / f"{_crew_link_root.name}-outside"
+        _crew_link_outside.mkdir()
+        os.symlink(str(_crew_link_outside), str(_crew_link_root / ".crew"))
+        _crew_link_proc = _run_capture(
+            _crew_link_root,
+            "{}",
+            {"CLAUDE_PROJECT_DIR": str(_crew_link_root)},
+        )
+        _capture_check("Cursor env capture refuses a symlinked .crew directory",
+              _crew_link_proc.returncode == 0
+              and _crew_link_proc.stdout.strip() == "{}"
+              and _crew_link_proc.stderr == ""
+              and not list(_crew_link_outside.iterdir()),
+              "rc 0, {}, empty stderr, empty target", _crew_link_proc.stderr)
+        shutil.rmtree(str(_crew_link_outside))
+
+    with tempfile.TemporaryDirectory() as _file_td:
+        _file_root = Path(_file_td)
+        (_file_root / ".crew").mkdir()
+        _probe_file = _file_root / ".crew" / "probes"
+        _probe_file.write_bytes(b"keep")
+        _file_proc = _run_capture(
+            _file_root,
+            "{}",
+            {"CLAUDE_PROJECT_DIR": str(_file_root)},
+        )
+        _capture_check("Cursor env capture reports a probes regular file",
+              _file_proc.returncode == 0
+              and _file_proc.stdout.strip() == "{}"
+              and _file_proc.stderr == ""
+              and _probe_file.read_bytes() == b"keep",
+              "{}, empty stderr, file unchanged", _file_proc.stderr)
+
+    with tempfile.TemporaryDirectory() as _crew_file_td:
+        _crew_file_root = Path(_crew_file_td)
+        (_crew_file_root / ".crew").write_bytes(b"keep")
+        _crew_file_proc = _run_capture(
+            _crew_file_root,
+            "{}",
+            {"CLAUDE_PROJECT_DIR": str(_crew_file_root)},
+        )
+        _capture_check("Cursor env capture reports a .crew regular file",
+              _crew_file_proc.returncode == 0
+              and _crew_file_proc.stdout.strip() == "{}"
+              and _crew_file_proc.stderr == ""
+              and (_crew_file_root / ".crew").read_bytes() == b"keep",
+              "{}, empty stderr, file unchanged", _crew_file_proc.stderr)
+
+    import artifact_prune as _artifact_prune
+    _capture_source = _capture_script.read_text(encoding="utf-8")
+    _guard_idx = _capture_source.find("sys.version_info < (3, 11)")
+    _first_def_idx = _capture_source.find("def ")
+    if 0 <= _guard_idx < _first_def_idx:
+        log_pass("Cursor env capture version guard precedes function definitions")
+    else:
+        log_fail("Cursor env capture version guard precedes function definitions",
+                 "guard before first def", f"guard={_guard_idx} def={_first_def_idx}")
+    _forbidden_imports = ("models", "artifact_prune")
+    if not any(f"import {name}" in _capture_source or f"from {name}" in _capture_source
+               for name in _forbidden_imports):
+        if "from state_discovery import crew_base" in _capture_source:
+            log_pass("Cursor env capture uses the shared crew_base resolver")
+        else:
+            log_fail("Cursor env capture uses the shared crew_base resolver",
+                     "from state_discovery import crew_base", _capture_source)
+    else:
+        log_fail("Cursor env capture uses the shared crew_base resolver",
+                 "only the shared state_discovery import", _capture_source)
+    _capture_check("Cursor env capture filename regex matches artifact pruning",
+          _artifact_prune.PROBE_FILE_RE.fullmatch(_capture_file.name) is not None,
+          _artifact_prune.PROBE_FILE_RE.pattern, _capture_file.name)
+    _capture_check("Cursor env capture source contains no em dash",
+          chr(0x2014) not in _capture_source, "0", str(_capture_source.count(chr(0x2014))))
+
+    with tempfile.TemporaryDirectory() as _limited_td:
+        _limited_root = Path(_limited_td)
+
+        def _limit_file_size():
+            resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+
+        _limited_proc = _run_capture(
+            _limited_root,
+            "{}",
+            {"CLAUDE_PROJECT_DIR": str(_limited_root)},
+            preexec_fn=_limit_file_size,
+        )
+        _limited_probes = _limited_root / ".crew" / "probes"
+        _capture_check("Cursor env capture removes a partial file after a write failure",
+              _limited_proc.returncode == 0
+              and _limited_proc.stdout.strip() == "{}"
+              and _limited_proc.stderr == ""
+              and _limited_probes.is_dir()
+              and list(_limited_probes.iterdir()) == [],
+              "rc 0, empty stderr, empty probes dir", _limited_proc.stderr)
+        _limited_retry = _run_capture(
+            _limited_root,
+            "{}",
+            {"CLAUDE_PROJECT_DIR": str(_limited_root)},
+        )
+        _capture_check("Cursor env capture retries after removing a partial file",
+              _limited_retry.returncode == 0
+              and len(list(_limited_probes.iterdir())) == 1,
+              "one full capture", _limited_retry.stderr)
 
     # The manifest's agents dir ships EXACTLY crew's Cursor role adapters (plus
     # the .gitkeep that keeps the dir present when the set shrinks). The
@@ -2896,9 +3366,11 @@ def main():
             rp_crew_dir = test_path / "report-only" / ".crew"
             rp_reviews = rp_crew_dir / "reviews"
             rp_debates = rp_crew_dir / "debates"
+            rp_probes = rp_crew_dir / "probes"
             rp_sess1 = rp_reviews / "sess1"
             rp_sess1.mkdir(parents=True, exist_ok=True)
             rp_debates.mkdir(parents=True, exist_ok=True)
+            rp_probes.mkdir(parents=True, exist_ok=True)
 
             over_mtime = _time.time() - (8 * 86400)    # over both the 1-day and 7-day rules
             ancient_mtime = _time.time() - (30 * 86400)
@@ -2931,6 +3403,16 @@ def main():
             rp_debate.mkdir()
             (rp_debate / "question.md").write_text("q")
 
+            # Probe captures: only the aged generated file is a candidate.
+            rp_probe_old = rp_probes / "cursor-hook-env-2026-08-28.txt"
+            rp_probe_old.write_text("old")
+            rp_probe_fresh = rp_probes / f"cursor-hook-env-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.txt"
+            rp_probe_fresh.write_text("fresh")
+            rp_probe_foreign = rp_probes / "notes.txt"
+            rp_probe_foreign.write_text("foreign")
+            rp_probe_link = rp_probes / "cursor-hook-env-2026-08-27.txt"
+            os.symlink(str(rp_probe_old), str(rp_probe_link))
+
             # Signal markers: aged one reaped, fresh one kept, a foreign name never
             # touched (the ONLY auto-delete session-start still performs).
             rp_signals = rp_sess1 / "signals"
@@ -2942,7 +3424,7 @@ def main():
             rp_sig_foreign = rp_signals / "my.report.json"
             rp_sig_foreign.write_text("not a crew marker")
 
-            for _p in (rp_orphan, rp_debate, rp_sig_old, rp_sig_foreign):
+            for _p in (rp_orphan, rp_debate, rp_probe_old, rp_sig_old, rp_sig_foreign):
                 _age(_p, over_mtime)
             _age(rp_live, ancient_mtime)
 
@@ -2951,11 +3433,11 @@ def main():
             # (no byte total): exact sizing is the attended swab's job. ---
             _report = report_stale_artifacts(rp_crew_dir)
 
-            if "2 stale crew artifact(s)" in _report and "crew swab" in _report:
-                log_pass("report_stale_artifacts surfaces the 2 candidates + the swab hint")
+            if "3 stale crew artifact(s)" in _report and "crew swab" in _report:
+                log_pass("report_stale_artifacts surfaces the 3 candidates + the swab hint")
             else:
-                log_fail("report_stale_artifacts surfaces the 2 candidates + the swab hint",
-                         "'2 stale crew artifact(s)' and 'crew swab' in the returned notice", repr(_report))
+                log_fail("report_stale_artifacts surfaces the 3 candidates + the swab hint",
+                         "'3 stale crew artifact(s)' and 'crew swab' in the returned notice", repr(_report))
 
             # Count-only: no byte figure rides the notice (no 'B'/'KB'/'MB' unit, no
             # parenthesized size). The reporter must not pay the per-dir sizing walk.
@@ -2973,7 +3455,7 @@ def main():
                     raise AssertionError("dir_size must not be called by the count-only reporter")
                 ss_module.artifact_prune.dir_size = _boom
                 _report_nosize = report_stale_artifacts(rp_crew_dir)
-                if "2 stale crew artifact(s)" in _report_nosize:
+                if "3 stale crew artifact(s)" in _report_nosize:
                     log_pass("report_stale_artifacts does NO per-dir sizing walk (dir_size never called)")
                 else:
                     log_fail("report_stale_artifacts does NO per-dir sizing walk (dir_size never called)",
@@ -2997,13 +3479,13 @@ def main():
             # while with_sizes=False records 0 for the same set (accurate count, no walk).
             _sized = ss_module.artifact_prune.collect_prunable(rp_crew_dir, _time.time())
             _unsized = ss_module.artifact_prune.collect_prunable(rp_crew_dir, _time.time(), with_sizes=False)
-            if (len(_sized) == len(_unsized) == 2
+            if (len(_sized) == len(_unsized) == 3
                     and any(i.bytes > 0 for i in _sized)
                     and all(i.bytes == 0 for i in _unsized)):
                 log_pass("with_sizes toggles bytes (default sizes, False zeroes) with the SAME orphan count")
             else:
                 log_fail("with_sizes toggles bytes (default sizes, False zeroes) with the SAME orphan count",
-                         "same 2 items, sized>0 vs unsized==0",
+                         "same 3 items, sized>0 vs unsized==0",
                          f"sized={[i.bytes for i in _sized]} unsized={[i.bytes for i in _unsized]}")
 
             if rp_orphan.exists() and (rp_orphan / "run.json").exists():
@@ -3024,10 +3506,11 @@ def main():
                 log_fail("report_stale_artifacts leaves an ACTIVE loop's run dir (protected, no error)",
                          "dir kept", "dir removed")
 
-            # Non-vacuity: with the two candidates removed the report must return
+            # Non-vacuity: with the three candidates removed the report must return
             # "" (proves the earlier surfacing was not an unconditional string).
             shutil.rmtree(rp_orphan)
             shutil.rmtree(rp_debate)
+            rp_probe_old.unlink()
             _clean_report = report_stale_artifacts(rp_crew_dir)
             if _clean_report == "":
                 log_pass("report_stale_artifacts is silent when there are no candidates (non-vacuity)")
@@ -5540,12 +6023,21 @@ def main():
                                  created_at="2026-01-01T00:00:00+00:00")
                 return run_id, run_d
 
-            def _rv_land(run_d: Path, seat: str, run_id: str, tsha: str, ok=True) -> None:
-                (run_d / f"{seat}.json").write_text(json.dumps({
+            def _rv_land(run_d: Path, seat: str, run_id: str, tsha: str, ok=True,
+                         reported_model: str | None = None,
+                         model_attribution: str | None = None) -> None:
+                record = {
                     "name": seat, "model": "m", "ok": ok,
                     "output": "VERDICT: APPROVED", "error": None, "elapsed": 1.0,
                     "run_id": run_id, "target_sha256": tsha,
-                }), encoding="utf-8")
+                }
+                if reported_model is not None:
+                    record["reported_model"] = reported_model
+                if model_attribution is not None:
+                    record["model_attribution"] = model_attribution
+                (run_d / f"{seat}.json").write_text(
+                    json.dumps(record), encoding="utf-8"
+                )
 
             def _rv_state_path(loop: str, sid: str) -> Path:
                 stem = "build-state" if loop == "bl" else "measure-twice-state"
@@ -6413,6 +6905,36 @@ def main():
             for _rv_loop in ("bl", "mt"):
                 _rv_matrix(_rv_loop)
 
+            sid = "rv-attribution"
+            target = rv_root / "attribution.md"
+            target.write_text("# attribution\n", encoding="utf-8")
+            target_sha = rr.sha256_text(target.read_text(encoding="utf-8"))
+            run_id, run_d = _rv_mint(
+                sid,
+                spec=target.name,
+                base="",
+                tsha=target_sha,
+                seats=("codex",),
+            )
+            _rv_init("bl", sid)
+            _rv_begin("bl", sid)
+            _rv_land(
+                run_d,
+                "codex",
+                run_id,
+                target_sha,
+                reported_model="GPT Test",
+                model_attribution="runtime-reported",
+            )
+            _, err, code = _rv_verdict("bl", sid, "APPROVED")
+            state = json.loads(_rv_state_path("bl", sid).read_text())
+            if code == 0 and state.get("phase") == "done":
+                log_pass("record-verdict ignores attribution fields for quorum")
+            else:
+                log_fail("record-verdict ignores attribution fields for quorum",
+                         "exit 0 and phase=done",
+                         f"exit {code}, stderr={err[:160]!r}, state={state}")
+
             # --- the verbs read `active` by the SHARED truthiness rule ---
             # A truthy-non-True `active` (1, "true") is ON to the Stop hook, so it
             # goes on blocking. A verb that read it as OFF would strand that loop:
@@ -6768,6 +7290,12 @@ def main():
                     log_fail(f"{hook_path.name}: version guard precedes project imports",
                              "guard before `from models import`",
                              f"guard_idx={guard_idx}, import_idx={import_idx}")
+            _capture_guard_idx = _capture_script.read_text().find("sys.version_info < (3, 11)")
+            if _capture_guard_idx >= 0:
+                log_pass("cursor-env-capture.py: version guard is present")
+            else:
+                log_fail("cursor-env-capture.py: version guard is present",
+                         "guard present", "guard absent")
 
             # Behavioral: an unexpected in-hook crash fails OPEN (valid allow
             # JSON on stdout) and LOUD (diagnostic on stderr + the hook's own
@@ -6852,6 +7380,21 @@ def main():
                         log_fail(name,
                                  "rc 0, allow JSON + systemMessage, stderr diagnostic",
                                  f"rc={proc.returncode} stdout={proc.stdout[:150]!r} stderr={proc.stderr[:150]!r}")
+                _capture_old = subprocess.run(
+                    [old_python, str(_capture_script)],
+                    input="{}",
+                    capture_output=True, text=True, cwd=SCRIPT_DIR, env=_neutral_env(),
+                )
+                if (
+                    _capture_old.returncode == 0
+                    and _capture_old.stdout.strip() == "{}"
+                    and "3.11" in _capture_old.stderr
+                ):
+                    log_pass("cursor-env-capture.py below the 3.11 floor: visible no-op")
+                else:
+                    log_fail("cursor-env-capture.py below the 3.11 floor: visible no-op",
+                             "rc 0, {}, stderr diagnostic mentioning 3.11",
+                             f"rc={_capture_old.returncode} stdout={_capture_old.stdout!r} stderr={_capture_old.stderr!r}")
 
     finally:
         # Nothing to restore — isolation is the neutral HOME, not a mutation

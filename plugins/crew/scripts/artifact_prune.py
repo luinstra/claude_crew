@@ -1,7 +1,7 @@
 """Enumerate stale crew artifacts safe to prune: ONE definition, two callers.
 
 The `crew swab` command and the session-start reporter both need to answer the
-same question ("which review-run and debate dirs are stale orphans?") under the
+same question ("which review-run, debate, and probe artifacts are stale?") under the
 same safety rules. This module is that single answer, so the deliberate command
 and the unattended reporter can never disagree on what is prunable.
 
@@ -73,13 +73,16 @@ UNVALIDATABLE_WORKFLOW_GRACE_SECONDS = 86400
 
 REVIEWS_SUBDIR = "reviews"
 DEBATES_SUBDIR = "debates"
+PROBES_SUBDIR = "probes"
+PROBE_FILE_RE = re.compile(r"^cursor-hook-env-\d{4}-\d{2}-\d{2}\.txt$")
+PROBE_STALE_SECONDS = 7 * 86400
 
 
 @dataclass
 class Prunable:
     """One artifact dir the caller may remove, with its on-disk size when measured.
 
-    ``kind`` is "review-run" or "debate"; ``name`` is the dir's own name (the run
+    ``kind`` is "review-run", "debate", or "probe"; ``name`` is the dir's own name (the run
     id for a review run); ``bytes`` is the byte total of the subtree (symlinks NOT
     followed) when the caller asked for sizing, or 0 when enumerated with
     ``with_sizes=False`` (the count-only path that skips the walk).
@@ -463,6 +466,43 @@ def prunable_debate_dirs(
     return out
 
 
+def prunable_probe_files(
+    crew_dir: Path, now: float, with_sizes: bool = True
+) -> list[Prunable]:
+    """Every stale Cursor environment capture under ``.crew/probes/``."""
+    if not own_dir(crew_dir):
+        return []
+    probes_root = crew_dir / PROBES_SUBDIR
+    if not own_dir(probes_root):
+        return []
+    out: list[Prunable] = []
+    for entry in probes_root.iterdir():
+        if (
+            entry.is_symlink()
+            or not entry.is_file()
+            or PROBE_FILE_RE.fullmatch(entry.name) is None
+            or not _resolved_within(entry, probes_root)
+        ):
+            continue
+        try:
+            age = now - entry.stat().st_mtime
+            size = entry.stat().st_size if with_sizes else 0
+        except OSError:
+            continue
+        if age <= PROBE_STALE_SECONDS:
+            continue
+        out.append(
+            Prunable(
+                kind="probe",
+                path=entry,
+                name=entry.name,
+                bytes=size,
+                session_dir=probes_root,
+            )
+        )
+    return out
+
+
 def _drop_nested(items: list[Prunable]) -> list[Prunable]:
     """Drop any candidate whose resolved path is nested under another candidate.
 
@@ -495,7 +535,7 @@ def _drop_nested(items: list[Prunable]) -> list[Prunable]:
 def collect_prunable(
     crew_dir: Path, now: float, with_sizes: bool = True
 ) -> list[Prunable]:
-    """The full prunable set (review runs first, then debates).
+    """The full prunable set (review runs, debates, then probe captures).
 
     The ONE entry point the swab command and the session-start reporter both
     call, so they enumerate identically. A residual TOCTOU remains for the caller
@@ -510,7 +550,9 @@ def collect_prunable(
     """
     return _drop_nested(
         prunable_review_runs(crew_dir, with_sizes, now)
-    ) + prunable_debate_dirs(crew_dir, now, with_sizes)
+    ) + prunable_debate_dirs(crew_dir, now, with_sizes) + prunable_probe_files(
+        crew_dir, now, with_sizes
+    )
 
 
 def drop_dangling_pointer(session_dir: Path, removed_names: set) -> None:
