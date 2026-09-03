@@ -53,6 +53,8 @@ STANDALONE_POINTER_NAMES = (
 # is a LOOSE prefix match, not proof the engine minted the name (it also admits a
 # user-parked `run-notes` or `20250101-000000-scratch`). Tightening the grammar was
 # deliberately declined: for debates the real safety is elsewhere, not this regex.
+# The layout is legacy; the engine writes no `.crew/debates/` dir any more and
+# this finder only sweeps stale legacy debate dirs left by older runs.
 # The destructive step is the ATTENDED `crew swab` dry-run (the human reads the list
 # before `--yes`), and enumeration further requires the 1-day staleness threshold
 # plus NO synthesis.md (a completed debate is a decision record, kept at any age).

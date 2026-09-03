@@ -342,3 +342,29 @@ native seat. Run this alongside F2.1 (`readonly: true` enforcement) and F2.5
 (native cancellation) without waiting on either item. The panelist adapter
 carries the same `readonly: true` key as F2.1, so record whether the panelist
 wrote anything.
+
+### F3.2 Two-round debate on the app
+
+Refresh the `claude-crew` marketplace, update the `crew` plugin, open a new
+Cursor app session at `<repo root>`, and paste exactly:
+
+```
+/crew:debate --rounds 2 --seats cursor-composer,opus Should a single-round council keep rendering the strict-majority quorum header when it produces no verdict?
+```
+
+Assert two run directories under the session. The second run's
+`run.json.workflow_identity` has `round == 2`, `rounds == 2`, and a
+`prior_rounds_sha256` equal to the SHA-256 of its `prior-rounds.md`. The
+round-2 native prompt contains `### Round 1`; read the native subagent chip on
+both spawns and record both readings.
+
+Assert that the final synthesis artifact carries the four headings, the
+terminal status is `complete`, and `current-standalone-debate.json` names round
+2. Report both run ids, both chip readings, and the terminal status.
+
+Repeat the partial variant with `--timeout 1`; the external `opus` seat should
+time out in both rounds, round 2 should still re-issue `opus`, and the terminal
+status should be `quorum_not_met`. Report that run id and terminal status too.
+Run this alongside F2.1 (`readonly: true` enforcement) and F2.5 (native
+cancellation) without waiting on either item; those remain the open app-side
+items the gate runs alongside.

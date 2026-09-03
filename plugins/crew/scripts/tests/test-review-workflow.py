@@ -8,10 +8,12 @@ import io
 import json
 import multiprocessing
 import os
+import shutil
 import shlex
 import subprocess
 import tempfile
 import time
+import datetime as _dt
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
@@ -49,6 +51,17 @@ from review_workflow_fakes import InMemoryReviewDriver
 
 
 VALID_REVIEW = "## VERDICT\nAPPROVED\n\n## FINDINGS\nnone\n"
+VALID_SINGLE_ROUND_SYNTHESIS = (
+    "## Areas of agreement\nagreement\n\n"
+    "## Key disagreements\nuncertain\n\n"
+    "## Recommendation\nyes\n"
+)
+VALID_MULTI_ROUND_SYNTHESIS = (
+    "## How positions evolved\npositions\n\n"
+    "## Areas of agreement\nagreement\n\n"
+    "## Remaining disagreements\nuncertain\n\n"
+    "## Recommendation\nyes\n"
+)
 
 
 def _route_policy(host: str, *force_external: str) -> review_workflow.RoutePolicy:
@@ -573,7 +586,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             (cli.cmd_review_retry, SimpleNamespace(**ref_args, seats=None), "retry_review"),
             (cli.cmd_debate, SimpleNamespace(
                 question="question", file=None, panel=None, seats="codex",
-                session_id="session", timeout=1, force_external=None,
+                session_id="session", timeout=1, rounds=1, force_external=None,
             ), "start_debate"),
         ]
         for command, args, patched_name in cases:
@@ -6468,6 +6481,7 @@ class DebateWorkflowTest(unittest.TestCase):
         timeout: int | None = 1,
         panel: str | None = None,
         force_external: tuple[str, ...] | None = None,
+        rounds: int = 1,
     ):
         return review_workflow.start_debate(review_workflow.DebateRequest(
             question,
@@ -6475,6 +6489,7 @@ class DebateWorkflowTest(unittest.TestCase):
             seats=seats,
             session_id=session,
             timeout_seconds=timeout,
+            rounds=rounds,
             force_external_channels=force_external,
         ))
 
@@ -6505,8 +6520,77 @@ class DebateWorkflowTest(unittest.TestCase):
             str(submission), True, review_workflow.parse_host_result(payload),
         ))
 
+    def _submit_failure(self, step, item, *, status: str = "failed", diagnostic: str = "failed"):
+        payload = {
+            "schema": 1,
+            "ref": review_workflow.review_ref_to_dict(step.ref),
+            "action_id": item.action_id,
+            "status": status,
+            "artifact": None,
+            "judgment": None,
+            "diagnostic": diagnostic,
+        }
+        submission = Path(item.submission_path)
+        submission.parent.mkdir(parents=True, exist_ok=True)
+        submission.write_text(json.dumps(payload), encoding="utf-8")
+        return review_workflow.submit_review(review_workflow.SubmissionRequest(
+            str(submission), True, review_workflow.parse_host_result(payload),
+        ))
+
     def _provider(self, name: str, _channel: str):
         return _Provider(name=name, output="DIRECT TAKE: yes\n")
+
+    def _execute_all(self, step):
+        current = step
+        for item in step.work_items:
+            current = review_workflow.execute_external_review(step.ref, item.action_id)
+        return current
+
+    def _round_one_close(self, *, session: str, seats: str = "codex,codex-luna", rounds: int = 2):
+        with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
+            first = self._start(
+                seats=seats,
+                session=session,
+                timeout=None,
+                rounds=rounds,
+            )
+            closed = self._execute_all(first)
+        self.assertEqual(closed.outcome["status"], "round_complete")
+        return first, closed
+
+    def _point_at(self, run: Path) -> Path:
+        record = review_runs.read_run_json(run)
+        pointer = run.parent / review_workflow.DEBATE_POINTER
+        review_workflow._atomic(pointer, {
+            "schema": 1,
+            "run_id": record["run_id"],
+            "identity_digest": record["identity_digest"],
+            "target_sha256": record["target_sha256"],
+        })
+        return pointer
+
+    def _reopen_external_action(self, run: Path, seat: str) -> None:
+        workflow = json.loads((run / "workflow.json").read_text(encoding="utf-8"))
+        action = next(
+            action for action in workflow["actions"]
+            if action["kind"] == "reviewer" and action["seat"] == seat
+        )
+        action["status"] = "claimed"
+        for field in (
+            "ok", "diagnostic", "accepted_path", "accepted_sha256",
+            "reported_model", "model_attribution",
+        ):
+            action[field] = None
+        review_workflow._atomic(run / "workflow.json", workflow)
+
+    def _run_count(self, session: str) -> int:
+        return len(list((self.root / ".crew" / "reviews" / session).glob("run-*")))
+
+    def _cli(self, argv: list[str]) -> tuple[int, dict, str]:
+        output, errors = io.StringIO(), io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            status = cli.main(argv)
+        return status, json.loads(output.getvalue()), errors.getvalue()
 
     def test_debate_identity_is_question_scoped_and_never_shares_a_review_run(self) -> None:
         os.environ["CREW_HOST"] = "codex"
@@ -6600,7 +6684,12 @@ class DebateWorkflowTest(unittest.TestCase):
                 review_workflow.claim_review_action(
                     review_workflow.ClaimRequest(synthesis.ref, synthesis.work_items[0].action_id)
                 )
-                terminal = self._submit(synthesis, synthesis.work_items[0], "Recommendation: yes\n", judgment=None)
+                terminal = self._submit(
+                    synthesis,
+                    synthesis.work_items[0],
+                    VALID_SINGLE_ROUND_SYNTHESIS,
+                    judgment=None,
+                )
                 self.assertEqual(terminal.outcome["status"], "complete")
                 self.assertIsNone(terminal.outcome["judgment"])
                 self.assertEqual(review_workflow.next_review(step.ref).outcome, terminal.outcome)
@@ -6660,7 +6749,7 @@ class DebateWorkflowTest(unittest.TestCase):
             self.assertIn(expected, text)
         for forbidden in ("VERDICT", "APPROVED", "REVISE", "minor_only", "[BLOCKING]", "rubric", "PRIOR ROUNDS"):
             self.assertNotIn(forbidden, text)
-        terminal = self._submit(synthesis, item, "Recommendation: yes\n", judgment=None)
+        terminal = self._submit(synthesis, item, "text", judgment=None)
         self.assertEqual(terminal.outcome["status"], "complete")
 
     def test_debate_partial_failure_mints_synthesis_and_is_non_certifying(self) -> None:
@@ -6672,7 +6761,12 @@ class DebateWorkflowTest(unittest.TestCase):
             after = review_workflow.execute_external_review(step.ref, step.work_items[0].action_id)
             synthesis = review_workflow.execute_external_review(after.ref, after.work_items[0].action_id)
         self.assertEqual([item.kind for item in synthesis.work_items], ["synthesis"])
-        terminal = self._submit(synthesis, synthesis.work_items[0], "Recommendation: uncertain\n", judgment=None)
+        terminal = self._submit(
+            synthesis,
+            synthesis.work_items[0],
+            VALID_SINGLE_ROUND_SYNTHESIS,
+            judgment=None,
+        )
         run, _workflow = self._workflow(terminal)
         self.assertEqual(terminal.outcome["status"], "quorum_not_met")
         self.assertIsNone(terminal.outcome["judgment"])
@@ -6755,6 +6849,697 @@ class DebateWorkflowTest(unittest.TestCase):
                 step = self._start(seats=seat, force_external=(channel,), session=f"forced-{host}")
                 item = step.work_items[0]
                 self.assertEqual((item.driver, item.role, item.channel), ("external", None, channel))
+
+    def test_debate_rounds_outside_one_to_five_are_refused_before_any_write(self) -> None:
+        for value in (0, 6):
+            with self.subTest(rounds=value):
+                with self.assertRaises(review_workflow.WorkflowError) as ctx:
+                    self._start(rounds=value, session=f"invalid-{value}")
+                self.assertEqual(ctx.exception.code, "invalid_rounds")
+        self.assertFalse((self.root / ".crew" / "reviews").exists())
+
+    def test_debate_single_round_is_byte_identical_with_and_without_rounds(self) -> None:
+        first = self._start(session="single", timeout=None)
+        first_run, _first_workflow = self._workflow(first)
+        second = self._start(session="single", timeout=None, rounds=1)
+        second_run, _second_workflow = self._workflow(second)
+        self.assertEqual(first.ref, second.ref)
+        self.assertEqual(first_run, second_run)
+        self.assertEqual(
+            (first_run / "question.md").read_bytes(),
+            (second_run / "question.md").read_bytes(),
+        )
+
+    def test_debate_round_two_folds_round_one_as_frozen_data(self) -> None:
+        with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
+            first = self._start(
+                seats="codex,codex-luna", session="rounds", timeout=None, rounds=2,
+            )
+            after_first = review_workflow.execute_external_review(
+                first.ref, first.work_items[0].action_id,
+            )
+            closed = review_workflow.execute_external_review(
+                first.ref, after_first.work_items[0].action_id,
+            )
+        self.assertEqual(closed.type, "terminal")
+        self.assertEqual(closed.outcome["status"], "round_complete")
+        run_one, workflow_one = self._workflow(closed)
+        workflow_one_bytes = (run_one / "workflow.json").read_bytes()
+        self.assertFalse(any(action["kind"] == "synthesis" for action in workflow_one["actions"]))
+        next_step = review_workflow.next_review(first.ref)
+        run_two, workflow_two = self._workflow(next_step)
+        self.assertNotEqual(run_one, run_two)
+        self.assertEqual(next_step.ref.attempt_id, "attempt-0001")
+        self.assertEqual([item.seat for item in next_step.work_items], ["codex", "codex-luna"])
+        self.assertEqual((run_one / "workflow.json").read_bytes(), workflow_one_bytes)
+        prior = (run_two / "prior-rounds.md").read_text(encoding="utf-8")
+        self.assertIn("### Round 1", prior)
+        self.assertIn("### seat: codex", prior)
+        self.assertIn("### seat: codex-luna", prior)
+        record_two = json.loads((run_two / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(record_two["workflow_identity"]["round"], 2)
+        self.assertEqual(record_two["workflow_identity"]["rounds"], 2)
+        self.assertEqual(
+            record_two["workflow_identity"]["prior_rounds_sha256"],
+            hashlib.sha256((run_two / "prior-rounds.md").read_bytes()).hexdigest(),
+        )
+        self.assertEqual(record_two["prior_rounds"], [
+            (run_one / "panel-full.md").read_text(encoding="utf-8")
+        ])
+
+        with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
+            after_two_first = review_workflow.execute_external_review(
+                next_step.ref, next_step.work_items[0].action_id,
+            )
+            synthesis_step = review_workflow.execute_external_review(
+                next_step.ref, after_two_first.work_items[0].action_id,
+            )
+        self.assertEqual([item.kind for item in synthesis_step.work_items], ["synthesis"])
+        terminal = self._submit(
+            synthesis_step,
+            synthesis_step.work_items[0],
+            VALID_MULTI_ROUND_SYNTHESIS,
+            judgment=None,
+        )
+        self.assertEqual(terminal.outcome["status"], "complete")
+        self.assertEqual(review_workflow.next_review(first.ref).outcome, terminal.outcome)
+
+    def test_debate_seat_failed_in_round_one_is_issued_fresh_in_round_two(self) -> None:
+        def provider(name: str, _channel: str):
+            return _Provider(ok=name == "codex", name=name, output="DIRECT TAKE: yes\n")
+
+        with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=provider):
+            first = self._start(seats="codex,codex-luna", session="fresh-failed", timeout=None, rounds=2)
+            closed = first
+            for item in first.work_items:
+                closed = review_workflow.execute_external_review(first.ref, item.action_id)
+        self.assertEqual(closed.outcome["status"], "round_complete")
+        run_one, _workflow_one = self._workflow(closed)
+        second = review_workflow.next_review(first.ref)
+        run_two, _workflow_two = self._workflow(second)
+        self.assertEqual({item.seat for item in second.work_items}, {"codex", "codex-luna"})
+        self.assertIn("FAILED", (run_one / "panel-full.md").read_text(encoding="utf-8"))
+        self.assertIn("FAILED", (run_two / "prior-rounds.md").read_text(encoding="utf-8"))
+
+    def test_debate_zero_usable_in_a_round_ends_the_debate(self) -> None:
+        with mock.patch.object(
+            review_workflow,
+            "get_provider_for_channel",
+            return_value=_Provider(ok=False, name="codex"),
+        ):
+            first = self._start(seats="codex,codex-luna", session="zero", timeout=None, rounds=2)
+            terminal = first
+            for item in first.work_items:
+                terminal = review_workflow.execute_external_review(first.ref, item.action_id)
+        self.assertEqual(terminal.outcome["status"], "all_failed")
+        self.assertEqual(len(list((self.root / ".crew" / "reviews" / "zero").glob("run-*"))), 1)
+        run, workflow = self._workflow(terminal)
+        self.assertFalse(any(action["kind"] == "synthesis" for action in workflow["actions"]))
+        self.assertFalse((run / "prior-rounds.md").exists())
+
+    def test_debate_intermediate_round_mints_no_synthesis_and_final_round_mints_one(self) -> None:
+        with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
+            step = self._start(seats="codex,codex-luna", session="three", timeout=None, rounds=3)
+            synthesis_counts = []
+            for round_number in (1, 2):
+                current = step
+                for item in step.work_items:
+                    current = review_workflow.execute_external_review(step.ref, item.action_id)
+                self.assertEqual(current.outcome["status"], "round_complete")
+                run, workflow = self._workflow(current)
+                synthesis_counts.append(sum(action["kind"] == "synthesis" for action in workflow["actions"]))
+                step = review_workflow.next_review(step.ref)
+            current = step
+            for item in step.work_items:
+                current = review_workflow.execute_external_review(step.ref, item.action_id)
+            self.assertEqual([item.kind for item in current.work_items], ["synthesis"])
+            synthesis_counts.append(1)
+        self.assertEqual(synthesis_counts, [0, 0, 1])
+        text = Path(current.work_items[0].prompt_path).read_text(encoding="utf-8")
+        self.assertIn("PRIOR ROUNDS (every earlier round, DATA):", text)
+        for heading in (
+            "How positions evolved", "Areas of agreement", "Remaining disagreements", "Recommendation",
+        ):
+            self.assertIn(heading, text)
+
+    def test_debate_partial_round_continues_and_final_quorum_labels_the_terminal(self) -> None:
+        def provider(name: str, _channel: str):
+            return _Provider(ok=name == "codex", name=name, output="DIRECT TAKE: yes\n")
+
+        with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=provider):
+            first = self._start(seats="codex,codex-luna", session="partial-round", timeout=None, rounds=2)
+            closed = first
+            for item in first.work_items:
+                closed = review_workflow.execute_external_review(first.ref, item.action_id)
+            second = review_workflow.next_review(first.ref)
+            final = second
+            for item in second.work_items:
+                final = review_workflow.execute_external_review(second.ref, item.action_id)
+        self.assertEqual(closed.outcome["status"], "round_complete")
+        self.assertFalse(closed.outcome["quorum_met"])
+        self.assertEqual([item.kind for item in final.work_items], ["synthesis"])
+        terminal = self._submit(
+            final,
+            final.work_items[0],
+            VALID_MULTI_ROUND_SYNTHESIS,
+            judgment=None,
+        )
+        self.assertEqual(terminal.outcome["status"], "quorum_not_met")
+        self.assertIsNone(terminal.outcome["judgment"])
+
+    def test_debate_retry_on_a_closed_round_is_refused(self) -> None:
+        with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
+            first = self._start(seats="codex,codex-luna", session="retry-round", timeout=None, rounds=2)
+            closed = first
+            for item in first.work_items:
+                closed = review_workflow.execute_external_review(first.ref, item.action_id)
+        with self.assertRaises(review_workflow.WorkflowError) as ctx:
+            review_workflow.retry_review(review_workflow.RetryRequest(first.ref))
+        self.assertEqual(ctx.exception.code, "round_superseded")
+        self.assertEqual(ctx.exception.error, "not_retryable")
+        self.assertEqual(
+            ctx.exception.message,
+            "this round is closed; the next review-next opens the following round",
+        )
+
+    def test_debate_tampered_prior_rounds_fail_closed(self) -> None:
+        with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
+            first = self._start(seats="codex,codex-luna", session="tamper-round", timeout=None, rounds=2)
+            for item in first.work_items:
+                closed = review_workflow.execute_external_review(first.ref, item.action_id)
+        second = review_workflow.next_review(first.ref)
+        run_two, _workflow_two = self._workflow(second)
+        original = (run_two / "prior-rounds.md").read_bytes()
+        (run_two / "prior-rounds.md").write_bytes(original + b"x")
+        with self.assertRaises(review_workflow.WorkflowError) as ctx:
+            review_workflow.next_review(second.ref)
+        self.assertEqual(ctx.exception.code, "corrupt_workflow")
+        (run_two / "prior-rounds.md").write_bytes(original)
+        self.assertEqual(review_workflow.next_review(second.ref).ref, second.ref)
+
+    def test_debate_host_failure_statuses_and_lost_panelist_have_no_reroute(self) -> None:
+        os.environ["CREW_HOST"] = "claude"
+        for status in ("failed", "timeout", "cancelled"):
+            with self.subTest(status=status):
+                step = self._start(seats="opus", session=f"host-status-{status}")
+                item = step.work_items[0]
+                review_workflow.claim_review_action(
+                    review_workflow.ClaimRequest(step.ref, item.action_id)
+                )
+                terminal = self._submit_failure(
+                    step,
+                    item,
+                    status=status,
+                    diagnostic=f"host {status}",
+                )
+                self.assertEqual(terminal.outcome["status"], "all_failed")
+                _run, workflow = self._workflow(terminal)
+                self.assertEqual(len(workflow["actions"]), 1)
+                self.assertEqual(workflow["actions"][0]["driver"], "native")
+                self.assertEqual(workflow["actions"][0]["role"], "crew:panelist")
+
+        lost = self._start(seats="opus", session="lost-panelist")
+        item = lost.work_items[0]
+        self.assertEqual(item.driver, "native")
+        review_workflow.claim_review_action(
+            review_workflow.ClaimRequest(lost.ref, item.action_id)
+        )
+        recovered = review_workflow.recover_review_action(
+            review_workflow.RecoveryRequest(
+                lost.ref,
+                item.action_id,
+                "not_running",
+                "native_task_lost",
+            )
+        )
+        self.assertEqual(recovered.outcome["status"], "all_failed")
+        _run, workflow = self._workflow(recovered)
+        failed = next(action for action in workflow["actions"] if action["action_id"] == item.action_id)
+        self.assertEqual(failed["driver"], "native")
+        retried = review_workflow.retry_review(review_workflow.RetryRequest(lost.ref))
+        self.assertEqual(retried.work_items[0].role, "crew:panelist")
+
+    def test_debate_cli_start_envelope_and_question_sources(self) -> None:
+        invalid_session = self._cli([
+            "debate", "--session-id", "<session-id>", "--", "q",
+        ])
+        self.assertEqual(invalid_session[0], 2)
+        self.assertEqual(invalid_session[2], "")
+        self.assertEqual(invalid_session[1], {
+            "schema": 1,
+            "error": "invalid_request",
+            "code": "invalid_session_id",
+            "message": "the harness session id looks like an unsubstituted placeholder",
+        })
+
+        question_file = self.root / ".crew" / "question.md"
+        question_file.parent.mkdir(parents=True, exist_ok=True)
+        question_file.write_text("question from file", encoding="utf-8")
+        both = self._cli([
+            "debate", "--session-id", "both-sources", "-f", ".crew/question.md", "question",
+        ])
+        self.assertEqual(both[0], 2)
+        self.assertEqual(both[1]["error"], "invalid_request")
+        neither = self._cli(["debate", "--session-id", "neither-source"])
+        self.assertEqual(neither[0], 2)
+        self.assertEqual(neither[1]["error"], "invalid_request")
+
+        empty = self._cli([
+            "debate", "--session-id", "d", "--", "",
+        ])
+        self.assertEqual(empty[0], 0)
+        self.assertEqual(empty[1]["type"], "needs_input")
+        self.assertEqual(empty[1]["question"], review_workflow.DEBATE_NEEDS_INPUT_QUESTION)
+        self.assertFalse((self.root / ".crew" / "reviews").exists())
+
+        sourced = self._cli([
+            "debate", "--session-id", "relative-source", "-f", ".crew/question.md",
+        ])
+        self.assertEqual(sourced[0], 0)
+        self.assertEqual(sourced[1]["type"], "work_batch")
+        sourced_ref = review_workflow.parse_review_ref(sourced[1]["ref"])
+        sourced_run = self.root / ".crew" / "reviews" / sourced_ref.session_segment / sourced_ref.run_id
+        self.assertEqual((sourced_run / "question.md").read_text(encoding="utf-8"), "question from file")
+
+    def test_debate_cli_round_walk_uses_typed_steps(self) -> None:
+        def ref_args(ref_data: dict) -> list[str]:
+            return [
+                "--session-segment", ref_data["session_segment"],
+                "--run-id", ref_data["run_id"],
+                "--attempt-id", ref_data["attempt_id"],
+                "--target-sha256", ref_data["target_sha256"],
+            ]
+
+        with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
+            status, first, _errors = self._cli([
+                "debate", "--session-id", "cli-round-walk", "--seats", "codex,codex-luna",
+                "--rounds", "2", "--timeout", "1", "--", "Question",
+            ])
+            self.assertEqual((status, first["type"]), (0, "work_batch"))
+            first_ref = first["ref"]
+            for item in first["work_items"]:
+                status, landed, _errors = self._cli([
+                    "review-execute", *ref_args(first_ref), "--action-id", item["action_id"],
+                ])
+            self.assertEqual((status, landed["type"], landed["outcome"]["status"]),
+                             (0, "terminal", "round_complete"))
+            status, second, _errors = self._cli(["review-next", *ref_args(first_ref)])
+            self.assertEqual((status, second["type"]), (0, "work_batch"))
+            self.assertNotEqual(second["ref"]["run_id"], first_ref["run_id"])
+            second_ref = second["ref"]
+            for item in second["work_items"]:
+                status, second_landed, _errors = self._cli([
+                    "review-execute", *ref_args(second_ref), "--action-id", item["action_id"],
+                ])
+            self.assertEqual((status, second_landed["type"]), (0, "work_batch"))
+            synthesis = next(item for item in second_landed["work_items"] if item["kind"] == "synthesis")
+            status, _claim, _errors = self._cli([
+                "review-claim", *ref_args(second_ref), "--action-id", synthesis["action_id"],
+            ])
+            self.assertEqual(status, 0)
+            artifact = Path(synthesis["ingress_path"])
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text(VALID_MULTI_ROUND_SYNTHESIS, encoding="utf-8")
+            submission = Path(synthesis["submission_path"])
+            submission.parent.mkdir(parents=True, exist_ok=True)
+            submission.write_text(json.dumps({
+                "schema": 1,
+                "ref": second_ref,
+                "action_id": synthesis["action_id"],
+                "status": "ok",
+                "artifact": {
+                    "path": str(artifact),
+                    "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                },
+                "judgment": None,
+                "diagnostic": None,
+            }), encoding="utf-8")
+            status, complete, _errors = self._cli([
+                "review-submit", "-f", str(submission), "--consume",
+            ])
+            self.assertEqual((status, complete["type"], complete["outcome"]["status"]),
+                             (0, "terminal", "complete"))
+            status, repeated, _errors = self._cli(["review-next", *ref_args(second_ref)])
+        self.assertEqual((status, repeated["type"], repeated["outcome"]),
+                         (0, "terminal", complete["outcome"]))
+
+    def test_debate_obsolete_workflow_names_the_debate_pointer(self) -> None:
+        debate = self._start(session="obsolete-debate")
+        debate_run, debate_workflow = self._workflow(debate)
+        debate_workflow.pop("workflow_identity")
+        review_workflow._atomic(debate_run / "workflow.json", debate_workflow)
+        with self.assertRaises(review_workflow.WorkflowError) as debate_error:
+            review_workflow.next_review(debate.ref)
+        self.assertEqual(debate_error.exception.code, "obsolete_standalone_workflow")
+        self.assertIn(review_workflow.DEBATE_POINTER, debate_error.exception.message)
+        self.assertNotIn(review_workflow.STANDALONE_POINTER, debate_error.exception.message)
+
+        review = review_workflow.start_review(review_workflow.ReviewRequest(
+            str(self.plan), seats="codex", session_id="obsolete-review", timeout_seconds=1,
+        ))
+        review_run, review_workflow_data = self._workflow(review)
+        review_workflow_data.pop("workflow_identity")
+        review_workflow._atomic(review_run / "workflow.json", review_workflow_data)
+        with self.assertRaises(review_workflow.WorkflowError) as review_error:
+            review_workflow.next_review(review.ref)
+        self.assertEqual(review_error.exception.code, "obsolete_standalone_workflow")
+        self.assertIn(review_workflow.STANDALONE_POINTER, review_error.exception.message)
+
+    def test_debate_round_two_prompt_matches_render_prior_round(self) -> None:
+        first, _closed = self._round_one_close(session="render-round-two")
+        second = review_workflow.next_review(first.ref)
+        run, _workflow = self._workflow(second)
+        rendered = self.root / "round-two-rendered.txt"
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main([
+                "render", "--mode", "discuss", "--seat-role", "codex",
+                "-f", str(run / "question.md"),
+                "--prior-round", str(run / "prior-rounds.md"),
+                "-o", str(rendered),
+            ]), 0)
+        self.assertEqual(rendered.read_bytes(), Path(second.work_items[0].prompt_path).read_bytes())
+
+    def test_debate_identical_start_resumes_the_current_round_never_round_one(self) -> None:
+        first, _closed = self._round_one_close(session="resume-current")
+        second = review_workflow.next_review(first.ref)
+        run_two, workflow_two = self._workflow(second)
+        resumed = self._start(
+            session="resume-current",
+            seats="codex,codex-luna",
+            timeout=None,
+            rounds=2,
+        )
+        self.assertEqual(resumed.ref.run_id, second.ref.run_id)
+        self.assertEqual(review_workflow.read_standalone_pointer(
+            "resume-current", kind="standalone_debate"
+        )[0]["run_id"], second.ref.run_id)
+        shutil.rmtree(run_two.parent / first.ref.run_id)
+        resumed_after_removal = self._start(
+            session="resume-current",
+            seats="codex,codex-luna",
+            timeout=None,
+            rounds=2,
+        )
+        self.assertEqual(resumed_after_removal.ref.run_id, second.ref.run_id)
+        frozen_timeout = workflow_two["workflow_identity"]["timeout_seconds"]
+        different_timeout = frozen_timeout - 1 if frozen_timeout > 1 else frozen_timeout + 1
+        reminted = self._start(
+            session="resume-current",
+            seats="codex,codex-luna",
+            timeout=different_timeout,
+            rounds=2,
+        )
+        self.assertNotEqual(reminted.ref.run_id, second.ref.run_id)
+        self.assertEqual(self._workflow(reminted)[1]["workflow_identity"]["round"], 1)
+
+    def test_debate_start_over_legacy_pointer_reports_obsolete(self) -> None:
+        debate = self._start(session="obsolete-debate-start", timeout=None)
+        run, workflow = self._workflow(debate)
+        record = review_runs.read_run_json(run)
+        legacy_identity = dict(workflow["workflow_identity"])
+        for field in ("rounds", "round", "prior_rounds_sha256"):
+            legacy_identity.pop(field)
+        legacy_run_id, legacy_digest = review_runs.mint_identity(
+            target_sha256=record["target_sha256"],
+            target_spec=record["target_spec"],
+            target_base=record["target_base"],
+            seat_signatures=record["seat_signatures"],
+            workflow_identity=legacy_identity,
+        )
+        legacy_run = run.parent / legacy_run_id
+        run.rename(legacy_run)
+        old_prefix = str(run).encode()
+        new_prefix = str(legacy_run).encode()
+        for path in legacy_run.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                path.write_bytes(path.read_bytes().replace(old_prefix, new_prefix))
+
+        legacy_workflow = json.loads((legacy_run / "workflow.json").read_text(encoding="utf-8"))
+        legacy_workflow["workflow_identity"] = legacy_identity
+        legacy_workflow["ref"]["run_id"] = legacy_run_id
+        legacy_record = json.loads((legacy_run / "run.json").read_text(encoding="utf-8"))
+        legacy_record["run_id"] = legacy_run_id
+        legacy_record["identity_digest"] = legacy_digest
+        legacy_record["workflow_identity"] = legacy_identity
+        legacy_record.pop("prior_rounds", None)
+        review_workflow._atomic(legacy_run / "workflow.json", legacy_workflow)
+        review_workflow._atomic(legacy_run / "run.json", legacy_record)
+        pointer = legacy_run.parent / review_workflow.DEBATE_POINTER
+        review_workflow._atomic(pointer, {
+            "schema": 1,
+            "run_id": legacy_run_id,
+            "identity_digest": legacy_digest,
+            "target_sha256": record["target_sha256"],
+        })
+
+        with self.assertRaises(review_workflow.WorkflowError) as failure:
+            self._start(session="obsolete-debate-start", timeout=None)
+        self.assertEqual(failure.exception.code, "obsolete_standalone_workflow")
+        self.assertIn(review_workflow.DEBATE_POINTER, failure.exception.message)
+        self.assertNotIn("corrupt_workflow", failure.exception.message)
+
+    def test_debate_prune_classifies_every_round_terminal_only_when_closed(self) -> None:
+        closed_first, _closed = self._round_one_close(session="prune-closed")
+        closed_run = self._workflow(closed_first)[0]
+        (closed_run.parent / review_workflow.DEBATE_POINTER).unlink()
+        prunable = {item.path for item in artifact_prune.prunable_review_runs(self.root / ".crew")}
+        self.assertIn(closed_run, prunable)
+
+        current = self._start(session="prune-current", rounds=2)
+        current_run = self._workflow(current)[0]
+        prunable = {item.path for item in artifact_prune.prunable_review_runs(self.root / ".crew")}
+        self.assertNotIn(current_run, prunable)
+
+        mid = self._start(session="prune-mid", rounds=2)
+        mid_run = self._workflow(mid)[0]
+        (mid_run.parent / review_workflow.DEBATE_POINTER).unlink()
+        prunable = {item.path for item in artifact_prune.prunable_review_runs(self.root / ".crew")}
+        self.assertNotIn(mid_run, prunable)
+
+    def test_debate_review_next_reports_a_round_it_closes_and_follows_a_round_it_finds_closed(self) -> None:
+        first, closed = self._round_one_close(session="next-close-follow", rounds=2)
+        run_one = self._workflow(closed)[0]
+        self._reopen_external_action(run_one, "codex-luna")
+        self.assertIsNotNone(review_workflow._workflow(run_one))
+
+        reports_close = review_workflow.next_review(first.ref)
+        self.assertEqual(reports_close.outcome["status"], "round_complete")
+        self.assertEqual(reports_close.ref.run_id, first.ref.run_id)
+        self.assertEqual(self._run_count("next-close-follow"), 1)
+        follows_closed = review_workflow.next_review(first.ref)
+        self.assertEqual(follows_closed.type, "work_batch")
+        self.assertNotEqual(follows_closed.ref.run_id, first.ref.run_id)
+        self.assertEqual(self._run_count("next-close-follow"), 2)
+
+    def test_debate_successor_is_a_literal_clone_plus_recomputed_identity(self) -> None:
+        first, closed = self._round_one_close(session="clone-successor", rounds=2)
+        run_one, workflow_one = self._workflow(closed)
+        second = review_workflow.next_review(first.ref)
+        run_two, workflow_two = self._workflow(second)
+        rec_one = review_runs.read_run_json(run_one)
+        rec_two = review_runs.read_run_json(run_two)
+        for key in (
+            "target_sha256", "target_spec", "target_base", "target_descriptor", "snapshot",
+            "target_notes", "target_diff_cmd", "subprocess_seats", "task_seats",
+            "task_seat_models", "seat_signatures", "host", "seat_channels",
+        ):
+            self.assertEqual(rec_two[key], rec_one[key], key)
+        for key, value in rec_one["workflow_identity"].items():
+            if key not in {"round", "prior_rounds_sha256"}:
+                self.assertEqual(rec_two["workflow_identity"][key], value, key)
+        self.assertNotEqual(rec_two["run_id"], rec_one["run_id"])
+        self.assertNotEqual(rec_two["identity_digest"], rec_one["identity_digest"])
+        self.assertEqual(workflow_two["target"], workflow_one["target"])
+        self.assertEqual(workflow_two["roster"], workflow_one["roster"])
+        actions_one = {
+            action["seat"]: action for action in workflow_one["actions"] if action["kind"] == "reviewer"
+        }
+        actions_two = {
+            action["seat"]: action for action in workflow_two["actions"] if action["kind"] == "reviewer"
+        }
+        for seat, action in actions_one.items():
+            for key in ("model", "channel", "driver", "provider", "timeout_seconds"):
+                self.assertEqual(actions_two[seat][key], action[key], f"{seat}:{key}")
+
+        seed_a = review_workflow._successor_seed(first.ref)
+        fixed = _dt.datetime(2001, 2, 3, 4, 5, 6, tzinfo=_dt.timezone.utc)
+        clock_stub = SimpleNamespace(
+            datetime=SimpleNamespace(now=lambda tz=None: fixed),
+            timezone=_dt.timezone,
+        )
+        with (
+            mock.patch.object(review_workflow, "_resolve_seats", side_effect=AssertionError),
+            mock.patch.object(review_workflow, "_provider_timeout", side_effect=AssertionError),
+            mock.patch.object(review_workflow.targets, "is_dirty", side_effect=AssertionError),
+            mock.patch.object(review_workflow, "_dt", clock_stub),
+        ):
+            seed_b = review_workflow._successor_seed(first.ref)
+            self.assertEqual(seed_b.run_id, seed_a.run_id)
+            self.assertEqual(seed_b.identity_digest, seed_a.identity_digest)
+            loaded = review_workflow.next_review(first.ref)
+        self.assertEqual(loaded.ref.run_id, second.ref.run_id)
+        self.assertEqual(len(self._workflow(loaded)[1]["actions"]), 2)
+
+        fresh, _fresh_closed = self._round_one_close(session="clone-fresh", rounds=2)
+        seed_c = review_workflow._successor_seed(fresh.ref)
+        with (
+            mock.patch.object(review_workflow, "_resolve_seats", side_effect=AssertionError),
+            mock.patch.object(review_workflow, "_provider_timeout", side_effect=AssertionError),
+            mock.patch.object(review_workflow.targets, "is_dirty", side_effect=AssertionError),
+            mock.patch.object(review_workflow, "_dt", clock_stub),
+        ):
+            minted = review_workflow.next_review(fresh.ref)
+        minted_record = review_runs.read_run_json(self._workflow(minted)[0])
+        self.assertEqual(minted.ref.run_id, seed_c.run_id)
+        self.assertEqual(minted_record["created_at"], fixed.isoformat())
+
+    def test_debate_successor_walk_refuses_a_foreign_host(self) -> None:
+        first, _closed = self._round_one_close(session="foreign-host", rounds=2)
+        pointer = self.root / ".crew" / "reviews" / "foreign-host" / review_workflow.DEBATE_POINTER
+        pointer_bytes = pointer.read_bytes()
+        with mock.patch.object(review_workflow, "_host", return_value="cursor"):
+            with self.assertRaises(review_workflow.WorkflowError) as seed_error:
+                review_workflow._successor_seed(first.ref)
+            self.assertEqual(seed_error.exception.code, "host_mismatch")
+            with self.assertRaises(review_workflow.WorkflowError) as next_error:
+                review_workflow.next_review(first.ref)
+            self.assertEqual(next_error.exception.code, "host_mismatch")
+        self.assertEqual(self._run_count("foreign-host"), 1)
+        self.assertEqual(pointer.read_bytes(), pointer_bytes)
+        self.assertEqual(review_workflow.next_review(first.ref).ref.run_id != first.ref.run_id, True)
+
+    def test_debate_pointer_moves_only_from_the_run_it_names(self) -> None:
+        first, _closed = self._round_one_close(session="pointer-ownership", rounds=2)
+        second = review_workflow.next_review(first.ref)
+        run_one, _workflow_one = self._workflow(first)
+        run_two, _workflow_two = self._workflow(second)
+        pointer = self._point_at(run_one)
+
+        pointer.unlink()
+        adopted_absent = review_workflow.next_review(first.ref)
+        self.assertEqual(adopted_absent.ref.run_id, second.ref.run_id)
+        self.assertEqual(json.loads(pointer.read_text())["run_id"], second.ref.run_id)
+
+        self._point_at(run_one)
+        adopted = review_workflow.next_review(first.ref)
+        self.assertEqual(adopted.ref.run_id, second.ref.run_id)
+        self.assertEqual(json.loads(pointer.read_text())["run_id"], second.ref.run_id)
+
+        self._point_at(run_one)
+        adopted_from_start = self._start(
+            session="pointer-ownership", seats="codex,codex-luna", timeout=None, rounds=2,
+        )
+        self.assertEqual(adopted_from_start.ref.run_id, second.ref.run_id)
+        self.assertEqual(json.loads(pointer.read_text())["run_id"], second.ref.run_id)
+
+        pointer_bytes = pointer.read_bytes()
+        loaded = review_workflow.next_review(first.ref)
+        self.assertEqual(loaded.ref.run_id, second.ref.run_id)
+        self.assertEqual(pointer.read_bytes(), pointer_bytes)
+
+        other = self._start("Other question?", session="pointer-ownership", timeout=None)
+        competitor_bytes = pointer.read_bytes()
+        self.assertNotEqual(other.ref.run_id, second.ref.run_id)
+        self.assertEqual(review_workflow.next_review(first.ref).ref.run_id, second.ref.run_id)
+        self.assertEqual(pointer.read_bytes(), competitor_bytes)
+
+    def test_debate_pointer_compare_and_swap_preserves_a_competing_debate(self) -> None:
+        first, _closed = self._round_one_close(session="pointer-race", rounds=2)
+        real_compare_and_swap = review_workflow._write_pointer_if_current
+        interposed = False
+        competitor = {}
+
+        def interleave(wf, expected):
+            nonlocal interposed
+            if not interposed:
+                interposed = True
+                competitor["step"] = self._start(
+                    "Competing question?", session="pointer-race", timeout=None,
+                )
+            return real_compare_and_swap(wf, expected)
+
+        with mock.patch.object(
+            review_workflow,
+            "_write_pointer_if_current",
+            side_effect=interleave,
+        ):
+            successor = review_workflow.next_review(first.ref)
+        competing = competitor["step"]
+        pointer = self.root / ".crew" / "reviews" / "pointer-race" / review_workflow.DEBATE_POINTER
+        self.assertEqual(successor.type, "work_batch")
+        self.assertNotEqual(successor.ref.run_id, first.ref.run_id)
+        self.assertEqual(json.loads(pointer.read_text())["run_id"], competing.ref.run_id)
+        self.assertEqual(
+            review_workflow.read_standalone_pointer(
+                "pointer-race", kind="standalone_debate"
+            )[0]["run_id"],
+            competing.ref.run_id,
+        )
+
+    def test_debate_walk_reports_a_successor_round_it_closes_and_follows_it_next_time(self) -> None:
+        first, _closed = self._round_one_close(session="loaded-successor", rounds=3)
+        second = review_workflow.next_review(first.ref)
+        with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
+            closed_second = self._execute_all(second)
+        self.assertEqual(closed_second.outcome["status"], "round_complete")
+        run_two = self._workflow(closed_second)[0]
+        self._reopen_external_action(run_two, "codex-luna")
+        self.assertIsNotNone(review_workflow._workflow(run_two))
+
+        reports_close = review_workflow.next_review(first.ref)
+        self.assertEqual(reports_close.outcome["status"], "round_complete")
+        self.assertEqual(reports_close.ref.run_id, second.ref.run_id)
+        self.assertEqual(self._run_count("loaded-successor"), 2)
+        third = review_workflow.next_review(first.ref)
+        self.assertEqual(third.type, "work_batch")
+        self.assertNotEqual(third.ref.run_id, second.ref.run_id)
+        self.assertEqual(self._run_count("loaded-successor"), 3)
+        self.assertEqual(review_workflow.next_review(second.ref).ref, third.ref)
+        self.assertEqual(len(self._workflow(third)[1]["actions"]), 2)
+        self.assertEqual(
+            review_workflow.read_standalone_pointer(
+                "loaded-successor", kind="standalone_debate"
+            )[0]["run_id"],
+            third.ref.run_id,
+        )
+
+    def test_debate_successor_walk_refuses_a_run_dir_holding_a_foreign_identity(self) -> None:
+        first, _closed = self._round_one_close(
+            session="successor-collision", seats="codex,codex-luna", rounds=2,
+        )
+        seed = review_workflow._successor_seed(first.ref)
+        real = review_runs.mint_identity
+        other_sha = review_runs.sha256_text("Other question?")
+
+        def forged(**kwargs):
+            run_id, digest = real(**kwargs)
+            if kwargs["target_sha256"] == other_sha:
+                return seed.run_id, "f" * 64
+            return run_id, digest
+
+        with mock.patch.object(review_runs, "mint_identity", side_effect=forged):
+            other = self._start("Other question?", session="successor-collision", timeout=None)
+            self.assertEqual(other.ref.run_id, seed.run_id)
+            other_run = self._workflow(other)[0]
+            self.assertEqual(review_runs.read_run_json(other_run)["identity_digest"], "f" * 64)
+            pointer = other_run.parent / review_workflow.DEBATE_POINTER
+            self.assertEqual(json.loads(pointer.read_text())["run_id"], other.ref.run_id)
+            self.assertEqual(self._run_count("successor-collision"), 2)
+            other_bytes = (other_run / "workflow.json").read_bytes()
+            first_run = self._workflow(first)[0]
+            first_bytes = (first_run / "workflow.json").read_bytes()
+            pointer_bytes = pointer.read_bytes()
+            with self.assertRaises(review_workflow.WorkflowError) as collision:
+                review_workflow.next_review(first.ref)
+            self.assertEqual(collision.exception.code, "successor_mismatch")
+            self.assertEqual(collision.exception.error, "successor_mismatch")
+            self.assertEqual((other_run / "workflow.json").read_bytes(), other_bytes)
+            self.assertEqual((first_run / "workflow.json").read_bytes(), first_bytes)
+            self.assertEqual(pointer.read_bytes(), pointer_bytes)
+            self.assertEqual(self._run_count("successor-collision"), 2)
+
+        fresh, _fresh_closed = self._round_one_close(session="successor-normal", rounds=2)
+        self.assertNotEqual(review_workflow.next_review(fresh.ref).ref.run_id, fresh.ref.run_id)
 
 
 if __name__ == "__main__":

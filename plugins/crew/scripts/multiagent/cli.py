@@ -37,9 +37,9 @@ The engine EXECUTES seats resolved external for the current host, while ``render
 prompt for ANY seat, including Claude Task seats the orchestrator dispatches on
 a Claude host. Every seat's prompt comes from the one builder
 (``prompts.build_prompt``/``council``), so the external and Task paths can never
-drift. Multi-round context lives on disk (``rounds.py``: run-id, round-NN.md)
-and is threaded into both paths the same way (``--run-id``/``--round`` →
-``prior_round``). Native Task seats are still DISPATCHED by the orchestrator.
+drift. The workflow freezes multi-round context in each successor run, reads it
+from the frozen file, and builds the council prompt directly. Native Task seats
+are still DISPATCHED by the orchestrator.
 """
 
 from __future__ import annotations
@@ -209,11 +209,11 @@ def _filter_available(names: list[str], explicit: set[str]) -> list[str]:
     list, warn once and return the UNFILTERED list (a misconfiguration must never
     silently produce an empty review/run).
 
-    Used by the paths that resolve ONE unified panel list (``_resolve_seats``,
-    ``_resolve_debate_seats``): there the whole panel IS this list, so the
-    fallback is already whole-panel. Callers that split one resolution into TWO
-    seat-KINDS (``cmd_review_prep``: subprocess vs task) must NOT use this — its
-    per-list fallback would re-add a disabled kind. They compose
+    Used by the paths that resolve ONE unified panel list (``_resolve_seats``):
+    there the whole panel IS this list, so the fallback is already whole-panel.
+    Callers that split one resolution into TWO seat-KINDS (``cmd_review_prep``:
+    subprocess vs task) must NOT use this; its per-list fallback would re-add a
+    disabled kind. They compose
     ``_drop_unavailable`` + a single whole-panel fallback instead.
     """
     kept = _drop_unavailable(names, explicit)
@@ -487,99 +487,6 @@ def _resolve_seats(seats_arg: str | None) -> list[str]:
     return _filter_available(resolved, explicit)
 
 
-def _resolve_debate_panel_name(panel_arg: str | None) -> str:
-    """Effective DEBATE panel NAME when no explicit ``--seats`` is given.
-
-    Debate precedence (differs from review-prep, which has NO debate tier):
-
-        explicit ``--panel`` > ``config.debate_panel()`` > ``config.default_panel()``
-        > built-in ``full``
-
-    ``config.debate_panel()`` reads ``[debate].panel`` and ``config.default_panel()``
-    reads ``default_panel`` — both validate against the resolved panel names (``seats.merged_panels()``,
-    configured ``[panels]`` keys and return ``None`` on a missing/unknown value.
-    The returned name is resolved to seats through ``_panel_seat_list`` (which
-    handles an unknown ``--panel`` name → ``full``), so no caller hits a raw
-    ``KeyError``.
-    """
-    if panel_arg is not None:
-        return panel_arg
-    return config.debate_panel() or config.default_panel() or "full"
-
-
-class _DebateSeatError(Exception):
-    """Internal: a ``seats --debate --seats`` validation failure carrying the CLI
-    exit code. The message is already printed to stderr; ``cmd_seats`` translates
-    this into the nonzero exit (mirroring ``_RenderInputError``).
-    """
-
-    def __init__(self, code: int) -> None:
-        super().__init__()
-        self.code = code
-
-
-def _resolve_debate_seats(panel_arg: str | None, seats_arg: str | None) -> list[str]:
-    """Resolve the FULL debate panel seat list — subprocess AND Claude Task seats.
-
-    Unlike ``_resolve_seats`` (subprocess-only, registry-filtered), this KEEPS the
-    Claude Task seats (opus/sonnet/fable) so the debate orchestrator can split
-    the resolved panel into its per-seat subprocess fan-out and its Task dispatch.
-    Group tokens (``cursor``, ``agy``) are expanded; order preserved, de-duplicated.
-
-    Precedence: explicit ``--seats`` (wins) > explicit ``--panel`` >
-    ``config.debate_panel()`` > ``config.default_panel()`` > built-in ``full``.
-
-    Explicit ``--seats`` entries are VALIDATED after group expansion by EXACT
-    membership in the fixed UNION allowlist ``known_seat_names() ∪
-    seats.task_seats()``. The union is the key — it KEEPS the Task seats
-    (opus/sonnet/fable, which are registry-backed external seats off-host and
-    native Task seats on a Claude host) while REJECTING garbage. Membership in
-    this enumerated allowlist IS the path-safety guarantee (strictly stronger than
-    a charset filter — no path-unsafe string can be a member), so no separate
-    regex guard is needed here. An unknown name (e.g. ``cursor-../../x``, which is
-    in NEITHER set) raises ``_DebateSeatError(2)`` with a stderr message — debate.md
-    classifies ``cursor-*`` as a subprocess seat and writes
-    ``.crew/debates/<dir>/<seat>.json``, so a traversal name must not reach the
-    debate dir (it can't: it's not in the allowlist). This differs from
-    ``cmd_collect``, which DOES need a charset guard because it accepts ARBITRARY
-    user seat names with no registry/allowlist to check against. The preset path
-    (no explicit ``--seats``) is unaffected: preset/group-expanded names are
-    always valid.
-    """
-    if seats_arg is not None:
-        names = [s.strip() for s in seats_arg.split(",") if s.strip()]
-        names = _expand_seat_groups(names)
-        valid = set(known_seat_names()) | set(seats.task_seats())
-        for n in names:
-            if n not in valid:
-                print(
-                    f"error: invalid debate seat name {n!r} in --seats; debate "
-                    "seats must be a known seat (a registered subprocess seat or a "
-                    "Claude Task seat: " + ", ".join(sorted(valid)) + "). debate "
-                    "writes per-seat results as .crew/debates/<dir>/<seat>.json and "
-                    "must not let a seat name escape the debate dir; membership in "
-                    "this fixed allowlist is itself the path-safety guarantee.",
-                    file=sys.stderr,
-                )
-                raise _DebateSeatError(2)
-        explicit = set(names)
-    else:
-        # Roster resolution through the single shared point (honors [panels]).
-        names = _expand_seat_groups(_panel_seat_list(_resolve_debate_panel_name(panel_arg)))
-        # A NAMED --panel's members are EXPLICIT (mirror review-prep): an
-        # unavailable one is skipped WITH a one-time note, not silently dropped.
-        # A default/[debate].panel resolution (no --panel given) keeps the silent
-        # drop — there is no user-named seat to annotate.
-        explicit = set(names) if panel_arg is not None else set()
-    # Availability filter (skip-note for an explicitly-named unavailable seat;
-    # empty-after-filter falls back to the unfiltered panel). This is ONE unified
-    # debate panel list (subprocess + task together), so _filter_available's
-    # fallback is already whole-panel here.
-    names = _filter_available(names, explicit)
-    seen: set[str] = set()
-    return [n for n in names if not (n in seen or seen.add(n))]
-
-
 def _reviews_base() -> str:
     """The `.crew/reviews` root, anchored under the shared ``crew_base()`` so the
     engine resolves review dirs at the SAME project root as the state layer.
@@ -787,6 +694,7 @@ def cmd_debate(args: argparse.Namespace) -> int:
         seats=args.seats,
         session_id=args.session_id,
         timeout_seconds=args.timeout,
+        rounds=args.rounds,
         force_external_channels=_parse_force_external(args.force_external),
     )
     try:
@@ -2128,28 +2036,12 @@ def cmd_build_executor(args: argparse.Namespace) -> int:
 
 
 def _render_prior(args: argparse.Namespace) -> str | None:
-    """Resolve the prior-round DATA for a render, from --prior-round or --run-id/--round.
-
-    Priority: an explicit ``--prior-round <file>`` wins; otherwise, given both
-    ``--run-id`` and ``--round`` (>1), read rounds 1..round-1 from the run dir.
-    Raises ``rounds.RoundError`` for an invalid run-id (traversal guard) or a
-    lone --run-id/--round (the two must travel together).
-    """
+    """Read explicit prior-round DATA for a render, when supplied."""
     if args.prior_round:
         try:
             return Path(args.prior_round).read_text(encoding="utf-8")
         except OSError as exc:
             raise rounds.RoundError(f"cannot read --prior-round file {args.prior_round!r}: {exc}")
-    has_id, has_round = bool(args.run_id), args.round is not None
-    if has_id != has_round:
-        raise rounds.RoundError("--run-id and --round must be given together")
-    if has_id and has_round:
-        # anchor_path passes "" through as a sentinel; consumed here it would
-        # resolve the run dir against the shell cwd via Path(".").
-        if not args.base_dir:
-            raise rounds.RoundError("--base-dir cannot be empty")
-        d = rounds.run_dir(args.run_id, base_dir=args.base_dir)
-        return rounds.read_prior_rounds(d, args.round)
     return None
 
 
@@ -2185,14 +2077,6 @@ def _resolve_render_inputs(
     except rounds.RoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise _RenderInputError(2)
-
-    # Loud (not silent) when a later round has no prior context to thread.
-    if args.round is not None and args.round > 1 and not prior:
-        print(
-            f"warning: --round {args.round} but no prior-round content found "
-            "(prompt will omit prior-round context)",
-            file=sys.stderr,
-        )
 
     # Free-form question (discuss) XOR a target.
     if args.question is not None and args.file:
@@ -2405,83 +2289,7 @@ def cmd_render_stage_all(args: argparse.Namespace) -> int:
 
 
 def cmd_seats(args: argparse.Namespace) -> int:
-    """Print the resolved seat list — one per line.
-
-    DEFAULT (no ``--debate``): the resolved SUBPROCESS seat list — ``--seats``
-    (group tokens like ``cursor`` expanded, filtered to the registry, de-duped)
-    the SAME way ``review`` resolves it, but printed instead of run.
-    This lets an orchestrator that fans out PER-SEAT — one ``run <seat>`` call
-    each, every subprocess seat its own visible shell — obtain the expanded list
-    without hardcoding the cursor group, keeping the registry the single source.
-
-    ``--debate``: the FULL debate panel (subprocess AND Claude Task seats, so the
-    /crew:debate orchestrator can split it into its subprocess fan-out + Task
-    dispatch), applying debate precedence ``--seats > --panel >
-    config.debate_panel() > config.default_panel() > full``. This is the engine
-    hook that lets the LLM-driven ``debate.md`` honor ``.crew/config.toml`` when
-    the user names no ``--panel``/``--seats`` (the markdown cannot read TOML).
-    """
-    if args.debate:
-        try:
-            resolved = _resolve_debate_seats(args.panel, args.seats)
-        except _DebateSeatError as e:
-            return e.code
-        if args.json:
-            # Split the ONE resolved debate panel into the same three fields
-            # review-prep emits, so debate.md consumes an identical shape and never
-            # classifies seat names itself. The debate resolver already applied
-            # precedence + availability + expansion, so this only partitions: a
-            # resolver-engine seat is a subprocess seat, a resolver-native seat is
-            # a task seat (the union is exhaustive under the current catalog).
-            host = channels.current_host()
-            resolved_catalog = _resolved_catalog_executions(
-                declared_native=channels.task_native_channel(host),
-            )
-            known = {
-                name for name, execution in resolved_catalog.items()
-                if execution.engine_runnable
-            }
-            task_names = {
-                name for name, execution in resolved_catalog.items()
-                if execution.native
-            }
-            subprocess_seats = [s for s in resolved if s in known]
-            task_seats = [s for s in resolved if s in task_names]
-            task_seat_models = {n: _task_seat_model(n) for n in task_seats}
-            seat_channels = {
-                name: resolved_catalog[name].channel for name in subprocess_seats + task_seats
-            }
-            payload = {
-                "subprocess_seats": subprocess_seats,
-                "task_seats": task_seats,
-                "task_seat_models": task_seat_models,
-                "host": host,
-                "seat_channels": seat_channels,
-            }
-            print(json.dumps(payload, ensure_ascii=False))
-            return 0
-        for s in resolved:
-            print(s)
-        return 0
-    if args.json:
-        # --json only shapes the --debate split; without --debate the subprocess
-        # panel is a plain one-per-line list. Fail loud rather than silently ignore.
-        print(
-            "error: --json is only valid with --debate; without --debate, "
-            "`seats` prints one seat per line.",
-            file=sys.stderr,
-        )
-        return 2
-    if args.panel is not None:
-        # --panel only steers the DEBATE panel resolver; without --debate it would
-        # be silently ignored (the default path resolves the subprocess panel from
-        # --seats only). Fail loud rather than no-op.
-        print(
-            "error: --panel is only valid with --debate; without --debate, "
-            "`seats` resolves the subprocess panel from --seats only.",
-            file=sys.stderr,
-        )
-        return 2
+    """Print the resolved subprocess seat list, one per line."""
     for s in _resolve_seats(args.seats):
         print(s)
     return 0
@@ -5054,7 +4862,7 @@ def cmd_swab(args: argparse.Namespace) -> int:
     current-standalone-review, or current-standalone-debate pointer names them, and no nonterminal standalone
     workflow protects them; there is deliberately no review-run age threshold
     beyond the 1-day grace given to a standalone workflow that fails validation)
-    and stale debate dirs (past the 1-day threshold, no synthesis), plus Cursor
+    and stale legacy debate dirs (past the 1-day threshold, no synthesis), plus Cursor
     environment captures older than seven days.
     Signal markers are deliberately left
     untouched: they carry no clean orphan signal at an attended moment, so this
@@ -5070,13 +4878,13 @@ def cmd_swab(args: argparse.Namespace) -> int:
     (a candidate whose ``rmtree`` raised lands in ``failed`` and contributes 0, even
     if it was partially deleted).
 
-    The ``.crew/reviews`` and ``.crew/debates`` roots are resolved from the shared
-    ``crew_base()`` root, IDENTICALLY to how ``review-prep`` / ``collect`` / ``run``
-    resolve them (they derive from the same resolver): a destructive command and the
-    writers must never target different trees when ``CLAUDE_PROJECT_DIR`` and cwd
-    diverge. If ``--yes`` is run from a terminal ``.crew`` cwd without the env var,
-    it refuses because the resolver's artifact-root re-anchor is only a guess; the
-    dry-run listing remains available.
+    The ``.crew/reviews`` root and legacy ``.crew/debates`` artifacts are resolved
+    from the shared ``crew_base()`` root, identically to how ``review-prep`` /
+    ``collect`` / ``run`` resolve their review artifacts (they derive from the same
+    resolver): a destructive command and the writers must never target different
+    trees when ``CLAUDE_PROJECT_DIR`` and cwd diverge. If ``--yes`` is run from a
+    terminal ``.crew`` cwd without the env var, it refuses because the resolver's
+    artifact-root re-anchor is only a guess; the dry-run listing remains available.
     """
     if args.yes and cwd_reanchored():
         print(
@@ -5159,7 +4967,7 @@ def cmd_swab(args: argparse.Namespace) -> int:
         for it in review:
             print(f"  {it.path} ({_fmt_bytes(it.bytes)})")
     if debate:
-        print("Debate dirs (stale, no synthesis):")
+        print("stale legacy debate dirs (no synthesis):")
         for it in debate:
             print(f"  {it.path} ({_fmt_bytes(it.bytes)})")
     if probes:
@@ -5217,7 +5025,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     debate = sub.add_parser(
         "debate",
-        help="Start or resume the engine-owned debate workflow (single-round council).",
+        help="Start or resume the engine-owned bounded-round debate workflow.",
     )
     debate.add_argument(
         "question",
@@ -5234,6 +5042,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     debate.add_argument("--seats", default=None, help="comma-separated registered seats")
     debate.add_argument("--panel", default=None, help="named debate panel")
+    debate.add_argument(
+        "--rounds",
+        type=int,
+        default=1,
+        help="number of bounded debate rounds (1 through 5)",
+    )
     debate.add_argument("--session-id", dest="session_id", required=True, help="literal harness session id")
     debate.add_argument(
         "--timeout",
@@ -5312,37 +5126,12 @@ def build_parser() -> argparse.ArgumentParser:
     seats_p = sub.add_parser(
         "seats",
         help="print the host-resolved external seat list (group tokens expanded), "
-             "one per line for per-seat fan-out. Default: the external panel. With "
-             "--debate: the FULL debate panel (subprocess AND Claude Task seats).",
+             "one per line for per-seat fan-out. Default: the external panel.",
     )
     seats_p.add_argument(
         "--seats", default=None,
         help="comma-separated seats / group tokens (e.g. 'cursor'); "
-             "default = the default external panel. With --debate, explicit "
-             "entries are validated against registered external + Task seats and "
-             "path-unsafe/unknown names are rejected.",
-    )
-    seats_p.add_argument(
-        "--panel", default=None,
-        help="named preset (only used with --debate): resolved via the configured "
-             "[panels] roster then the shipped panels (e.g. full/lite/solo/cursor/quick "
-             "or a custom [panels] name) into the full debate seat list; an unknown "
-             "name falls back to 'full'",
-    )
-    seats_p.add_argument(
-        "--debate", action="store_true",
-        help="print the FULL debate panel (subprocess AND Claude Task seats), "
-             "applying debate precedence --seats > --panel > "
-             "config.debate_panel() ([debate].panel) > config.default_panel() > "
-             "built-in 'full'. The engine hook that lets debate.md honor "
-             ".crew/config.toml when no --panel/--seats is named.",
-    )
-    seats_p.add_argument(
-        "--json", action="store_true",
-        help="with --debate: emit {subprocess_seats, task_seats, task_seat_models, "
-             "host, seat_channels} "
-             "as JSON (mirrors review-prep's split) instead of one seat per line, so "
-             "debate.md reads the roster split without classifying seat names itself.",
+             "default = the default external panel.",
     )
     seats_p.set_defaults(func=cmd_seats)
 
@@ -5834,24 +5623,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="label this seat in the prompt (e.g. opus, sonnet, panelist)",
     )
     rndr.add_argument(
-        "--run-id", dest="run_id", default=None,
-        help="debate run-id; with --round, folds prior rounds in as DATA",
-    )
-    rndr.add_argument(
-        "--round", type=int, default=None,
-        help="round number (>=1); a round >1 folds in prior rounds 1..n-1",
-    )
-    rndr.add_argument(
         "--prior-round", dest="prior_round", default=None, type=anchor_path,
-        help="explicit prior-round text file (alternative to --run-id/--round; "
+        help="explicit prior-round text file for discuss prompts ("
              "a relative path resolves against the project root)",
-    )
-    rndr.add_argument(
-        "--base-dir", dest="base_dir",
-        default=str(crew_base() / ".crew" / "debates"), type=anchor_path,
-        help="parent dir for debate runs (used to resolve --run-id); default "
-             "<project>/.crew/debates, anchored to CLAUDE_PROJECT_DIR (an "
-             "explicit relative path anchors the same way)",
     )
     rndr.add_argument("--base", default="main", help="base ref for branch/auto diffs")
     rndr.add_argument(
@@ -5995,8 +5769,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="swab the decks: review and prune stale crew artifacts (orphaned "
              "review runs with no active loop, current-run, current-standalone-review, or "
              "current-standalone-debate pointer, or nonterminal/ambiguous standalone "
-             "workflow, and stale "
-             "debate transcripts). Dry-run by default; pass --yes to delete.",
+             "workflow, and stale legacy debate dirs). Dry-run by default; pass "
+             "--yes to delete.",
     )
     swab.add_argument(
         "--yes", action="store_true",

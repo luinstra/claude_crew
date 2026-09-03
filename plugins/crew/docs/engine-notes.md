@@ -82,13 +82,6 @@ Opt-in for COST (premium/metered Cursor buckets):
   was fuzzy-matched down to Cursor Grok 4.5 High instead of erroring, so the seat
   quietly ran a tier below its request while the result recorded the old pin.
 
-## Why the interim multi-round section still uses `seats --debate`
-
-The interim multi-round section of debate.md uses `crew seats --debate` because
-that Markdown transport still resolves its panel before it issues its per-seat
-actions. The single-round workflow passes `[debate].panel` into the shared
-resolver and does not use this command path.
-
 ## Why `crew state …` routes through the dispatcher instead of a plugin-root shim
 
 `crew-state.py` does a bare `from models import …` with NO `sys.path` guard. A
@@ -101,8 +94,9 @@ to `crew-state.py`.
 
 The scaffold verb and the killability split-brain are gone because the review
 seam issues one claimable action per seat, the same reason standalone review
-never enters an ad-hoc fan-out. The engine therefore owns the single-round
-question target, panelist actions, settlement, and advisory synthesis.
+never enters an ad-hoc fan-out. The engine therefore owns the bounded-round
+question target, panelist actions, settlement, successor walk, and advisory
+synthesis.
 
 ## Debate on the review seam
 
@@ -120,6 +114,31 @@ pretend to certify or revise a target.
 
 The strict-majority header stays advisory and findings parsing is short-circuited because
 a panel shape that depends on seat prose is not deterministic.
+
+Each round is a standalone run. The successor stores a literal
+`prior-rounds.md`, containing the fold of every earlier round's frozen
+`panel-full.md`, rather than linking back to mutable predecessor artifacts.
+The file and its digest make the context supplied to every later seat explicit
+and immutable.
+
+A successor is a clone of the closed round's record with only the round,
+prior-rounds digest, `prior_rounds`, run id, identity digest, and creation time
+recomputed. One
+closed-on-entry predicate is used at every entry: a call that finds the round
+already closed follows the successor, while the call whose own advance closes
+the round reports `round_complete`. This keeps transitions visible and prevents
+an intermediate round from minting synthesis.
+
+The session pointer moves only from the run it names. That adoption heals
+the crash window between a durable successor write and pointer update without
+stealing a pointer from a later round or another debate. The renderer reads
+only frozen result records, so the successor identity hashes deterministic
+`panel-full.md` bytes rather than live clock, environment, or filesystem data.
+
+An accepted residual is that a closed intermediate round can lose swab
+protection while its debate remains live. Swab is attended and dry-run by
+default, and the driver follows a closed round immediately. No predecessor link
+is added to change that behavior.
 
 The inherited timeout envelope is reused because the same host transport and
 settlement boundary apply to debate seats.

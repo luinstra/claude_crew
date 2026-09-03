@@ -161,11 +161,11 @@ launched so nested crew calls re-detect their host.
 
 ```
 multiagent/
-├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher); subcommands: review | debate | review-next | review-claim | review-execute | review-submit | review-recover | review-retry | run | dispatch | build-executor | render (incl. --stage-all) | seats (incl. --debate) | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | wait (incl. --signal) | signal | doctor | probe | scaffold-config | swab
+├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher); subcommands: review | debate | review-next | review-claim | review-execute | review-submit | review-recover | review-retry | run | dispatch | build-executor | render (incl. --stage-all) | seats | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | wait (incl. --signal) | signal | doctor | probe | scaffold-config | swab
 ├── review_workflow.py   # standalone review authority: exact schema transport, snapshot, lock/advance transaction, attempt history, repair, retry, and synthesis readiness
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
-├── rounds.py            # debate run lifecycle: run-id (+traversal guard), run-dir, question.md, round-NN.md read/write, prior-rounds concat. NO model calls.
+├── rounds.py            # run-id grammar (+traversal guard) shared with review runs, and the prior-round fold. NO model calls.
 ├── review_runs.py       # review-run lifecycle (pure leaf like rounds.py): run identity mint (content hash + review inputs), reviews-subdir session sanitizer (the ONE mechanism cli.py delegates to), write-once run.json + mint-conflict refusal, snapshot write/self-heal, the landed-and-valid seat predicate, preserve-valid seat writes (per-seat lock), pointer read/write. NO model calls.
 ├── continuations.py     # exact provider conversation chain records: safe paths, binding validation, atomic 0600 writes, sibling locks, invalidation, and ordered classification. NO provider/CLI imports.
 ├── channels.py          # Host detection, channel table (the native column is caller-declared, not host-derived), capability seam, and seat execution resolver
@@ -199,7 +199,7 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
 - `review-retry` — retry pending reviewer seats from a terminal attempt. An
   identical `review` start after `synthesis_failed` is the separate,
   intentional attempt-local synthesis restart and does not rerun seats.
-- `debate`: start or resume the engine-owned debate workflow (single-round council in this slice; multi-round follows); the six review-* verbs drive it unchanged because the frozen identity carries the mode.
+- `debate`: start or resume the engine-owned debate workflow; the six review-* verbs drive it unchanged because the frozen identity carries the mode.
 - `run <seat>`: run ONE host-resolved external seat; `--json` always exits 0 with the six-field core
   plus optional channel and identity stamps for every result it WRITES.
   Run-scoped MISUSE (non-member seat, prompt/model/sandbox override) exits 2 before any result is
@@ -221,7 +221,7 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   The builtin sentinel keeps the ``channel`` key present with JSON ``null`` when
   no external channel is resolved.
 - `render` — build/stage a seat prompt; `--stage-all` collapses N stages into one call.
-- `seats` — resolve/print a panel; `--debate` prints the config-aware full debate panel.
+- `seats`: resolve/print the subprocess seats for a panel.
 - `collect` — fold per-seat `<seat>.json` into a digest; `--group`/`--full`/`--report-unparsed`.
 - `wait` — the review flows' barrier primitive: block until every named SUBPROCESS seat's
   `<seat>.json` exists (a failed seat counts as landed, it has FINISHED; certification is collect's
@@ -304,7 +304,7 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
 - `probe` — opt-in BILLABLE live seat smoke test (doctor proves the CLI is installed; probe proves it returns usable output).
 - `scaffold-config` — `/crew:init` commented-config generator.
 - `swab`: attended cleanup of stale crew artifacts (orphaned review-run dirs,
-  stale debate dirs, and probe captures). DRY-RUN BY DEFAULT (lists only, like
+  stale legacy debate dirs, and probe captures). DRY-RUN BY DEFAULT (lists only, like
   `git clean -n`); `--yes` is the DESTRUCTIVE step, scoped to enumerated
   candidates from
   `artifact_prune.collect_prunable` and exiting nonzero if any delete failed. A
@@ -323,7 +323,7 @@ resolver (`state_discovery.py`: `CLAUDE_PROJECT_DIR`, else a hook-payload root, 
 cwd, except a terminal `.crew` payload root or fallback cwd re-anchors to its parent
 with a one-time stderr advisory). The engine
 (review-prep/collect/run/swab, via `_reviews_base()` and the anchored
-`review_runs`/`rounds` defaults), the state layer (`crew state` verbs + `models`,
+`review_runs` defaults), the state layer (`crew state` verbs + `models`,
 via `get_project_dir()`), `config.py`, and the session-start sweeps all resolve
 `.crew` through that one function, so a cwd that differs from CLAUDE_PROJECT_DIR
 no longer spawns a phantom nested `.crew`: the two layers land on the same tree.
@@ -332,7 +332,7 @@ state layer anchored to CLAUDE_PROJECT_DIR) is closed.
 
 **Explicit path ARGS anchor the same way (`state_discovery.anchor_path`).** Every
 explicit path argument the two CLIs take (`-f`/`-o`/`--out`/`--full`/`--seat`/
-`--detection`/`--prior-round`/`--base-dir`, `state init -f`/`--plan-file`, a
+`--detection`/`--prior-round`, `state init -f`/`--plan-file`, a
 `set plan_file` value) resolves a RELATIVE path against `crew_base()` at parse
 time (argparse `type=anchor_path`); an absolute path passes through unchanged,
 `~` expands first, and the special values `-` (stdout sentinel) and `""` pass
@@ -375,11 +375,14 @@ Key contracts (do NOT regress):
   (advisory council take, no verdict). `build_prompt` raises on an unknown mode.
   Defaults (`seat_role=None, mode="review", prior_round=None`) keep review output
   byte-identical — multi-round/discuss are opt-in.
-- **Multi-round lives on disk** (`rounds.py`): a run dir holds `question.md` +
-  `round-NN.md`; `render --run-id R --round n` folds rounds `1…n-1` in as
-  injection-guarded DATA (`prior_round`). The interim multi-round section owns
-  the loop and convergence; single-round council prompts are issued by the
-  workflow from `prompts.council` with the seat label.
+- **Multi-round lives in standalone runs**: round n+1 freezes
+  `prior-rounds.md` (the fold of every earlier round's `panel-full.md`) into its
+  identity and clones every other field of its record from round n. Intermediate
+  rounds derive `round_complete` (reported by the call whose advance closes the
+  round, followed by the call that finds it closed on entry: the next
+  `review-next` or an identical start) and mint no synthesis. The final round's
+  synthesis reads the trajectory, and the session pointer follows the walk only
+  from the run it names.
 - **Never choke** — a failed/skipped seat returns `ok=False`; the fan-out only
   exits nonzero when EVERY seat failed (and still emits the full array, no traceback).
 - **Reference mode is the default** — seats fetch the diff/plan themselves (the
@@ -420,23 +423,22 @@ Key contracts (do NOT regress):
   review's per-seat native admission, so on a Cursor host a `cursor-*` seat prints
   as external there while standalone review issues it in-session. WHY each
   opt-in seat is opt-in → engine-notes.
-- When the user names NEITHER `--panel` nor `--seats`, the default panel NAME comes from `default_panel`
-  (`config.py`, per-repo `.crew/config.toml` → global `~/.crew-config.toml`), falling back to the
-  built-in `full`; precedence is CLI flag > per-repo config > global config > builtin (no env tier — the
-  old env surface is retired).
-- `/crew:debate` passes `[debate].panel` as the default panel name into the shared
-  resolver, after explicit `--seats` or `--panel` selection. `seats --debate`
-  serves only the interim multi-round section; it prints the FULL debate panel
-  (subprocess AND Claude Task seats) for that Markdown path.
-  For debate only, an explicit `--seats` is the whole roster and ignores
-  `--panel`; review keeps those options as independent axes.
+- When the user names NEITHER `--panel` nor `--seats`, debate first uses
+  `[debate].panel`, then `default_panel`; other workflows use `default_panel`
+  (`config.py`, per-repo `.crew/config.toml` → global `~/.crew-config.toml`),
+  and both fall back to the built-in `full`. Explicit CLI selection takes
+  precedence, followed by per-repo config, global config, and the builtin (no
+  env tier because the old env surface is retired).
+- Standalone review and debate pass explicit `--seats` or `--panel` through the
+  shared resolver; CLI flags take precedence over per-repo and global config,
+  then the built-in panel is used.
 
 ### Availability filtering
 
 - Panel-NAME resolution AND the `available` filter funnel through ONE shared point in `cli.py`
   (`_panel_seat_list` resolves via `seats.merged_panels()`, which merges a configured `[panels]` entry over the shipped one).
 - Two availability shapes share the same `available=false` drop + explicit-name skip-note: the
-  legacy single-list chokepoint `_resolve_seats` (`seats` + the debate resolver)
+  legacy single-list chokepoint `_resolve_seats` (the standalone `seats` printer)
   uses `_filter_available`, which falls back to the unfiltered panel if the one list would empty;
   `review-prep` uses the lower-level `_drop_unavailable` per split (subprocess vs task) and applies a
   WHOLE-PANEL fallback ONCE — restoring the unfiltered panel only if the ENTIRE resolved panel
@@ -486,8 +488,8 @@ Key contracts (do NOT regress):
   mutually exclusive with `--stage`/`--seat-role`/`-o`, and rejects
   duplicate/normalization-colliding/empty role lists (nonzero, no partial files).
   Roles are prompt LABELS, NOT registry seats; they are NOT filtered through
-  `known_seat_names()`. `debate` keeps its per-seat `-o` renders in the interim
-  multi-round section of debate.md. It gets the dispatcher prefix only.
+  `known_seat_names()`. The debate workflow owns its per-seat rendering and
+  gets the dispatcher prefix only.
 
 ### Prep
 
@@ -531,7 +533,7 @@ Key contracts (do NOT regress):
   launch-time clear sits behind process start and every gate, a window a concurrent `wait` polls
   into); a landed valid file is never cleared. `--run-id` with
   an explicit `-o` is rejected (contradictory routing); explicit `-f`/`-o` alone still override
-  independently (debate's own `.crew/debates/` layout keeps passing explicit paths, unstamped).
+  independently.
 - `run --json` always exits 0 with the six-field core result for every result it writes (run-scoped
   results also carry the identity stamps), so per-seat never-choke is automatic (no
   all-failed abort to handle). Run-scoped misuse exits 2 with nothing written; the markdown-templated
@@ -636,8 +638,7 @@ Key contracts (do NOT regress):
   file per seat, no globs). `collect` gains `--run-id` (fallback: the session pointer; with
   neither, the flat dir, byte-identical no-flag behavior). The orchestrator WAITS
   for BOTH every subprocess run shell AND every Task-seat persist before collecting. `review` and
-  the single-round `/crew:debate` path are workflow-owned; the interim multi-round section remains
-  the Markdown owner and does not use `collect`.
+  `/crew:debate` are workflow-owned; neither uses `collect`.
 - **`dispatch` (write-mode single-seat WORK delegation).** The EXECUTION
   complement to read-only review/debate: `crew dispatch "<task>" [--seat <name>]`
   sends ONE subprocess seat (default `codex`; resolution `--seat` >
@@ -686,11 +687,11 @@ Key contracts (do NOT regress):
   around its no-arg `main()` (letting crew-state's own `SystemExit` propagate for
   correct exit codes). (WHY route it rather than ship a plugin-root shim →
   engine-notes.)
-- `debate` is workflow-owned for the single-round path: it freezes the question,
-  resolves the panel, issues one panelist action per seat, waits for the review
-  seam, and records a verdict-free synthesis. It mints no formatter action.
-  The interim multi-round section remains the Markdown owner until the engine
-  takes over that path. (WHY this split exists: engine-notes.)
+- `debate` is workflow-owned for every round: it freezes the question, resolves
+  the panel, issues one panelist action per seat, waits for the review seam,
+  walks successors with frozen prior-round context, and records a verdict-free
+  synthesis on the final round. It mints no formatter action. (WHY this design
+  exists: engine-notes.)
 - Two-tier config (env retired): tuning lives in TWO TOML files — per-repo
   `.crew/config.toml` and global `~/.crew-config.toml` (`config.py`, two memoized
   loaders). Knobs: `default_panel`, `[review].force_external_channels`
@@ -1382,7 +1383,7 @@ The `session-start.py` hook cleans up stale state files on every session start:
 
 **Review-run dirs, debate dirs, and probe captures: REPORTED, never deleted here.**
 `session-start` no longer deletes review-run dirs (`.crew/reviews/<session>/run-*`),
-stale debate dirs (`.crew/debates/`), or probe captures: destructive removal of
+stale legacy debate dirs (`.crew/debates/`), or probe captures: destructive removal of
 the user's disk from an unattended hook was the wrong venue. Instead
 `report_stale_artifacts` enumerates all three families through the ONE shared
 `artifact_prune.collect_prunable` finder (the same list

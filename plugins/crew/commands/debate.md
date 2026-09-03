@@ -20,12 +20,12 @@ token and everything after it are the question in original order and byte for
 byte. An explicit `--` is removed as the terminator, and every token after it
 belongs to the question. Do not scan question text for options. Reject a missing
 value or duplicate option in the leading prefix. An omitted `--rounds` means 1.
-Before branching, reject anything else: a supplied `--rounds` value must be an
+Before invoking the engine, reject anything else: a supplied `--rounds` value must be an
 integer from 1 through 5. On this command, an explicit `--seats` value is the
 whole roster and `--panel` is ignored; review keeps its `--panel` and `--seats`
 axes independent.
-`--rounds` selects which section of this file runs and is never appended to the
-`crew debate` command. The remaining recognized options are forwardable. Append
+`--rounds` is forwarded to the engine. The remaining recognized options are
+forwardable. Append
 only flags actually supplied by the user, and every valid command is the
 no-option form plus only the supplied forwardable option/value pairs. Encode
 every extracted question or option value with the POSIX algorithm below. Place
@@ -40,12 +40,13 @@ it in a command: reject NUL; emit a value matching
 the five characters `'"'"'`, then wrap the whole value in single quotes. The
 only shell expansion below is `${CLAUDE_PLUGIN_ROOT}`.
 
-With --rounds 1 (the default) the engine owns the whole round; with --rounds N greater than 1 follow section B below, the interim Markdown owner of multi-round debate until the engine takes it over.
+The engine owns every requested round and the final synthesis. With `--rounds N`
+the engine freezes each completed round into the successor run before opening
+the next one.
 
-`--force-external` is accepted only on the single-round engine path. Section B
-handles a supplied value before roster resolution. It is the user's option:
-pass it only when supplied, never add it to work around a refused spawn or a
-role that did not resolve, and let Python resolve it over configuration.
+`--force-external` is forwardable on every round. It is the user's option: pass
+it only when supplied, never add it to work around a refused spawn or a role
+that did not resolve, and let Python resolve it over configuration.
 
 Start with the literal harness session id. The first fence is the no-option
 form; the second demonstrates the supplied option form. After compaction,
@@ -56,7 +57,7 @@ repeat the identical start command and adopt the returned current reference.
 ```
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" debate --session-id '<session-id>' --panel '<panel>' --seats '<seats>' --timeout '<seconds>' --force-external '<channels>' -- '<question>'
+"${CLAUDE_PLUGIN_ROOT}/crew" debate --session-id '<session-id>' --rounds '<rounds>' --panel '<panel>' --seats '<seats>' --timeout '<seconds>' --force-external '<channels>' -- '<question>'
 ```
 
 The harness this runs on is Python's to determine, not yours. It reads the
@@ -129,9 +130,9 @@ With `work_item.channel` = `cursor`, spawn a panelist with exactly:
 
 `Task(subagent_type="<work_item.role>", model="<work_item.model>", prompt="You are the <work_item.seat> seat. Read <work_item.prompt_path> and follow it exactly.")`
 
-The two channel fences are byte-identical. The issued role is `crew:panelist`
-on Claude and `crew-panelist` on Cursor; the action remains reviewer-kind so
-the six reference-taking verbs stay unchanged.
+The two channel fences are byte-identical. The issued role is the
+provider-specific panelist role; the action remains reviewer-kind so the six
+reference-taking verbs stay unchanged.
 
 On the `cursor` channel, only a Cursor host issues a native Task, and its model
 is the seat's `native_model` pin. A seat without that pin is dropped during
@@ -258,7 +259,10 @@ running, using the issued kind and driver mapping:
 A lost native panelist settles failed with the same action id and driver. The
 panel degrades rather than dying: quorum recounts usable seats and the digest
 synthesizes from whatever returned. Retry pending panelist seats only on an
-explicit user request, using the frozen-roster subset or all pending seats.
+explicit user request, using the frozen-roster subset or all pending seats. A
+round that already closed refuses the retry with `round_superseded`, pending
+seats included: the following round reissues the whole roster fresh, so the
+answer to a seat that failed in a closed round is `review-next`, not a retry.
 Separately, repeating the identical start after `synthesis_failed` triggers the
 engine's attempt-local synthesis restart; adopt that returned reference without
 inventing a seat retry.
@@ -284,124 +288,9 @@ On `terminal`, branch only on the returned status:
   the returned `panel_path`; do not invent or request synthesis.
 - `synthesis_failed`: present the diagnostic and panel facts, then read and
   present the returned `panel_path`; do not invent or request synthesis.
+- round_complete: not a final outcome; run the review-next fence once with the returned reference and continue the loop with the step it returns (its ref names the next round's run).
 
 The same presentation rules apply after compaction or an identical-start resume.
-
----
-
-# B) Multi-round (`--rounds N`, N > 1): discuss mode
-
-Multi-round composes render/run, run-dir, and Write; no new engine call. Section B runs only for --rounds N greater than 1. The accepted `--rounds` value is an integer from 1 through 5. Resolve the roster split with the matching form below; the engine-owned section above never uses it.
-
-If `--force-external` was supplied, print one line,
-`--force-external is not available for multi-round mode yet`, and stop before
-roster resolution or run work.
-
-When neither roster option is supplied, use the configured default:
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --json
-```
-
-When `--panel <preset>` is supplied, forward it exactly:
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --json --panel '<panel>'
-```
-
-When `--seats <list>` is supplied, forward it exactly:
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --json --seats '<seats>'
-```
-
-When both are supplied, use the `--seats` form because the explicit list is the
-complete roster and wins over `--panel`.
-
-PRINTS `{subprocess_seats, task_seats, task_seat_models, host, seat_channels}` as one-line JSON.
-
-## B1 — Open the run
-
-Pick a run-id `run-<short-slug>` matching `^run-[A-Za-z0-9_-]+$` (any other
-character makes the first `render --run-id` fail with a `RoundError`). Define
-ONE absolute run dir for every read, write, and Task reference:
-
-```
-<run-dir> = <project-root>/.crew/debates/<run-id>
-```
-
-Bash uses relative `.crew/debates/<run-id>/...`; engine resolves prior
-rounds from that root. Write question with **Write** to `<run-dir>/question.md`.
-
-## B2 — For each round n = 1 … N
-
-**Render each seat's prompt** (the engine reads rounds `1…n-1`; round 1 has no
-prior). Render EVERY seat in the panel, subprocess AND task; omit `--base-dir`:
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" render --mode discuss --seat-role <seat> \
-  -f ".crew/debates/<run-id>/question.md" \
-  --run-id <run-id> --round <n> \
-  -o ".crew/debates/<run-id>/.prompt-<seat>-r<n>.txt"
-```
-
-Then run the round's seats (in parallel where possible):
-
-- **Subprocess seats**:
-  ```bash
-  "${CLAUDE_PLUGIN_ROOT}/crew" run <seat> -f ".crew/debates/<run-id>/.prompt-<seat>-r<n>.txt" --json --timeout '<seconds>' -o ".crew/debates/<run-id>/<seat>-r<n>.json"
-  ```
-  Include `--timeout '<seconds>'` only when the user supplied `--timeout`, and
-  forward that same value to every subprocess seat.
-- **Task seats**: one `crew:panelist` per seat, **pinned from
-  `task_seat_models[<seat>]`**, by reference, with the fence below. A Task seat appears
-  only when the current host resolves it native; on another host, the
-  `seats --debate` split places it in the external subprocess list instead.
-  Never emulate an external seat with a host-native subagent:
-  ```
-  # for each <seat> in task_seats:
-  Task(subagent_type="crew:panelist", model="<task_seat_models[<seat>]>", prompt="You are the <seat> seat. Read <run-dir>/.prompt-<seat>-r<n>.txt and follow it exactly.")
-  ```
-  Use each Task's RETURNED result as its take and completion signal.
-
-**Record the round.** Wait for every seat, normalize to the six-field core plus
-optional channel provenance; use **Write** to write all seats' positions,
-labeled by seat name, into:
-
-```
-<run-dir>/round-<NN>.md      (zero-padded: round-01.md, round-02.md, …)
-```
-
-That file is what the NEXT round's `render` folds in (`rounds.py` expects the
-zero-padded `round-NN.md` name).
-
-**Convergence check.** After writing `round-NN.md`, stop if positions have
-converged (stable, no new substantive disagreement) or n == N; otherwise
-continue to round n+1. Note early convergence in the synthesis.
-
-## B3 — Synthesize the debate
-
-Read the final round (and the trajectory) and write `synthesis.md` into the
-run dir: **How positions evolved / Areas of agreement / Remaining
-disagreements / Recommendation**. Tell the user the run-dir path.
-
----
-
-## Never choke (section B)
-
-A failed/skipped seat, subprocess OR task, in any round, NEVER aborts the debate
-and is NEVER silently dropped:
-
-- Subprocess seats run one-per-seat via `run --json` (always exit 0, six-field
-  core plus optional channel provenance); a failed seat lands as `ok=False`,
-  the others are unaffected. Read whichever `<seat>.json` files appear.
-  - A `crew:panelist` Task that errors, times out, or returns no
-  usable block is normalized to `ok=False` and rendered with its diagnostic;
-  the other seats proceed.
-- In multi-round, a seat that failed in round n can still participate in round
-  n+1 (re-rendered + re-dispatched fresh).
-- ONLY when **zero** seats produced usable output, skip the synthesis and
-  report: `could not convene — all seats failed: <per-seat diagnostics>`.
 
 ---
 

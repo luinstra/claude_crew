@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from multiagent import channels, config, findings, prompts, render, review_runs, seats, targets
+from multiagent import channels, config, findings, prompts, render, review_runs, rounds, seats, targets
 from multiagent.providers import (
     ATTRIBUTION_REQUESTED_ONLY,
     attribution_for,
@@ -42,6 +42,9 @@ _POINTER_BY_KIND = {
     "standalone_review": STANDALONE_POINTER,
     "standalone_debate": DEBATE_POINTER,
 }
+_POINTER_ABSENT = object()
+_POINTER_INVALID = object()
+_POINTER_EXPECTATION_UNSET = object()
 STANDALONE_RESERVED_STEMS = review_runs.RESERVED_STEMS | {"workflow"}
 NEEDS_INPUT_QUESTION = (
     "Review the newest plan or which code scope? Reply with a .md path, "
@@ -115,6 +118,7 @@ class DebateRequest:
     seats: str | None = None
     session_id: str = ""
     timeout_seconds: int | None = None
+    rounds: int = 1
     # None means "the caller named no channels", which is what lets the config
     # layers answer; an empty tuple is an explicit "force nothing" that wins.
     force_external_channels: tuple[str, ...] | None = None
@@ -1129,6 +1133,84 @@ def _verified_foundation(wf: dict, run: Path) -> tuple[dict, Path]:
             "corrupt_workflow",
             "immutable target snapshot is missing, unsafe, or does not match its frozen hash",
         )
+    identity = record.get("workflow_identity")
+    kind = identity.get("kind") if isinstance(identity, dict) else None
+    legacy_debate_identity_keys = {
+        "kind", "host", "force_external_channels", "prompt_mode",
+        "timeout_seconds", "provider_timeouts", "prompt_metadata_sha256",
+    }
+    if (
+        kind == "standalone_debate"
+        and isinstance(identity, dict)
+        and set(identity) == legacy_debate_identity_keys
+    ):
+        raise WorkflowError(
+            "obsolete_standalone_workflow",
+            "standalone debate workflow predates the multi-round identity; remove "
+            f"{_pointer_name_for_run(run)} and start again",
+        )
+    expected_identity_keys = (
+        {
+            "kind", "host", "force_external_channels", "prompt_mode",
+            "timeout_seconds", "provider_timeouts", "prompt_metadata_sha256",
+        }
+        if kind == "standalone_review"
+        else {
+            "kind", "host", "force_external_channels", "prompt_mode",
+            "timeout_seconds", "provider_timeouts", "prompt_metadata_sha256",
+            "rounds", "round", "prior_rounds_sha256",
+        }
+    )
+    if (
+        not isinstance(identity, dict)
+        or kind not in {"standalone_review", "standalone_debate"}
+        or set(identity) != expected_identity_keys
+    ):
+        raise WorkflowError("corrupt_workflow", "standalone workflow identity has invalid fields")
+    if kind == "standalone_review":
+        if "prior_rounds" in record:
+            raise WorkflowError("corrupt_workflow", "review run carries debate round data")
+    else:
+        rounds_value = identity.get("rounds")
+        round_value = identity.get("round")
+        prior_sha = identity.get("prior_rounds_sha256")
+        prior_records = record.get("prior_rounds")
+        if (
+            type(rounds_value) is not int
+            or not 1 <= rounds_value <= 5
+            or type(round_value) is not int
+            or not 1 <= round_value <= rounds_value
+            or not isinstance(prior_records, list)
+            or any(not isinstance(value, str) for value in prior_records)
+            or len(prior_records) != round_value - 1
+            or (round_value == 1 and (prior_sha is not None or prior_records))
+            or (round_value > 1 and (not isinstance(prior_sha, str) or SHA_RE.fullmatch(prior_sha) is None))
+        ):
+            raise WorkflowError("corrupt_workflow", "standalone debate round identity is invalid")
+        prior_path = run / "prior-rounds.md"
+        if round_value == 1:
+            if prior_path.exists() or prior_path.is_symlink():
+                raise WorkflowError("corrupt_workflow", "round 1 unexpectedly carries prior-round data")
+        else:
+            try:
+                safe_prior = prior_path.is_file() and not prior_path.is_symlink()
+                folded = rounds.fold_prior_rounds(prior_records)
+                prior_bytes = prior_path.read_bytes() if safe_prior else b""
+            except OSError as exc:
+                raise WorkflowError(
+                    "corrupt_workflow",
+                    f"cannot validate frozen prior rounds: {exc}",
+                ) from exc
+            if (
+                not safe_prior
+                or folded is None
+                or prior_bytes != folded.encode("utf-8")
+                or hashlib.sha256(prior_bytes).hexdigest() != prior_sha
+            ):
+                raise WorkflowError(
+                    "corrupt_workflow",
+                    "frozen prior rounds are missing, unsafe, or do not match their hash",
+                )
     return record, snapshot
 
 
@@ -1218,6 +1300,46 @@ def _pointer_path(session: str, *, kind: str = "standalone_review") -> Path:
     return session_dir / _POINTER_BY_KIND[kind]
 
 
+@contextlib.contextmanager
+def _standalone_pointer_lock(session: str):
+    """Hold the session-scoped lock shared by standalone pointer writers."""
+    pointer = _pointer_path(session, kind="standalone_review")
+    lock_target = pointer.parent / "standalone-pointer"
+    lock_path = lock_target.parent / ".standalone-pointer.lock"
+    try:
+        if lock_path.is_symlink() or (lock_path.exists() and not lock_path.is_file()):
+            raise WorkflowError(
+                "unsafe_review_path",
+                f"standalone pointer lock is not a regular non-symlink file: {lock_path}",
+            )
+    except OSError as exc:
+        _review_path_error(
+            f"cannot validate standalone pointer lock path {lock_path}: {exc}",
+            exc,
+        )
+    try:
+        with review_runs._sibling_write_lock(lock_target, required=True):
+            yield
+    except review_runs.ReviewRunError as exc:
+        raise WorkflowError("lock_unavailable", str(exc)) from exc
+
+
+def _pointer_state(session: str, *, kind: str) -> object:
+    """Return the pointer run id, or a distinct absent/invalid state."""
+    try:
+        pointer = _pointer_path(session, kind=kind)
+        if pointer.is_symlink() or not pointer.exists():
+            return _POINTER_ABSENT
+        if not pointer.is_file():
+            return _POINTER_INVALID
+        data = json.loads(pointer.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError, WorkflowError):
+        return _POINTER_INVALID
+    if not isinstance(data, dict) or not isinstance(data.get("run_id"), str):
+        return _POINTER_INVALID
+    return data["run_id"]
+
+
 def read_standalone_pointer(
     session: str, *, kind: str = "standalone_review"
 ) -> tuple[dict, dict] | None:
@@ -1283,6 +1405,8 @@ def read_standalone_pointer(
         wf = _workflow(run)
         ref = parse_review_ref(wf.get("ref"))
     except WorkflowError as exc:
+        if exc.code == "obsolete_standalone_workflow":
+            raise
         raise WorkflowError(
             "invalid_pointer",
             f"standalone pointer cannot verify its workflow: {exc.message}",
@@ -1345,6 +1469,24 @@ def _write_pointer_locked(wf: dict) -> None:
             "target_sha256": record["target_sha256"],
         },
     )
+
+
+def _write_pointer_if_current(
+    wf: dict,
+    expected_states: tuple[object, ...],
+) -> bool:
+    """Compare the session pointer and write it under one session lock."""
+    ref = parse_review_ref(wf["ref"])
+    identity = wf.get("workflow_identity")
+    kind = identity.get("kind") if isinstance(identity, dict) else None
+    if not isinstance(kind, str) or kind not in _POINTER_BY_KIND:
+        raise WorkflowError("corrupt_workflow", "cannot compare an unsupported workflow pointer")
+    with _standalone_pointer_lock(ref.session_segment):
+        current = _pointer_state(ref.session_segment, kind=kind)
+        if not any(current is expected or current == expected for expected in expected_states):
+            return False
+        _write_pointer_locked(wf)
+        return True
 
 
 def _action_id(attempt: int, kind: str, ordinal: int) -> str:
@@ -1417,7 +1559,16 @@ def _authoritative_reviewer_prompt(
         ) from exc
     prompt_mode = record["workflow_identity"].get("prompt_mode")
     if prompt_mode == "discuss":
-        return prompts.council(content, seat_role=seat, prior_round=None)
+        prior_round = None
+        if record["workflow_identity"].get("round", 1) > 1:
+            try:
+                prior_round = (run / "prior-rounds.md").read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise WorkflowError(
+                    "corrupt_workflow",
+                    f"cannot read frozen prior rounds as UTF-8: {exc}",
+                ) from exc
+        return prompts.council(content, seat_role=seat, prior_round=prior_round)
     kind = "plan" if snapshot.name == "target.md" else "code"
     target_spec = record.get("target_spec")
     descriptor = record.get("target_descriptor")
@@ -1970,6 +2121,9 @@ def _synthesis_action(wf: dict, run: Path) -> dict:
                 str(run / "panel.md"),
                 str(run / "panel-full.md"),
                 _effective_artifact_manifest(wf, run),
+                str(run / "prior-rounds.md")
+                if _is_discuss(wf) and wf["workflow_identity"]["round"] > 1
+                else None,
             )
             if _is_discuss(wf)
             else prompts.standalone_synthesis(
@@ -2452,7 +2606,12 @@ def _ensure_followups_locked(wf: dict, run: Path) -> None:
     if any(action.get("status") != "settled" for action in formatters):
         return
     _render_effective_panel_locked(wf, run)
-    if _panel(wf, run)["usable"] and not _current_actions(wf, ActionKind.SYNTHESIS):
+    identity = wf["workflow_identity"]
+    if (
+        _panel(wf, run)["usable"]
+        and (not _is_discuss(wf) or identity["round"] == identity["rounds"])
+        and not _current_actions(wf, ActionKind.SYNTHESIS)
+    ):
         wf["actions"].append(_synthesis_action(wf, run))
 
 
@@ -2502,6 +2661,14 @@ def _derive_step(wf: dict, run: Path) -> ReviewStep:
             "minor_only": False, **panel, "diagnostic": "all reviewer actions failed",
             "panel_path": str(run / "panel.md"), "full_path": str(run / "panel-full.md"),
             "synthesis_path": None}, **common)
+    identity = wf["workflow_identity"]
+    if _is_discuss(wf) and identity["round"] < identity["rounds"]:
+        return ReviewStep(StepType.TERMINAL, outcome={
+            "status": "round_complete", "judgment": None, "minor_only": False,
+            **panel, "diagnostic": None,
+            "panel_path": str(run / "panel.md"), "full_path": str(run / "panel-full.md"),
+            "synthesis_path": None,
+        }, **common)
     synthesis = next(iter(_current_actions(wf, ActionKind.SYNTHESIS)), None)
     if synthesis is None or synthesis.get("status") != "settled":
         return ReviewStep(StepType.WAITING, **common)
@@ -2527,6 +2694,10 @@ def _derive_step(wf: dict, run: Path) -> ReviewStep:
         **panel, "diagnostic": diagnostic,
         "panel_path": str(run / "panel.md"), "full_path": str(run / "panel-full.md"),
         "synthesis_path": synthesis_path_value}, **common)
+
+
+def _round_closed(step: ReviewStep) -> bool:
+    return step.type == StepType.TERMINAL and (step.outcome or {}).get("status") == "round_complete"
 
 
 def _standalone_run_terminal_for_prune(
@@ -2761,12 +2932,22 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
     }:
         _corrupt_workflow("workflow has missing or unknown fields")
     identity = wf["workflow_identity"]
-    if (
-        not isinstance(identity, dict)
-        or set(identity) != {
+    identity_kind = identity.get("kind") if isinstance(identity, dict) else None
+    expected_identity_keys = (
+        {
             "kind", "host", "force_external_channels", "prompt_mode",
             "timeout_seconds", "provider_timeouts", "prompt_metadata_sha256",
         }
+        if identity_kind == "standalone_review"
+        else {
+            "kind", "host", "force_external_channels", "prompt_mode",
+            "timeout_seconds", "provider_timeouts", "prompt_metadata_sha256",
+            "rounds", "round", "prior_rounds_sha256",
+        }
+    )
+    if (
+        not isinstance(identity, dict)
+        or set(identity) != expected_identity_keys
         or identity.get("kind") not in {"standalone_review", "standalone_debate"}
         or not isinstance(identity.get("host"), str)
         or identity.get("host") not in HOSTS
@@ -2795,6 +2976,24 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
         )
     ):
         _corrupt_workflow("standalone workflow identity is invalid")
+    if identity["kind"] == "standalone_debate" and (
+        type(identity["rounds"]) is not int
+        or not 1 <= identity["rounds"] <= 5
+        or type(identity["round"]) is not int
+        or not 1 <= identity["round"] <= identity["rounds"]
+        or (
+            identity["round"] == 1
+            and identity["prior_rounds_sha256"] is not None
+        )
+        or (
+            identity["round"] > 1
+            and (
+                not isinstance(identity["prior_rounds_sha256"], str)
+                or SHA_RE.fullmatch(identity["prior_rounds_sha256"]) is None
+            )
+        )
+    ):
+        _corrupt_workflow("standalone debate round identity is invalid")
     ref = parse_review_ref(wf["ref"])
     target = wf["target"]
     if (
@@ -3061,6 +3260,8 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
             ):
                 _corrupt_workflow(f"formatter action {action_id!r} violates its frozen route")
         else:
+            if _is_discuss(wf) and identity["round"] < identity["rounds"]:
+                _corrupt_workflow("intermediate debate rounds cannot contain synthesis actions")
             synthesis_by_attempt[attempt_id] = synthesis_by_attempt.get(attempt_id, 0) + 1
             if synthesis_by_attempt[attempt_id] != 1 or ordinal != 0:
                 _corrupt_workflow(f"attempt {attempt_id!r} has invalid synthesis cardinality")
@@ -3125,6 +3326,9 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
                         run,
                         max_attempt_number=attempt_number,
                     ),
+                    str(run / "prior-rounds.md")
+                    if _is_discuss(wf) and identity["round"] > 1
+                    else None,
                 )
                 if _is_discuss(wf)
                 else prompts.standalone_synthesis(
@@ -3181,7 +3385,13 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
     _validate_retry_receipts(wf, current_attempt)
 
 
-def _advance_locked(wf: dict, run: Path, *, adopt_pointer: bool = False) -> ReviewStep:
+def _advance_locked(
+    wf: dict,
+    run: Path,
+    *,
+    adopt_pointer: bool = False,
+    pointer_expected: tuple[object, ...] | object = _POINTER_EXPECTATION_UNSET,
+) -> ReviewStep:
     """The sole render/follow-up/persist transition, called with the lock held."""
     ref = parse_review_ref(wf["ref"])
     expected = _guard_review_path(
@@ -3204,8 +3414,198 @@ def _advance_locked(wf: dict, run: Path, *, adopt_pointer: bool = False) -> Revi
     # harness session. Only an explicit start/resume/adoption may move the
     # session pointer, and it does so after the durable workflow write above.
     if adopt_pointer:
-        _write_pointer_locked(wf)
+        if pointer_expected is _POINTER_EXPECTATION_UNSET:
+            raise WorkflowError(
+                "corrupt_workflow",
+                "pointer adoption requires a compare-and-swap expectation",
+            )
+        if not isinstance(pointer_expected, tuple):
+            raise WorkflowError(
+                "corrupt_workflow",
+                "pointer adoption expectation has an invalid shape",
+            )
+        _write_pointer_if_current(wf, pointer_expected)
     return _derive_step(wf, run)
+
+
+@dataclass(frozen=True, slots=True)
+class _SuccessorSeed:
+    session_segment: str
+    predecessor_run_id: str
+    record: dict
+    target: dict
+    roster: list
+    source_actions: dict
+    snapshot_bytes: bytes
+    prior_records: list[str]
+    prior_text: str
+    identity: dict
+    run_id: str
+    identity_digest: str
+
+
+def _successor_seed(ref: ReviewRef) -> _SuccessorSeed:
+    run = _guard_review_path(
+        session_segment=ref.session_segment,
+        run_id=ref.run_id,
+        create=False,
+    )
+    with _workflow_lock(run):
+        wf, run = _load_current_locked(ref, run)
+        record = review_runs.read_run_json(run)
+        snapshot_bytes = (run / "question.md").read_bytes()
+        panel_full = _canonical_panel_bytes(wf, run).full.decode("utf-8")
+        source_actions = {
+            action["seat"]: action
+            for action in wf["actions"]
+            if action["kind"] == ActionKind.REVIEWER
+            and action["attempt_id"] == "attempt-0001"
+        }
+        target = dict(wf["target"])
+        roster = list(wf["roster"])
+    prior_records = [*record["prior_rounds"], panel_full]
+    prior_text = rounds.fold_prior_rounds(prior_records)
+    if prior_text is None:
+        raise WorkflowError("corrupt_workflow", "debate successor has no prior-round data")
+    identity = {
+        **record["workflow_identity"],
+        "round": record["workflow_identity"]["round"] + 1,
+        "prior_rounds_sha256": review_runs.sha256_text(prior_text),
+    }
+    run_id, identity_digest = review_runs.mint_identity(
+        target_sha256=record["target_sha256"],
+        target_spec=record["target_spec"],
+        target_base=record["target_base"],
+        seat_signatures=record["seat_signatures"],
+        workflow_identity=identity,
+    )
+    return _SuccessorSeed(
+        session_segment=ref.session_segment,
+        predecessor_run_id=record["run_id"],
+        record=record,
+        target=target,
+        roster=roster,
+        source_actions=source_actions,
+        snapshot_bytes=snapshot_bytes,
+        prior_records=prior_records,
+        prior_text=prior_text,
+        identity=identity,
+        run_id=run_id,
+        identity_digest=identity_digest,
+    )
+
+
+def _mint_successor_locked(seed: _SuccessorSeed) -> tuple[ReviewStep, bool]:
+    run = _guard_review_path(
+        session_segment=seed.session_segment,
+        run_id=seed.run_id,
+        create=True,
+    )
+    with _workflow_lock(run):
+        if (run / "workflow.json").is_file():
+            wf = _workflow(run)
+            record = review_runs.read_run_json(run)
+            if (
+                record.get("identity_digest") != seed.identity_digest
+                or record.get("workflow_identity") != seed.identity
+            ):
+                raise WorkflowError(
+                    "successor_mismatch",
+                    f"run dir {seed.run_id} holds a different identity than the successor "
+                    f"derived from {seed.predecessor_run_id}; remove that dir and run "
+                    "review-next again",
+                    "successor_mismatch",
+                )
+            _verify_host(wf)
+            closed = _round_closed(_derive_step(wf, run))
+            return _advance_locked(
+                wf,
+                run,
+                adopt_pointer=True,
+                pointer_expected=(_POINTER_ABSENT, seed.predecessor_run_id),
+            ), closed
+
+        successor = {
+            key: seed.record[key]
+            for key in (
+                "target_sha256", "target_spec", "target_base", "target_descriptor",
+                "snapshot", "target_notes", "target_diff_cmd", "subprocess_seats",
+                "task_seats", "task_seat_models", "seat_signatures", "host", "seat_channels",
+            )
+        }
+        successor.update({
+            "run_id": seed.run_id,
+            "identity_digest": seed.identity_digest,
+            "workflow_identity": seed.identity,
+            "prior_rounds": seed.prior_records,
+            "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        })
+        review_runs.write_run_json_once(run, successor)
+        snapshot_path = run / "question.md"
+        _write_run_text(
+            run,
+            snapshot_path,
+            seed.snapshot_bytes.decode("utf-8"),
+            "standalone target snapshot",
+        )
+        prior_path = run / "prior-rounds.md"
+        _write_run_text(run, prior_path, seed.prior_text, "frozen prior rounds")
+        ref = ReviewRef(
+            seed.session_segment,
+            seed.run_id,
+            "attempt-0001",
+            seed.record["target_sha256"],
+        )
+        policy = RoutePolicy.from_identity(seed.identity)
+        actions = [
+            _reviewer_action(
+                run,
+                ref,
+                ordinal=ordinal,
+                seat=seat,
+                model=seed.source_actions[seat]["model"],
+                channel=seed.source_actions[seat]["channel"],
+                driver=seed.source_actions[seat]["driver"],
+                provider=seed.source_actions[seat]["provider"],
+                policy=policy,
+                timeout_seconds=(
+                    seed.source_actions[seat].get("timeout_seconds")
+                    if seed.source_actions[seat]["driver"] == ActionDriver.EXTERNAL
+                    else None
+                ),
+                prompt=_authoritative_reviewer_prompt(
+                    run,
+                    successor,
+                    snapshot_path,
+                    seat,
+                ),
+                prompt_mode="discuss",
+            )
+            for ordinal, seat in enumerate(seed.roster, 1)
+        ]
+        wf = {
+            "schema": SCHEMA,
+            "workflow_identity": seed.identity,
+            "ref": review_ref_to_dict(ref),
+            "target": seed.target,
+            "roster": seed.roster,
+            "actions": actions,
+            "retry_receipts": {},
+        }
+        return _advance_locked(
+            wf,
+            run,
+            adopt_pointer=True,
+            pointer_expected=(_POINTER_ABSENT, seed.predecessor_run_id),
+        ), False
+
+
+def _follow_rounds(ref: ReviewRef) -> ReviewStep:
+    while True:
+        step, closed = _mint_successor_locked(_successor_seed(ref))
+        if not closed:
+            return step
+        ref = step.ref
 
 
 def _matching_pointer_identity(
@@ -3220,7 +3620,8 @@ def _matching_pointer_identity(
     force_external_channels: list[str],
     prompt_mode: str,
     prompt_metadata_sha256: str,
-) -> dict | None:
+    rounds: int | None = None,
+) -> tuple[dict, ReviewRef] | None:
     """The pointed-at identity when it describes THIS start, else None.
 
     The route policy is part of the match key, not merely part of the identity
@@ -3255,8 +3656,12 @@ def _matching_pointer_identity(
         and identity.get("force_external_channels") == force_external_channels
         and identity.get("prompt_mode") == prompt_mode
         and identity.get("prompt_metadata_sha256") == prompt_metadata_sha256
+        and (
+            kind != "standalone_debate"
+            or identity.get("rounds") == rounds
+        )
     ):
-        return identity
+        return identity, ref
     return None
 
 
@@ -3285,7 +3690,8 @@ def _start_run(
     prompt_mode: str,
     default_panel: str | None,
     base: str = "",
-) -> ReviewStep:
+    rounds: int | None = None,
+) -> tuple[ReviewStep, bool]:
     session = _session(request)
     _guard_review_path(
         session_segment=session,
@@ -3325,6 +3731,7 @@ def _start_run(
         target.descriptor,
     )
     target_base = base if target.replay_spec == "branch" else ""
+    pointer_state = _pointer_state(session, kind=kind)
     match = (
         _matching_pointer_identity(
             session,
@@ -3337,12 +3744,17 @@ def _start_run(
             force_external_channels=policy.identity_value(),
             prompt_mode=prompt_mode,
             prompt_metadata_sha256=prompt_metadata_sha,
+            rounds=rounds,
         )
         if request.timeout_seconds is None
         else None
     )
-    frozen = match
+    frozen = match[0] if match is not None else None
     timeout, raw_warning = _timeout(request.timeout_seconds, frozen)
+    matching_effective_timeout = (
+        frozen is not None
+        and timeout == frozen.get("timeout_seconds")
+    )
     if raw_warning is not None:
         print(
             f"warning: standalone provider timeout {raw_warning}s exceeds the "
@@ -3403,14 +3815,26 @@ def _start_run(
         "provider_timeouts": provider_timeouts,
         "prompt_metadata_sha256": prompt_metadata_sha,
     }
-    run_id, digest = review_runs.mint_identity(
-        target_sha256=target_sha,
-        target_spec=target.replay_spec,
-        target_base=target_base,
-        seat_signatures=signatures,
-        workflow_identity=identity,
-    )
-    ref = ReviewRef(session, run_id, "attempt-0001", target_sha)
+    if kind == "standalone_debate":
+        identity.update({
+            "rounds": rounds,
+            "round": 1,
+            "prior_rounds_sha256": None,
+        })
+    if kind == "standalone_debate" and matching_effective_timeout:
+        identity = match[0]
+        ref = match[1]
+        run_id = ref.run_id
+        digest = ""
+    else:
+        run_id, digest = review_runs.mint_identity(
+            target_sha256=target_sha,
+            target_spec=target.replay_spec,
+            target_base=target_base,
+            seat_signatures=signatures,
+            workflow_identity=identity,
+        )
+        ref = ReviewRef(session, run_id, "attempt-0001", target_sha)
     run = _guard_review_path(
         session_segment=ref.session_segment,
         run_id=ref.run_id,
@@ -3426,7 +3850,13 @@ def _start_run(
                     "standalone run identity differs; start a new run",
                     "conflict",
                 )
-            step = _advance_locked(wf, run, adopt_pointer=True)
+            closed = _round_closed(_derive_step(wf, run)) if kind == "standalone_debate" else False
+            step = _advance_locked(
+                wf,
+                run,
+                adopt_pointer=True,
+                pointer_expected=(pointer_state,),
+            )
             if step.outcome and step.outcome.get("status") == "synthesis_failed":
                 step = _create_synthesis_restart_locked(
                     wf,
@@ -3434,9 +3864,8 @@ def _start_run(
                     parse_review_ref(wf["ref"]),
                     wf.setdefault("retry_receipts", {}),
                 )
-                _write_pointer_locked(wf)
-                return step
-            return step
+                return step, closed
+            return step, closed
         snapshot_path = run / snapshot_name
         record = {
             "run_id": run_id,
@@ -3468,6 +3897,8 @@ def _start_run(
             "workflow_identity": identity,
             "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         }
+        if kind == "standalone_debate":
+            record["prior_rounds"] = []
         review_runs.write_run_json_once(run, record)
         _write_run_text(
             run,
@@ -3522,7 +3953,12 @@ def _start_run(
             "actions": actions,
             "retry_receipts": {},
         }
-        return _advance_locked(wf, run, adopt_pointer=True)
+        return _advance_locked(
+            wf,
+            run,
+            adopt_pointer=True,
+            pointer_expected=(pointer_state,),
+        ), False
 
 
 @_public_workflow_boundary
@@ -3543,7 +3979,7 @@ def start_review(request: ReviewRequest) -> ReviewStep:
             "resolved target carries invalid canonical prompt metadata",
         )
     snapshot_name = review_runs.snapshot_name(target.kind)
-    step = _start_run(
+    step, _closed = _start_run(
         request,
         host=host,
         policy=policy,
@@ -3562,6 +3998,8 @@ def start_review(request: ReviewRequest) -> ReviewStep:
 def start_debate(request: DebateRequest) -> ReviewStep:
     if request.timeout_seconds is not None and request.timeout_seconds <= 0:
         raise WorkflowError("invalid_timeout", "timeout must be a positive integer")
+    if type(request.rounds) is not int or not 1 <= request.rounds <= 5:
+        raise WorkflowError("invalid_rounds", "rounds must be an integer from 1 to 5")
     host = _host()
     policy = _resolve_route_policy(request, host)
     roles = native_roles(policy)
@@ -3569,7 +4007,7 @@ def start_debate(request: DebateRequest) -> ReviewStep:
         return ReviewStep(StepType.NEEDS_INPUT, question=DEBATE_NEEDS_INPUT_QUESTION)
     target = _question_target(request.question)
 
-    step = _start_run(
+    step, closed = _start_run(
         request,
         host=host,
         policy=policy,
@@ -3579,8 +4017,9 @@ def start_debate(request: DebateRequest) -> ReviewStep:
         kind="standalone_debate",
         prompt_mode="discuss",
         default_panel=config.debate_panel(),
+        rounds=request.rounds,
     )
-    return step
+    return _follow_rounds(step.ref) if closed else step
 
 
 @_public_workflow_boundary
@@ -3592,7 +4031,13 @@ def next_review(ref: ReviewRef) -> ReviewStep:
     )
     with _workflow_lock(run):
         wf, run = _load_current_locked(ref, run)
-        return _advance_locked(wf, run)
+        closed = _round_closed(_derive_step(wf, run))
+        if not closed:
+            return _advance_locked(wf, run)
+    # A closed round is followed by the call that finds it closed and reported
+    # by the call that closes it, so a re-derive after a landing never hides the
+    # successor mint behind a transition the caller did not observe.
+    return _follow_rounds(ref)
 
 
 @_public_workflow_boundary
@@ -4286,6 +4731,12 @@ def retry_review(request: RetryRequest) -> ReviewStep:
         source_step = _derive_step(wf, run)
         if source_step.type != StepType.TERMINAL:
             raise WorkflowError("active_attempt", "the source attempt is still active", "not_retryable")
+        if (source_step.outcome or {}).get("status") == "round_complete":
+            raise WorkflowError(
+                "round_superseded",
+                "this round is closed; the next review-next opens the following round",
+                "not_retryable",
+            )
         source_attempt = stored.attempt_id
         if _source_receipt(receipts, source_attempt) is not None:
             raise WorkflowError("conflict", "source attempt already has a retry receipt", "conflict")

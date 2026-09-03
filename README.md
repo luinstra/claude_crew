@@ -116,7 +116,7 @@ repo-relative path.
 | `/crew:plan "description"` | Start a planning session with the advisor agent |
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (keeps main context clean) |
 | `/crew:review "the plan \| diff"` | Multi-model review of a plan or code diff using the fixed target grammar below → `APPROVED`/`REVISE` verdict |
-| `/crew:debate "question"` | Engine-owned council on a free-form question: a single round of independent takes from the configured debate panel, synthesized into areas of agreement, key disagreements, and a recommendation (no verdict); multi-round with --rounds |
+| `/crew:debate "question"` | Engine-owned council on a free-form question: a single round of independent takes from the configured debate panel, synthesized into areas of agreement, key disagreements, and a recommendation (no verdict); --rounds N (1 to 5) runs N rounds, each seat seeing every earlier round as data, with one synthesis over the trajectory |
 | `/crew:dispatch "[--seat <name>] <task>"` | Delegate a WORK task to ONE non-Claude seat (default `codex`) in write mode — it edits the working tree and leaves changes UNCOMMITTED + UNSTAGED for you to review (keep / revert / pipe into `/crew:review`) |
 | `/crew:build "task"` | Start a persistence loop: persists toward completion, also ending on a completing verdict, your cancel, or a safety bound |
 | `/crew:cancel-build` | Exit an active build loop early |
@@ -461,8 +461,8 @@ for ad-hoc calls — never raw `agy -p` / `codex exec`.**
 
 Attended cleanup of stale crew artifacts under the project `.crew/`: orphaned
 review-run dirs (no active loop, current-run, current-standalone-review, or current-standalone-debate pointer,
-or nonterminal/ambiguous standalone workflow names or protects them), stale
-debate dirs (past the 1-day threshold, no synthesis), and probe captures (past
+or nonterminal/ambiguous standalone workflow names or protects them),
+stale legacy debate dirs (past the 1-day threshold, no synthesis), and probe captures (past
 the 7-day threshold). It is DRY-RUN by default, modelled on `git clean -n`:
 with no flag it only lists what it would remove, so reading the list is the
 safety step. `--yes` rmtrees directory candidates and unlinks probe captures.

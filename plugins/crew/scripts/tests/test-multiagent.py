@@ -3138,6 +3138,20 @@ def test_render():
           set(arr[0].keys()) == {"name", "model", "ok", "output", "error", "elapsed"},
           "six fields", str(set(arr[0].keys())))
 
+    # A successor round hashes its rendered panel, so this renderer may read
+    # nothing the frozen result records do not carry.
+    render_source = (MULTIAGENT_DIR / "render.py").read_text(encoding="utf-8")
+    for forbidden in (
+        "import time", "import datetime", "import os", "os.environ",
+        "time.time", "datetime.now",
+    ):
+        check(
+            f"render source has no live {forbidden} dependency",
+            forbidden not in render_source,
+            f"absent: {forbidden}",
+            render_source,
+        )
+
 
 # =============================================================================
 # Prompts tests
@@ -4416,21 +4430,7 @@ def test_run_subcommand():
 
 
 def test_rounds():
-    log_section("rounds — debate run lifecycle (pure FS, no model calls)")
-
-    check("slugify lowercases + collapses to [a-z0-9-]",
-          rounds.slugify("Redis vs In-Memory!!") == "redis-vs-in-memory",
-          "redis-vs-in-memory", rounds.slugify("Redis vs In-Memory!!"))
-    check("slugify empty -> 'debate'", rounds.slugify("") == "debate",
-          "debate", rounds.slugify(""))
-
-    rid = rounds.new_run_id("My Topic", ts="2026-06-23T10:11:12")
-    check("new_run_id has run- prefix + matches RUN_ID_RE",
-          rid.startswith("run-") and bool(rounds.RUN_ID_RE.match(rid)),
-          "valid run id", rid)
-    check("new_run_id with no slug still valid",
-          bool(rounds.RUN_ID_RE.match(rounds.new_run_id(ts="20260623"))),
-          "valid", "?")
+    log_section("rounds - run-id grammar and prior-round fold")
 
     # traversal guard: a valid run-id can only ever name a child of base_dir.
     for bad in ("../evil", "run-../x", "run-a/b", "nope", "run-..", ""):
@@ -4439,43 +4439,12 @@ def test_rounds():
             check(f"validate_run_id rejects {bad!r}", False, "RoundError", "no raise")
         except rounds.RoundError:
             check(f"validate_run_id rejects {bad!r}", True)
-    try:
-        rounds.run_dir("../../etc", base_dir="/tmp/x")
-        check("run_dir rejects traversal run-id", False, "RoundError", "no raise")
-    except rounds.RoundError:
-        check("run_dir rejects traversal run-id", True)
-
-    with tempfile.TemporaryDirectory() as td:
-        d = rounds.ensure_run_dir(rid, base_dir=td)
-        check("ensure_run_dir creates the dir", d.is_dir(), "dir exists", str(d))
-        rounds.write_question(d, "Redis or in-memory?")
-        check("question round-trips",
-              rounds.read_question(d) == "Redis or in-memory?",
-              "Redis or in-memory?", str(rounds.read_question(d)))
-        rounds.write_round(d, 1, "r1 positions")
-        rounds.write_round(d, 2, "r2 positions")
-        check("round-NN.md is zero-padded",
-              (d / "round-01.md").is_file() and (d / "round-02.md").is_file(),
-              "round-01/02.md", str(sorted(p.name for p in d.glob("round-*.md"))))
-        check("list_rounds returns sorted ints",
-              rounds.list_rounds(d) == [1, 2], "[1, 2]", str(rounds.list_rounds(d)))
-        check("read_prior_rounds(1) is None (round 1 has no prior)",
-              rounds.read_prior_rounds(d, 1) is None, "None",
-              str(rounds.read_prior_rounds(d, 1)))
-        prior = rounds.read_prior_rounds(d, 3)
-        check("read_prior_rounds(3) concatenates rounds 1 + 2",
-              prior is not None and "r1 positions" in prior and "r2 positions" in prior,
-              "rounds 1+2", str(prior))
-        check("read_round(2) returns round 2 text",
-              rounds.read_round(d, 2) == "r2 positions", "r2 positions",
-              str(rounds.read_round(d, 2)))
-        check("read_round missing -> None",
-              rounds.read_round(d, 9) is None, "None", str(rounds.read_round(d, 9)))
-        try:
-            rounds.round_path(d, 0)
-            check("round_path(0) raises RoundError", False, "RoundError", "no raise")
-        except rounds.RoundError:
-            check("round_path(0) raises RoundError", True)
+    check("fold_prior_rounds([]) is None",
+          rounds.fold_prior_rounds([]) is None, "None", "not None")
+    folded = rounds.fold_prior_rounds(["r1 positions", "r2 positions"])
+    check("fold_prior_rounds adds numbered headers and blank-line joins",
+          folded == "### Round 1\nr1 positions\n\n### Round 2\nr2 positions",
+          "numbered folded records", repr(folded))
 
 
 def test_discuss_and_modes():
@@ -4554,43 +4523,6 @@ def test_render_subcommand():
     proc = _run_cli(["render", "working-tree", "--mode", "discuss", "-q", "Q"], timeout=30)
     check("render non-default target + -q together -> nonzero error",
           proc.returncode != 0, "nonzero", str(proc.returncode))
-
-    # multi-round: prior round folded in from the run dir
-    with tempfile.TemporaryDirectory() as td:
-        d = rounds.ensure_run_dir("run-xyz", base_dir=td)
-        rounds.write_round(d, 1, "codex: use redis\nagy: in-memory")
-        proc = _run_cli(
-            ["render", "--mode", "discuss", "-q", "Redis?", "--seat-role", "codex",
-             "--run-id", "run-xyz", "--round", "2", "--base-dir", td],
-            timeout=30,
-        )
-        check("render round 2 folds the prior round in as DATA",
-              proc.returncode == 0 and "PRIOR ROUND" in proc.stdout
-              and "use redis" in proc.stdout,
-              "prior round data", proc.stdout[:200])
-
-    proc = _run_cli(["render", "--mode", "discuss", "-q", "Q", "--run-id", "run-x"], timeout=30)
-    check("render lone --run-id (no --round) -> error",
-          proc.returncode != 0, "nonzero", str(proc.returncode))
-
-    proc = _run_cli(
-        ["render", "--mode", "discuss", "-q", "Q", "--run-id", "../../etc", "--round", "2"],
-        timeout=30,
-    )
-    check("render rejects a traversal --run-id", proc.returncode != 0,
-          "nonzero", str(proc.returncode))
-
-    # Empty --base-dir at the prior-round consumer: rejected (exit 2 naming
-    # the flag) instead of resolving the run dir against the shell cwd.
-    proc = _run_cli(
-        ["render", "--mode", "discuss", "-q", "Q", "--run-id", "run-x",
-         "--round", "2", "--base-dir", ""],
-        timeout=30,
-    )
-    check("render empty --base-dir with --run-id/--round: exit 2 naming the flag",
-          proc.returncode == 2 and "--base-dir" in proc.stderr,
-          "exit 2 + '--base-dir' in stderr",
-          f"{proc.returncode}: {proc.stderr[:160]}")
 
     # PARITY GATE: render's emitted prompt == prompts.build_prompt(...) exactly —
     # the orchestrator's Task-seat prompt is the same single source as the engine's.
@@ -6036,12 +5968,6 @@ def test_panel_availability_consistency():
               rp.returncode == 0 and obj is not None
               and obj["subprocess_seats"] == ["codex"] and obj["task_seats"] == ["opus"],
               "subprocess [codex], task [opus]", f"rc={rp.returncode} obj={obj}")
-        # debate path: `crew seats --debate --panel quick` resolves it too.
-        ds = _run_dispatcher(["seats", "--debate", "--panel", "quick"],
-                             cwd=td, env=env, timeout=30)
-        dlines = [ln for ln in ds.stdout.splitlines() if ln.strip()]
-        check("`crew seats --debate --panel quick` resolves the custom preset (subprocess + task)",
-              ds.returncode == 0 and dlines == ["codex", "opus"], "['codex','opus']", str(dlines))
     with tempfile.TemporaryDirectory() as td:
         proj = Path(td)
         _write_cfg(proj, 'default_panel = "quick"\n[panels]\nquick = ["codex"]\n')
@@ -6737,6 +6663,25 @@ def test_debate_argv_input_errors():
                 f"rc={proc.returncode} payload={payload}",
             )
 
+        rounds_cases = (
+            ("rounds below bound", ["debate", "--session-id", "argv-rounds-zero",
+             "--rounds", "0", "--", "question"]),
+            ("rounds above bound", ["debate", "--session-id", "argv-rounds-six",
+             "--rounds", "6", "--", "question"]),
+        )
+        for label, argv in rounds_cases:
+            proc = _run_dispatcher(argv, env=env, cwd=td, timeout=30)
+            payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
+            check(
+                f"crew debate argv {label} -> typed invalid_rounds",
+                proc.returncode == 2
+                and payload.get("error") == "invalid_request"
+                and payload.get("code") == "invalid_rounds"
+                and "1 to 5" in payload.get("message", ""),
+                "exit 2 and typed invalid_rounds",
+                f"rc={proc.returncode} payload={payload}",
+            )
+
         roster_cases = (
             (
                 "explicit seats alone",
@@ -6771,233 +6716,21 @@ def test_debate_argv_input_errors():
             )
 
 
-def test_debate_panel_resolver():
-    log_section("crew seats --debate (config-aware debate panel resolver)")
-    from multiagent import seats as _seatcat  # noqa: E402
-    _cursor_all = sorted(_seatcat.group_tokens()["cursor"])
-
-    def resolve(config_toml=None, extra_args=()):
-        """Run `crew seats --debate [extra_args]` with CLAUDE_PROJECT_DIR pointing
-        at a temp repo holding the given .crew/config.toml (or none). Returns the
-        printed seat list (one per line). The dispatcher is a fresh subprocess, so
-        config memoization needs no reset here."""
-        with tempfile.TemporaryDirectory() as td:
-            if config_toml is not None:
-                crew = Path(td) / ".crew"
-                crew.mkdir(parents=True)
-                (crew / "config.toml").write_text(config_toml)
-            env = {**_neutral_env(), "CLAUDE_PROJECT_DIR": td}
-            proc = _run_dispatcher(["seats", "--debate", *extra_args],
-                                   env=env, cwd=td, timeout=30)
-            lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
-            return proc.returncode, lines
-
-    FULL = ["codex", "codex-luna", "cursor-auto", "cursor-composer", "opus", "sonnet"]
-
-    # 1. [debate].panel="full" BEATS default_panel="lite" -> debate resolves full.
-    rc, lines = resolve("default_panel = \"lite\"\n\n[debate]\npanel = \"full\"\n")
-    check("seats --debate: [debate].panel='full' BEATS default_panel='lite' -> full",
-          rc == 0 and lines == FULL, str(FULL), f"rc={rc} {lines}")
-
-    # 2. default_panel="lite" + no [debate] -> debate falls back to default_panel.
-    rc, lines = resolve("default_panel = \"lite\"\n")
-    check("seats --debate: default_panel='lite' + no [debate] -> lite (opus,sonnet)",
-          rc == 0 and lines == ["opus", "sonnet"], "['opus', 'sonnet']",
-          f"rc={rc} {lines}")
-
-    # 3. Neither set -> built-in 'full'.
-    rc, lines = resolve(None)
-    check("seats --debate: no config -> built-in 'full'",
-          rc == 0 and lines == FULL, str(FULL), f"rc={rc} {lines}")
-    rc, lines = resolve("")  # empty config file, present but empty
-    check("seats --debate: empty config -> built-in 'full'",
-          rc == 0 and lines == FULL, str(FULL), f"rc={rc} {lines}")
-
-    # 4. Explicit --panel BEATS [debate].panel (explicit wins).
-    rc, lines = resolve("[debate]\npanel = \"full\"\n", ["--panel", "lite"])
-    check("seats --debate --panel lite BEATS [debate].panel='full' (explicit wins)",
-          rc == 0 and lines == ["opus", "sonnet"], "['opus', 'sonnet']",
-          f"rc={rc} {lines}")
-
-    # 4b. Explicit --seats BEATS [debate].panel (explicit wins; keeps Task seats).
-    rc, lines = resolve("[debate]\npanel = \"full\"\n", ["--seats", "codex,opus"])
-    check("seats --debate --seats codex,opus BEATS [debate].panel (explicit wins)",
-          rc == 0 and lines == ["codex", "opus"], "['codex', 'opus']",
-          f"rc={rc} {lines}")
-
-    # 5. Resolved seat list for each tier is correct (solo + cursor expansion).
-    rc, lines = resolve("[debate]\npanel = \"solo\"\n")
-    check("seats --debate: [debate].panel='solo' -> ['opus']",
-          rc == 0 and lines == ["opus"], "['opus']", f"rc={rc} {lines}")
-    rc, lines = resolve("[debate]\npanel = \"cursor\"\n")
-    check("seats --debate: [debate].panel='cursor' -> all cursor-* (group expanded), no task",
-          rc == 0 and sorted(lines) == _cursor_all,
-          str(_cursor_all), f"rc={rc} {lines}")
-
-    # 6. Invalid [debate].panel -> falls back to default_panel (then full), no crash.
-    rc, lines = resolve("default_panel = \"lite\"\n\n[debate]\npanel = \"bogus\"\n")
-    check("seats --debate: invalid [debate].panel -> falls back to default_panel='lite'",
-          rc == 0 and lines == ["opus", "sonnet"], "['opus', 'sonnet']",
-          f"rc={rc} {lines}")
-
-    # 7. BLOCKING regression guard: an explicit --seats with a path-traversal /
-    #    unknown name is REJECTED (nonzero, nothing on stdout) so a hostile seat
-    #    name can never reach .crew/debates/<dir>/<seat>.json. The valid subset
-    #    that KEEPS a task seat (case 4b) must still pass.
-    rc, lines = resolve(None, ["--seats", "cursor-../../x"])
-    check("seats --debate --seats cursor-../../x -> REJECTED (nonzero, no stdout)",
-          rc != 0 and lines == [], "rc!=0 and []", f"rc={rc} {lines}")
-    rc, lines = resolve(None, ["--seats", "codex,bogusseat"])
-    check("seats --debate --seats codex,bogusseat (unknown name) -> REJECTED",
-          rc != 0 and lines == [], "rc!=0 and []", f"rc={rc} {lines}")
-    # A valid subset incl. a task seat still succeeds and KEEPS opus.
-    rc, lines = resolve(None, ["--seats", "codex,opus"])
-    check("seats --debate --seats codex,opus (valid subset) -> KEEPS opus",
-          rc == 0 and lines == ["codex", "opus"], "['codex', 'opus']",
-          f"rc={rc} {lines}")
-
-    # 7b. The REMOVED opus-4.6 seat (its claude-opus-4-6 pin is rejected by the
-    #     Task tool's model validation) is now an UNKNOWN name -> rejected exactly
-    #     like bogusseat. The opt-in fable Task seat is a member -> accepted.
-    rc, lines = resolve(None, ["--seats", "opus-4.6"])
-    check("seats --debate --seats opus-4.6 (REMOVED seat) -> REJECTED",
-          rc != 0 and lines == [], "rc!=0 and []", f"rc={rc} {lines}")
-    rc, lines = resolve(None, ["--seats", "opus,sonnet,fable"])
-    check("seats --debate --seats opus,sonnet,fable -> all three KEPT (task seats)",
-          rc == 0 and lines == ["opus", "sonnet", "fable"],
-          "['opus', 'sonnet', 'fable']", f"rc={rc} {lines}")
-
-    # 8. MINOR: `seats --panel <preset>` WITHOUT --debate errors (--panel only
-    #    steers the debate resolver; it would otherwise be silently ignored).
-    with tempfile.TemporaryDirectory() as td:
-        env = {**_neutral_env(), "CLAUDE_PROJECT_DIR": td}
-        proc = _run_dispatcher(["seats", "--panel", "lite"],
-                               env=env, cwd=td, timeout=30)
-    out_lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
-    check("seats --panel lite WITHOUT --debate -> errors (nonzero, no stdout)",
-          proc.returncode != 0 and out_lines == []
-          and "--panel" in proc.stderr,
-          "rc!=0, no stdout, stderr mentions --panel",
-          f"rc={proc.returncode} stdout={out_lines} stderr={proc.stderr!r}")
-
-    # 9. MINOR: a NAMED --panel's members are EXPLICIT in the debate resolver
-    #    (mirror review-prep) — an unavailable member is skipped WITH a one-time
-    #    stderr note, not silently dropped.
-    with tempfile.TemporaryDirectory() as td:
-        crew = Path(td) / ".crew"
-        crew.mkdir(parents=True)
-        (crew / "config.toml").write_text('[seats.cursor-auto]\navailable = false\n')
-        env = {**_neutral_env(), "CLAUDE_PROJECT_DIR": td}
-        proc = _run_dispatcher(["seats", "--debate", "--panel", "cursor"],
-                               env=env, cwd=td, timeout=30)
-    dlines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
-    check("seats --debate --panel cursor drops the unavailable member from the list",
-          proc.returncode == 0 and "cursor-auto" not in dlines and "cursor-composer" in dlines,
-          "no cursor-auto, cursor-composer kept", str(dlines))
-    check("seats --debate --panel <named> unavailable member -> one-time stderr skip-note",
-          "unavailable" in proc.stderr.lower() and "cursor-auto" in proc.stderr,
-          "stderr skip-note", repr(proc.stderr[:160]))
-
-    # 9b. WITHOUT a named --panel (default/[debate].panel resolution) the same
-    #     unavailable seat is dropped SILENTLY — no user-named seat to annotate.
-    with tempfile.TemporaryDirectory() as td:
-        crew = Path(td) / ".crew"
-        crew.mkdir(parents=True)
-        (crew / "config.toml").write_text(
-            'default_panel = "cursor"\n[seats.cursor-auto]\navailable = false\n')
-        env = {**_neutral_env(), "CLAUDE_PROJECT_DIR": td}
-        proc = _run_dispatcher(["seats", "--debate"], env=env, cwd=td, timeout=30)
-    dlines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
-    check("seats --debate (no --panel) drops the unavailable seat SILENTLY",
-          proc.returncode == 0 and "cursor-auto" not in dlines
-          and "cursor-auto" not in proc.stderr,
-          "dropped, no skip-note", f"lines={dlines} stderr={proc.stderr[:120]!r}")
-
-    # 10. --json split: the SAME resolved panel, returned as review-prep's
-    #     {subprocess_seats, task_seats, task_seat_models} instead of one per line —
-    #     so debate.md consumes the split without classifying seat names itself.
-    def resolve_json(config_toml=None, extra_args=(), host=None):
-        with tempfile.TemporaryDirectory() as td:
-            if config_toml is not None:
-                crew = Path(td) / ".crew"
-                crew.mkdir(parents=True)
-                (crew / "config.toml").write_text(config_toml)
-            env = {**_neutral_env(), "CLAUDE_PROJECT_DIR": td}
-            if host is not None:
-                env["CREW_HOST"] = host
-            proc = _run_dispatcher(["seats", "--debate", "--json", *extra_args],
-                                   env=env, cwd=td, timeout=30)
-            try:
-                payload = json.loads(proc.stdout)
-            except json.JSONDecodeError:
-                payload = None
-            return proc.returncode, payload, proc.stderr
-
-    rc, payload, _ = resolve_json(None)
-    check("seats --debate --json: built-in full -> exact review-prep shape + split",
-          rc == 0 and payload == {
-              "subprocess_seats": ["codex", "codex-luna",
-                                   "cursor-auto", "cursor-composer"],
-              "task_seats": ["opus", "sonnet"],
-              "task_seat_models": {"opus": "opus", "sonnet": "sonnet"},
-              "host": "claude",
-              "seat_channels": {
-                  "codex": "codex", "codex-luna": "codex",
-                  "cursor-auto": "cursor", "cursor-composer": "cursor",
-                  "opus": "claude", "sonnet": "claude",
-              },
-          }, "the three-field split with model pins", f"rc={rc} {payload}")
-
-    rc_codex, payload_codex, _ = resolve_json(None, host="codex")
-    check("seats --debate --json codex host keeps Claude seats as subprocess",
-          rc_codex == 0
-          and payload_codex["task_seats"] == []
-          and "opus" in payload_codex["subprocess_seats"]
-          and payload_codex["seat_channels"]["opus"] == "claude",
-          "opus in codex-host subprocess seats with claude channel",
-          f"rc={rc_codex} {payload_codex}")
-
-    # The JSON split is the SAME panel the plain listing prints, just partitioned:
-    # subprocess_seats + task_seats (in order) reconstructs the one-per-line output.
-    _rc_plain, plain_lines = resolve(None)
-    check("seats --debate --json split == the plain one-per-line panel (partitioned)",
-          rc == 0 and _rc_plain == 0
-          and payload["subprocess_seats"] + payload["task_seats"] == plain_lines,
-          str(plain_lines),
-          f"{payload['subprocess_seats'] + payload['task_seats']}")
-
-    # A subprocess-only panel (cursor) -> task_seats empty, no model pins.
-    rc, payload, _ = resolve_json("[debate]\npanel = \"cursor\"\n")
-    check("seats --debate --json --panel cursor -> task_seats empty, all cursor subprocess",
-          rc == 0 and payload["task_seats"] == []
-          and payload["task_seat_models"] == {}
-          and sorted(payload["subprocess_seats"]) == _cursor_all,
-          "empty task split, cursor subprocess", f"rc={rc} {payload}")
-
-    # An explicit --seats keeps its Task seats in the split, each pinned from the
-    # catalog (the load-bearing fix: a catalog [seats.opus].model would appear HERE).
-    rc, payload, _ = resolve_json(None, ["--seats", "codex,opus,sonnet,fable"])
-    check("seats --debate --json --seats codex,opus,sonnet,fable -> Task seats split + pinned",
-          rc == 0 and payload["subprocess_seats"] == ["codex"]
-          and payload["task_seats"] == ["opus", "sonnet", "fable"]
-          and payload["task_seat_models"] == {
-              "opus": "opus", "sonnet": "sonnet", "fable": "fable"},
-          "codex subprocess; opus/sonnet/fable task+pins", f"rc={rc} {payload}")
-
-    # A rejected --seats (path traversal) fails the same under --json (nonzero, no JSON).
-    rc, payload, _ = resolve_json(None, ["--seats", "cursor-../../x"])
-    check("seats --debate --json --seats cursor-../../x -> REJECTED (nonzero, no payload)",
-          rc != 0, "rc!=0", f"rc={rc} {payload}")
-
-    # 11. --json WITHOUT --debate errors (it only shapes the debate split).
-    with tempfile.TemporaryDirectory() as td:
-        env = {**_neutral_env(), "CLAUDE_PROJECT_DIR": td}
-        proc = _run_dispatcher(["seats", "--json"], env=env, cwd=td, timeout=30)
-    check("seats --json WITHOUT --debate -> errors (nonzero, stderr mentions --json)",
-          proc.returncode != 0 and proc.stdout.strip() == ""
-          and "--json" in proc.stderr,
-          "rc!=0, no stdout, stderr mentions --json",
-          f"rc={proc.returncode} stdout={proc.stdout!r} stderr={proc.stderr!r}")
+def test_render_reads_only_frozen_results():
+    log_section("render reads only frozen result records")
+    source = (MULTIAGENT_DIR / "render.py").read_text(encoding="utf-8")
+    forbidden = (
+        "import time", "import datetime", "import os", "os.environ",
+        "time.time", "datetime.now",
+    )
+    check(
+        "render has no live clock or environment reads",
+        all(token not in source for token in forbidden),
+        "no live clock or environment imports",
+        source[:300],
+    )
+    # A successor round hashes rendered panel bytes, so render may read only
+    # the result records carried by its caller.
 
 
 def test_debate_oracle_removed():
@@ -7012,15 +6745,8 @@ def test_debate_oracle_removed():
     check("debate.md has ZERO hardcoded model=\"opus|sonnet|fable\" literals",
           hits == [], "no model= Task-seat literals", f"{len(hits)} found: {hits}")
 
-    # (b) POSITIVE grep, in the suite: debate.md drives the split off the engine's
-    #     `seats --debate --json`, and cli.py implements that subcommand+flag.
-    check("debate.md invokes `seats --debate --json`",
-          "seats --debate --json" in debate_md, "present", "MISSING")
     check("debate.md uses the issued work-item model pin",
           'model="<work_item.model>"' in debate_md, "present", "MISSING")
-    check("debate.md keeps task_seat_models in section B",
-          "task_seat_models[" in debate_md.split("# B)", 1)[1],
-          "present in section B", "MISSING")
 
 
 def test_panel_catalog():
@@ -7585,7 +7311,6 @@ def test_measure_twice_md_loop_sentinels():
 
 def test_debate_md_driver_sync():
     log_section("debate.md review-seam driver sync")
-    from multiagent import channels
     review_raw = (SCRIPT_DIR.parent / "commands" / "review.md").read_text(encoding="utf-8")
     debate_raw = (SCRIPT_DIR.parent / "commands" / "debate.md").read_text(encoding="utf-8")
     review_fences = _fence_lines("review.md")
@@ -7601,53 +7326,52 @@ def test_debate_md_driver_sync():
     hash_line = "python3 -c 'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' '<artifact-path>'"
     check("debate driver copies the artifact hash fence", hash_line in debate_raw and hash_line in review_raw, "hash fence", hash_line)
 
-    section_a = debate_raw.split("# B)", 1)[0]
     task_lines = [line for line in debate_raw.splitlines() if "Task(subagent_type=" in line]
     review_task_lines = [line for line in review_raw.splitlines() if "Task(subagent_type=" in line]
-    section_task_lines = [line for line in section_a.splitlines() if "Task(subagent_type=" in line]
-    check("debate driver copies native Task fences", all(line in review_task_lines for line in section_task_lines), "all section A Task lines copied", str(section_task_lines))
-    reviewer_lines = [line for line in section_task_lines if 'subagent_type="<work_item.role>"' in line and "You are the <work_item.seat> seat." in line]
-    scribe_lines = [line for line in section_task_lines if 'subagent_type="<return_transport.primary.role>"' in line]
-    formatter_lines = [line for line in section_task_lines if "formatter" in line.lower() and 'subagent_type="<work_item.role>"' in line]
+    check("debate driver copies native Task fences", all(line in review_task_lines for line in task_lines), "all Task lines copied", str(task_lines))
+    reviewer_lines = [line for line in task_lines if 'subagent_type="<work_item.role>"' in line and "You are the <work_item.seat> seat." in line]
+    scribe_lines = [line for line in task_lines if 'subagent_type="<return_transport.primary.role>"' in line]
+    formatter_lines = [line for line in task_lines if "formatter" in line.lower() and 'subagent_type="<work_item.role>"' in line]
     check("debate driver has two reviewer Task fences", len(reviewer_lines) == 2, "two reviewer fences", str(reviewer_lines))
     check("debate driver has two scribe Task fences", len(scribe_lines) == 2, "two scribe fences", str(scribe_lines))
     check("debate driver has no formatter Task fences", len(formatter_lines) == 0, "no formatter fences", str(formatter_lines))
-    check("debate section B keeps its panelist Task fence", sum('subagent_type="crew:panelist"' in line for line in task_lines) == 1, "one panelist fence", str(task_lines))
-    check("debate section B keeps the model expression", debate_raw.count('model="<task_seat_models[<seat>]>"') == 1, "one model expression", str(debate_raw.count('model="<task_seat_models[<seat>]>"')))
+    removed_debate_terms = (
+        "crew:" + "panelist", "task_seat_models[", "# B)",
+        "seats --" + "debate", 'crew" render', 'crew" run', ".crew/debates",
+        "spawn a native formatter", "formatter_task_lost", "parent_formatter_lost",
+    )
+    for phrase in removed_debate_terms:
+        check(f"debate driver omits {phrase}", phrase not in debate_raw, "absent", phrase)
     ownership = "With --rounds 1 (the default) the engine owns the whole round; with --rounds N greater than 1 follow section B below, the interim Markdown owner of multi-round debate until the engine takes it over."
-    check("debate driver has one ownership sentence", debate_raw.count(ownership) == 1, "one ownership sentence", str(debate_raw.count(ownership)))
-    for phrase in ("seats --debate", 'crew" render', 'crew" run', ".crew/debates", "spawn a native formatter", "formatter_task_lost", "parent_formatter_lost"):
-        check(f"debate section A omits {phrase}", phrase not in section_a, "absent", phrase)
+    check("debate driver omits the interim ownership sentence", ownership not in debate_raw, "absent", ownership)
     protocol = "A debate never issues a formatter action; if a work item's kind is formatter, surface it as a protocol error and stop."
-    check("debate section A owns formatter protocol handling", section_a.count(protocol) == 1, "one protocol sentence", str(section_a.count(protocol)))
-    check("debate section A states the rounds bound before branching",
-          "Before branching, reject anything else: a supplied `--rounds` value must be an\ninteger from 1 through 5." in section_a,
-          "integer 1 through 5 before branching", section_a[:1200])
-    check("debate section A carries the inline POSIX quoting algorithm",
-          "reject NUL; emit a value matching" in section_a
-          and "`^[A-Za-z0-9_@%+=:,./-]+$` unchanged" in section_a
-          and ("the five characters `" + "'\"'\"'" + "`") in section_a,
-          "inline hostile-safe quoting algorithm", section_a[:1200])
-    check("debate section A limits force-external to the engine path",
-          "`--force-external` is accepted only on the single-round engine path." in section_a,
-          "single-round engine path", section_a[:1500])
+    check("debate driver owns formatter protocol handling", debate_raw.count(protocol) == 1, "one protocol sentence", str(debate_raw.count(protocol)))
+    check("debate driver states the rounds bound before invoking the engine",
+          "Before invoking the engine, reject anything else: a supplied `--rounds` value must be an\ninteger from 1 through 5." in debate_raw,
+          "integer 1 through 5 before invoking the engine", debate_raw[:1200])
+    check("debate driver carries the inline POSIX quoting algorithm",
+          "reject NUL; emit a value matching" in debate_raw
+          and "`^[A-Za-z0-9_@%+=:,./-]+$` unchanged" in debate_raw
+          and ("the five characters `" + "'\"'\"'" + "`") in debate_raw,
+          "inline hostile-safe quoting algorithm", debate_raw[:1200])
+    check("debate driver forwards force-external to the engine",
+          "`--force-external` is forwardable on every round." in debate_raw,
+          "forwardable on every round", debate_raw[:1500])
     check("debate driver advertises every section A option",
           'argument-hint: "[--rounds N] [--panel ...] [--seats ...] [--timeout S] [--force-external ...] <question>"' in debate_raw,
           "complete argument hint", debate_raw[:400])
-    section_a_normalized = " ".join(section_a.split())
+    section_a_normalized = " ".join(debate_raw.split())
     debate_start_lines = [
         line for line in debate_fences
         if '"${CLAUDE_PLUGIN_ROOT}/crew" debate ' in line
     ]
-    rounds_carveout = (
-        "`--rounds` selects which section of this file runs and is never appended "
-        "to the `crew debate` command."
-    )
-    check("debate driver never forwards rounds",
+    round_complete = "round_complete: not a final outcome; run the review-next fence once with the returned reference and continue the loop with the step it returns (its ref names the next round's run)."
+    check("debate driver documents round completion",
           len(debate_start_lines) == 2
-          and all("--rounds" not in line for line in debate_start_lines)
-          and rounds_carveout in section_a_normalized,
-          "two start fences without --rounds and explicit carve-out",
+          and "--rounds '<rounds>'" in debate_start_lines[1]
+          and "--rounds" not in debate_start_lines[0]
+          and debate_raw.count(round_complete) == 1,
+          "two start fences and one round_complete branch",
           str(debate_start_lines))
     parent_rules = (
         "Read exactly `work_item.prompt_path`, perform the synthesis in the current host context",
@@ -7666,30 +7390,6 @@ def test_debate_md_driver_sync():
           all(rule in section_a_normalized for rule in parent_rules),
           "parent synthesis, fallback, outcome, waiting, and hash failure rules",
           str([rule for rule in parent_rules if rule not in section_a_normalized]))
-    section_b = "# B)" + debate_raw.split("# B)", 1)[1]
-    split_fences = [line for line in debate_fences if '"${CLAUDE_PLUGIN_ROOT}/crew" seats --debate --json' in line]
-    check("debate section B has one roster fence per form", section_b.count("seats --debate --json") == 3, "three split fences", str(section_b.count("seats --debate --json")))
-    check("debate section B forwards panel and seats forms", len(split_fences) == 3
-          and any("--panel '<panel>'" in line for line in split_fences)
-          and any("--seats '<seats>'" in line for line in split_fences)
-          and any(line.endswith("seats --debate --json") for line in split_fences),
-          "no-option, panel, and seats forms", str(split_fences))
-    check("debate section B states the rounds bound", "integer from 1 through 5" in section_b, "1 through 5", section_b[:300])
-    check("debate section B has one round render fence", " ".join(section_b.split()).count("--run-id <run-id> --round <n>") == 1, "one round pin", section_b)
-    run_lines = [line for line in debate_fences if '"${CLAUDE_PLUGIN_ROOT}/crew" run <seat>' in line]
-    check("debate section B has one run fence with timeout forwarding",
-          len(run_lines) == 1 and "--timeout '<seconds>'" in run_lines[0],
-          "one run fence with timeout", str(run_lines))
-    check("debate never-choke block is scoped to section B",
-          "## Never choke (section B)" in section_b and "## Never choke (both modes)" not in debate_raw,
-          "section B heading", section_b[:500])
-    check("debate section B carries the force-external stop line",
-          "--force-external is not available for multi-round mode yet" in section_b,
-          "force-external stop line", section_b[:500])
-    check("debate section B keeps the zero-usable rule", section_b.count("ONLY when **zero** seats produced usable output") == 1, "one zero-usable rule", str(section_b.count("ONLY when **zero** seats produced usable output")))
-    check("debate section B has no deleted heading references", "exactly as A3" not in section_b and "(see A4)" not in section_b, "no deleted references", section_b)
-    host_markers = ("CREW_HOST", *channels.codex_host_markers(), *channels.cursor_host_markers(), "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
-    check("debate driver branches only on issued values", all(marker not in debate_raw for marker in host_markers), "no host markers", str(host_markers))
 
 
 def test_persist_seat_doc_sync():
@@ -15854,7 +15554,6 @@ def test_routing_parameter_neutrality():
                 "prep_full": json.loads(prep_full.stdout),
                 "prep_override": json.loads(prep_override.stdout),
                 "seats": run("seats"),
-                "debate": run("seats", "--debate", "--json"),
                 "doctor": json.loads(run("doctor").stdout),
                 "build_executor": run("build-executor"),
                 "build_sentinel": _run_cli(
@@ -15927,14 +15626,6 @@ def test_routing_parameter_neutrality():
             check(f"crew seats lists the external subset unchanged on host={host}",
                   listing == expected_subprocess,
                   repr(expected_subprocess), repr(listing))
-
-            debate = json.loads(captured[host]["debate"].stdout)
-            check(f"crew debate --json partitions seats unchanged on host={host}",
-                  debate["subprocess_seats"] == expected_subprocess
-                  and debate["task_seats"] == expected_task
-                  and debate["seat_channels"] == expected_channels,
-                  f"subprocess={expected_subprocess} task={expected_task}",
-                  repr(debate))
 
             doctor = captured[host]["doctor"]
             expected_doctor_task = claude_registered if native_here else set()
@@ -16270,10 +15961,6 @@ def test_workplan_doc_sync():
         "review.md": common,
         "build.md": common,
         "measure-twice.md": common,
-        "debate.md": (
-            "subprocess_seats", "task_seats", "task_seat_models", "host",
-            "seat_channels",
-        ),
     }
     for filename, keys in expected.items():
         raw = (PLUGIN_ROOT / "commands" / filename).read_text(encoding="utf-8")
@@ -16354,7 +16041,6 @@ def test_roster_channel_invariant():
     for command_name, command_args in (
         ("review-prep", ["review-prep", "plan.md", "--panel", "full",
                          "--session-id", "invariant"]),
-        ("debate JSON", ["seats", "--debate", "--json", "--panel", "full"]),
     ):
         with tempfile.TemporaryDirectory() as td:
             project = Path(td)
@@ -19953,83 +19639,6 @@ def test_workplan_contract_freeze():
         )
 
 
-def test_debate_split_contract_freeze():
-    """Freeze the current seats --debate --json shape and partition."""
-    log_section("contract freeze: debate JSON split")
-    expected_keys = [
-        "subprocess_seats", "task_seats", "task_seat_models", "host", "seat_channels",
-    ]
-    cases = [
-        (
-            "default mixed panel",
-            ["codex", "codex-luna", "cursor-auto", "cursor-composer"],
-            ["opus", "sonnet"],
-            {"opus": "opus", "sonnet": "sonnet"},
-            {"codex": "codex", "codex-luna": "codex",
-             "cursor-auto": "cursor", "cursor-composer": "cursor",
-             "opus": "claude", "sonnet": "claude"},
-            ["seats", "--debate", "--json"],
-        ),
-        (
-            "cursor external panel",
-            [
-                "cursor-auto", "cursor-composer", "cursor-gemini", "cursor-glm",
-                "cursor-gpt", "cursor-grok",
-            ],
-            [],
-            {},
-            {name: "cursor" for name in (
-                "cursor-auto", "cursor-composer", "cursor-gemini", "cursor-glm",
-                "cursor-gpt", "cursor-grok")},
-            [
-                "seats", "--debate", "--json", "--panel", "cursor",
-            ],
-        ),
-    ]
-
-    for (label, expected_subprocess, expected_task, expected_models,
-         expected_channels, args) in cases:
-        with tempfile.TemporaryDirectory() as td:
-            proc = _run_dispatcher(
-                args, cwd=td, env=_clean_env(td), timeout=30,
-            )
-            try:
-                payload = json.loads(proc.stdout)
-            except json.JSONDecodeError as exc:
-                payload = None
-                check(
-                    f"{label}: debate emits JSON",
-                    False,
-                    "valid JSON",
-                    f"{exc}: rc={proc.returncode} stdout={proc.stdout[:160]!r}",
-                )
-            if payload is not None:
-                check(
-                    f"{label}: debate exact key order and exit 0",
-                    proc.returncode == 0 and list(payload) == expected_keys,
-                    str(expected_keys),
-                    f"rc={proc.returncode} keys={list(payload)}",
-                )
-                check(
-                    f"{label}: debate exact seat partition",
-                    payload["subprocess_seats"] == expected_subprocess
-                    and payload["task_seats"] == expected_task
-                    and payload["task_seat_models"] == expected_models,
-                    f"subprocess={expected_subprocess}, task={expected_task}, models={expected_models}",
-                    f"subprocess={payload.get('subprocess_seats')}, "
-                    f"task={payload.get('task_seats')}, models={payload.get('task_seat_models')}",
-                )
-                check(
-                    f"{label}: host and final roster channel map",
-                    payload["host"] == "claude"
-                    and payload["seat_channels"] == expected_channels
-                    and set(payload["seat_channels"]) == set(
-                        expected_subprocess + expected_task),
-                    f"host='claude', seat_channels={expected_channels}",
-                    f"host={payload.get('host')!r}, channels={payload.get('seat_channels')}",
-                )
-
-
 def test_build_executor_contract_freeze():
     """Freeze build-executor sources, JSON keys, and rejection diagnostics."""
     log_section("contract freeze: build-executor JSON")
@@ -20406,8 +20015,7 @@ def main():
     test_workplan_doc_sync()
     test_review_prep_never_clears_task_seat_file()
     test_debate_argv_input_errors()
-    test_debate_panel_resolver()
-    test_debate_split_contract_freeze()
+    test_render_reads_only_frozen_results()
     test_debate_oracle_removed()
     test_panel_catalog()
     test_config_declared_seats()
