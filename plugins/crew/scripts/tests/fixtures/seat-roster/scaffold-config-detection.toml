@@ -4,7 +4,7 @@
 # Every key below is OPTIONAL; delete what you don't need. Python 3.11+ required to load.
 
 # Default panel when you name neither --panel nor --seats.
-# Cost-safe built-in full = codex + codex-luna + cursor-auto + cursor-composer + opus + sonnet.
+# Cost-safe built-in full = astra + sol + luna + cursor-auto + cursor-composer + opus + sonnet.
 default_panel = "full"
 
 # [debate].panel — /crew:debate's default panel (can default fuller than reviews).
@@ -14,7 +14,7 @@ default_panel = "full"
 # [dispatch].seat: /crew:dispatch's default WRITE seat (must be ONE registry-known
 # seat; read-only Claude seats validate here but are refused by dispatch at runtime).
 [dispatch]
-seat = "codex"
+seat = "luna"
 # timeout = 1800   # /crew:dispatch WORK wall-clock; provider floors raise
 #   the effective timeout only when the resolved [dispatch].timeout is
 #   below the floor; agy's floor is its print timeout plus grace, about 8
@@ -35,11 +35,11 @@ seat = "codex"
 
 # [panels] — redefine a built-in preset or add a custom one (usable via --panel <name>).
 # [panels]
-# nightly = ["codex", "opus"]
+# nightly = ["sol", "opus"]
 
 # [build].executor: /crew:build's implement-step executor. Default is the
 #   crew:executor Task agent (Claude); set it to ONE write-capable subprocess
-#   seat (e.g. codex-luna) to route each round through that model instead. The
+#   seat (e.g. luna) to route each round through that model instead. The
 #   Resolution: active-loop stamp (source: "state") > --executor <seat>
 #   flag > [build].executor config > built-in. With no active-loop stamp, the
 #   --executor <seat> flag overrides this config for a fresh resolve.
@@ -61,13 +61,17 @@ seat = "codex"
 # already skips a CLI that isn't installed, so these flags are mainly for DISCOVERABILITY,
 # a DELIBERATE opt-out, and capturing your confirmed preferences — NOT a requirement.
 
-[seats.codex]
-# model = "gpt-5.6-sol"
-# reasoning_effort = "xhigh"     # codex-seat knob (read per seat: [seats.codex] here)
+[seats.astra]
+# model = "gpt-6-astra"
+# reasoning_effort = "xhigh"     # codex-seat knob (read per seat: [seats.astra] here)
 
-[seats.codex-luna]
+[seats.sol]
+# model = "gpt-5.6-sol"
+# reasoning_effort = "xhigh"     # codex-seat knob (read per seat: [seats.sol] here)
+
+[seats.luna]
 # model = "gpt-5.6-luna"
-# reasoning_effort = "xhigh"     # codex-seat knob (read per seat: [seats.codex-luna] here)
+# reasoning_effort = "xhigh"     # codex-seat knob (read per seat: [seats.luna] here)
 
 [seats.cursor-auto]
 # model = "auto"
@@ -76,7 +80,7 @@ seat = "codex"
 # model = "composer-2.5"
 # native_model = "composer-2.5-fast"   # cursor-seat knob: the app Task-path variant slug (read per seat: [seats.cursor-composer] here)
 
-[seats.codex-terra]
+[seats.terra]
 available = false   # opt-in; see docs/engine-notes.md for why
 
 [seats.cursor-gpt]

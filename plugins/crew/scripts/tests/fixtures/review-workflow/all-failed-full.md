@@ -1,11 +1,11 @@
-### seat: codex  |  model: gpt-5.6-sol  |  0.0s
+### seat: sol  |  model: gpt-5.6-sol  |  0.0s
 status: FAILED
 
 ERROR: seat failed
 
 ------------------------------------------------------------------------
 
-### seat: codex-luna  |  model: (skipped)
+### seat: luna  |  model: (skipped)
 status: SKIPPED
 
 SKIPPED: missing executable

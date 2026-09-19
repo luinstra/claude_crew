@@ -639,7 +639,7 @@ def _run_codex_with_fake(*, continuation, sandbox="workspace-write", model="o3",
     seat never reached a real invocation (e.g. it was killed on timeout)."""
     from multiagent.providers import codex as codex_mod
     codex_mod._reset_probe_cache_for_tests()
-    prov = codex_mod.CodexProvider(name="codex", default_model=model,
+    prov = codex_mod.CodexProvider(name="sol", default_model=model,
                                    reasoning_effort="xhigh")
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
@@ -867,7 +867,7 @@ def test_codex_continuation():
         codex_mod.tempfile.mkstemp = tracking_mkstemp
         codex_mod.run_reaped = probe_oserror_then_run
         try:
-            prov = codex_mod.CodexProvider(name="codex", default_model="o3")
+            prov = codex_mod.CodexProvider(name="sol", default_model="o3")
             res = prov.run(
                 "P", sandbox="workspace-write", timeout=10,
                 continuation=ProviderContinuation("thread-abc"),
@@ -899,7 +899,7 @@ def test_codex_continuation():
         os.environ["PATH"] = str(d) + os.pathsep + env_path
         os.environ["FAKE_PROBE_LOG"] = str(probe_log)
         try:
-            prov = codex_mod.CodexProvider(name="codex", default_model="o3",
+            prov = codex_mod.CodexProvider(name="sol", default_model="o3",
                                            reasoning_effort="xhigh")
             prov.run("P", sandbox="workspace-write", model="o3", timeout=10,
                      continuation=ProviderContinuation())
@@ -923,7 +923,7 @@ def test_codex_continuation():
         os.environ["PATH"] = str(d) + os.pathsep + env_path
         os.environ["FAKE_PROBE_LOG"] = str(probe_log)
         try:
-            prov = codex_mod.CodexProvider(name="codex", default_model="o3")
+            prov = codex_mod.CodexProvider(name="sol", default_model="o3")
             prov.run("P", sandbox="workspace-write", timeout=10,
                      continuation=ProviderContinuation())
             first = probe_log.read_text().count("\n") if probe_log.exists() else 0
@@ -2100,12 +2100,12 @@ def test_default_seats():
     CURSOR_SEATS = shipped_seats("cursor")
     # No config, no env (retired): the CONFIGURED default panel (here the built-in
     # full) drives _resolve_seats; opus/sonnet (Task seats) drop via the registry
-    # filter, leaving the built-in four subprocess seats.
+    # filter, leaving the built-in five subprocess seats.
     with project_config("", write_file=False):
         resolved = _resolve_seats(None)
         check("_resolve_seats(None) -> builtin full's subprocess subset",
-              resolved == ["codex", "codex-luna", "cursor-auto", "cursor-composer"],
-              "['codex', 'codex-luna', 'cursor-auto', 'cursor-composer']", str(resolved))
+              resolved == ["astra", "sol", "luna", "cursor-auto", "cursor-composer"],
+              "['astra', 'sol', 'luna', 'cursor-auto', 'cursor-composer']", str(resolved))
         # The 'cursor' group token expands on the --seats path (the env path is gone).
         seats = _resolve_seats("cursor")
         check("--seats cursor expands to all cursor-* seats",
@@ -2116,9 +2116,9 @@ def test_default_seats():
         check("_resolve_seats(None) honors config default_panel=lite (no subprocess seats)",
               _resolve_seats(None) == [], "[]", str(_resolve_seats(None)))
     # A [panels] override of `full` changes the resolved default subprocess set.
-    with project_config('[panels]\nfull = ["codex", "opus"]\n'):
-        check("_resolve_seats(None) honors [panels].full override (codex only; opus is a Task seat)",
-              _resolve_seats(None) == ["codex"], "['codex']", str(_resolve_seats(None)))
+    with project_config('[panels]\nfull = ["sol", "opus"]\n'):
+        check("_resolve_seats(None) honors [panels].full override (sol only; opus is a Task seat)",
+              _resolve_seats(None) == ["sol"], "['sol']", str(_resolve_seats(None)))
 
 
 def test_resolve_timeout():
@@ -2218,7 +2218,7 @@ def test_dispatch_timeout():
             calls: list[dict] = []
 
             class _TimeoutProvider(Provider):
-                name = "codex"
+                name = "sol"
                 supports_workspace_write = True
                 supports_continuation = True
 
@@ -2228,13 +2228,13 @@ def test_dispatch_timeout():
                 def run(self, *args, **kwargs):
                     calls.append(kwargs)
                     return ProviderResult(
-                        name="codex", model="o3", ok=True, output="", error=None, elapsed=0.1,
+                        name="sol", model="o3", ok=True, output="", error=None, elapsed=0.1,
                     )
 
             try:
                 with mock.patch.object(cli, "get_provider", return_value=_TimeoutProvider()), \
                      contextlib.redirect_stdout(io.StringIO()):
-                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=True))
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="sol", task="x", json=True))
             finally:
                 if saved_working is None:
                     os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
@@ -2438,14 +2438,14 @@ def test_stage():
 
 def test_registry():
     log_section("Provider registry")
-    check("get_provider('codex') -> CodexProvider",
-          isinstance(get_provider("codex"), CodexProvider), "CodexProvider", "?")
+    check("get_provider('sol') -> CodexProvider",
+          isinstance(get_provider("sol"), CodexProvider), "CodexProvider", "?")
     # agy ships an adapter but no shipped seat, so the registry reaches it only
     # through a config-declared row: that IS the supported path now.
     with project_config(agy_seat_toml()):
         check(f"get_provider({AGY_SEAT!r}) -> AgyProvider (config-declared agy seat)",
               isinstance(get_provider(AGY_SEAT), AgyProvider), "AgyProvider", "?")
-        seats = available_seats(["codex", AGY_SEAT])
+        seats = available_seats(["sol", AGY_SEAT])
         check("available_seats returns instances", len(seats) == 2, "2", str(len(seats)))
     with project_config("", write_file=False):
         try:
@@ -2531,33 +2531,33 @@ def test_registry():
               override_spec.native_model == "composer-2.6-fast"
               and override_spec.model == "composer-2.5",
               "composer-2.6-fast + composer-2.5", str(override_spec))
-    with project_config('[seats.codex]\nnative_model = "x"\n'):
+    with project_config('[seats.sol]\nnative_model = "x"\n'):
         stderr = StringIO()
         with redirect_stderr(stderr):
-            codex_spec = seat_catalog.seat_spec("codex")
+            codex_spec = seat_catalog.seat_spec("sol")
         check("native_model on a non-cursor seat warns and is ignored",
               codex_spec.native_model is None
               and "native_model" in stderr.getvalue()
-              and "codex" in stderr.getvalue(),
+              and "sol" in stderr.getvalue(),
               "no native_model + channel warning", f"spec={codex_spec} stderr={stderr.getvalue()!r}")
     # Codex model-seats mirror cursor: one CodexProvider per CODEX_SEATS entry,
-    # each pinned to its model (codex + codex-luna default, codex-terra opt-in).
+    # each pinned to its model (terra is the opt-in one).
     CODEX_SEATS = shipped_seats("codex")
     for seat_name, spec in CODEX_SEATS.items():
         check(f"get_provider('{seat_name}') -> CodexProvider pinned to {spec.model}",
               isinstance(get_provider(seat_name), CodexProvider)
               and get_provider(seat_name)._default_model == spec.model,
               f"CodexProvider({spec.model})", repr(get_provider(seat_name).__dict__))
-    check("CODEX_SEATS pins codex to gpt-5.6-sol",
-          CODEX_SEATS.get("codex").model == "gpt-5.6-sol",
-          "gpt-5.6-sol", str(CODEX_SEATS.get("codex")))
-    check("CODEX_SEATS pins codex-luna to gpt-5.6-luna",
-          CODEX_SEATS.get("codex-luna").model == "gpt-5.6-luna",
-          "gpt-5.6-luna", str(CODEX_SEATS.get("codex-luna")))
-    # The opt-in codex-terra seat's model pin (registered, run via --seats).
-    check("CODEX_SEATS pins codex-terra to gpt-5.6-terra",
-          CODEX_SEATS.get("codex-terra").model == "gpt-5.6-terra",
-          "gpt-5.6-terra", str(CODEX_SEATS.get("codex-terra")))
+    check("CODEX_SEATS pins sol to gpt-5.6-sol",
+          CODEX_SEATS.get("sol").model == "gpt-5.6-sol",
+          "gpt-5.6-sol", str(CODEX_SEATS.get("sol")))
+    check("CODEX_SEATS pins luna to gpt-5.6-luna",
+          CODEX_SEATS.get("luna").model == "gpt-5.6-luna",
+          "gpt-5.6-luna", str(CODEX_SEATS.get("luna")))
+    # The opt-in terra seat's model pin (registered, run via --seats).
+    check("CODEX_SEATS pins terra to gpt-5.6-terra",
+          CODEX_SEATS.get("terra").model == "gpt-5.6-terra",
+          "gpt-5.6-terra", str(CODEX_SEATS.get("terra")))
 
 
 # =============================================================================
@@ -2566,7 +2566,7 @@ def test_registry():
 
 def test_result_contract():
     log_section("ProviderResult contract (Step 1.0 / 1.1)")
-    r = ProviderResult(name="codex", model="o3", ok=True, output="x", error=None, elapsed=1.5)
+    r = ProviderResult(name="sol", model="o3", ok=True, output="x", error=None, elapsed=1.5)
     d = r.to_dict()
     check("to_dict has exactly the six fields (optional fields omitted when None)",
           set(d.keys()) == {"name", "model", "ok", "output", "error", "elapsed"},
@@ -2584,7 +2584,7 @@ def test_result_contract():
     # The run-identity stamps follow the SAME additive contract as
     # repaired_output: serialized only when set, coerced by from_dict, and the
     # six core fields stay universally present.
-    stamped = ProviderResult(name="codex", model="o3", ok=True, output="x",
+    stamped = ProviderResult(name="sol", model="o3", ok=True, output="x",
                              error=None, elapsed=1.5,
                              run_id="run-abc123def456", target_sha256="f" * 64)
     sd = stamped.to_dict()
@@ -2618,7 +2618,7 @@ def test_result_contract():
 
     # A REPAIRED seat carries the optional 7th field; it round-trips and does NOT
     # touch the original output.
-    rr = ProviderResult(name="codex", model="o3", ok=True, output="ORIGINAL",
+    rr = ProviderResult(name="sol", model="o3", ok=True, output="ORIGINAL",
                         error=None, elapsed=1.5, repaired_output="REPAIRED")
     dd = rr.to_dict()
     check("to_dict includes repaired_output ONLY when set",
@@ -2638,7 +2638,7 @@ def test_continuations():
     log_section("continuation types and chain store")
 
     legacy = ProviderResult(
-        name="codex", model="o3", ok=True, output="x", error=None, elapsed=1.0,
+        name="sol", model="o3", ok=True, output="x", error=None, elapsed=1.0,
     )
     check(
         "unchained ProviderResult keeps the exact six-field shape",
@@ -2650,7 +2650,7 @@ def test_continuations():
         capability="supported", phase="fresh", conversation_id="thread-1",
     )
     chained = ProviderResult(
-        name="codex", model="o3", ok=True, output="x", error=None, elapsed=1.0,
+        name="sol", model="o3", ok=True, output="x", error=None, elapsed=1.0,
         continuation=outcome, continuation_id="thread-1",
     )
     round_tripped = ProviderResult.from_dict(chained.to_dict())
@@ -2683,7 +2683,7 @@ def test_continuations():
     )
 
     binding = continuations.ContinuationBinding(
-        chain="build-executor", loop_instance_id="loop-1", seat="codex",
+        chain="build-executor", loop_instance_id="loop-1", seat="sol",
         provider="codex", model="o3", workspace=".", head="HEAD",
         branch="main", index_tree="tree-1",
     )
@@ -3085,12 +3085,12 @@ def _binding_error(record, expected):
 
 def test_render():
     log_section("render")
-    ok = ProviderResult("codex", "o3", True, "looks good APPROVED", None, 2.0)
+    ok = ProviderResult("sol", "o3", True, "looks good APPROVED", None, 2.0)
     fail = ProviderResult("agy", "Gemini 3.1 Pro (High)", False, "", "agy returned no output", 1.0)
     none_model = ProviderResult("agy", None, True, "review body", None, 1.0)
 
     panel = render.render_panel([ok, fail])
-    check("render_panel shows both seats", "codex" in panel and "agy" in panel,
+    check("render_panel shows both seats", "sol" in panel and "agy" in panel,
           "both", panel[:80])
     check("render_panel failed seat shows ERROR block",
           "FAILED" in panel and "agy returned no output" in panel,
@@ -3107,14 +3107,14 @@ def test_render():
         check("render_block model=None renders without TypeError", False,
               "no TypeError", str(exc))
 
-    skipped = render.render_skipped("codex", "codex not found on PATH")
+    skipped = render.render_skipped("sol", "codex not found on PATH")
     check("render_skipped shows marked skipped block",
           "SKIPPED" in skipped and "not found" in skipped, "SKIPPED + diag", skipped)
 
     # An unavailable seat (CLI marks it ok=False, error="skipped: <diag>") must
     # render as a SKIPPED block in non-JSON output — distinct from FAILED.
     skipped_result = ProviderResult(
-        "codex", None, False, "", "skipped: codex not found on PATH", 0.0
+        "sol", None, False, "", "skipped: codex not found on PATH", 0.0
     )
     skip_block = render.render_block(skipped_result)
     check("render_block routes a skipped seat to a SKIPPED block (not FAILED)",
@@ -3230,7 +3230,7 @@ def test_prompts():
     check("prompts has NO SEAT/ROUND header text",
           "SEAT:" not in code and "ROUND:" not in code, "no SEAT/ROUND", "present")
 
-    p1 = prompts.debate_synthesis("p", "f", [("codex", "a")])
+    p1 = prompts.debate_synthesis("p", "f", [("sol", "a")])
     check(
         "debate synthesis headings are ordered",
         p1.index("Areas of agreement") < p1.index("Key disagreements") < p1.index("Recommendation"),
@@ -3245,7 +3245,7 @@ def test_prompts():
     )
     check(
         "debate synthesis lists frozen artifacts",
-        "1. codex: a" in p1 and "GROUPED PANEL: p" in p1 and "FULL PANEL: f" in p1,
+        "1. sol: a" in p1 and "GROUPED PANEL: p" in p1 and "FULL PANEL: f" in p1,
         "artifact manifest",
         p1,
     )
@@ -3389,7 +3389,7 @@ def test_targets():
         crew_run = Path(td) / ".crew" / "reviews" / "sess-1" / "run-abc123def456"
         crew_run.mkdir(parents=True)
         (crew_run / "run.json").write_text('{"run_id": "run-abc123def456"}\n')
-        (crew_run / "codex.json").write_text('{"ok": true}\n')
+        (crew_run / "sol.json").write_text('{"ok": true}\n')
         (Path(td) / ".crew" / "build-state-sess-1.json").write_text('{"active": true}\n')
         after = targets.resolve("working-tree", cwd=td)
         check("working-tree hash is stable across the appearance of .crew/ artifacts",
@@ -3414,7 +3414,7 @@ def test_targets():
         # Engine artifacts appear untracked, and NOTHING else is uncommitted.
         crew_run = Path(td) / ".crew" / "reviews" / "sess-1" / "run-abc123def456"
         crew_run.mkdir(parents=True)
-        (crew_run / "codex.json").write_text('{"ok": true}\n')
+        (crew_run / "sol.json").write_text('{"ok": true}\n')
         t = targets.resolve("auto", base="main", cwd=td)
         check("auto with ONLY .crew/ artifacts uncommitted resolves the branch diff, "
               "not an empty working-tree",
@@ -3467,7 +3467,7 @@ def test_targets():
         (Path(td) / "b.txt").write_text("brand new\n")          # included untracked
         crew_run = Path(td) / ".crew" / "reviews" / "sess-1" / "run-abc123def456"
         crew_run.mkdir(parents=True)
-        (crew_run / "codex.json").write_text('{"ok": true}\n')
+        (crew_run / "sol.json").write_text('{"ok": true}\n')
         t = targets.resolve("auto", base="main", cwd=td)
         check("a real edit beside .crew/ artifacts resolves working-tree",
               t.kind == "code" and "working-tree" in t.scope
@@ -3835,7 +3835,7 @@ def test_provider_readonly_cwd():
             # --- read-only: cwd must be crew_base (proj), never the process cwd ---
             os.environ.pop("CLAUDE_WORKING_DIRECTORY", None)
 
-            CodexProvider("codex", "o3").run("P", sandbox="read-only", timeout=30)
+            CodexProvider("sol", "o3").run("P", sandbox="read-only", timeout=30)
             check("codex read-only seat runs in crew_base(), not the process cwd",
                   rp(cap.read_text()) == rp(proj) and rp(cap.read_text()) != rp(other),
                   rp(proj), rp(cap.read_text()))
@@ -3853,7 +3853,7 @@ def test_provider_readonly_cwd():
             # --- workspace-write: cwd stays CLAUDE_WORKING_DIRECTORY (unchanged) ---
             os.environ["CLAUDE_WORKING_DIRECTORY"] = str(wsdir)
 
-            CodexProvider("codex", "o3").run("P", sandbox="workspace-write", timeout=30)
+            CodexProvider("sol", "o3").run("P", sandbox="workspace-write", timeout=30)
             check("codex workspace-write cwd stays CLAUDE_WORKING_DIRECTORY (unchanged)",
                   rp(cap.read_text()) == rp(wsdir), rp(wsdir), rp(cap.read_text()))
 
@@ -3979,7 +3979,7 @@ def test_production_invocation_and_fanout():
         env = _neutral_env()
         env["CREW_HOST"] = "codex"
         proc = _run_cli(
-            ["review", "plan.md", "--seats", f"codex,{AGY_SEAT}", "--session-id", "S", "--timeout", "2"],
+            ["review", "plan.md", "--seats", f"sol,{AGY_SEAT}", "--session-id", "S", "--timeout", "2"],
             env=env, cwd=str(repo), timeout=30,
         )
         check("cli.py bare-script runs without ModuleNotFoundError",
@@ -3991,9 +3991,9 @@ def test_production_invocation_and_fanout():
               "schema-1 work_batch", f"rc={proc.returncode} out={proc.stdout[:200]}")
         work = payload.get("work_items", [])
         check("standalone work_batch exposes each external seat",
-              [item.get("seat") for item in work] == ["codex", AGY_SEAT]
+              [item.get("seat") for item in work] == ["sol", AGY_SEAT]
               and all(item.get("driver") == "external" for item in work),
-              f"codex,{AGY_SEAT} external actions", str(work))
+              f"sol,{AGY_SEAT} external actions", str(work))
 
         # The host adapter places all supplied options before a literal `--`
         # and carries the target as one final argv item. This is executable
@@ -4018,7 +4018,7 @@ def test_production_invocation_and_fanout():
         hostile_rel = hostile_plan.relative_to(repo).as_posix()
         all_options = _run_cli(
             ["review", "--session-id", "S-all", "--base", "main",
-             "--panel", "full", "--seats", f"codex,{AGY_SEAT}", "--timeout", "2",
+             "--panel", "full", "--seats", f"sol,{AGY_SEAT}", "--timeout", "2",
              "--inline-diff", "--", hostile_rel],
             env=env, cwd=str(repo), timeout=30,
         )
@@ -4028,7 +4028,7 @@ def test_production_invocation_and_fanout():
               all_options.returncode == 0
               and all_payload.get("type") == "work_batch"
               and all_payload.get("resolved_target", {}).get("scope") == hostile_rel
-              and [item.get("seat") for item in all_work] == ["codex", AGY_SEAT]
+              and [item.get("seat") for item in all_work] == ["sol", AGY_SEAT]
               and all(item.get("driver") == "external" for item in all_work),
               f"hostile target path plus independent codex,{AGY_SEAT} seat selection",
               f"rc={all_options.returncode} payload={all_payload}")
@@ -4120,25 +4120,25 @@ def test_run_subcommand():
         # -f <file> reads the prompt and dispatches.
         pf = d / "prompt.txt"
         pf.write_text("FROM-FILE-PROMPT")
-        proc = _run_cli(["run", "codex", "-f", str(pf)], env=env, timeout=30)
+        proc = _run_cli(["run", "sol", "-f", str(pf)], env=env, timeout=30)
         check("run -f reads prompt file and dispatches",
               proc.returncode == 0 and "RAN:FROM-FILE-PROMPT" in proc.stdout,
               "exit0 + RAN:FROM-FILE-PROMPT", f"{proc.returncode}: {proc.stdout!r} {proc.stderr!r}")
 
         # direct <prompt-string> dispatches.
-        proc = _run_cli(["run", "codex", "DIRECT-PROMPT"], env=env, timeout=30)
+        proc = _run_cli(["run", "sol", "DIRECT-PROMPT"], env=env, timeout=30)
         check("run direct prompt-string dispatches",
               proc.returncode == 0 and "RAN:DIRECT-PROMPT" in proc.stdout,
               "exit0 + RAN:DIRECT-PROMPT", f"{proc.returncode}: {proc.stdout!r} {proc.stderr!r}")
 
         # --json emits the six-field core plus resolved channel provenance.
-        proc = _run_cli(["run", "codex", "X", "--json"], env=env, timeout=30)
+        proc = _run_cli(["run", "sol", "X", "--json"], env=env, timeout=30)
         ok_json = False
         try:
             obj = json.loads(proc.stdout)
             ok_json = (set(obj.keys())
                        == {"name", "model", "ok", "output", "error", "elapsed", "channel"}
-                       and obj["name"] == "codex" and obj["ok"] is True)
+                       and obj["name"] == "sol" and obj["ok"] is True)
         except Exception:
             ok_json = False
         check("run --json emits six-field core plus channel, exit 0",
@@ -4174,7 +4174,7 @@ def test_run_subcommand():
         channels.set_capabilities({})
         with contextlib.redirect_stderr(err):
             empty_cap_rc = cli.cmd_run(
-                cli.build_parser().parse_args(["run", "codex", "hi"])
+                cli.build_parser().parse_args(["run", "sol", "hi"])
             )
     finally:
         channels.set_capabilities(None)
@@ -4187,8 +4187,8 @@ def test_run_subcommand():
     # guard. We do NOT invoke/meter it — calling with no prompt source proves it
     # cleared the Task-seat/unknown rejection (it hits the 'no prompt' error, NOT
     # 'Task seat' or 'subprocess seat').
-    proc = _run_cli(["run", "codex"], timeout=30)
-    check("run codex passes seat-validation (no Task-seat/unknown rejection)",
+    proc = _run_cli(["run", "sol"], timeout=30)
+    check("run sol passes seat-validation (no Task-seat/unknown rejection)",
           proc.returncode != 0
           and "no prompt" in proc.stderr
           and "Task seat" not in proc.stderr
@@ -4196,7 +4196,7 @@ def test_run_subcommand():
           "'no prompt' (past seat guard)", f"{proc.returncode}: {proc.stderr!r}")
 
     # neither prompt source -> error.
-    proc = _run_cli(["run", "codex"], timeout=30)
+    proc = _run_cli(["run", "sol"], timeout=30)
     check("run with neither -f nor prompt-string -> nonzero error",
           proc.returncode != 0 and "no prompt" in proc.stderr,
           "nonzero + 'no prompt'", f"{proc.returncode}: {proc.stderr!r}")
@@ -4205,7 +4205,7 @@ def test_run_subcommand():
     with tempfile.TemporaryDirectory() as td:
         pf = Path(td) / "p.txt"
         pf.write_text("x")
-        proc = _run_cli(["run", "codex", "STR", "-f", str(pf)], timeout=30)
+        proc = _run_cli(["run", "sol", "STR", "-f", str(pf)], timeout=30)
         check("run with BOTH -f and prompt-string -> nonzero error",
               proc.returncode != 0 and "not both" in proc.stderr,
               "nonzero + 'not both'", f"{proc.returncode}: {proc.stderr!r}")
@@ -4221,17 +4221,17 @@ def test_run_subcommand():
         sys.exit(1)
         """)
         env = path_with(bins)
-        proc = _run_cli(["run", "codex", "p"], env=env, timeout=30)
+        proc = _run_cli(["run", "sol", "p"], env=env, timeout=30)
         check("run ok=False -> nonzero exit, error to stderr (non-json)",
               proc.returncode != 0 and "boom" in proc.stderr,
               "nonzero + error on stderr", f"{proc.returncode}: out={proc.stdout!r} err={proc.stderr!r}")
         # same failure with --json -> exit 0, ok=False in the JSON.
-        proc = _run_cli(["run", "codex", "p", "--json"], env=env, timeout=30)
+        proc = _run_cli(["run", "sol", "p", "--json"], env=env, timeout=30)
         ok_json = False
         try:
             obj = json.loads(proc.stdout)
             ok_json = (obj["ok"] is False and bool(obj["error"])
-                       and obj["name"] == "codex"
+                       and obj["name"] == "sol"
                        and obj["model"] == "gpt-5.6-sol"
                        and obj["channel"] == "codex")
         except Exception:
@@ -4275,26 +4275,26 @@ def test_run_subcommand():
         rd = cwd / ".crew" / "reviews" / "S"
         rd.mkdir(parents=True)
         (rd / "prompt-seat.txt").write_text("SHARED-PROMPT")
-        proc = _run_cli(["run", "codex", "--session-id", "S", "--json"],
+        proc = _run_cli(["run", "sol", "--session-id", "S", "--json"],
                         env=env, cwd=str(cwd), timeout=30)
-        derived = rd / "codex.json"
+        derived = rd / "sol.json"
         ok_json = False
         if derived.exists():
             try:
                 obj = json.loads(derived.read_text())
                 ok_json = (set(obj.keys())
                            == {"name", "model", "ok", "output", "error", "elapsed", "channel"}
-                           and obj["name"] == "codex"
+                           and obj["name"] == "sol"
                            and "SHARED-PROMPT" in obj["output"])
             except Exception:
                 ok_json = False
         check("run --session-id derives BOTH -f (prompt-seat.txt) and -o (<seat>.json)",
               proc.returncode == 0 and ok_json and proc.stdout.strip() == "",
-              "exit0 + derived codex.json six-field core + channel + empty stdout",
+              "exit0 + derived sol.json six-field core + channel + empty stdout",
               f"{proc.returncode}: exists={derived.exists()} out={proc.stdout!r}")
 
     # Case 2: explicit -o OVERRIDES output derivation — writes <X>, NOT the
-    # derived .crew/reviews/S/codex.json.
+    # derived .crew/reviews/S/sol.json.
     with tempfile.TemporaryDirectory() as td:
         cwd = Path(td)
         env = _sid_env(cwd)
@@ -4302,15 +4302,15 @@ def test_run_subcommand():
         rd.mkdir(parents=True)
         (rd / "prompt-seat.txt").write_text("SHARED-PROMPT")
         x = cwd / "explicit-out.json"
-        proc = _run_cli(["run", "codex", "--session-id", "S", "-o", str(x), "--json"],
+        proc = _run_cli(["run", "sol", "--session-id", "S", "-o", str(x), "--json"],
                         env=env, cwd=str(cwd), timeout=30)
         check("run --session-id + explicit -o overrides (writes -o, not <seat>.json)",
-              proc.returncode == 0 and x.exists() and not (rd / "codex.json").exists(),
-              "exit0 + -o written + codex.json absent",
-              f"{proc.returncode}: x={x.exists()} derived={(rd / 'codex.json').exists()}")
+              proc.returncode == 0 and x.exists() and not (rd / "sol.json").exists(),
+              "exit0 + -o written + sol.json absent",
+              f"{proc.returncode}: x={x.exists()} derived={(rd / 'sol.json').exists()}")
 
     # Case 3: explicit -f OVERRIDES input derivation (reads <Y>), still derives -o
-    # to .crew/reviews/S/codex.json.
+    # to .crew/reviews/S/sol.json.
     with tempfile.TemporaryDirectory() as td:
         cwd = Path(td)
         env = _sid_env(cwd)
@@ -4319,9 +4319,9 @@ def test_run_subcommand():
         (rd / "prompt-seat.txt").write_text("SHARED-PROMPT")
         y = cwd / "explicit-in.txt"
         y.write_text("OVERRIDE-INPUT")
-        proc = _run_cli(["run", "codex", "--session-id", "S", "-f", str(y), "--json"],
+        proc = _run_cli(["run", "sol", "--session-id", "S", "-f", str(y), "--json"],
                         env=env, cwd=str(cwd), timeout=30)
-        derived = rd / "codex.json"
+        derived = rd / "sol.json"
         read_y = False
         if derived.exists():
             try:
@@ -4332,7 +4332,7 @@ def test_run_subcommand():
                 read_y = False
         check("run --session-id + explicit -f overrides input (reads -f), still derives -o",
               proc.returncode == 0 and read_y,
-              "exit0 + derived codex.json from -f body",
+              "exit0 + derived sol.json from -f body",
               f"{proc.returncode}: exists={derived.exists()} out={proc.stdout!r}")
 
     # Case 4: path-traversal seat name is rejected by the EXISTING unknown-seat
@@ -4351,14 +4351,14 @@ def test_run_subcommand():
 
     # Case 5: literal placeholder session-id -> exit 2 with the placeholder message
     # (mirrors collect's <>/guard).
-    proc = _run_cli(["run", "codex", "--session-id", "<session-id>", "--json"], timeout=30)
+    proc = _run_cli(["run", "sol", "--session-id", "<session-id>", "--json"], timeout=30)
     check("run --session-id '<session-id>' (placeholder) -> exit 2 + placeholder message",
           proc.returncode == 2 and "unsubstituted placeholder" in proc.stderr,
           "exit2 + 'unsubstituted placeholder'", f"{proc.returncode}: {proc.stderr!r}")
 
     # Case 6: no --session-id AND no -f/prompt -> unchanged 'no prompt' error.
-    proc = _run_cli(["run", "codex"], timeout=30)
-    check("run codex (no --session-id, no source) -> unchanged 'no prompt' error",
+    proc = _run_cli(["run", "sol"], timeout=30)
+    check("run sol (no --session-id, no source) -> unchanged 'no prompt' error",
           proc.returncode != 0 and "no prompt" in proc.stderr,
           "nonzero + 'no prompt'", f"{proc.returncode}: {proc.stderr!r}")
 
@@ -4368,11 +4368,11 @@ def test_run_subcommand():
         cwd = Path(td)
         env = _sid_env(cwd)
         env["CLAUDE_SESSION_ID"] = "S"
-        proc = _run_cli(["run", "codex", "hi"], env=env, cwd=str(cwd), timeout=30)
-        derived = cwd / ".crew" / "reviews" / "S" / "codex.json"
+        proc = _run_cli(["run", "sol", "hi"], env=env, cwd=str(cwd), timeout=30)
+        derived = cwd / ".crew" / "reviews" / "S" / "sol.json"
         check("run with CLAUDE_SESSION_ID env but no --session-id -> no derive (stdout)",
               proc.returncode == 0 and "RAN:hi" in proc.stdout and not derived.exists(),
-              "exit0 + stdout output + codex.json absent",
+              "exit0 + stdout output + sol.json absent",
               f"{proc.returncode}: derived={derived.exists()} out={proc.stdout!r}")
 
     # Case 8: explicit --session-id "" (empty) does NOT derive even with env set —
@@ -4381,17 +4381,17 @@ def test_run_subcommand():
         cwd = Path(td)
         env = _sid_env(cwd)
         env["CLAUDE_SESSION_ID"] = "S"
-        proc = _run_cli(["run", "codex", "hi", "--session-id", "", "--json"],
+        proc = _run_cli(["run", "sol", "hi", "--session-id", "", "--json"],
                         env=env, cwd=str(cwd), timeout=30)
-        derived = cwd / ".crew" / "reviews" / "S" / "codex.json"
+        derived = cwd / ".crew" / "reviews" / "S" / "sol.json"
         on_stdout = False
         try:
-            on_stdout = json.loads(proc.stdout)["name"] == "codex"
+            on_stdout = json.loads(proc.stdout)["name"] == "sol"
         except Exception:
             on_stdout = False
         check("run --session-id '' (empty) does NOT derive (truthy gate) -> stdout",
               proc.returncode == 0 and on_stdout and not derived.exists(),
-              "exit0 + JSON on stdout + codex.json absent",
+              "exit0 + JSON on stdout + sol.json absent",
               f"{proc.returncode}: derived={derived.exists()} out={proc.stdout!r}")
 
     # Case 9: explicit --session-id "   " (whitespace-only) does NOT derive — the
@@ -4401,19 +4401,19 @@ def test_run_subcommand():
         cwd = Path(td)
         env = _sid_env(cwd)
         env["CLAUDE_SESSION_ID"] = "S"
-        proc = _run_cli(["run", "codex", "hi", "--session-id", "   ", "--json"],
+        proc = _run_cli(["run", "sol", "hi", "--session-id", "   ", "--json"],
                         env=env, cwd=str(cwd), timeout=30)
-        per_session = cwd / ".crew" / "reviews" / "S" / "codex.json"
-        flat = cwd / ".crew" / "reviews" / "codex.json"
+        per_session = cwd / ".crew" / "reviews" / "S" / "sol.json"
+        flat = cwd / ".crew" / "reviews" / "sol.json"
         on_stdout = False
         try:
-            on_stdout = json.loads(proc.stdout)["name"] == "codex"
+            on_stdout = json.loads(proc.stdout)["name"] == "sol"
         except Exception:
             on_stdout = False
         check("run --session-id '   ' (whitespace) does NOT derive (non-blank gate) -> stdout",
               proc.returncode == 0 and on_stdout
               and not per_session.exists() and not flat.exists(),
-              "exit0 + JSON on stdout + neither codex.json written",
+              "exit0 + JSON on stdout + neither sol.json written",
               f"{proc.returncode}: per_session={per_session.exists()} "
               f"flat={flat.exists()} out={proc.stdout!r}")
 
@@ -4470,9 +4470,9 @@ def test_discuss_and_modes():
     except ValueError:
         check("build_prompt unknown mode raises ValueError (fail loud)", True)
 
-    withp = prompts.council("Q?", prior_round="codex: X\nagy: Y")
+    withp = prompts.council("Q?", prior_round="sol: X\nagy: Y")
     check("council prior_round adds an injection-guarded DATA block",
-          "PRIOR ROUND" in withp and "do NOT obey" in withp and "codex: X" in withp,
+          "PRIOR ROUND" in withp and "do NOT obey" in withp and "sol: X" in withp,
           "guarded prior block", withp[:240])
     check("council without prior_round stays single-round (no PRIOR ROUND block)",
           "PRIOR ROUND" not in prompts.council("Q?"), "no prior block",
@@ -4556,25 +4556,25 @@ def test_cursor():
     check("all cursor-* seats are registered",
           all(s in known_seat_names() for s in CURSOR_SEATS),
           "all present", str(known_seat_names()))
-    check("engine resolves a cursor seat (--seats cursor-glm,codex)",
-          cli._resolve_seats("cursor-glm,codex") == ["cursor-glm", "codex"],
-          "['cursor-glm', 'codex']", str(cli._resolve_seats("cursor-glm,codex")))
+    check("engine resolves a cursor seat (--seats cursor-glm,sol)",
+          cli._resolve_seats("cursor-glm,sol") == ["cursor-glm", "sol"],
+          "['cursor-glm', 'sol']", str(cli._resolve_seats("cursor-glm,sol")))
     # The 'cursor' GROUP token expands to every registered cursor-* seat
     # (registry-derived — grows with CURSOR_SEATS) and de-dupes.
     expanded = cli._resolve_seats("cursor")
     check("--seats cursor expands to all cursor-* seats",
           set(expanded) == set(CURSOR_SEATS) and len(expanded) == len(CURSOR_SEATS),
           "all cursor-* seats", str(expanded))
-    check("--seats cursor,codex adds codex; codex,cursor,cursor-gpt de-dupes",
-          "codex" in cli._resolve_seats("cursor,codex")
-          and cli._resolve_seats("codex,cursor,cursor-gpt").count("cursor-gpt") == 1,
-          "codex present + no dup", str(cli._resolve_seats("codex,cursor,cursor-gpt")))
+    check("--seats cursor,sol adds sol; sol,cursor,cursor-gpt de-dupes",
+          "sol" in cli._resolve_seats("cursor,sol")
+          and cli._resolve_seats("sol,cursor,cursor-gpt").count("cursor-gpt") == 1,
+          "codex present + no dup", str(cli._resolve_seats("sol,cursor,cursor-gpt")))
     # `cli.py seats` prints the resolved (group-expanded) subprocess list, one per
     # line — the helper an orchestrator uses to fan out PER-SEAT.
-    proc = _run_cli(["seats", "--seats", "codex,cursor"], timeout=30)
+    proc = _run_cli(["seats", "--seats", "sol,cursor"], timeout=30)
     lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
     check("cli.py seats expands the cursor group to concrete seats (one per line)",
-          proc.returncode == 0 and "codex" in lines
+          proc.returncode == 0 and "sol" in lines
           and all(s in lines for s in CURSOR_SEATS),
           "codex + all cursor-* one per line", str(lines))
 
@@ -5025,7 +5025,7 @@ def test_from_dict_and_escaping():
     log_section("ProviderResult.from_dict (render-safety contract) + JSON escaping fix")
 
     # 1. round-trip: from_dict(to_dict(r)) == r for an ok and a failed result.
-    rok = ProviderResult(name="codex", model="gpt-5", ok=True,
+    rok = ProviderResult(name="sol", model="gpt-5", ok=True,
                          output="hello", error=None, elapsed=1.5)
     rfail = ProviderResult(name="cursor-glm", model=None, ok=False,
                           output="", error="boom", elapsed=0.0)
@@ -5047,7 +5047,7 @@ def test_from_dict_and_escaping():
           "six fields", str(set(rok.to_dict().keys())))
 
     attributed = ProviderResult(
-        name="codex", model="gpt-5", ok=True, output="hello", error=None,
+        name="sol", model="gpt-5", ok=True, output="hello", error=None,
         elapsed=1.5, reported_model="GPT Test",
         model_attribution="runtime-reported",
     )
@@ -5167,9 +5167,9 @@ def test_from_dict_and_escaping():
         sys.exit(0)
         """)
         env = path_with(bins)
-        outf = d / "codex.json"
+        outf = d / "sol.json"
         proc = _run_cli(
-            ["run", "codex", "X", "--json", "-o", str(outf)], env=env, timeout=30)
+            ["run", "sol", "X", "--json", "-o", str(outf)], env=env, timeout=30)
         text = outf.read_text(encoding="utf-8") if outf.exists() else ""
         check("cmd_run --json -o writes literal non-ASCII char (no \\u escape)",
               proc.returncode == 0
@@ -5179,7 +5179,7 @@ def test_from_dict_and_escaping():
 
     # mirror via render.render_json over a non-ASCII result.
     rj = render.render_json([ProviderResult(
-        name="codex", model=None, ok=True,
+        name="sol", model=None, ok=True,
         output="x — y …", error=None, elapsed=0.0)])
     check("render_json emits literal non-ASCII char (no \\u escape)",
           "—" in rj and "…" in rj and "\\u" not in rj,
@@ -5394,11 +5394,11 @@ def test_config():
     VALID = textwrap.dedent("""
         default_panel = "lite"
 
-        [seats.codex]
+        [seats.sol]
         model = "gpt-5.5"
         reasoning_effort = "high"
 
-        [seats.codex-luna]
+        [seats.luna]
         model = "luna-config"
         reasoning_effort = "low"
 
@@ -5419,26 +5419,26 @@ def test_config():
     with project(VALID):
         check("config valid: default_panel() -> 'lite'",
               config.default_panel() == "lite", "lite", str(config.default_panel()))
-        check("config valid: seat_spec('codex').model -> 'gpt-5.5'",
-              seats.seat_spec("codex").model == "gpt-5.5",
-              "gpt-5.5", str(seats.seat_spec("codex").model))
+        check("config valid: seat_spec('sol').model -> 'gpt-5.5'",
+              seats.seat_spec("sol").model == "gpt-5.5",
+              "gpt-5.5", str(seats.seat_spec("sol").model))
         check("config valid: seat_spec('agy-gemini').model -> 'Gemini Config Model'",
               seats.seat_spec("agy-gemini").model == "Gemini Config Model",
               "Gemini Config Model", str(seats.seat_spec("agy-gemini").model))
         check("config valid: seat_spec('cursor-glm').model -> 'glm-config-max'",
               seats.seat_spec("cursor-glm").model == "glm-config-max",
               "glm-config-max", str(seats.seat_spec("cursor-glm").model))
-        check("config valid: seat_spec('codex').reasoning_effort -> 'high'",
-              seats.seat_spec("codex").reasoning_effort == "high",
-              "high", str(seats.seat_spec("codex").reasoning_effort))
+        check("config valid: seat_spec('sol').reasoning_effort -> 'high'",
+              seats.seat_spec("sol").reasoning_effort == "high",
+              "high", str(seats.seat_spec("sol").reasoning_effort))
         # Per-seat lookup: each codex seat reads ITS OWN table; the luna value
-        # does not bleed into the bare codex seat (and vice versa).
-        check("config valid: seat_spec('codex-luna').reasoning_effort -> 'low'",
-              seats.seat_spec("codex-luna").reasoning_effort == "low",
-              "low", str(seats.seat_spec("codex-luna").reasoning_effort))
-        check("config valid: seat_spec('codex-luna').model -> 'luna-config'",
-              seats.seat_spec("codex-luna").model == "luna-config",
-              "luna-config", str(seats.seat_spec("codex-luna").model))
+        # does not bleed into the sol seat (and vice versa).
+        check("config valid: seat_spec('luna').reasoning_effort -> 'low'",
+              seats.seat_spec("luna").reasoning_effort == "low",
+              "low", str(seats.seat_spec("luna").reasoning_effort))
+        check("config valid: seat_spec('luna').model -> 'luna-config'",
+              seats.seat_spec("luna").model == "luna-config",
+              "luna-config", str(seats.seat_spec("luna").model))
         check("config valid: seat_spec('agy-gemini').print_timeout -> '3m'",
               seats.seat_spec("agy-gemini").print_timeout == "3m",
               "3m", str(seats.seat_spec("agy-gemini").print_timeout))
@@ -5448,10 +5448,10 @@ def test_config():
         # tune (cursor-gpt is opt-in, untouched here).
         check("config valid: an untuned seat keeps its shipped model, no tune",
               seats.seat_spec("cursor-gpt").model == "gpt-5.5-extra-high"
-              and seats.seat_spec("codex-terra").reasoning_effort is None,
+              and seats.seat_spec("terra").reasoning_effort is None,
               "shipped pin, tune None",
               f"{seats.seat_spec('cursor-gpt').model} / "
-              f"{seats.seat_spec('codex-terra').reasoning_effort}")
+              f"{seats.seat_spec('terra').reasoning_effort}")
 
     # 2. Missing file -> default_panel/default_timeout None (no crash, no warn); an
     #    untuned seat carries no per-provider tune. Both knobs read are ones the
@@ -5461,8 +5461,8 @@ def test_config():
         buf = io.StringIO()
         with redirect_stderr(buf):
             vals = (config.default_panel(), config.default_timeout(),
-                    seats.seat_spec("codex").reasoning_effort,
-                    seats.seat_spec("codex-luna").reasoning_effort)
+                    seats.seat_spec("sol").reasoning_effort,
+                    seats.seat_spec("luna").reasoning_effort)
         check("config missing file: getters/tunes None, no stderr noise",
               all(v is None for v in vals) and buf.getvalue() == "",
               "all None + silent", f"vals={vals} stderr={buf.getvalue()!r}")
@@ -5489,7 +5489,7 @@ def test_config():
     BAD = textwrap.dedent("""
         default_panel = "huge"
 
-        [seats.codex]
+        [seats.sol]
         reasoning_effort = 123
         model = "kept-codex-model"
 
@@ -5505,14 +5505,14 @@ def test_config():
         buf = io.StringIO()
         with redirect_stderr(buf):
             dp = config.default_panel()
-            re_ = seats.seat_spec("codex").reasoning_effort
+            re_ = seats.seat_spec("sol").reasoning_effort
             pt = seats.seat_spec("agy-gemini").print_timeout
             tmo = config.default_timeout()
-            kept = seats.seat_spec("codex").model
+            kept = seats.seat_spec("sol").model
         check("config bad fields: each invalid field dropped (tune/getter -> None)",
               dp is None and re_ is None and pt is None and tmo is None,
               "all None", f"dp={dp} re={re_} pt={pt} tmo={tmo}")
-        check("config bad fields: a VALID sibling (seats.codex.model) still returns",
+        check("config bad fields: a VALID sibling (seats.sol.model) still returns",
               kept == "kept-codex-model", "kept-codex-model", str(kept))
         check("config bad fields: warnings go to stderr",
               "default_panel" in buf.getvalue() and "timeout" in buf.getvalue(),
@@ -5563,7 +5563,7 @@ def test_config():
     # ---- Precedence: per-repo BEATS global BEATS built-in (env retired) ----------
     from multiagent.cli import _resolve_timeout  # noqa: E402
 
-    def _codex_model(seat="codex"):
+    def _codex_model(seat="sol"):
         # The catalog now owns per-seat model resolution (config over the shipped
         # pin); this shim keeps the precedence assertions reading the same value
         # the deleted config.seat_model getter used to return.
@@ -5580,13 +5580,13 @@ def test_config():
         check("precedence: global [tuning].timeout (222) wins over builtin when no per-repo",
               _resolve_timeout(None) == 222, "222", str(_resolve_timeout(None)))
 
-    # 7c. per-repo [seats.codex].model beats global; global-only applies.
-    with crew_config(project="[seats.codex]\nmodel = \"codex-repo\"\n",
-                     glob="[seats.codex]\nmodel = \"codex-global\"\n"):
-        check("precedence: per-repo [seats.codex].model BEATS global",
+    # 7c. per-repo [seats.sol].model beats global; global-only applies.
+    with crew_config(project="[seats.sol]\nmodel = \"codex-repo\"\n",
+                     glob="[seats.sol]\nmodel = \"codex-global\"\n"):
+        check("precedence: per-repo [seats.sol].model BEATS global",
               _codex_model() == "codex-repo", "codex-repo", str(_codex_model()))
-    with crew_config(glob="[seats.codex]\nmodel = \"codex-global\"\n"):
-        check("precedence: global-only [seats.codex].model applies (no per-repo)",
+    with crew_config(glob="[seats.sol]\nmodel = \"codex-global\"\n"):
+        check("precedence: global-only [seats.sol].model applies (no per-repo)",
               _codex_model() == "codex-global", "codex-global", str(_codex_model()))
 
     # 7c2. No config in either layer -> _codex_model falls back to the seat's
@@ -5594,21 +5594,21 @@ def test_config():
     with crew_config():
         check("no config: _codex_model() -> codex's built-in pin gpt-5.6-sol",
               _codex_model() == "gpt-5.6-sol", "gpt-5.6-sol", str(_codex_model()))
-        check("no config: _codex_model('codex-luna') -> its pin gpt-5.6-luna",
-              _codex_model("codex-luna") == "gpt-5.6-luna",
-              "gpt-5.6-luna", str(_codex_model("codex-luna")))
-    # A [seats.codex-luna].model override beats the pin AND stays seat-scoped
-    # (the bare codex seat keeps its own pin).
-    with crew_config(project="[seats.codex-luna]\nmodel = \"luna-repo\"\n"):
-        check("[seats.codex-luna].model BEATS the built-in pin",
-              _codex_model("codex-luna") == "luna-repo",
-              "luna-repo", str(_codex_model("codex-luna")))
-        check("codex-luna config does NOT leak into the bare codex seat",
+        check("no config: _codex_model('luna') -> its pin gpt-5.6-luna",
+              _codex_model("luna") == "gpt-5.6-luna",
+              "gpt-5.6-luna", str(_codex_model("luna")))
+    # A [seats.luna].model override beats the pin AND stays seat-scoped
+    # (the sol seat keeps its own pin).
+    with crew_config(project="[seats.luna]\nmodel = \"luna-repo\"\n"):
+        check("[seats.luna].model BEATS the built-in pin",
+              _codex_model("luna") == "luna-repo",
+              "luna-repo", str(_codex_model("luna")))
+        check("luna config does NOT leak into the sol seat",
               _codex_model() == "gpt-5.6-sol", "gpt-5.6-sol", str(_codex_model()))
 
     # ---- Per-seat argv/resolution assertions (NO metered seat calls) ------------
     # 8. codex reasoning_effort from config flows into the -c argv; absent -> xhigh.
-    with project("[seats.codex]\nreasoning_effort = \"medium\"\n"):
+    with project("[seats.sol]\nreasoning_effort = \"medium\"\n"):
         with tempfile.TemporaryDirectory() as bd:
             d = Path(bd)
             cap = d / "capture.json"
@@ -5627,7 +5627,7 @@ def test_config():
             old_path = os.environ["PATH"]
             os.environ["PATH"] = str(d) + os.pathsep + old_path
             try:
-                get_provider("codex").run("PROMPT", timeout=15)
+                get_provider("sol").run("PROMPT", timeout=15)
             finally:
                 os.environ["PATH"] = old_path
             argv = json.loads(cap.read_text())
@@ -5661,9 +5661,9 @@ def test_config():
                   "model_reasoning_effort=xhigh" in argv, "xhigh in argv", str(argv))
 
     # 8c. Registry codex seats: the pinned --model lands in argv when no explicit
-    #     model is given, and [seats.codex-luna].reasoning_effort reaches ONLY the
-    #     luna seat (the bare codex seat keeps the xhigh default).
-    with project("[seats.codex-luna]\nreasoning_effort = \"low\"\n"):
+    #     model is given, and [seats.luna].reasoning_effort reaches ONLY the
+    #     luna seat (the sol seat keeps the xhigh default).
+    with project("[seats.luna]\nreasoning_effort = \"low\"\n"):
         with tempfile.TemporaryDirectory() as bd:
             d = Path(bd)
             cap = d / "capture.json"
@@ -5682,21 +5682,21 @@ def test_config():
             old_path = os.environ["PATH"]
             os.environ["PATH"] = str(d) + os.pathsep + old_path
             try:
-                get_provider("codex-luna").run("PROMPT", timeout=15)
+                get_provider("luna").run("PROMPT", timeout=15)
                 argv_luna = json.loads(cap.read_text())
-                get_provider("codex").run("PROMPT", timeout=15)
+                get_provider("sol").run("PROMPT", timeout=15)
                 argv_codex = json.loads(cap.read_text())
             finally:
                 os.environ["PATH"] = old_path
-            check("per-seat: codex-luna argv carries its pinned --model gpt-5.6-luna",
+            check("per-seat: luna argv carries its pinned --model gpt-5.6-luna",
                   "--model" in argv_luna and "gpt-5.6-luna" in argv_luna,
                   "--model gpt-5.6-luna", str(argv_luna))
-            check("per-seat: [seats.codex-luna].reasoning_effort -> luna argv effort=low",
+            check("per-seat: [seats.luna].reasoning_effort -> luna argv effort=low",
                   "model_reasoning_effort=low" in argv_luna, "low in argv", str(argv_luna))
-            check("per-seat: bare codex argv carries its pinned --model gpt-5.6-sol",
+            check("per-seat: sol argv carries its pinned --model gpt-5.6-sol",
                   "--model" in argv_codex and "gpt-5.6-sol" in argv_codex,
                   "--model gpt-5.6-sol", str(argv_codex))
-            check("per-seat: luna effort does NOT leak into codex (stays xhigh)",
+            check("per-seat: luna effort does NOT leak into sol (stays xhigh)",
                   "model_reasoning_effort=xhigh" in argv_codex,
                   "xhigh in argv", str(argv_codex))
             check("per-seat: codex hermetic flags identical across codex seats",
@@ -5803,7 +5803,7 @@ def test_config():
         obj = json.loads(proc.stdout)
         check("review-prep explicit --panel full OVERRIDES config default_panel=lite",
               proc.returncode == 0
-              and obj["subprocess_seats"] == ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["astra", "sol", "luna", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"],
               "full overrides config", str(obj))
 
@@ -5826,7 +5826,7 @@ def test_config():
         obj = json.loads(proc.stdout) if proc.returncode == 0 else None
         check("review-prep invalid config default_panel -> built-in 'full' (no KeyError)",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["astra", "sol", "luna", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"],
               "full fallback on invalid", f"rc={proc.returncode} obj={obj}")
 
@@ -5848,22 +5848,22 @@ def test_global_roster_availability():
 
     # --- panels() roster ------------------------------------------------------
     # Override a built-in preset AND define a custom one.
-    with project_config('[panels]\nfull = ["codex", "opus"]\nquick = ["codex"]\n'):
+    with project_config('[panels]\nfull = ["sol", "opus"]\nquick = ["sol"]\n'):
         p = config.panels()
         check("panels(): override builtin full + custom quick",
-              p == {"full": ["codex", "opus"], "quick": ["codex"]},
-              "{'full': ['codex','opus'], 'quick': ['codex']}", str(p))
+              p == {"full": ["sol", "opus"], "quick": ["sol"]},
+              "{'full': ['sol','opus'], 'quick': ['sol']}", str(p))
         # default_panel="quick" is now ACCEPTED (validates vs PANEL_PRESETS ∪ panels()).
-    with project_config('default_panel = "quick"\n[panels]\nquick = ["codex"]\n'):
+    with project_config('default_panel = "quick"\n[panels]\nquick = ["sol"]\n'):
         check("default_panel='quick' accepted (matches [panels] override, also a builtin name)",
               config.default_panel() == "quick", "quick", str(config.default_panel()))
     # Unknown seat in a roster list is dropped (warn once); the entry survives.
-    with project_config('[panels]\nmix = ["codex", "nope"]\n'):
+    with project_config('[panels]\nmix = ["sol", "nope"]\n'):
         buf = io.StringIO()
         with redirect_stderr(buf):
             p = config.panels()
         check("panels(): unknown roster seat dropped (entry kept)",
-              p == {"mix": ["codex"]}, "{'mix': ['codex']}", str(p))
+              p == {"mix": ["sol"]}, "{'mix': ['sol']}", str(p))
         check("panels(): unknown roster seat warns to stderr",
               "nope" in buf.getvalue(), "warn mentions 'nope'", repr(buf.getvalue()[:160]))
     # An entry whose EVERY element drops is omitted; all-dropped -> None.
@@ -5885,12 +5885,12 @@ def test_global_roster_availability():
     with project_config("", write_file=False):
         check("panels(): absent -> None", config.panels() is None, "None", str(config.panels()))
     # per-repo [panels] entry overrides global PER NAME; global-only names remain.
-    with crew_config(project='[panels]\nfull = ["codex"]\n',
+    with crew_config(project='[panels]\nfull = ["sol"]\n',
                      glob='[panels]\nfull = ["opus"]\nextra = ["sonnet"]\n'):
         p = config.panels()
         check("panels(): per-repo overrides global per name; global-only name remains",
-              p == {"full": ["codex"], "extra": ["sonnet"]},
-              "{'full': ['codex'], 'extra': ['sonnet']}", str(p))
+              p == {"full": ["sol"], "extra": ["sonnet"]},
+              "{'full': ['sol'], 'extra': ['sonnet']}", str(p))
 
     # --- seat availability (catalog `available` flag) -------------------------
     def avail(seat):
@@ -5940,25 +5940,25 @@ def test_panel_availability_consistency():
     #    `crew seats` (no --seats) AND review-prep.
     with tempfile.TemporaryDirectory() as td:
         proj = Path(td)
-        _write_cfg(proj, '[panels]\nfull = ["codex", "opus"]\n')
+        _write_cfg(proj, '[panels]\nfull = ["sol", "opus"]\n')
         _write_plan(proj)
         env = _clean_env(td)
         seats_p = _run_dispatcher(["seats"], cwd=td, env=env, timeout=30)
         lines = [ln for ln in seats_p.stdout.splitlines() if ln.strip()]
-        check("ad-hoc `crew seats` honors [panels].full override (codex only; opus is a Task seat)",
-              seats_p.returncode == 0 and lines == ["codex"], "['codex']", str(lines))
+        check("ad-hoc `crew seats` honors [panels].full override (sol only; opus is a Task seat)",
+              seats_p.returncode == 0 and lines == ["sol"], "['sol']", str(lines))
         rp = _run_dispatcher(["review-prep", "plan.md", "--session-id", "po"],
                              cwd=td, env=env, timeout=30)
         obj = json.loads(rp.stdout)
-        check("review-prep honors [panels].full override (subprocess [codex], task [opus])",
-              obj["subprocess_seats"] == ["codex"] and obj["task_seats"] == ["opus"],
-              "subprocess [codex], task [opus]", str(obj))
+        check("review-prep honors [panels].full override (subprocess [sol], task [opus])",
+              obj["subprocess_seats"] == ["sol"] and obj["task_seats"] == ["opus"],
+              "subprocess [sol], task [opus]", str(obj))
 
     # 2. A custom [panels].quick resolves via --panel quick (choices removed) AND
     #    via default_panel="quick".
     with tempfile.TemporaryDirectory() as td:
         proj = Path(td)
-        _write_cfg(proj, '[panels]\nquick = ["codex", "opus"]\n')
+        _write_cfg(proj, '[panels]\nquick = ["sol", "opus"]\n')
         _write_plan(proj)
         env = _clean_env(td)
         rp = _run_dispatcher(["review-prep", "plan.md", "--panel", "quick", "--session-id", "pq"],
@@ -5966,32 +5966,32 @@ def test_panel_availability_consistency():
         obj = json.loads(rp.stdout) if rp.returncode == 0 else None
         check("--panel quick resolves a custom [panels] preset (choices removed)",
               rp.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex"] and obj["task_seats"] == ["opus"],
-              "subprocess [codex], task [opus]", f"rc={rp.returncode} obj={obj}")
+              and obj["subprocess_seats"] == ["sol"] and obj["task_seats"] == ["opus"],
+              "subprocess [sol], task [opus]", f"rc={rp.returncode} obj={obj}")
     with tempfile.TemporaryDirectory() as td:
         proj = Path(td)
-        _write_cfg(proj, 'default_panel = "quick"\n[panels]\nquick = ["codex"]\n')
+        _write_cfg(proj, 'default_panel = "quick"\n[panels]\nquick = ["sol"]\n')
         _write_plan(proj)
         env = _clean_env(td)
         rp = _run_dispatcher(["review-prep", "plan.md", "--session-id", "pdq"],
                              cwd=td, env=env, timeout=30)
         obj = json.loads(rp.stdout)
         check("default_panel='quick' resolves with no flags",
-              obj["subprocess_seats"] == ["codex"] and obj["task_seats"] == [],
-              "subprocess [codex], task []", str(obj))
+              obj["subprocess_seats"] == ["sol"] and obj["task_seats"] == [],
+              "subprocess [sol], task []", str(obj))
 
     # 3. Unknown --panel name falls back to a CONFIGURED [panels].full (not builtin).
     with tempfile.TemporaryDirectory() as td:
         proj = Path(td)
-        _write_cfg(proj, '[panels]\nfull = ["codex"]\n')
+        _write_cfg(proj, '[panels]\nfull = ["sol"]\n')
         _write_plan(proj)
         env = _clean_env(td)
         rp = _run_dispatcher(["review-prep", "plan.md", "--panel", "bogus", "--session-id", "pb"],
                              cwd=td, env=env, timeout=30)
         obj = json.loads(rp.stdout)
         check("unknown --panel name falls back to the CONFIGURED [panels].full",
-              obj["subprocess_seats"] == ["codex"] and obj["task_seats"] == [],
-              "configured full [codex]", str(obj))
+              obj["subprocess_seats"] == ["sol"] and obj["task_seats"] == [],
+              "configured full [sol]", str(obj))
 
     # 4. Availability: available=false drops the seat from a DEFAULT panel silently
     #    (ad-hoc `crew seats` + review-prep both).
@@ -6003,13 +6003,13 @@ def test_panel_availability_consistency():
         seats_p = _run_dispatcher(["seats"], cwd=td, env=env, timeout=30)
         lines = [ln for ln in seats_p.stdout.splitlines() if ln.strip()]
         check("ad-hoc `crew seats` drops an available=false seat from the default panel",
-              "cursor-auto" not in lines and "codex" in lines and "codex-luna" in lines,
+              "cursor-auto" not in lines and "sol" in lines and "luna" in lines,
               "no cursor-auto", str(lines))
         rp = _run_dispatcher(["review-prep", "plan.md", "--session-id", "pa1"],
                              cwd=td, env=env, timeout=30)
         obj = json.loads(rp.stdout)
         check("review-prep drops an available=false seat from the default panel",
-              "cursor-auto" not in obj["subprocess_seats"] and "codex" in obj["subprocess_seats"],
+              "cursor-auto" not in obj["subprocess_seats"] and "sol" in obj["subprocess_seats"],
               "no cursor-auto", str(obj["subprocess_seats"]))
 
     # 5. Explicitly-named unavailable seat -> SKIPPED WITH a one-time stderr note.
@@ -6017,11 +6017,11 @@ def test_panel_availability_consistency():
         proj = Path(td)
         _write_cfg(proj, '[seats.cursor-auto]\navailable = false\n')
         env = _clean_env(td)
-        seats_p = _run_dispatcher(["seats", "--seats", "codex,cursor-auto"],
+        seats_p = _run_dispatcher(["seats", "--seats", "sol,cursor-auto"],
                                   cwd=td, env=env, timeout=30)
         lines = [ln for ln in seats_p.stdout.splitlines() if ln.strip()]
         check("explicit --seats <unavailable> skipped, the rest run",
-              lines == ["codex"], "['codex']", str(lines))
+              lines == ["sol"], "['sol']", str(lines))
         check("explicit --seats <unavailable> emits a one-time stderr skip-note",
               "unavailable" in seats_p.stderr.lower() and "cursor-auto" in seats_p.stderr,
               "stderr skip-note", repr(seats_p.stderr[:160]))
@@ -6051,7 +6051,7 @@ def test_panel_availability_consistency():
                              cwd=td, env=env, timeout=30)
         obj = json.loads(rp.stdout)
         check("--panel full drops its unavailable member from subprocess_seats",
-              "cursor-auto" not in obj["subprocess_seats"] and "codex" in obj["subprocess_seats"],
+              "cursor-auto" not in obj["subprocess_seats"] and "sol" in obj["subprocess_seats"],
               "no cursor-auto", str(obj["subprocess_seats"]))
         check("--panel full unavailable member -> one-time stderr skip-note",
               "unavailable" in rp.stderr.lower() and "cursor-auto" in rp.stderr,
@@ -6072,7 +6072,7 @@ def test_panel_availability_consistency():
         obj = json.loads(rp.stdout)
         check("review-prep disabling BOTH task seats in full -> task_seats == [] (no opus/sonnet restoration)",
               rp.returncode == 0
-              and obj["subprocess_seats"] == ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["astra", "sol", "luna", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == [],
               "subprocess intact, task []", str(obj))
         # The empty TASK split must NOT fire the all-unavailable whole-panel warn
@@ -6087,8 +6087,9 @@ def test_panel_availability_consistency():
     with tempfile.TemporaryDirectory() as td:
         proj = Path(td)
         _write_cfg(proj,
-                   '[seats.codex]\navailable = false\n'
-                   '[seats.codex-luna]\navailable = false\n'
+                   '[seats.astra]\navailable = false\n'
+                   '[seats.sol]\navailable = false\n'
+                   '[seats.luna]\navailable = false\n'
                    '[seats.cursor-auto]\navailable = false\n'
                    '[seats.cursor-composer]\navailable = false\n')
         _write_plan(proj)
@@ -6108,8 +6109,9 @@ def test_panel_availability_consistency():
     with tempfile.TemporaryDirectory() as td:
         proj = Path(td)
         _write_cfg(proj,
-                   '[seats.codex]\navailable = false\n'
-                   '[seats.codex-luna]\navailable = false\n'
+                   '[seats.astra]\navailable = false\n'
+                   '[seats.sol]\navailable = false\n'
+                   '[seats.luna]\navailable = false\n'
                    '[seats.cursor-auto]\navailable = false\n'
                    '[seats.cursor-composer]\navailable = false\n'
                    '[seats.opus]\navailable = false\n'
@@ -6121,7 +6123,7 @@ def test_panel_availability_consistency():
         obj = json.loads(rp.stdout)
         check("review-prep disabling EVERY seat -> whole-panel fallback restores the unfiltered panel",
               rp.returncode == 0
-              and obj["subprocess_seats"] == ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["astra", "sol", "luna", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"],
               "unfiltered full restored", str(obj))
         check("review-prep all-unavailable -> the whole-panel fallback warn fires once",
@@ -6138,8 +6140,9 @@ def test_panel_availability_consistency():
     with tempfile.TemporaryDirectory() as td:
         proj = Path(td)
         _write_cfg(proj,
-                   '[seats.codex]\navailable = false\n'
-                   '[seats.codex-luna]\navailable = false\n'
+                   '[seats.astra]\navailable = false\n'
+                   '[seats.sol]\navailable = false\n'
+                   '[seats.luna]\navailable = false\n'
                    '[seats.cursor-auto]\navailable = false\n'
                    '[seats.cursor-composer]\navailable = false\n')
         _write_plan(proj)
@@ -6166,7 +6169,7 @@ def test_review_prep():
         tdp = Path(td)
         _write_plan(tdp)
         proc = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex,cursor",
+            ["review-prep", "plan.md", "--seats", "sol,cursor",
              "--session-id", "s1", "--task-seats", "opus,sonnet"],
             cwd=td, timeout=30)
         obj = None
@@ -6200,7 +6203,7 @@ def test_review_prep():
         _write_plan(tdp)
         # Plain id: session_segment == the id (idempotent), a clean-case control.
         proc = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex", "--session-id", "seg1"],
+            ["review-prep", "plan.md", "--seats", "sol", "--session-id", "seg1"],
             cwd=td, timeout=30)
         obj = json.loads(proc.stdout)
         check("review-prep JSON exposes session_segment == session_segment(id) (plain id)",
@@ -6213,7 +6216,7 @@ def test_review_prep():
         raw_id = "../ev!l/x"
         expected_seg = _rr_seg.session_segment(raw_id)
         proc = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex", "--session-id", raw_id],
+            ["review-prep", "plan.md", "--seats", "sol", "--session-id", raw_id],
             cwd=td, timeout=30)
         obj = json.loads(proc.stdout)
         seg = obj.get("session_segment")
@@ -6231,7 +6234,7 @@ def test_review_prep():
         _write_plan(tdp)
         # group `cursor` expands; native Claude seats stay out of subprocess_seats.
         proc = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex,cursor,opus,sonnet",
+            ["review-prep", "plan.md", "--seats", "sol,cursor,opus,sonnet",
              "--session-id", "s2", "--task-seats", "opus,sonnet"],
             cwd=td, timeout=30)
         obj = json.loads(proc.stdout)
@@ -6240,14 +6243,14 @@ def test_review_prep():
         _cursor = set(_seatcat.group_tokens()["cursor"])
         check("review-prep subprocess_seats are host-resolved external seats (no opus/sonnet)",
               proc.returncode == 0 and "opus" not in subs and "sonnet" not in subs
-              and "codex" in subs and any(s in _cursor for s in subs),
+              and "sol" in subs and any(s in _cursor for s in subs),
               "host-resolved external seats only", str(subs))
         check("review-prep task_seats echoes --task-seats verbatim",
               obj["task_seats"] == ["opus", "sonnet"], "['opus','sonnet']",
               str(obj["task_seats"]))
         # nonsense labels echo unchanged — NEVER registry-filtered.
         proc = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex",
+            ["review-prep", "plan.md", "--seats", "sol",
              "--session-id", "s2b", "--task-seats", "foo,bar"],
             cwd=td, timeout=30)
         obj = json.loads(proc.stdout)
@@ -6255,7 +6258,7 @@ def test_review_prep():
               obj["task_seats"] == ["foo", "bar"], "['foo','bar']", str(obj["task_seats"]))
         # omitted --task-seats -> [].
         proc = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex", "--session-id", "s2c"],
+            ["review-prep", "plan.md", "--seats", "sol", "--session-id", "s2c"],
             cwd=td, timeout=30)
         obj = json.loads(proc.stdout)
         check("review-prep omitted --task-seats -> []",
@@ -6295,7 +6298,7 @@ def test_review_prep():
         tdp = Path(td)
         _write_plan(tdp)
         prep = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex",
+            ["review-prep", "plan.md", "--seats", "sol",
              "--session-id", "pa"], cwd=td, timeout=30)
         obj = json.loads(prep.stdout)
         prep_f = tdp / obj["prompt_path"]
@@ -6316,7 +6319,7 @@ def test_review_prep():
         tdp = Path(td)
         _write_plan(tdp)
         prep = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex",
+            ["review-prep", "plan.md", "--seats", "sol",
              "--session-id", "pa", "--inline-diff"], cwd=td, timeout=30)
         stage = _run_dispatcher(
             ["render", "plan.md", "--mode", "review", "--stage",
@@ -6338,7 +6341,7 @@ def test_review_prep():
         _init_repo(tda)                                   # commits a.txt=hello
         (Path(tda) / "a.txt").write_text("hello\nchanged\n")
         prep = _run_dispatcher(
-            ["review-prep", "working-tree", "--seats", "codex", "--session-id", "wa"],
+            ["review-prep", "working-tree", "--seats", "sol", "--session-id", "wa"],
             cwd=tda, timeout=30)
         obj = json.loads(prep.stdout) if prep.returncode == 0 else {}
         prep_f = Path(tda) / obj.get("prompt_path", "missing")
@@ -6373,7 +6376,7 @@ def test_review_prep():
         """)
         env = path_with(bins)
         proc = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex", "--session-id", "s4",
+            ["review-prep", "plan.md", "--seats", "sol", "--session-id", "s4",
              "--task-seats", "opus,sonnet"], cwd=td, env=env, timeout=30)
         obj = json.loads(proc.stdout) if proc.returncode == 0 else {}
         run_d = tdp / obj.get("run_dir", "?")
@@ -6401,13 +6404,13 @@ def test_review_prep():
         tdp = Path(td)
         _write_plan(tdp)
         ph = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex",
+            ["review-prep", "plan.md", "--seats", "sol",
              "--session-id", "<session-id>"], cwd=td, timeout=30)
         check("review-prep rejects an unsubstituted <session-id> placeholder (nonzero)",
               ph.returncode != 0 and "placeholder" in ph.stderr.lower(),
               "nonzero + placeholder", f"rc={ph.returncode} err={ph.stderr[:150]}")
         trav = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex",
+            ["review-prep", "plan.md", "--seats", "sol",
              "--session-id", "../../x"], cwd=td, timeout=30)
         # traversal id sanitizes/collapses to .crew/reviews/x (contained), not a
         # raise; the run dir nests under the CONTAINED session dir.
@@ -6472,7 +6475,7 @@ def test_review_prep():
         proc, obj = _prep(["--panel", "full", "--session-id", "pf"], td)
         check("review-prep --panel full -> default subprocess subset + task_seats/models",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["astra", "sol", "luna", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"]
               and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"},
               "full preset split", str(obj))
@@ -6521,10 +6524,10 @@ def test_review_prep():
     #     unknown name — a removal regression guard.
     with tempfile.TemporaryDirectory() as td:
         _write_plan(Path(td))
-        proc, obj = _prep(["--seats", "codex,opus,opus-4.6", "--session-id", "ms"], td)
-        check("review-prep --seats codex,opus,opus-4.6: the REMOVED opus-4.6 seat is dropped",
+        proc, obj = _prep(["--seats", "sol,opus,opus-4.6", "--session-id", "ms"], td)
+        check("review-prep --seats sol,opus,opus-4.6: the REMOVED opus-4.6 seat is dropped",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex"]
+              and obj["subprocess_seats"] == ["sol"]
               and obj["task_seats"] == ["opus"]
               and obj["task_seat_models"] == {"opus": "opus"},
               "opus-4.6 dropped from both lists", str(obj))
@@ -6533,10 +6536,10 @@ def test_review_prep():
     #      name (a first-class alias — no MODEL_OVERRIDES entry).
     with tempfile.TemporaryDirectory() as td:
         _write_plan(Path(td))
-        proc, obj = _prep(["--seats", "codex,fable", "--session-id", "fs"], td)
-        check("review-prep --seats codex,fable: fable is a task seat pinned model='fable'",
+        proc, obj = _prep(["--seats", "sol,fable", "--session-id", "fs"], td)
+        check("review-prep --seats sol,fable: fable is a task seat pinned model='fable'",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex"]
+              and obj["subprocess_seats"] == ["sol"]
               and obj["task_seats"] == ["fable"]
               and obj["task_seat_models"] == {"fable": "fable"},
               "fable task seat, own-name pin", str(obj))
@@ -6545,10 +6548,10 @@ def test_review_prep():
     #     _resolve_seats's drop behavior); exit 0.
     with tempfile.TemporaryDirectory() as td:
         _write_plan(Path(td))
-        proc, obj = _prep(["--seats", "codex,opus,bogus", "--session-id", "us"], td)
-        check("review-prep --seats codex,opus,bogus drops 'bogus' from BOTH lists (exit 0)",
+        proc, obj = _prep(["--seats", "sol,opus,bogus", "--session-id", "us"], td)
+        check("review-prep --seats sol,opus,bogus drops 'bogus' from BOTH lists (exit 0)",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex"]
+              and obj["subprocess_seats"] == ["sol"]
               and obj["task_seats"] == ["opus"]
               and obj["task_seat_models"] == {"opus": "opus"}
               and "bogus" not in obj["subprocess_seats"]
@@ -6569,7 +6572,7 @@ def test_review_prep():
         bo_prefix = str(Path(td).resolve() / ".crew" / "reviews" / "bo" / "run-")
         check("review-prep both --panel and --seats omitted + no config -> built-in 'full' (subprocess AND task seats)",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["astra", "sol", "luna", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus", "sonnet"]
               and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"}
               and obj["prompt_path"].startswith(bo_prefix)
@@ -6584,16 +6587,16 @@ def test_review_prep():
         proc, obj = _prep(["--panel", "full", "--task-seats", "opus", "--session-id", "ov1"], td)
         check("review-prep --panel full --task-seats opus -> task list overridden to ['opus']",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
+              and obj["subprocess_seats"] == ["astra", "sol", "luna", "cursor-auto", "cursor-composer"]
               and obj["task_seats"] == ["opus"]
               and obj["task_seat_models"] == {"opus": "opus"},
               "task-seats override", str(obj))
     with tempfile.TemporaryDirectory() as td:
         _write_plan(Path(td))
-        proc, obj = _prep(["--panel", "full", "--seats", "codex", "--session-id", "ov2"], td)
-        check("review-prep --panel full --seats codex keeps the panel's native seats",
+        proc, obj = _prep(["--panel", "full", "--seats", "sol", "--session-id", "ov2"], td)
+        check("review-prep --panel full --seats sol keeps the panel's native seats",
               proc.returncode == 0 and obj is not None
-              and obj["subprocess_seats"] == ["codex"]
+              and obj["subprocess_seats"] == ["sol"]
               and obj["task_seats"] == ["opus", "sonnet"]
               and obj["task_seat_models"] == {"opus": "opus", "sonnet": "sonnet"},
               "explicit subprocess seat plus panel native seats", str(obj))
@@ -6685,15 +6688,15 @@ def test_debate_argv_input_errors():
         roster_cases = (
             (
                 "explicit seats alone",
-                ["debate", "--session-id", "argv-seats-alone", "--seats", "codex",
+                ["debate", "--session-id", "argv-seats-alone", "--seats", "sol",
                  "--", "question"],
-                ["codex"],
+                ["sol"],
             ),
             (
                 "explicit seats plus panel",
                 ["debate", "--session-id", "argv-seats", "--panel", "solo",
-                 "--seats", "codex", "--", "question"],
-                ["codex"],
+                 "--seats", "sol", "--", "question"],
+                ["sol"],
             ),
             (
                 "panel alone",
@@ -6795,14 +6798,14 @@ def test_panel_catalog():
         # hand-literal so a derivation-logic bug (wrong order / wrong filter) fails
         # NAMING it, not just when it drifts in lockstep with the panels literal.
         catalog = seats.merged_catalog()
-        check("_resolve_seats(None) == the built-in four (order pinned)",
+        check("_resolve_seats(None) == the built-in five (order pinned)",
               builtin_four
-              == ["codex", "codex-luna", "cursor-auto", "cursor-composer"],
-              "['codex', 'codex-luna', 'cursor-auto', 'cursor-composer']",
+              == ["astra", "sol", "luna", "cursor-auto", "cursor-composer"],
+              "['astra', 'sol', 'luna', 'cursor-auto', 'cursor-composer']",
               str(builtin_four))
         check("premium_off_seats() == the opt-in SET (no dupes/drops)",
               set(seats.premium_off_seats())
-              == {"cursor-glm", "cursor-gpt", "cursor-gemini", "cursor-grok", "codex-terra"}
+              == {"cursor-glm", "cursor-gpt", "cursor-gemini", "cursor-grok", "terra"}
               and len(seats.premium_off_seats()) == 5,
               "5 opt-in seats", str(seats.premium_off_seats()))
         # opt_in agreement: the derived sets tie back to the one flag.
@@ -6813,7 +6816,7 @@ def test_panel_catalog():
         check("premium_off_seats() == {subprocess seats with opt_in=True}",
               set(seats.premium_off_seats()) == _sub_opt,
               "opt_in True set", str(sorted(set(seats.premium_off_seats()))))
-        check("the built-in four == {subprocess seats with opt_in=False}",
+        check("the built-in five == {subprocess seats with opt_in=False}",
               set(builtin_four)
               == {n for n, s in catalog.items()
                   if s.kind.model_rule == "free" and not s.opt_in},
@@ -6828,9 +6831,9 @@ def test_panel_catalog():
               panels["solo"] == ["opus"], "['opus']", str(panels["solo"]))
         check("cursor == ['cursor'] (literal group token, unexpanded)",
               panels["cursor"] == ["cursor"], "['cursor']", str(panels["cursor"]))
-        check("quick panel is codex+sonnet",
-              panels["quick"] == ["codex", "sonnet"],
-              "['codex', 'sonnet']", str(panels["quick"]))
+        check("quick panel is astra+sol+sonnet",
+              panels["quick"] == ["astra", "sol", "sonnet"],
+              "['astra', 'sol', 'sonnet']", str(panels["quick"]))
 
     # NO-PROVIDER-IMPORT, enforced STRUCTURALLY in a CLEAN subprocess: importing
     # seats must NOT pull in multiagent.providers / build the registry. (A clean
@@ -6866,7 +6869,7 @@ def test_catalog_cache_reset():
         config._reset_cache_for_tests()  # every cache cold
         try:
             catalog = seats.merged_catalog()   # THE cold entry point
-            built = "codex" in catalog and "opus" in catalog
+            built = "sol" in catalog and "opus" in catalog
         except RecursionError:
             built = False
         check("merged_catalog() builds on a fully-cold cache (no recursion)",
@@ -6876,18 +6879,18 @@ def test_catalog_cache_reset():
         config._reset_cache_for_tests()
         try:
             resolved = cli._resolve_seats(None)
-            ok = resolved == ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
+            ok = resolved == ["astra", "sol", "luna", "cursor-auto", "cursor-composer"]
         except RecursionError:
             ok = False
         check("_resolve_seats(None) resolves on a cold cache (no recursion)",
-              ok, "built-in four", str(locals().get("resolved", "RecursionError")))
+              ok, "built-in five", str(locals().get("resolved", "RecursionError")))
 
     # --- One reset clears ALL SIX caches (AC 24). Warm every cache, then reset,
     # and assert each is back to its unloaded/None sentinel.
     with crew_config():
         seats.merged_catalog()          # warms catalog + premium-off + registry
         seats.premium_off_seats()
-        providers.get_provider("codex")
+        providers.get_provider("sol")
         seats._warn_once("probe", "warm the loader warn guard")
         config.default_panel()          # warms config caches + config._warned via nothing
         # Confirm they are warm before the reset.
@@ -6985,7 +6988,7 @@ def test_catalog_call_graph_invariant():
             setattr(mod, attr, _spy(mod, attr, orig))
         try:
             catalog = seats.merged_catalog()   # THE cold entry point, under the spies
-            built = "codex" in catalog and "opus" in catalog
+            built = "sol" in catalog and "opus" in catalog
         finally:
             for (mod, attr), orig in originals.items():
                 setattr(mod, attr, orig)
@@ -7038,7 +7041,7 @@ def test_review_prep_never_clears_task_seat_file():
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         _write_plan(tdp)
-        prep = ["review-prep", "plan.md", "--seats", "codex",
+        prep = ["review-prep", "plan.md", "--seats", "sol",
                 "--task-seats", "opus,sonnet", "--session-id", "S"]
 
         first = _run_dispatcher(prep, cwd=td, timeout=30)
@@ -7046,7 +7049,7 @@ def test_review_prep_never_clears_task_seat_file():
         run_d = tdp / first_obj["run_dir"]
         opus_f = run_d / "opus.json"
         sonnet_f = run_d / "sonnet.json"
-        codex_f = run_d / "codex.json"
+        codex_f = run_d / "sol.json"
 
         failed = _run_dispatcher(
             ["persist-seat", "opus", "--session-id", "S",
@@ -7082,14 +7085,14 @@ def test_review_prep_never_clears_task_seat_file():
               f"exists={sonnet_f.exists()}")
 
         codex_f.write_text(json.dumps(
-            {"name": "codex", "model": "m", "ok": False, "output": "",
+            {"name": "sol", "model": "m", "ok": False, "output": "",
              "error": "seat blew up", "elapsed": 1.0,
              "run_id": first_obj["run_id"],
              "target_sha256": first_obj["target_sha256"]}), encoding="utf-8")
         fourth = _run_dispatcher(prep, cwd=td, timeout=30)
         check("re-prep still clears a stale subprocess result",
               fourth.returncode == 0 and not codex_f.exists(),
-              "codex.json is cleared", f"rc={fourth.returncode} exists={codex_f.exists()}")
+              "sol.json is cleared", f"rc={fourth.returncode} exists={codex_f.exists()}")
 
 
 def test_build_md_executor_fork_sentinels():
@@ -7818,7 +7821,7 @@ def test_persist_seat_doc_sync():
 # ONE seat-name charset, defined ONCE, serves ALL roster matching (parse,
 # ratchet, run-tokenizer). There is no other matching mechanism. The lookaround
 # form (below) is used for counting: NEVER \b, because regex \b treats "-" as a
-# boundary, so \bcodex\b matches inside "codex-luna" and a 3-name line would
+# boundary, so \bcodex\b matches inside "luna" and a 3-name line would
 # count as 4 (the repo's earlier BSD-grep hyphen lesson). re.escape keeps a
 # future dotted seat name literal.
 import re as _roster_re  # noqa: E402
@@ -8156,18 +8159,18 @@ def _roster_drill(root: Path):
     CASES = [
         ("seat swap on README default line", "README.md",
          lambda t: mutate_roster_line(t, "default",
-             lambda l: l.replace("`codex-luna`", "`cursor-zzz`", 1))),
+             lambda l: l.replace("`luna`", "`cursor-zzz`", 1))),
         ("stale name on scripts/CLAUDE.md opt-in line",
          "plugins/crew/scripts/CLAUDE.md",
          lambda t: mutate_roster_line(t, "opt-in",
              lambda l: l.rstrip() + ", `cursor-stale`")),
         ("fake 4-name line in build.md", "plugins/crew/commands/build.md",
-         lambda t: append_line(t, "Panel seats: codex, codex-luna, opus, cursor-auto")),
+         lambda t: append_line(t, "Panel seats: sol, luna, opus, cursor-auto")),
         ("unanchored wrapped 3-current+1-stale run", "plugins/crew/commands/review.md",
-         lambda t: append_line(t, "`codex`, `cursor-auto`, `sonnet`, `stale-seat`")),
+         lambda t: append_line(t, "`sol`, `cursor-auto`, `sonnet`, `stale-seat`")),
         ("labeled+punctuated 3-current+1-stale run",
          "plugins/crew/commands/measure-twice.md",
-         lambda t: append_line(t, "Seats: codex, cursor-auto, sonnet, stale-seat.")),
+         lambda t: append_line(t, "Seats: sol, cursor-auto, sonnet, stale-seat.")),
         ("wrapped (none) on an anchored roster line", "README.md",
          lambda t: mutate_roster_line(t, "opt-in",
              lambda l: l.split(":", 1)[0] + ": `(none)`")),
@@ -8178,16 +8181,16 @@ def _roster_drill(root: Path):
              lambda l: l.replace("`, `", "`,`", 1))),
         ("unbalanced-backtick wrapper on README default line", "README.md",
          lambda t: mutate_roster_line(t, "default",
-             lambda l: l.replace("`codex`", "`codex", 1))),
+             lambda l: l.replace("`sol`", "`sol", 1))),
         # Provider-family rule: 2 same-provider seats on a NON-anchored prose line,
         # one per separator, each BELOW every old-ratchet threshold so ONLY the
         # family rule catches it (a 2-name line never reaches the >=4 / len>=3 gates).
         ("family rule ' + ' separator (2 codex)", "plugins/crew/commands/review.md",
-         lambda t: append_line(t, "The codex + codex-luna seats agree here.")),
+         lambda t: append_line(t, "The sol + luna seats agree here.")),
         ("family rule '/' separator (2 cursor)", "plugins/crew/commands/build.md",
          lambda t: append_line(t, "cursor-auto/cursor-composer routing note.")),
         ("family rule ', ' separator (2 codex)", "plugins/crew/commands/measure-twice.md",
-         lambda t: append_line(t, "codex, codex-luna together on this line.")),
+         lambda t: append_line(t, "sol, luna together on this line.")),
     ]
 
     scan_files = _roster_scan_files(root)
@@ -8380,7 +8383,7 @@ def _seed_dispatch_record(
     session_id: str = "S",
     chain: str = "build-executor",
     conversation_id: str = "existing-thread",
-    seat: str = "codex",
+    seat: str = "sol",
     provider: str = "codex",
     model: str | None = None,
 ) -> object:
@@ -8444,7 +8447,7 @@ def test_dispatch_chain():
             real_classify = continuations.classify_continuation
 
             class _ChainProvider(Provider):
-                name = "codex"
+                name = "sol"
                 supports_workspace_write = True
                 supports_continuation = True
 
@@ -8460,7 +8463,7 @@ def test_dispatch_chain():
                     )
                     phase = "resume" if continuation and continuation.conversation_id else "fresh"
                     return ProviderResult(
-                        name="codex",
+                        name="sol",
                         model="o3",
                         ok=True,
                         output="BODY",
@@ -8486,7 +8489,7 @@ def test_dispatch_chain():
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
                     rc1 = cli.cmd_dispatch(_dispatch_ns(
-                        seat="codex", task="x", json=True, out=str(out_path),
+                        seat="sol", task="x", json=True, out=str(out_path),
                         session_id="S", chain="build-executor",
                     ))
                 first = json.loads(out_path.read_text())
@@ -8494,7 +8497,7 @@ def test_dispatch_chain():
 
                 with contextlib.redirect_stdout(out):
                     rc2 = cli.cmd_dispatch(_dispatch_ns(
-                        seat="codex", task="x", json=True, out=str(out_path),
+                        seat="sol", task="x", json=True, out=str(out_path),
                         session_id="S", chain="build-executor",
                     ))
                 second = json.loads(out_path.read_text())
@@ -8505,7 +8508,7 @@ def test_dispatch_chain():
                 ):
                     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(store_err):
                         rc3 = cli.cmd_dispatch(_dispatch_ns(
-                            seat="codex", task="x", json=True, out=str(out_path),
+                            seat="sol", task="x", json=True, out=str(out_path),
                             session_id="S", chain="build-executor",
                         ))
                 failed_store = json.loads(out_path.read_text())
@@ -8578,7 +8581,7 @@ def test_dispatch_chain():
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
                 rc = cli.cmd_dispatch(_dispatch_ns(
-                    seat="codex", task="x", json=True, chain="build-executor",
+                    seat="sol", task="x", json=True, chain="build-executor",
                 ))
         finally:
             if env_saved is None:
@@ -8628,7 +8631,7 @@ def test_dispatch_chain_failure_invariants():
         calls = []
 
         class _TombstoneFailure(Provider):
-            name = "codex"
+            name = "sol"
             supports_workspace_write = True
             supports_continuation = True
 
@@ -8646,7 +8649,7 @@ def test_dispatch_chain_failure_invariants():
                      continuations, "invalidate", side_effect=OSError("locked"),
                  ), contextlib.redirect_stderr(err):
                 rc = cli.cmd_dispatch(_dispatch_ns(
-                    seat="codex", task="x", json=True, out=str(repo / "out.json"),
+                    seat="sol", task="x", json=True, out=str(repo / "out.json"),
                     session_id="S", chain="build-executor",
                 ))
             after = continuations.load_record("S", "build-executor")
@@ -8720,7 +8723,7 @@ def test_dispatch_chain_failure_invariants():
         prior = _seed_dispatch_record(repo)
 
         class _Unavailable(Provider):
-            name = "codex"
+            name = "sol"
             supports_workspace_write = True
             supports_continuation = True
 
@@ -8735,7 +8738,7 @@ def test_dispatch_chain_failure_invariants():
             with mock.patch("multiagent.cli.get_provider", return_value=_Unavailable()):
                 with contextlib.redirect_stdout(io.StringIO()):
                     rc = cli.cmd_dispatch(_dispatch_ns(
-                        seat="codex", task="x", json=True, out=str(out_path),
+                        seat="sol", task="x", json=True, out=str(out_path),
                         session_id="S", chain="build-executor",
                     ))
             envelope = json.loads(out_path.read_text())
@@ -8789,15 +8792,15 @@ def test_dispatch_chain_e2e_fake_clis():
             fake = f"CAPTURE = {str(capture)!r}\n" + _CODEX_CONTINUATION_FAKE
             make_fake_bin(bins, "codex", fake)
             first, first_env = _run_dispatch(
-                repo, bins, ["--seat", "codex", "--chain", "build-executor", "task"],
+                repo, bins, ["--seat", "sol", "--chain", "build-executor", "task"],
                 session="S",
             )
-            first_call = read_capture("codex", capture, first)
+            first_call = read_capture("sol", capture, first)
             second, second_env = _run_dispatch(
-                repo, bins, ["--seat", "codex", "--chain", "build-executor", "task"],
+                repo, bins, ["--seat", "sol", "--chain", "build-executor", "task"],
                 session="S",
             )
-            second_call = read_capture("codex", capture, second)
+            second_call = read_capture("sol", capture, second)
             base = repo / ".crew" / "reviews"
             record_path = continuations.chain_dir(
                 "S", "build-executor", base=base,
@@ -8922,7 +8925,7 @@ def test_dispatch_chain_e2e_fake_clis():
             )
             codex_proc, codex_env = _run_dispatch(
                 repo, bins,
-                ["--seat", "codex", "--chain", "build-executor", "task"],
+                ["--seat", "sol", "--chain", "build-executor", "task"],
                 session="S",
             )
             codex_call = json.loads(codex_capture.read_text())
@@ -8962,7 +8965,7 @@ def test_dispatch_chain_classifier_precedence():
     import unittest.mock as mock
 
     record = continuations.ContinuationRecord(
-        chain="build-executor", loop_instance_id="loop-1", seat="codex",
+        chain="build-executor", loop_instance_id="loop-1", seat="sol",
         provider="codex", model="o3", workspace="/repo", head="head",
         branch="main", index_tree="tree", conversation_id="thread-1",
         created_at="2026-01-01T00:00:00+00:00",
@@ -9088,7 +9091,7 @@ def test_dispatch_chain_classifier_precedence():
             )
 
             class _MismatchedProvider(Provider):
-                name = "codex"
+                name = "sol"
                 supports_workspace_write = True
                 supports_continuation = True
 
@@ -9097,7 +9100,7 @@ def test_dispatch_chain_classifier_precedence():
 
                 def run(self, *args, **kwargs):
                     return ProviderResult(
-                        name="codex", model="o3", ok=True, output="BODY",
+                        name="sol", model="o3", ok=True, output="BODY",
                         error=None, elapsed=0.1,
                         continuation=ContinuationOutcome(
                             capability="supported", phase="resume",
@@ -9111,7 +9114,7 @@ def test_dispatch_chain_classifier_precedence():
                 cli, "get_provider", return_value=_MismatchedProvider(),
             ), contextlib.redirect_stdout(io.StringIO()):
                 rc = cli.cmd_dispatch(_dispatch_ns(
-                    seat="codex", task="x", json=True, out=str(out_path),
+                    seat="sol", task="x", json=True, out=str(out_path),
                     session_id="S", chain="build-executor",
                 ))
             envelope = json.loads(out_path.read_text())
@@ -9193,7 +9196,7 @@ def test_dispatch_chain_reset_reason_binding_persist():
             )
 
             class _FreshProvider(Provider):
-                name = "codex"
+                name = "sol"
                 supports_workspace_write = True
                 supports_continuation = True
 
@@ -9202,7 +9205,7 @@ def test_dispatch_chain_reset_reason_binding_persist():
 
                 def run(self, *args, **kwargs):
                     return ProviderResult(
-                        name="codex", model="o3", ok=True, output="BODY",
+                        name="sol", model="o3", ok=True, output="BODY",
                         error=None, elapsed=0.1,
                         continuation=ContinuationOutcome(
                             capability="supported", phase="fresh",
@@ -9215,7 +9218,7 @@ def test_dispatch_chain_reset_reason_binding_persist():
             with mock.patch.object(cli, "get_provider", return_value=_FreshProvider()), \
                  contextlib.redirect_stdout(io.StringIO()):
                 rc = cli.cmd_dispatch(_dispatch_ns(
-                    seat="codex", task="x", json=True, out=str(out_path),
+                    seat="sol", task="x", json=True, out=str(out_path),
                     session_id="S", chain="build-executor",
                 ))
             envelope = json.loads(out_path.read_text())
@@ -9242,7 +9245,7 @@ def test_dispatch_chain_reset_reason_binding_persist():
             _seed_dispatch_record(repo, conversation_id="old-thread")
 
             class _ResumeMismatchProvider(Provider):
-                name = "codex"
+                name = "sol"
                 supports_workspace_write = True
                 supports_continuation = True
 
@@ -9251,7 +9254,7 @@ def test_dispatch_chain_reset_reason_binding_persist():
 
                 def run(self, *args, **kwargs):
                     return ProviderResult(
-                        name="codex", model="o3", ok=True, output="BODY",
+                        name="sol", model="o3", ok=True, output="BODY",
                         error=None, elapsed=0.1,
                         continuation=ContinuationOutcome(
                             capability="supported", phase="resume",
@@ -9265,7 +9268,7 @@ def test_dispatch_chain_reset_reason_binding_persist():
                 cli, "get_provider", return_value=_ResumeMismatchProvider(),
             ), contextlib.redirect_stdout(io.StringIO()):
                 rc = cli.cmd_dispatch(_dispatch_ns(
-                    seat="codex", task="x", json=True, out=str(out_path),
+                    seat="sol", task="x", json=True, out=str(out_path),
                     session_id="S", chain="build-executor",
                 ))
             envelope = json.loads(out_path.read_text())
@@ -9291,7 +9294,7 @@ def test_dispatch_chain_reset_reason_binding_persist():
             )
 
             class _UnavailableProvider(Provider):
-                name = "codex"
+                name = "sol"
                 supports_workspace_write = True
                 supports_continuation = True
 
@@ -9306,7 +9309,7 @@ def test_dispatch_chain_reset_reason_binding_persist():
                 cli, "get_provider", return_value=_UnavailableProvider(),
             ), contextlib.redirect_stdout(io.StringIO()):
                 rc = cli.cmd_dispatch(_dispatch_ns(
-                    seat="codex", task="x", json=True, out=str(out_path),
+                    seat="sol", task="x", json=True, out=str(out_path),
                     session_id="S", chain="build-executor",
                 ))
             envelope = json.loads(out_path.read_text())
@@ -9352,7 +9355,7 @@ def test_dispatch_chain_snapshot_probes():
                 calls = []
 
                 class _Provider(Provider):
-                    name = "codex"
+                    name = "sol"
                     supports_workspace_write = True
                     supports_continuation = True
 
@@ -9362,7 +9365,7 @@ def test_dispatch_chain_snapshot_probes():
                     def run(self, *args, **kwargs):
                         calls.append(kwargs)
                         return ProviderResult(
-                            name="codex", model="o3", ok=True, output="BODY",
+                            name="sol", model="o3", ok=True, output="BODY",
                             error=None, elapsed=0.1,
                             continuation=ContinuationOutcome(
                                 capability="supported", phase="fresh",
@@ -9387,7 +9390,7 @@ def test_dispatch_chain_snapshot_probes():
                         )
                     with contextlib.redirect_stderr(err):
                         rc = cli.cmd_dispatch(_dispatch_ns(
-                            seat="codex", task="x", json=True, out=str(out_path),
+                            seat="sol", task="x", json=True, out=str(out_path),
                             session_id="S", chain="build-executor",
                         ))
                 after = continuations.load_record("S", "build-executor")
@@ -9429,7 +9432,7 @@ def test_dispatch_chain_snapshot_probes():
                 calls = []
 
                 class _Provider(Provider):
-                    name = "codex"
+                    name = "sol"
                     supports_workspace_write = True
                     supports_continuation = True
 
@@ -9439,7 +9442,7 @@ def test_dispatch_chain_snapshot_probes():
                     def run(self, *args, **kwargs):
                         calls.append(kwargs)
                         return ProviderResult(
-                            name="codex", model="o3", ok=True, output="BODY",
+                            name="sol", model="o3", ok=True, output="BODY",
                             error=None, elapsed=0.1,
                             continuation=ContinuationOutcome(
                                 capability="supported", phase="fresh",
@@ -9463,7 +9466,7 @@ def test_dispatch_chain_snapshot_probes():
                         )
                     with contextlib.redirect_stdout(io.StringIO()):
                         rc = cli.cmd_dispatch(_dispatch_ns(
-                            seat="codex", task="x", json=True, out=str(out_path),
+                            seat="sol", task="x", json=True, out=str(out_path),
                             session_id="S", chain="build-executor",
                         ))
                 envelope = json.loads(out_path.read_text())
@@ -9521,7 +9524,7 @@ def test_dispatch_chain_safety_and_output():
                 calls = []
 
                 class _StoreProvider(Provider):
-                    name = "codex"
+                    name = "sol"
                     supports_workspace_write = True
                     supports_continuation = True
 
@@ -9531,7 +9534,7 @@ def test_dispatch_chain_safety_and_output():
                     def run(self, *args, **kwargs):
                         calls.append(kwargs)
                         return ProviderResult(
-                            name="codex", model="o3", ok=True,
+                            name="sol", model="o3", ok=True,
                             output="PROVIDER BODY", error=None, elapsed=0.25,
                             continuation=ContinuationOutcome(
                                 capability="supported", phase=phase,
@@ -9547,7 +9550,7 @@ def test_dispatch_chain_safety_and_output():
                          continuations, "save_record", side_effect=OSError("store failed"),
                      ), contextlib.redirect_stderr(err):
                     rc = cli.cmd_dispatch(_dispatch_ns(
-                        seat="codex", task="x", json=True, out=str(out_path),
+                        seat="sol", task="x", json=True, out=str(out_path),
                         session_id="S", chain="build-executor",
                     ))
                 envelope = json.loads(out_path.read_text())
@@ -9591,7 +9594,7 @@ def test_dispatch_chain_safety_and_output():
             observed = []
 
             class _InterruptingProvider(Provider):
-                name = "codex"
+                name = "sol"
                 supports_workspace_write = True
                 supports_continuation = True
 
@@ -9608,7 +9611,7 @@ def test_dispatch_chain_safety_and_output():
             with mock.patch.object(cli, "get_provider", return_value=_InterruptingProvider()):
                 try:
                     cli.cmd_dispatch(_dispatch_ns(
-                        seat="codex", task="x", json=True,
+                        seat="sol", task="x", json=True,
                         out=str(repo / "interrupt.json"), session_id="S",
                         chain="build-executor",
                     ))
@@ -9646,7 +9649,7 @@ def test_dispatch_chain_safety_and_output():
             state_path = repo / ".crew" / "build-state-S.json"
 
             class _RacingProvider(Provider):
-                name = "codex"
+                name = "sol"
                 supports_workspace_write = True
                 supports_continuation = True
 
@@ -9661,7 +9664,7 @@ def test_dispatch_chain_safety_and_output():
                     state["loop_instance_id"] = "loop-2"
                     state_path.write_text(json.dumps(state))
                     return ProviderResult(
-                        name="codex", model="o3", ok=True, output="EDITED BODY",
+                        name="sol", model="o3", ok=True, output="EDITED BODY",
                         error=None, elapsed=0.1,
                         continuation=ContinuationOutcome(
                             capability="supported", phase="resume",
@@ -9674,7 +9677,7 @@ def test_dispatch_chain_safety_and_output():
             with mock.patch.object(cli, "get_provider", return_value=_RacingProvider()):
                 with contextlib.redirect_stdout(io.StringIO()):
                     rc = cli.cmd_dispatch(_dispatch_ns(
-                        seat="codex", task="x", json=True, out=str(out_path),
+                        seat="sol", task="x", json=True, out=str(out_path),
                         session_id="S", chain="build-executor",
                     ))
             envelope = json.loads(out_path.read_text())
@@ -9710,7 +9713,7 @@ def test_dispatch_chain_safety_and_output():
             calls = []
 
             class _ContendedProvider(Provider):
-                name = "codex"
+                name = "sol"
                 supports_workspace_write = True
                 supports_continuation = True
 
@@ -9720,7 +9723,7 @@ def test_dispatch_chain_safety_and_output():
                 def run(self, *args, **kwargs):
                     calls.append(kwargs)
                     return ProviderResult(
-                        name="codex", model="o3", ok=True, output="BODY",
+                        name="sol", model="o3", ok=True, output="BODY",
                         error=None, elapsed=0.1,
                     )
 
@@ -9733,7 +9736,7 @@ def test_dispatch_chain_safety_and_output():
                          continuations, "DEFAULT_CHAIN_LOCK_TIMEOUT_SECONDS", 0.05,
                      ), contextlib.redirect_stderr(err):
                     rc = cli.cmd_dispatch(_dispatch_ns(
-                        seat="codex", task="x", json=True,
+                        seat="sol", task="x", json=True,
                         out=str(repo / "contended.json"), session_id="S",
                         chain="build-executor",
                     ))
@@ -9769,7 +9772,7 @@ def test_dispatch_chain_safety_and_output():
                 calls = []
 
                 class _NeverProvider(Provider):
-                    name = "codex"
+                    name = "sol"
                     supports_workspace_write = True
                     supports_continuation = True
 
@@ -9788,7 +9791,7 @@ def test_dispatch_chain_safety_and_output():
                     continuations, "_continuation_paths", side_effect=setup_error,
                 ), contextlib.redirect_stderr(err):
                     rc = cli.cmd_dispatch(_dispatch_ns(
-                        seat="codex", task="x", json=True, out=str(out_path),
+                        seat="sol", task="x", json=True, out=str(out_path),
                         session_id="S", chain="build-executor",
                     ))
                 check(
@@ -9824,7 +9827,7 @@ def test_dispatch_chain_safety_and_output():
             os.environ["CLAUDE_WORKING_DIRECTORY"] = str(repo)
             try:
                 class _HumanProvider(Provider):
-                    name = "codex"
+                    name = "sol"
                     supports_workspace_write = True
                     supports_continuation = True
 
@@ -9833,7 +9836,7 @@ def test_dispatch_chain_safety_and_output():
 
                     def run(self, *args, **kwargs):
                         return ProviderResult(
-                            name="codex", model="o3", ok=ok,
+                            name="sol", model="o3", ok=ok,
                             output="HUMAN BODY" if ok else "",
                             error=None if ok else "provider failed", elapsed=0.1,
                             continuation=ContinuationOutcome(
@@ -9853,10 +9856,10 @@ def test_dispatch_chain_safety_and_output():
                      ), \
                      contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                     rc = cli.cmd_dispatch(_dispatch_ns(
-                        seat="codex", task="x", json=False,
+                        seat="sol", task="x", json=False,
                         session_id="S", chain="build-executor",
                     ))
-                human_path = repo / ".crew" / "reviews" / "S" / "dispatch-codex.json"
+                human_path = repo / ".crew" / "reviews" / "S" / "dispatch-sol.json"
                 stream = human_path.read_text() if ok else stderr.getvalue()
                 lines = stream.splitlines()
                 status_line = f"continuation: {expected_status}"
@@ -9922,7 +9925,7 @@ def test_dispatch_chain_gates_and_regression():
         env["CLAUDE_WORKING_DIRECTORY"] = str(repo)
         env["CLAUDE_SESSION_ID"] = "environment-session"
         missing = _run_cli(
-            ["dispatch", "--seat", "codex", "--chain", "build-executor",
+            ["dispatch", "--seat", "sol", "--chain", "build-executor",
              "task", "--json"], env=env, cwd=str(repo), timeout=30,
         )
         check(
@@ -9935,7 +9938,7 @@ def test_dispatch_chain_gates_and_regression():
             f"calls={calls.read_text() if calls.exists() else ''!r}",
         )
         explicit = _run_cli(
-            ["dispatch", "--seat", "codex", "--chain", "build-executor",
+            ["dispatch", "--seat", "sol", "--chain", "build-executor",
              "task", "--json", "--session-id", "S"],
             env=env, cwd=str(repo), timeout=30,
         )
@@ -9949,7 +9952,7 @@ def test_dispatch_chain_gates_and_regression():
         )
         before_invalid = len(call_lines)
         invalid = _run_cli(
-            ["dispatch", "--seat", "codex", "--chain", "../unsafe", "task",
+            ["dispatch", "--seat", "sol", "--chain", "../unsafe", "task",
              "--json", "--session-id", "S"],
             env=env, cwd=str(repo), timeout=30,
         )
@@ -9992,7 +9995,7 @@ def test_dispatch_chain_gates_and_regression():
                 calls = []
 
                 class _NeverProvider(Provider):
-                    name = "codex"
+                    name = "sol"
                     supports_workspace_write = True
                     supports_continuation = True
 
@@ -10008,7 +10011,7 @@ def test_dispatch_chain_gates_and_regression():
                 with mock.patch.object(cli, "get_provider", return_value=_NeverProvider()), \
                      contextlib.redirect_stderr(err):
                     rc = cli.cmd_dispatch(_dispatch_ns(
-                        seat="codex", task="x", json=True, out=str(out_path),
+                        seat="sol", task="x", json=True, out=str(out_path),
                         session_id="S", chain="build-executor",
                     ))
                 check(
@@ -10040,7 +10043,7 @@ def test_dispatch_chain_gates_and_regression():
             calls = []
 
             class _LegacyProvider(Provider):
-                name = "codex"
+                name = "sol"
                 supports_workspace_write = True
                 supports_continuation = True
 
@@ -10050,7 +10053,7 @@ def test_dispatch_chain_gates_and_regression():
                 def run(self, *args, **kwargs):
                     calls.append((args, kwargs))
                     return ProviderResult(
-                        name="codex", model="o3", ok=True, output="LEGACY BODY",
+                        name="sol", model="o3", ok=True, output="LEGACY BODY",
                         error=None, elapsed=0.1,
                     )
 
@@ -10066,7 +10069,7 @@ def test_dispatch_chain_gates_and_regression():
                 "dispatch_options": None,
             }
             golden_envelope = {
-                "seat": "codex",
+                "seat": "sol",
                 "model": "o3",
                 "ok": True,
                 "output": "LEGACY BODY",
@@ -10096,7 +10099,7 @@ def test_dispatch_chain_gates_and_regression():
                  ):
                 with contextlib.redirect_stdout(io.StringIO()):
                     rc = cli.cmd_dispatch(_dispatch_ns(
-                        seat="codex", task="x", json=True, out=str(out_path),
+                        seat="sol", task="x", json=True, out=str(out_path),
                     ))
             envelope = json.loads(out_path.read_text())
             exact_fields = [
@@ -10123,7 +10126,7 @@ def test_dispatch_chain_gates_and_regression():
             with mock.patch.object(cli, "get_provider", return_value=_LegacyProvider()), \
                  contextlib.redirect_stdout(human):
                 rc_human = cli.cmd_dispatch(_dispatch_ns(
-                    seat="codex", task="x", json=False,
+                    seat="sol", task="x", json=False,
                 ))
             check(
                 "unchained human dispatch prints no continuation status line",
@@ -10142,7 +10145,7 @@ def test_dispatch_chain_gates_and_regression():
                     cli, "get_provider", return_value=_UnchainedOSErrorProvider(),
                 ), contextlib.redirect_stderr(unchained_stderr):
                     cli.cmd_dispatch(_dispatch_ns(
-                        seat="codex", task="x", json=True,
+                        seat="sol", task="x", json=True,
                     ))
             except OSError as exc:
                 unchained_error = exc
@@ -10191,7 +10194,7 @@ def test_dispatch():
     # --- Task 2: supports_workspace_write fail-closed default + explicit True ---
     check("Provider ABC default supports_workspace_write is False (fail-CLOSED)",
           Provider.supports_workspace_write is False, "False", str(Provider.supports_workspace_write))
-    for s in ("codex", "cursor-auto"):
+    for s in ("sol", "cursor-auto"):
         check(f"{s} provider opts into supports_workspace_write=True",
               get_provider(s).supports_workspace_write is True,
               "True", str(get_provider(s).supports_workspace_write))
@@ -10294,22 +10297,22 @@ def test_dispatch():
 
     # --- Task 3: config.dispatch_seat validation ---
     log_section("dispatch — config.dispatch_seat() validation")
-    with project_config('[dispatch]\nseat = "codex-terra"\n'):
-        check("[dispatch].seat=codex-terra -> 'codex-terra'",
-              config.dispatch_seat() == "codex-terra",
-              "codex-terra", repr(config.dispatch_seat()))
+    with project_config('[dispatch]\nseat = "terra"\n'):
+        check("[dispatch].seat=terra -> 'terra'",
+              config.dispatch_seat() == "terra",
+              "terra", repr(config.dispatch_seat()))
     with project_config('[dispatch]\nseat = "opus"\n'):
         check("[dispatch].seat=opus -> 'opus'", config.dispatch_seat() == "opus",
               "opus", repr(config.dispatch_seat()))
-    # `agy` joins the group tokens: with no shipped agy seat, the channel mints a
-    # token under that name, so it names a LIST of seats rather than one.
-    for bad in ("bogus", "cursor", "agy"):
+    # `agy` and `codex` join the group tokens: with no shipped seat of either
+    # name, each channel mints a token that names a LIST of seats rather than one.
+    for bad in ("bogus", "cursor", "agy", "codex"):
         with project_config(f'[dispatch]\nseat = "{bad}"\n'):
             check(f"[dispatch].seat={bad} (task/unknown/group) -> None (warn once)",
                   config.dispatch_seat() is None, "None", repr(config.dispatch_seat()))
-    with crew_config(project='[dispatch]\nseat = "codex-terra"\n', glob='[dispatch]\nseat = "codex"\n'):
-        check("[dispatch].seat per-repo (codex-terra) wins over global (codex)",
-              config.dispatch_seat() == "codex-terra", "codex-terra", repr(config.dispatch_seat()))
+    with crew_config(project='[dispatch]\nseat = "terra"\n', glob='[dispatch]\nseat = "sol"\n'):
+        check("[dispatch].seat per-repo (terra) wins over global (sol)",
+              config.dispatch_seat() == "terra", "terra", repr(config.dispatch_seat()))
 
     # --- Task 4: git tri-state helpers + full envelope scenarios ---
     log_section("dispatch — git guard helpers + envelope scenarios")
@@ -10390,8 +10393,8 @@ def test_dispatch():
         make_fake_bin(bins, "codex", _fake_codex())
         repo = Path(td) / "r1"; repo.mkdir(); _init_repo(str(repo))
         proc, env = _run_dispatch(repo, bins, ["make a file"])
-        check("dispatch noop: exit 0, ok=true, seat=codex, all *_changed typed false",
-              proc.returncode == 0 and env and env["ok"] is True and env["seat"] == "codex"
+        check("dispatch noop: exit 0, ok=true, seat=luna (built-in default), all *_changed typed false",
+              proc.returncode == 0 and env and env["ok"] is True and env["seat"] == "luna"
               and env["head_moved"] is False and env["staged_changed"] is False
               and env["branch_changed"] is False
               and isinstance(env["head_moved"], bool) and isinstance(env["staged_changed"], bool)
@@ -10504,20 +10507,20 @@ def test_dispatch():
                         env=env_d, cwd=str(repo), timeout=30)
         last = [l for l in proc.stdout.splitlines() if l.strip()][-1]
         check("dispatch --session-id derives + PRINTS dispatch-<seat>.json path (== written file)",
-              proc.returncode == 0 and last.endswith("dispatch-codex.json")
+              proc.returncode == 0 and last.endswith("dispatch-luna.json")
               and (repo / last).exists()
-              and json.loads((repo / last).read_text())["seat"] == "codex",
-              "printed path == written dispatch-codex.json", f"{proc.returncode}: {last!r}")
+              and json.loads((repo / last).read_text())["seat"] == "luna",
+              "printed path == written dispatch-luna.json", f"{proc.returncode}: {last!r}")
 
-        # (9) Default-seat routing via [dispatch].seat config -> codex-terra, an
+        # (9) Default-seat routing via [dispatch].seat config -> terra, an
         #     opt-in seat no built-in default picks, served by the fake codex.
         repo = Path(td) / "r9"; repo.mkdir(); _init_repo(str(repo))
         proj = Path(td) / "proj"; (proj / ".crew").mkdir(parents=True)
-        (proj / ".crew" / "config.toml").write_text('[dispatch]\nseat = "codex-terra"\n')
+        (proj / ".crew" / "config.toml").write_text('[dispatch]\nseat = "terra"\n')
         home = Path(td) / "home"; home.mkdir()
         proc, env = _run_dispatch(repo, bins, ["x"], project_dir=proj, home=str(home))
-        check("dispatch [dispatch].seat=codex-terra routes (no --seat) -> envelope seat=codex-terra",
-              env and env["seat"] == "codex-terra", "seat=codex-terra", str(env))
+        check("dispatch [dispatch].seat=terra routes (no --seat) -> envelope seat=terra",
+              env and env["seat"] == "terra", "seat=terra", str(env))
 
         # (9b) HERMETICITY REGRESSION (billable-leak incident): a REAL
         #      ~/.crew-config.toml in the parent process's HOME must NEVER leak
@@ -10538,9 +10541,9 @@ def test_dispatch():
             else:
                 os.environ["HOME"] = saved_home
         check("dispatch ignores the PARENT process's real ~/.crew-config.toml "
-              "(no home= -> neutral HOME -> builtin codex, NOT cursor-glm)",
-              env and env["seat"] == "codex" and env["ok"] is True,
-              "seat=codex ok=true (fake bin ran)", str(env))
+              "(no home= -> neutral HOME -> builtin luna, NOT cursor-glm)",
+              env and env["seat"] == "luna" and env["ok"] is True,
+              "seat=luna ok=true (fake bin ran)", str(env))
 
         # (10) DETACH (checkout <sha>, same commit) -> branch_changed=true via the
         #      '<detached>' sentinel, head_moved=false (BLOCKING-1: a None branch
@@ -10676,14 +10679,14 @@ def test_dispatch():
 
             # Unavailable-but-known-writable seat -> skipped ok=false envelope, exit 0, path printed.
             class _Unavail(Provider):
-                name = "codex"
+                name = "sol"
                 supports_workspace_write = True
                 def is_available(self): return (False, "codex not found on PATH")
                 def run(self, *a, **k): raise AssertionError("seat ran despite unavailable")
             out = io.StringIO()
             with mock.patch("multiagent.cli.get_provider", return_value=_Unavail()):
                 with contextlib.redirect_stdout(out):
-                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=True,
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="sol", task="x", json=True,
                                                         session_id="usess"))
             lines = [l for l in out.getvalue().splitlines() if l.strip()]
             envj = json.loads(Path(lines[-1]).read_text())
@@ -10691,7 +10694,7 @@ def test_dispatch():
                   rc == 0 and envj["ok"] is False and "skipped" in (envj["error"] or "")
                   and envj["head_moved"] is False and envj["staged_changed"] is False
                   and envj["branch_changed"] is False
-                  and lines[-1].endswith("dispatch-codex.json"),
+                  and lines[-1].endswith("dispatch-sol.json"),
                   "exit0 ok=false skipped path-printed", f"rc={rc} {envj}")
 
             # Non-writable channel -> fail fast exit 2, seat never probed/run.
@@ -10704,7 +10707,7 @@ def test_dispatch():
             err = io.StringIO()
             try:
                 with contextlib.redirect_stderr(err):
-                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=True))
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="sol", task="x", json=True))
             finally:
                 channels.set_capabilities(None)
             check("dispatch non-writable seat -> exit 2, fails fast (no is_available/run)",
@@ -10713,31 +10716,31 @@ def test_dispatch():
 
             # Null-model human header omits the (…) parens.
             class _OkNullModel(Provider):
-                name = "codex"
+                name = "sol"
                 supports_workspace_write = True
                 def is_available(self): return (True, "")
                 def run(self, *a, **k):
-                    return ProviderResult(name="codex", model=None, ok=True,
+                    return ProviderResult(name="sol", model=None, ok=True,
                                           output="BODY", error=None, elapsed=0.1)
             out = io.StringIO()
             with mock.patch("multiagent.cli.get_provider", return_value=_OkNullModel()):
                 with contextlib.redirect_stdout(out):
-                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="sol", task="x", json=False))
             head = out.getvalue().splitlines()[0]
-            check("dispatch human header null model -> 'dispatch: codex' (no parens)",
-                  rc == 0 and head == "dispatch: codex", "dispatch: codex", repr(head))
+            check("dispatch human header null model -> 'dispatch: sol' (no parens)",
+                  rc == 0 and head == "dispatch: sol", "dispatch: sol", repr(head))
 
             class _OkModel(_OkNullModel):
                 def run(self, *a, **k):
-                    return ProviderResult(name="codex", model="gpt-x", ok=True,
+                    return ProviderResult(name="sol", model="gpt-x", ok=True,
                                           output="BODY", error=None, elapsed=0.1)
             out = io.StringIO()
             with mock.patch("multiagent.cli.get_provider", return_value=_OkModel()):
                 with contextlib.redirect_stdout(out):
-                    cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+                    cli.cmd_dispatch(_dispatch_ns(seat="sol", task="x", json=False))
             head = out.getvalue().splitlines()[0]
-            check("dispatch human header with model -> 'dispatch: codex (gpt-x)'",
-                  head == "dispatch: codex (gpt-x)", "dispatch: codex (gpt-x)", repr(head))
+            check("dispatch human header with model -> 'dispatch: sol (gpt-x)'",
+                  head == "dispatch: sol (gpt-x)", "dispatch: sol (gpt-x)", repr(head))
 
             # BLOCKING-1: human-mode warnings appear LAST and in the fixed D4
             # relative order HEAD -> staged -> branch. The staged warning ALWAYS
@@ -10747,11 +10750,11 @@ def test_dispatch():
             # with git status") so it is non-misleading on a pure commit too.
             STAGED_MARK = "staged/index content changed"
             class _OkBody(Provider):
-                name = "codex"
+                name = "sol"
                 supports_workspace_write = True
                 def is_available(self): return (True, "")
                 def run(self, *a, **k):
-                    return ProviderResult(name="codex", model=None, ok=True,
+                    return ProviderResult(name="sol", model=None, ok=True,
                                           output="BODY", error=None, elapsed=0.1)
             # Slice A: head_moved + staged + branch ALL change (the
             # commit-then-additional-stage shape) -> ALL THREE warn, in the fixed
@@ -10762,7 +10765,7 @@ def test_dispatch():
                  mock.patch("multiagent.cli._git_staged", side_effect=["s1", "s2"]), \
                  mock.patch("multiagent.cli._git_branch", side_effect=["main", "tmp"]):
                 with contextlib.redirect_stdout(out):
-                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="sol", task="x", json=False))
             wlines = out.getvalue().splitlines()
             warn_idx = [i for i, l in enumerate(wlines) if l.startswith("WARNING:")]
             body_idx = next(i for i, l in enumerate(wlines) if l == "BODY")
@@ -10782,7 +10785,7 @@ def test_dispatch():
                  mock.patch("multiagent.cli._git_staged", side_effect=["s1", "s2"]), \
                  mock.patch("multiagent.cli._git_branch", side_effect=["main", "tmp"]):
                 with contextlib.redirect_stdout(out):
-                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="sol", task="x", json=False))
             wlines = out.getvalue().splitlines()
             warn_idx = [i for i, l in enumerate(wlines) if l.startswith("WARNING:")]
             check("dispatch human warnings: independent stage-only DOES warn, staged->branch order",
@@ -10800,7 +10803,7 @@ def test_dispatch():
                  mock.patch("multiagent.cli._git_staged", side_effect=["s1", "s2"]), \
                  mock.patch("multiagent.cli._git_branch", side_effect=["main", "main"]):
                 with contextlib.redirect_stdout(out):
-                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="sol", task="x", json=False))
             wlines = out.getvalue().splitlines()
             staged_line = next((l for l in wlines if STAGED_MARK in l), "")
             check("dispatch human: pure commit warns HEAD AND surfaces staged (worded non-misleadingly) (BLOCKING-1a)",
@@ -10820,7 +10823,7 @@ def test_dispatch():
                  mock.patch("multiagent.cli._git_staged", side_effect=["s1", "s3"]), \
                  mock.patch("multiagent.cli._git_branch", side_effect=["main", "main"]):
                 with contextlib.redirect_stdout(out):
-                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="sol", task="x", json=False))
             wlines = out.getvalue().splitlines()
             check("dispatch human: commit-then-extra-stage surfaces the staged warning (BLOCKING-1b)",
                   rc == 0 and any("moved HEAD" in l for l in wlines)
@@ -10836,7 +10839,7 @@ def test_dispatch():
                  mock.patch("multiagent.cli._git_staged", side_effect=["s1", "s1"]), \
                  mock.patch("multiagent.cli._git_branch", side_effect=[cli._DETACHED, "main"]):
                 with contextlib.redirect_stdout(out):
-                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="sol", task="x", json=False))
             wlines = out.getvalue().splitlines()
             bwarn = next((l for l in wlines if "changed branch" in l), "")
             check("dispatch human: detached-before recovery uses 'git checkout --detach <head_before>' (BLOCKING-2)",
@@ -10854,7 +10857,7 @@ def test_dispatch():
                  mock.patch("multiagent.cli._git_staged", side_effect=["s1", "s1"]), \
                  mock.patch("multiagent.cli._git_branch", side_effect=[cli._DETACHED, "main"]):
                 with contextlib.redirect_stdout(out):
-                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="sol", task="x", json=False))
             wlines = out.getvalue().splitlines()
             bwarn = next((l for l in wlines if "changed branch" in l), "")
             check("dispatch human: detached-before recovery null-guards head_before (no literal '--detach None') (MINOR-1)",
@@ -10865,17 +10868,17 @@ def test_dispatch():
             # MINOR-2: human-mode failure with -o still WRITES the envelope file
             # (parity with the JSON path) and keeps exit 1.
             class _Fail(Provider):
-                name = "codex"
+                name = "sol"
                 supports_workspace_write = True
                 def is_available(self): return (True, "")
                 def run(self, *a, **k):
-                    return ProviderResult(name="codex", model=None, ok=False,
+                    return ProviderResult(name="sol", model=None, ok=False,
                                           output="", error="seat blew up", elapsed=0.1)
             ofile = str(repo / "fail-envelope.json")
             err = io.StringIO()
             with mock.patch("multiagent.cli.get_provider", return_value=_Fail()):
                 with contextlib.redirect_stderr(err):
-                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False, out=ofile))
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="sol", task="x", json=False, out=ofile))
             wrote = Path(ofile).exists()
             envf = json.loads(Path(ofile).read_text()) if wrote else None
             check("dispatch human-mode failure with -o WRITES the envelope file, exit 1 (MINOR-2 parity)",
@@ -10894,7 +10897,7 @@ def test_dispatch():
                  mock.patch("multiagent.cli._git_staged", side_effect=["s1", "s2"]), \
                  mock.patch("multiagent.cli._git_branch", side_effect=["main", "main"]):
                 with contextlib.redirect_stderr(err):
-                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="sol", task="x", json=False))
             fail_out = err.getvalue()
             check("dispatch FAILURE path prints HEAD + staged guard warnings, not just the error (1.1)",
                   rc == 1 and "seat blew up" in fail_out
@@ -10913,7 +10916,7 @@ def test_dispatch():
                  mock.patch("multiagent.cli._git_staged", side_effect=["s1", "s1"]), \
                  mock.patch("multiagent.cli._git_branch", side_effect=["main", "main"]):
                 with contextlib.redirect_stderr(err):
-                    rc = cli.cmd_dispatch(_dispatch_ns(seat="codex", task="x", json=False))
+                    rc = cli.cmd_dispatch(_dispatch_ns(seat="sol", task="x", json=False))
             clean_out = err.getvalue()
             check("dispatch FAILURE path with no guard trip prints NO warnings (1.1 non-vacuity)",
                   rc == 1 and "seat blew up" in clean_out
@@ -11103,8 +11106,8 @@ def test_dispatch_options():
           res == {} and "provider kind" in err and "agy, claude-code, codex, cursor" in err,
           "kind-not-seat warn naming kinds", f"{res} err={err!r}")
 
-    res, err, _ = _opts("codex", project='[dispatch.codex-luna]\nprofile = "x"\n')
-    check("seat-name table [dispatch.codex-luna] warns: keyed by kind, NOT seat name",
+    res, err, _ = _opts("codex", project='[dispatch.luna]\nprofile = "x"\n')
+    check("seat-name table [dispatch.luna] warns: keyed by kind, NOT seat name",
           res == {} and "not seat name" in err and "agy, claude-code, codex, cursor" in err,
           "kind-not-seat warn", f"{res} err={err!r}")
 
@@ -11141,16 +11144,16 @@ def test_dispatch_options():
           "both warn keys present", str(warned))
 
     # Coexistence with [dispatch].seat: both getters read their own keys, no cross-warn.
-    with crew_config(project='[dispatch]\nseat = "codex"\n\n[dispatch.codex]\nprofile = "x"\n'):
+    with crew_config(project='[dispatch]\nseat = "sol"\n\n[dispatch.codex]\nprofile = "x"\n'):
         err_io = StringIO()
         with contextlib.redirect_stderr(err_io):
             seat_res = config.dispatch_seat()
             res = config.dispatch_provider_options("codex")
         err = err_io.getvalue()
     check("coexistence: [dispatch].seat AND [dispatch.codex] resolve side by side, no warns",
-          seat_res == "codex" and res == {"profile": "x"} and not err
+          seat_res == "sol" and res == {"profile": "x"} and not err
           and "seat" not in err,
-          "seat=codex + {'profile': 'x'}, silent", f"{seat_res} {res} err={err!r}")
+          "seat=sol + {'profile': 'x'}, silent", f"{seat_res} {res} err={err!r}")
 
     res, err, _ = _opts("cursor", project='[dispatch.cursor]\nforce = true\n')
     check("cursor force=true -> {'force': True}", res == {"force": True},
@@ -11296,9 +11299,9 @@ def test_dispatch_options():
         "staged_before", "staged_after", "staged_changed",
         "branch_before", "branch_after", "branch_changed", "guard_warnings",
     }
-    # codex-luna is the ALIAS-seat proof: a seat named codex-luna reads
+    # luna is the ALIAS-seat proof: a seat named luna reads
     # [dispatch.codex] via its provider KIND (seat_spec().provider).
-    for seat_name, prof in (("codex", "pp"), ("codex-luna", "pl")):
+    for seat_name, prof in (("sol", "pp"), ("luna", "pl")):
         with crew_config(project=f'[dispatch.codex]\nprofile = "{prof}"\n') as proj:
             d = proj / "bins"
             d.mkdir()
@@ -11407,18 +11410,18 @@ def test_dispatch_options():
         'default_panel = "full"\n'
         "\n"
         "[dispatch]\n"
-        'seat = "codex"\n'
+        'seat = "sol"\n'
         "\n"
         "[dispatch.codex]\n"
         'profile = "p"\n'
     )
     with crew_config(glob=seeded_global):
         rc, out, err = _run_parsed(["scaffold-config", "--repo", "--out", "-",
-                                    "--dispatch-seat", "codex-terra"])
+                                    "--dispatch-seat", "terra"])
         parsed = _toml.loads(out)
         check("seeded --repo: --dispatch-seat edit lands under [dispatch] proper (section-distinct)",
-              rc == 0 and parsed.get("dispatch", {}).get("seat") == "codex-terra",
-              "dispatch.seat == codex-terra", str(parsed.get("dispatch")))
+              rc == 0 and parsed.get("dispatch", {}).get("seat") == "terra",
+              "dispatch.seat == terra", str(parsed.get("dispatch")))
         check("seeded --repo: the real [dispatch.codex] table survives byte-verbatim",
               parsed["dispatch"]["codex"]["profile"] == "p"
               and '[dispatch.codex]\nprofile = "p"' in out,
@@ -11696,9 +11699,9 @@ def test_repair_seat_name_form():
         env = _neutral_env()
         env.pop("CLAUDE_SESSION_ID", None)
 
-        # Mint a real run (plan target needs no git repo), codex as the member.
+        # Mint a real run (plan target needs no git repo), sol as the member.
         prep = _run_cli(
-            ["review-prep", "plan.md", "--seats", "codex", "--task-seats", "",
+            ["review-prep", "plan.md", "--seats", "sol", "--task-seats", "",
              "--session-id", "S"], env=env, cwd=td, timeout=30)
         check("prep for repair-seat test exits 0", prep.returncode == 0,
               "0", f"{prep.returncode}: {prep.stderr[:200]}")
@@ -11707,23 +11710,23 @@ def test_repair_seat_name_form():
         run_dir = Path(obj["run_dir"])
 
         # A landed-but-non-parsing seat result in the run dir.
-        raw = ProviderResult(name="codex", model="m", ok=True,
+        raw = ProviderResult(name="sol", model="m", ok=True,
                              output="freeform prose, no schema",
                              error=None, elapsed=1.0)
         raw.run_id = run_id
         raw.target_sha256 = obj["target_sha256"]
-        _write_seat_json(run_dir, "codex", raw)
+        _write_seat_json(run_dir, "sol", raw)
 
         # A reformat that parses (a committed compliant fixture's output).
-        fix = _fixture_result("compliant", "codex")
+        fix = _fixture_result("compliant", "sol")
         reform = tdp / "reform.txt"
         reform.write_text(fix.output, encoding="utf-8")
 
-        # NAME form: engine derives <run_dir>/codex.json itself.
+        # NAME form: engine derives <run_dir>/sol.json itself.
         proc = _run_cli(
-            ["repair-seat", "codex", "--session-id", "S", "--run-id", run_id,
+            ["repair-seat", "sol", "--session-id", "S", "--run-id", run_id,
              "-f", str(reform)], env=env, cwd=td, timeout=30)
-        seat_file = run_dir / "codex.json"
+        seat_file = run_dir / "sol.json"
         data = json.loads(seat_file.read_text()) if seat_file.is_file() else {}
         check("repair-seat NAME form derives the run dir seat file and repairs it",
               proc.returncode == 0
@@ -11736,7 +11739,7 @@ def test_repair_seat_name_form():
         # Mutual exclusion: both forms -> exit 2, nothing changed.
         before = seat_file.read_bytes()
         proc = _run_cli(
-            ["repair-seat", "codex", "--seat", str(seat_file), "-f", str(reform)],
+            ["repair-seat", "sol", "--seat", str(seat_file), "-f", str(reform)],
             env=env, cwd=td, timeout=30)
         check("repair-seat NAME + --seat together exits 2, bytes untouched",
               proc.returncode == 2 and "not both" in proc.stderr
@@ -11869,10 +11872,10 @@ def test_doctor():
         if payload is not None:
             sub = payload.get("subprocess", {})
             check("doctor: codex detected available (present on PATH)",
-                  sub.get("codex", {}).get("available") is True, "codex true", str(sub.get("codex")))
-            check("doctor: codex-luna tracks the shared codex binary (available)",
-                  sub.get("codex-luna", {}).get("available") is True,
-                  "codex-luna true", str(sub.get("codex-luna")))
+                  sub.get("sol", {}).get("available") is True, "codex true", str(sub.get("sol")))
+            check("doctor: luna tracks the shared codex binary (available)",
+                  sub.get("luna", {}).get("available") is True,
+                  "luna true", str(sub.get("luna")))
             check("doctor: agy detected ABSENT with a PATH diag",
                   sub.get(AGY_SEAT, {}).get("available") is False
                   and "PATH" in (sub.get(AGY_SEAT, {}).get("diag") or ""),
@@ -12091,7 +12094,7 @@ def test_probe():
         # 2. Absent CLI (codex not on the isolated PATH) -> status skipped, but
         # since EVERY probed seat was skipped, exit 2 (all-skipped must NOT read
         # as a healthy green). The JSON still records the skipped status.
-        proc = _run_cli(["probe", "codex"], env=env_empty, timeout=30)
+        proc = _run_cli(["probe", "sol"], env=env_empty, timeout=30)
         check("probe all-skipped -> exit 2", proc.returncode == 2, "2",
               f"{proc.returncode}: {proc.stderr[:200]}")
         try:
@@ -12102,8 +12105,8 @@ def test_probe():
                   f"{exc}: {proc.stdout[:200]}")
         if payload is not None:
             check("probe absent CLI -> codex status skipped",
-                  payload.get("codex", {}).get("status") == "skipped",
-                  "skipped", str(payload.get("codex")))
+                  payload.get("sol", {}).get("status") == "skipped",
+                  "skipped", str(payload.get("sol")))
 
         # 3. Fake codex that prints PROBE-OK -> status pass, exit 0.
         bins_pass = d / "bin-pass"; bins_pass.mkdir()
@@ -12120,7 +12123,7 @@ def test_probe():
         sys.exit(0)
         """)
         env_pass = isol_env(bins_pass)
-        proc = _run_cli(["probe", "codex"], env=env_pass, timeout=30)
+        proc = _run_cli(["probe", "sol"], env=env_pass, timeout=30)
         check("probe pass -> exit 0", proc.returncode == 0, "0",
               f"{proc.returncode}: {proc.stderr[:200]}")
         # 6. stderr contains "BILLABLE" before any provider ran.
@@ -12134,8 +12137,8 @@ def test_probe():
                   f"{exc}: {proc.stdout[:200]}")
         if payload is not None:
             check("probe pass -> codex status pass",
-                  payload.get("codex", {}).get("status") == "pass",
-                  "pass", str(payload.get("codex")))
+                  payload.get("sol", {}).get("status") == "pass",
+                  "pass", str(payload.get("sol")))
         proc = _run_cli(["probe", "--all"], env=env_pass, timeout=30)
         try:
             all_payload = json.loads(proc.stdout)
@@ -12144,9 +12147,9 @@ def test_probe():
             check("probe --all stdout parses as JSON", False, "valid json",
                   f"{exc}: {proc.stdout[:200]}")
         expected_engine = [
-            "codex", "codex-luna", "codex-terra", "cursor-auto",
+            "astra", "cursor-auto",
             "cursor-composer", "cursor-gemini", "cursor-glm", "cursor-gpt",
-            "cursor-grok",
+            "cursor-grok", "luna", "sol", "terra",
         ]
         if all_payload is not None:
             check("probe --all filters native Claude seats and keeps engine seats in sorted order",
@@ -12164,7 +12167,7 @@ def test_probe():
         # absent on the isolated PATH) -> exit 0. A skipped seat alongside a real
         # pass is still healthy; only ALL-skipped (test 2) or any fail/degraded
         # flips nonzero.
-        proc = _run_cli(["probe", "codex", "cursor-auto"], env=env_pass, timeout=30)
+        proc = _run_cli(["probe", "sol", "cursor-auto"], env=env_pass, timeout=30)
         check("probe pass+skipped -> exit 0", proc.returncode == 0, "0",
               f"{proc.returncode}: {proc.stderr[:200]}")
         try:
@@ -12175,10 +12178,10 @@ def test_probe():
                   f"{exc}: {proc.stdout[:200]}")
         if payload is not None:
             check("probe pass+skipped -> codex pass, cursor-auto skipped",
-                  payload.get("codex", {}).get("status") == "pass"
+                  payload.get("sol", {}).get("status") == "pass"
                   and payload.get("cursor-auto", {}).get("status") == "skipped",
-                  "codex=pass cursor-auto=skipped",
-                  f"codex={payload.get('codex')} cursor-auto={payload.get('cursor-auto')}")
+                  "sol=pass cursor-auto=skipped",
+                  f"sol={payload.get('sol')} cursor-auto={payload.get('cursor-auto')}")
 
         # 4. Fake codex that prints unrelated prose -> status degraded, exit 1.
         bins_degraded = d / "bin-degraded"; bins_degraded.mkdir()
@@ -12195,7 +12198,7 @@ def test_probe():
         sys.exit(0)
         """)
         env_degraded = isol_env(bins_degraded)
-        proc = _run_cli(["probe", "codex"], env=env_degraded, timeout=30)
+        proc = _run_cli(["probe", "sol"], env=env_degraded, timeout=30)
         check("probe degraded -> exit 1", proc.returncode == 1, "1",
               f"{proc.returncode}: {proc.stderr[:200]}")
         check("probe degraded -> BILLABLE warning on stderr",
@@ -12208,8 +12211,8 @@ def test_probe():
                   f"{exc}: {proc.stdout[:200]}")
         if payload is not None:
             check("probe degraded -> codex status degraded",
-                  payload.get("codex", {}).get("status") == "degraded",
-                  "degraded", str(payload.get("codex")))
+                  payload.get("sol", {}).get("status") == "degraded",
+                  "degraded", str(payload.get("sol")))
 
         # 5. Fake codex that exits nonzero with no output -> status fail, exit 1.
         bins_fail = d / "bin-fail"; bins_fail.mkdir()
@@ -12220,7 +12223,7 @@ def test_probe():
         sys.exit(1)
         """)
         env_fail = isol_env(bins_fail)
-        proc = _run_cli(["probe", "codex"], env=env_fail, timeout=30)
+        proc = _run_cli(["probe", "sol"], env=env_fail, timeout=30)
         check("probe fail -> exit 1", proc.returncode == 1, "1",
               f"{proc.returncode}: {proc.stderr[:200]}")
         check("probe fail -> BILLABLE warning on stderr",
@@ -12233,8 +12236,8 @@ def test_probe():
                   f"{exc}: {proc.stdout[:200]}")
         if payload is not None:
             check("probe fail -> codex status fail",
-                  payload.get("codex", {}).get("status") == "fail",
-                  "fail", str(payload.get("codex")))
+                  payload.get("sol", {}).get("status") == "fail",
+                  "fail", str(payload.get("sol")))
 
         # 10. Fake codex that echoes the probe prompt verbatim (CONTAINS
         # "single line: PROBE-OK" but no line strips to exactly "PROBE-OK")
@@ -12254,7 +12257,7 @@ def test_probe():
         sys.exit(0)
         """)
         env_echo = isol_env(bins_echo)
-        proc = _run_cli(["probe", "codex"], env=env_echo, timeout=30)
+        proc = _run_cli(["probe", "sol"], env=env_echo, timeout=30)
         check("probe echoed-prompt -> exit 1 (no exact PROBE-OK line)",
               proc.returncode == 1, "1", f"{proc.returncode}: {proc.stderr[:200]}")
         try:
@@ -12265,14 +12268,14 @@ def test_probe():
                   f"{exc}: {proc.stdout[:200]}")
         if payload is not None:
             check("probe echoed-prompt -> codex status degraded",
-                  payload.get("codex", {}).get("status") == "degraded",
-                  "degraded", str(payload.get("codex")))
+                  payload.get("sol", {}).get("status") == "degraded",
+                  "degraded", str(payload.get("sol")))
 
         # 11. -o write-branch coverage (mirrors test_doctor's -o branch): the
         # passing fake -> the file exists, parses as JSON, codex status pass;
         # stdout still carries the JSON per the existing contract.
         out_path_probe = d / "explicit-probe.json"
-        proc = _run_cli(["probe", "codex", "-o", str(out_path_probe)],
+        proc = _run_cli(["probe", "sol", "-o", str(out_path_probe)],
                          env=env_pass, timeout=30)
         check("probe -o -> exit 0", proc.returncode == 0, "0",
               f"{proc.returncode}: {proc.stderr[:200]}")
@@ -12281,8 +12284,8 @@ def test_probe():
         if out_path_probe.is_file():
             file_payload = json.loads(out_path_probe.read_text(encoding="utf-8"))
             check("probe -o file parses as JSON with codex status pass",
-                  file_payload.get("codex", {}).get("status") == "pass",
-                  "pass", str(file_payload.get("codex")))
+                  file_payload.get("sol", {}).get("status") == "pass",
+                  "pass", str(file_payload.get("sol")))
         try:
             stdout_payload = json.loads(proc.stdout)
         except Exception as exc:
@@ -12291,8 +12294,8 @@ def test_probe():
                   f"{exc}: {proc.stdout[:200]}")
         if stdout_payload is not None:
             check("probe -o stdout carries codex status pass",
-                  stdout_payload.get("codex", {}).get("status") == "pass",
-                  "pass", str(stdout_payload.get("codex")))
+                  stdout_payload.get("sol", {}).get("status") == "pass",
+                  "pass", str(stdout_payload.get("sol")))
 
         env_codex = dict(env_empty)
         env_codex["CREW_HOST"] = "codex"
@@ -12343,7 +12346,7 @@ def test_probe():
         """)
         env_marker = isol_env(bins_marker)
         proc = _run_cli(
-            ["probe", "codex", "--session-id", "<session-id>"],
+            ["probe", "sol", "--session-id", "<session-id>"],
             env=env_marker, timeout=30,
         )
         check("probe placeholder session-id -> exit 2",
@@ -12393,7 +12396,7 @@ def test_scaffold_config():
     # --- fresh global template: --out - is PURE TOML, note on stderr ----------
     with crew_config() as proj:
         rc, out, err = run(["scaffold-config", "--out", "-",
-                            "--default-panel", "lite", "--dispatch-seat", "codex-terra"])
+                            "--default-panel", "lite", "--dispatch-seat", "terra"])
         check("scaffold --out - exits 0", rc == 0, "0", str(rc))
         parsed = None
         try:
@@ -12431,8 +12434,8 @@ def test_scaffold_config():
             check("bare (no --detection) OMITS every per-seat available line",
                   all("available" not in tbl for tbl in seats_tbl.values()),
                   "no available keys", str({k: v for k, v in seats_tbl.items() if 'available' in v}))
-            check("fresh template carries a [seats.codex-luna] block (default seat)",
-                  "codex-luna" in seats_tbl, "codex-luna table present", str(sorted(seats_tbl)))
+            check("fresh template carries a [seats.luna] block (default seat)",
+                  "luna" in seats_tbl, "luna table present", str(sorted(seats_tbl)))
 
         # round-trip through the real loader: getters read the values, ZERO warnings.
         config.global_config_path().write_text(out)
@@ -12440,7 +12443,7 @@ def test_scaffold_config():
         check("round-trip: default_panel() reads the baked value",
               config.default_panel() == "lite", "lite", str(config.default_panel()))
         check("round-trip: dispatch_seat() reads the baked value",
-              config.dispatch_seat() == "codex-terra", "codex-terra", str(config.dispatch_seat()))
+              config.dispatch_seat() == "terra", "terra", str(config.dispatch_seat()))
         check("round-trip: ZERO config warnings on the emitted template",
               not config._warned, "no warnings", str(config._warned))
 
@@ -12448,7 +12451,7 @@ def test_scaffold_config():
     with crew_config() as proj:
         det = Path(proj) / "doctor.json"
         write_det(det, absent=["cursor-composer"],
-                  present=["codex", "codex-luna", "codex-terra",
+                  present=["astra", "sol", "luna", "terra",
                            "cursor-auto",
                            "cursor-glm", "cursor-gpt", "cursor-gemini",
                            "cursor-grok"])
@@ -12460,19 +12463,19 @@ def test_scaffold_config():
               seats_tbl.get("cursor-composer", {}).get("available") is False,
               "cursor-composer false", str(seats_tbl.get("cursor-composer")))
         check("detection: detected-present codex -> available OMITTED",
-              "available" not in seats_tbl.get("codex", {}), "codex no available", str(seats_tbl.get("codex")))
-        check("detection: detected-present codex-luna -> available OMITTED (default seat, not opt-in)",
-              "available" not in seats_tbl.get("codex-luna", {}),
-              "codex-luna no available", str(seats_tbl.get("codex-luna")))
+              "available" not in seats_tbl.get("sol", {}), "codex no available", str(seats_tbl.get("sol")))
+        check("detection: detected-present luna -> available OMITTED (default seat, not opt-in)",
+              "available" not in seats_tbl.get("luna", {}),
+              "luna no available", str(seats_tbl.get("luna")))
         check("detection: premium cursor-glm -> available=false (cost-safe)",
               seats_tbl.get("cursor-glm", {}).get("available") is False,
               "glm false", str(seats_tbl.get("cursor-glm")))
         check("detection: premium cursor-grok -> available=false (cost-safe)",
               seats_tbl.get("cursor-grok", {}).get("available") is False,
               "grok false", str(seats_tbl.get("cursor-grok")))
-        check("detection: opt-in codex-terra -> available=false (even when CLI present)",
-              seats_tbl.get("codex-terra", {}).get("available") is False,
-              "codex-terra false", str(seats_tbl.get("codex-terra")))
+        check("detection: opt-in terra -> available=false (even when CLI present)",
+              seats_tbl.get("terra", {}).get("available") is False,
+              "terra false", str(seats_tbl.get("terra")))
         check("detection: --disable-seat opus (TASK seat) -> [seats.opus].available=false",
               seats_tbl.get("opus", {}).get("available") is False, "opus false", str(seats_tbl.get("opus")))
         # the opus-disabled output loads clean via the real loader.
@@ -12579,22 +12582,22 @@ def test_scaffold_config():
     multi_global = (
         '# tuned global\n'
         'default_panel = "lite"\n\n'
-        '[seats.codex]\n'
+        '[seats.sol]\n'
         'model = "gpt-x"\n\n'
         '[seats.cursor-auto]\n'
         'model = "auto"\n'
     )
     with crew_config(glob=multi_global) as proj:
         rc, out, err = run(["scaffold-config", "--repo", "--out", "-",
-                            "--default-panel", "full", "--dispatch-seat", "codex",
-                            "--disable-seat", "codex"])
+                            "--default-panel", "full", "--dispatch-seat", "sol",
+                            "--disable-seat", "sol"])
         parsed = _toml.loads(out)
         check("D3 case1: default_panel replaced in place (lite -> full)",
               parsed.get("default_panel") == "full", "full", str(parsed.get("default_panel")))
-        check("D3 case2: codex.available inserted into existing [seats.codex] header",
-              parsed["seats"]["codex"].get("available") is False
-              and parsed["seats"]["codex"].get("model") == "gpt-x",
-              "codex false + model kept", str(parsed["seats"].get("codex")))
+        check("D3 case2: codex.available inserted into existing [seats.sol] header",
+              parsed["seats"]["sol"].get("available") is False
+              and parsed["seats"]["sol"].get("model") == "gpt-x",
+              "codex false + model kept", str(parsed["seats"].get("sol")))
         check("D3 section-scoping: [seats.cursor-auto].model UNTOUCHED (not hit by codex edit)",
               parsed["seats"]["cursor-auto"].get("model") == "auto"
               and "available" not in parsed["seats"]["cursor-auto"],
@@ -12602,7 +12605,7 @@ def test_scaffold_config():
         check("D3: comment '# tuned global' preserved verbatim",
               "# tuned global" in out, "comment present", "missing")
         check("D3 case3: [dispatch] appended (absent in base) -> seat lands",
-              parsed.get("dispatch", {}).get("seat") == "codex", "codex", str(parsed.get("dispatch")))
+              parsed.get("dispatch", {}).get("seat") == "sol", "sol", str(parsed.get("dispatch")))
 
     # absent-key-in-existing-header (--add-seat lands available=true) +
     # absent-in-every-form (--add-seat cursor-composer appends a new table).
@@ -12626,7 +12629,7 @@ def test_scaffold_config():
               out.count("[seats.cursor-glm]") == 1, "1 header", str(out.count("[seats.cursor-glm]")))
 
     # absent top-level default_panel -> inserted after leading comment block.
-    nopanel_global = "# header comment\n# more\n\n[dispatch]\nseat = \"codex\"\n"
+    nopanel_global = "# header comment\n# more\n\n[dispatch]\nseat = \"sol\"\n"
     with crew_config(glob=nopanel_global) as proj:
         rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--default-panel", "lite"])
         parsed = _toml.loads(out)
@@ -12639,7 +12642,7 @@ def test_scaffold_config():
               "inserted in position", f"dp@{dp_idx} disp@{disp_idx}")
 
     # Case-4 position-0 edge: base starts DIRECTLY with a header, no leading comment.
-    pos0_global = "[seats.codex]\nmodel = \"x\"\n"
+    pos0_global = "[seats.sol]\nmodel = \"x\"\n"
     with crew_config(glob=pos0_global) as proj:
         rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--default-panel", "lite"])
         parsed = _toml.loads(out)
@@ -12649,10 +12652,10 @@ def test_scaffold_config():
               "position 0", out.split("\n")[0])
 
     # multiline-string base -> whole-seed pre-gate leaves it VERBATIM (byte-identical).
-    multiline_global = 'default_panel = "lite"\n\n[seats.codex]\nmodel = """multi\nline"""\n'
+    multiline_global = 'default_panel = "lite"\n\n[seats.sol]\nmodel = """multi\nline"""\n'
     with crew_config(glob=multiline_global) as proj:
         rc, out, err = run(["scaffold-config", "--repo", "--out", "-",
-                            "--default-panel", "full", "--disable-seat", "codex"])
+                            "--default-panel", "full", "--disable-seat", "sol"])
         check("D3 pre-gate: multiline-string base left VERBATIM (no line edits)",
               out.rstrip("\n") == multiline_global.rstrip("\n")
               and "could not safely apply override" in err,
@@ -12661,24 +12664,24 @@ def test_scaffold_config():
         _toml.loads(out)
 
     # inline-table base -> leave codex verbatim + note, NO duplicate, still loads.
-    inline_global = '[seats]\ncodex = { reasoning_effort = "xhigh" }\n'
+    inline_global = '[seats]\nsol = { reasoning_effort = "xhigh" }\n'
     with crew_config(glob=inline_global) as proj:
-        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "codex"])
-        check("D3 case5: inline-table codex -> stderr note, no duplicate [seats.codex], loads",
-              "could not safely apply override 'codex'" in err
-              and out.count("[seats.codex]") == 0,
-              "leave + note, no dup", f"err={err[:60]} dup={out.count('[seats.codex]')}")
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "sol"])
+        check("D3 case5: inline-table codex -> stderr note, no duplicate [seats.sol], loads",
+              "could not safely apply override 'sol'" in err
+              and out.count("[seats.sol]") == 0,
+              "leave + note, no dup", f"err={err[:60]} dup={out.count('[seats.sol]')}")
         loaded = _toml.loads(out)  # must NOT raise TOMLDecodeError
         check("D3 case5: inline-table output keeps codex inline (override NOT applied)",
-              loaded["seats"]["codex"] == {"reasoning_effort": "xhigh"},
-              "codex inline intact", str(loaded["seats"].get("codex")))
+              loaded["seats"]["sol"] == {"reasoning_effort": "xhigh"},
+              "codex inline intact", str(loaded["seats"].get("sol")))
 
     # dotted-key base -> leave + note, still loads, no duplicate.
-    dotted_global = 'seats.codex-luna.reasoning_effort = "high"\n'
+    dotted_global = 'seats.luna.reasoning_effort = "high"\n'
     with crew_config(glob=dotted_global) as proj:
-        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "codex-luna"])
-        check("D3 case5: dotted-key codex-luna -> stderr note + loads (no duplicate)",
-              "could not safely apply override 'codex-luna'" in err,
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "luna"])
+        check("D3 case5: dotted-key luna -> stderr note + loads (no duplicate)",
+              "could not safely apply override 'luna'" in err,
               "leave + note", f"err={err[:60]}")
         _toml.loads(out)  # must NOT raise
 
@@ -12698,7 +12701,7 @@ def test_scaffold_config():
     # idempotency: two runs, identical inputs + unchanged global -> byte-identical.
     with crew_config(glob=multi_global) as proj:
         argv = ["scaffold-config", "--repo", "--out", "-", "--default-panel", "full",
-                "--dispatch-seat", "codex", "--disable-seat", "codex"]
+                "--dispatch-seat", "sol", "--disable-seat", "sol"]
         _, out1, _ = run(argv)
         _, out2, _ = run(argv)
         check("D3 idempotency: identical inputs -> byte-identical output",
@@ -12719,18 +12722,18 @@ def test_scaffold_config():
     # codex's exact repro: trailing inline comment on the header.
     commented_header_global = (
         'default_panel = "full"\n\n'
-        '[seats.codex] # my note\n'
+        '[seats.sol] # my note\n'
         'model = "gpt-x"\n'
     )
     with crew_config(glob=commented_header_global) as proj:
-        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "codex"])
-        check("header-recog: '[seats.codex] # note' -> NO duplicate [seats.codex]",
-              out.count("[seats.codex]") == 1, "1 header", str(out.count("[seats.codex]")))
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "sol"])
+        check("header-recog: '[seats.sol] # note' -> NO duplicate [seats.sol]",
+              out.count("[seats.sol]") == 1, "1 header", str(out.count("[seats.sol]")))
         loaded = loads_clean(out)
         check("header-recog: commented-header output LOADS (no TOMLDecodeError)",
-              loaded.get("seats", {}).get("codex", {}).get("available") is False
-              and loaded["seats"]["codex"].get("model") == "gpt-x",
-              "in-place disable + model kept", str(loaded.get("seats", {}).get("codex")))
+              loaded.get("seats", {}).get("sol", {}).get("available") is False
+              and loaded["seats"]["sol"].get("model") == "gpt-x",
+              "in-place disable + model kept", str(loaded.get("seats", {}).get("sol")))
 
     # quoted dotted component: [seats."cursor-glm"].
     quoted_header_global = (
@@ -12748,36 +12751,36 @@ def test_scaffold_config():
               and loaded["seats"]["cursor-glm"].get("model") == "glm-5.2-max",
               "glm true + model kept", str(loaded["seats"].get("cursor-glm")))
 
-    # internal-whitespace header: [ seats.codex-luna ].
+    # internal-whitespace header: [ seats.luna ].
     ws_header_global = (
         'default_panel = "full"\n\n'
-        '[ seats.codex-luna ]\n'
+        '[ seats.luna ]\n'
         'model = "gpt-5.6-luna"\n'
     )
     with crew_config(glob=ws_header_global) as proj:
-        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "codex-luna"])
-        check("header-recog: '[ seats.codex-luna ]' internal-whitespace header recognized",
-              out.count("seats.codex-luna") == 1, "1 occurrence", str(out.count("seats.codex-luna")))
+        rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "luna"])
+        check("header-recog: '[ seats.luna ]' internal-whitespace header recognized",
+              out.count("seats.luna") == 1, "1 occurrence", str(out.count("seats.luna")))
         loaded = loads_clean(out)
         check("header-recog: whitespace-header output LOADS + disable applied in place",
-              loaded["seats"]["codex-luna"].get("available") is False
-              and loaded["seats"]["codex-luna"].get("model") == "gpt-5.6-luna",
-              "codex-luna false + model kept", str(loaded["seats"].get("codex-luna")))
+              loaded["seats"]["luna"].get("available") is False
+              and loaded["seats"]["luna"].get("model") == "gpt-5.6-luna",
+              "luna false + model kept", str(loaded["seats"].get("luna")))
 
     # --- parse-guard BACKSTOP: an edit that would break the base is discarded --
     # Monkeypatch the recognizer to MISS a header (simulating any form the regex
-    # still slips) so a disable would APPEND a duplicate [seats.codex] -> invalid.
+    # still slips) so a disable would APPEND a duplicate [seats.sol] -> invalid.
     # The backstop must catch it and hand back the VERBATIM base + a note.
     guard_global = (
         'default_panel = "full"\n\n'
-        '[seats.codex]\n'
+        '[seats.sol]\n'
         'model = "gpt-x"\n'
     )
     with crew_config(glob=guard_global) as proj:
         orig_header_name = cli._header_name
         cli._header_name = lambda line: None  # blind the recognizer entirely
         try:
-            rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "codex"])
+            rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--disable-seat", "sol"])
         finally:
             cli._header_name = orig_header_name
         check("parse-guard: blinded recognizer would dup -> output FALLS BACK to verbatim base",
@@ -12786,15 +12789,15 @@ def test_scaffold_config():
               "verbatim + note", f"changed={out.rstrip()!=guard_global.rstrip()} err={err[:60]}")
         loaded = loads_clean(out)  # the verbatim fallback ALWAYS loads
         check("parse-guard: fallback output LOADS (no TOMLDecodeError)",
-              "codex" in loaded.get("seats", {}), "loads", str(loaded.get("seats")))
+              "sol" in loaded.get("seats", {}), "loads", str(loaded.get("seats")))
 
     # --- MINOR: contradictory --add-seat X --disable-seat X -> validation error
     with crew_config() as proj:
         target = Path(proj) / "c.toml"
         rc, out, err = run(["scaffold-config", "--out", str(target),
-                            "--add-seat", "codex", "--disable-seat", "codex"])
+                            "--add-seat", "sol", "--disable-seat", "sol"])
         check("contradictory --add-seat/--disable-seat codex -> nonzero + stderr, no file",
-              rc != 0 and "codex" in err and not target.exists(),
+              rc != 0 and "sol" in err and not target.exists(),
               "nonzero, stderr, no file", f"rc={rc} err={err[:60]} exists={target.exists()}")
 
     # --- MINOR: --repo + existing global + NO --detection -> skipped note ------
@@ -12809,16 +12812,16 @@ def test_scaffold_config():
     # --- MINOR: --repo + global + VALID --detection -> parsed, NOT auto-applied
     with crew_config(glob=multi_global) as proj:
         det = Path(proj) / "doctor.json"
-        write_det(det, absent=["cursor-auto"], present=["codex"])
+        write_det(det, absent=["cursor-auto"], present=["sol"])
         rc, out, err = run(["scaffold-config", "--repo", "--out", "-", "--detection", str(det),
-                            "--disable-seat", "codex"])
+                            "--disable-seat", "sol"])
         parsed = _toml.loads(out)  # loads clean
         check("--repo + global + valid --detection: detected-absent cursor-auto NOT auto-applied",
               "available" not in parsed.get("seats", {}).get("cursor-auto", {"available": "x"}),
               "cursor-auto untouched by detection", str(parsed.get("seats", {}).get("cursor-auto")))
         check("--repo + global + valid --detection: only explicit --disable-seat codex lands",
-              parsed["seats"]["codex"].get("available") is False,
-              "codex false (explicit)", str(parsed["seats"].get("codex")))
+              parsed["seats"]["sol"].get("available") is False,
+              "codex false (explicit)", str(parsed["seats"].get("sol")))
         check("--repo + global + valid --detection: no 'detection skipped' note (flag present)",
               "detection skipped" not in err, "no skip note", err[:80])
 
@@ -12844,7 +12847,7 @@ def test_findings_parser():
 
     # COMPLIANT block [compliant fixture] -> exact findings/criteria/verdict +
     # findings_parsed=True.
-    codex = _fixture_result("compliant", "codex")
+    codex = _fixture_result("compliant", "sol")
     p = findings.parse_seat(codex)
     check("compliant codex: findings_parsed=True, verdict APPROVED, confidence",
           p.findings_parsed and p.verdict == "APPROVED" and p.confidence == "medium",
@@ -12876,7 +12879,7 @@ def test_findings_parser():
           "REVISE + Correctness FAIL", f"v={pp.verdict} c={pp.criteria}")
 
     # REAL-PROSE block [real-prose fixture] -> findings_parsed=False, no metadata.
-    rcodex = _fixture_result("real-prose", "codex")
+    rcodex = _fixture_result("real-prose", "sol")
     pr = findings.parse_seat(rcodex)
     check("real-prose codex: findings_parsed=False, NO metadata (no ## headers)",
           pr.findings_parsed is False and pr.verdict is None
@@ -13095,7 +13098,7 @@ def test_collect_grouped():
                                           encoding="utf-8")
         return rd
 
-    six = ["codex", "agy", "cursor-auto", "cursor-composer", "opus", "sonnet"]
+    six = ["sol", "agy", "cursor-auto", "cursor-composer", "opus", "sonnet"]
 
     # --group + --full: writes both; --full byte-equals render_panel; grouped smaller.
     with tempfile.TemporaryDirectory() as td:
@@ -13130,7 +13133,7 @@ def test_collect_grouped():
               "path-only stdout (anchored)", repr(proc.stdout))
         check("grouped digest: shared finding present ONCE as 6/6 with all seats",
               grouped.count("6/6 [MINOR]") == 1
-              and "codex, agy, cursor-auto, cursor-composer, opus, sonnet" in grouped,
+              and "sol, agy, cursor-auto, cursor-composer, opus, sonnet" in grouped,
               "one 6/6 row", grouped[:80])
         check("grouped digest: a Task-seat-only finding surfaces as ⚠ SINGLETON",
               "⚠ SINGLETON 1/6 [BLOCKING]" in grouped and "(opus)" in grouped,
@@ -13148,7 +13151,7 @@ def test_collect_grouped():
     # denominator vs roster: 6 ran, one partial -> header "6 ran, 5 findings-parsed",
     # partial in roster + RAW, groups /5, excluded from denominator.
     with tempfile.TemporaryDirectory() as td:
-        seats = ["codex", "agy", "cursor-auto", "cursor-composer", "opus", "partial"]
+        seats = ["sol", "agy", "cursor-auto", "cursor-composer", "opus", "partial"]
         stage(td, seats)
         proc = _run_dispatcher(
             ["collect", "--session-id", "sess", "--seats", ",".join(seats),
@@ -13167,7 +13170,7 @@ def test_collect_grouped():
 
     # zero-compliant [real-prose fixture]: grouped == render_panel + "\n".
     with tempfile.TemporaryDirectory() as td:
-        rseats = ["codex", "agy"]
+        rseats = ["sol", "agy"]
         stage(td, rseats, kind="real-prose")
         proc = _run_dispatcher(
             ["collect", "--session-id", "sess", "--seats", ",".join(rseats),
@@ -13195,32 +13198,32 @@ def test_collect_grouped():
 
     # seat order: VERDICTS roster follows --seats order, full names.
     with tempfile.TemporaryDirectory() as td:
-        order = ["sonnet", "codex", "opus"]
+        order = ["sonnet", "sol", "opus"]
         stage(td, order)
         _run_dispatcher(
             ["collect", "--session-id", "sess", "--seats", ",".join(order),
              "--group", "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
         dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
         roster = [ln for ln in dig.splitlines() if ln.startswith("- sonnet")
-                  or ln.startswith("- codex") or ln.startswith("- opus")]
-        check("seat order: VERDICTS roster follows --seats order (sonnet, codex, opus)",
-              roster[0].startswith("- sonnet") and roster[1].startswith("- codex")
+                  or ln.startswith("- sol") or ln.startswith("- opus")]
+        check("seat order: VERDICTS roster follows --seats order (sonnet, sol, opus)",
+              roster[0].startswith("- sonnet") and roster[1].startswith("- sol")
               and roster[2].startswith("- opus"), "roster order", str(roster))
 
     # dotted Task seat (BLOCKING-B): opus-46 passes charset guard + labels opus-46;
     # raw dot opus-4.6 is REJECTED.
     with tempfile.TemporaryDirectory() as td:
-        rd = stage(td, ["codex", "opus"])
+        rd = stage(td, ["sol", "opus"])
         (rd / "opus-46.json").write_text((rd / "opus.json").read_text(), encoding="utf-8")
         proc = _run_dispatcher(
-            ["collect", "--session-id", "sess", "--seats", "codex,opus-46",
+            ["collect", "--session-id", "sess", "--seats", "sol,opus-46",
              "--group", "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
         dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
         check("dotted seat: collect --seats codex,opus-46 succeeds + labels opus-46",
               proc.returncode == 0 and "- opus-46  " in dig, "opus-46 labeled",
               f"rc={proc.returncode}")
         proc2 = _run_dispatcher(
-            ["collect", "--session-id", "sess", "--seats", "codex,opus-4.6",
+            ["collect", "--session-id", "sess", "--seats", "sol,opus-4.6",
              "--group", "-o", "x.md"], cwd=td, timeout=30)
         check("dotted seat: a RAW dot (opus-4.6) is rejected by the charset guard",
               proc2.returncode == 2, "exit 2", f"rc={proc2.returncode}")
@@ -13233,17 +13236,17 @@ def test_collect_grouped():
              "--group", "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
         dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
         check("mixed seat-kinds: subprocess + Task seats share the 6/6 group",
-              "6/6 [MINOR]" in dig and "opus" in dig and "codex" in dig,
+              "6/6 [MINOR]" in dig and "opus" in dig and "sol" in dig,
               "shared group across kinds", "?")
 
     # Task seat with no usable block -> SKIPPED, excluded from denominator.
     with tempfile.TemporaryDirectory() as td:
-        rd = stage(td, ["codex", "opus"])
+        rd = stage(td, ["sol", "opus"])
         skipped = ProviderResult(name="sonnet", model=None, ok=False, output="",
                                  error="skipped: no result", elapsed=0.0)
         (rd / "sonnet.json").write_text(json.dumps(skipped.to_dict()), encoding="utf-8")
         _run_dispatcher(
-            ["collect", "--session-id", "sess", "--seats", "codex,opus,sonnet",
+            ["collect", "--session-id", "sess", "--seats", "sol,opus,sonnet",
              "--group", "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
         dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
         # A SKIPPED seat never RAN -> excluded from the ran-count R (and from RAW),
@@ -13262,18 +13265,18 @@ def test_collect_grouped():
     with tempfile.TemporaryDirectory() as td:
         rd = Path(td) / ".crew" / "reviews" / "sess"
         rd.mkdir(parents=True)
-        sub_block = ProviderResult(name="codex", model=None, ok=True, error=None, elapsed=0.0,
+        sub_block = ProviderResult(name="sol", model=None, ok=True, error=None, elapsed=0.0,
             output="## VERDICT\nREVISE\n## FINDINGS\n- [BLOCKING] x.py:1 — subprocess lone dissent\n")
         task_block = ProviderResult(name="opus", model=None, ok=True, error=None, elapsed=0.0,
             output="## VERDICT\nAPPROVED\n## FINDINGS\n- [MINOR] y.py:1 — task lone dissent\n")
-        (rd / "codex.json").write_text(json.dumps(sub_block.to_dict()), encoding="utf-8")
+        (rd / "sol.json").write_text(json.dumps(sub_block.to_dict()), encoding="utf-8")
         (rd / "opus.json").write_text(json.dumps(task_block.to_dict()), encoding="utf-8")
         _run_dispatcher(
-            ["collect", "--session-id", "sess", "--seats", "codex,opus",
+            ["collect", "--session-id", "sess", "--seats", "sol,opus",
              "--group", "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
         dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
         check("singleton seat-kind-blind: subprocess BLOCKING + Task MINOR both ⚠ SINGLETON",
-              dig.count("⚠ SINGLETON") == 2 and "(codex)" in dig and "(opus)" in dig,
+              dig.count("⚠ SINGLETON") == 2 and "(sol)" in dig and "(opus)" in dig,
               "two singletons", "?")
 
     # BUG-CLASS end-to-end: a MIXED tagged+prose seat loses NOTHING — both the
@@ -13281,15 +13284,15 @@ def test_collect_grouped():
     with tempfile.TemporaryDirectory() as td:
         rd = Path(td) / ".crew" / "reviews" / "sess"
         rd.mkdir(parents=True)
-        mixed = ProviderResult(name="codex", model=None, ok=True, error=None, elapsed=0.0,
+        mixed = ProviderResult(name="sol", model=None, ok=True, error=None, elapsed=0.0,
             output="## FINDINGS\n- [BLOCKING] a.py:1 — tagged finding here\n"
                    "the error handling in bar.py is ALSO weak and untagged\n")
         compliant = ProviderResult(name="opus", model=None, ok=True, error=None, elapsed=0.0,
             output="## VERDICT\nAPPROVED\n## FINDINGS\n- [MINOR] z.py:1 — minor nit\n")
-        (rd / "codex.json").write_text(json.dumps(mixed.to_dict()), encoding="utf-8")
+        (rd / "sol.json").write_text(json.dumps(mixed.to_dict()), encoding="utf-8")
         (rd / "opus.json").write_text(json.dumps(compliant.to_dict()), encoding="utf-8")
         _run_dispatcher(
-            ["collect", "--session-id", "sess", "--seats", "codex,opus",
+            ["collect", "--session-id", "sess", "--seats", "sol,opus",
              "--group", "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
         dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
         raw_section = dig.split("## RAW / UNPARSED SEATS", 1)[1]
@@ -13300,9 +13303,9 @@ def test_collect_grouped():
 
     # --group with --full sibling AND a --full WITHOUT --group warning.
     with tempfile.TemporaryDirectory() as td:
-        stage(td, ["codex", "opus"])
+        stage(td, ["sol", "opus"])
         proc = _run_dispatcher(
-            ["collect", "--session-id", "sess", "--seats", "codex,opus",
+            ["collect", "--session-id", "sess", "--seats", "sol,opus",
              "--full", ".crew/reviews/sess/panel-full.md"], cwd=td, timeout=30)
         check("collect --full WITHOUT --group: warns on stderr, writes no sibling",
               proc.returncode == 0 and "warning" in proc.stderr.lower()
@@ -13312,9 +13315,9 @@ def test_collect_grouped():
 
     # --report-unparsed: identifies the partial (non-compliant) seat only.
     with tempfile.TemporaryDirectory() as td:
-        stage(td, ["codex", "partial", "opus"])
+        stage(td, ["sol", "partial", "opus"])
         proc = _run_dispatcher(
-            ["collect", "--session-id", "sess", "--seats", "codex,partial,opus",
+            ["collect", "--session-id", "sess", "--seats", "sol,partial,opus",
              "--report-unparsed"], cwd=td, timeout=30)
         check("--report-unparsed: lists ONLY the non-compliant seat (partial)",
               proc.returncode == 0 and proc.stdout.strip() == "partial",
@@ -13325,7 +13328,7 @@ def test_collect_grouped():
         # combining query mode with digest-shaping flags warns loudly on stderr
         # (stdout still carries ONLY the seat names — nothing is written).
         wproc = _run_dispatcher(
-            ["collect", "--session-id", "sess", "--seats", "codex,partial,opus",
+            ["collect", "--session-id", "sess", "--seats", "sol,partial,opus",
              "--report-unparsed", "--group",
              "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
         check("--report-unparsed + --group/-o: stderr warns, stdout names only, "
@@ -13340,7 +13343,7 @@ def test_collect_grouped():
     # ORIGINAL output is PRESERVED byte-intact; a repaired (now-compliant) seat
     # groups normally.
     with tempfile.TemporaryDirectory() as td:
-        rd = stage(td, ["codex", "partial"])
+        rd = stage(td, ["sol", "partial"])
         repl = ("## VERDICT\nREVISE\n## FINDINGS\n"
                 "- [BLOCKING] cli.py:1600 — collect drops prose. WHY: no fallback. FIX: raw.\n"
                 "## CONFIDENCE\nmedium\n")
@@ -13366,7 +13369,7 @@ def test_collect_grouped():
               "round-trip", "?")
         # the repaired seat now parses + groups (grouping reads repaired_output).
         chk = _run_dispatcher(
-            ["collect", "--session-id", "sess", "--seats", "codex,partial",
+            ["collect", "--session-id", "sess", "--seats", "sol,partial",
              "--report-unparsed"], cwd=td, timeout=30)
         check("repair-seat: repaired seat is now findings-parsed (report-unparsed empty)",
               chk.stdout.strip() == "", "no unparsed left", repr(chk.stdout))
@@ -13388,8 +13391,8 @@ def test_collect_grouped():
         seat = ProviderResult(name="partial", model="gpt-5", ok=True,
                               output=original_out, error=None, elapsed=1.0)
         (rd / "partial.json").write_text(json.dumps(seat.to_dict()), encoding="utf-8")
-        codex_seat = _fixture_result("compliant", "codex")
-        (rd / "codex.json").write_text(json.dumps(codex_seat.to_dict()), encoding="utf-8")
+        codex_seat = _fixture_result("compliant", "sol")
+        (rd / "sol.json").write_text(json.dumps(codex_seat.to_dict()), encoding="utf-8")
         # a LOSSY-but-VALID repair: parses, but keeps only ONE of the two findings.
         lossy = ("## VERDICT\nREVISE\n## FINDINGS\n"
                  "- [BLOCKING] auth.py:10 — token is logged in plaintext\n"
@@ -13406,7 +13409,7 @@ def test_collect_grouped():
               "original preserved, repaired stored", f"rc={rproc.returncode}")
         # grouped digest uses the repaired (lossy) text; --full uses the original.
         _run_dispatcher(
-            ["collect", "--session-id", "sess", "--seats", "codex,partial",
+            ["collect", "--session-id", "sess", "--seats", "sol,partial",
              "--group", "-o", ".crew/reviews/sess/panel.md",
              "--full", ".crew/reviews/sess/panel-full.md"], cwd=td, timeout=30)
         dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
@@ -13426,7 +13429,7 @@ def test_collect_grouped():
               and "retry loop never backs off" in full,
               "dropped finding survives in --full", "?")
         # and --full renders the ORIGINAL, not the repaired text.
-        results = [_fixture_result("compliant", "codex"),
+        results = [_fixture_result("compliant", "sol"),
                    ProviderResult.from_dict(after)]
         check("repair-seat (lossy): --full byte-equals render_panel over ORIGINAL output",
               full == render.render_panel(results) + "\n",
@@ -13435,7 +13438,7 @@ def test_collect_grouped():
     # repair-seat FAITHFUL repair (parses, same findings): grouped uses it, --full
     # still shows the original, the new field round-trips.
     with tempfile.TemporaryDirectory() as td:
-        rd = stage(td, ["codex", "partial"])
+        rd = stage(td, ["sol", "partial"])
         original_out = json.loads((rd / "partial.json").read_text())["output"]
         faithful = ("## VERDICT\nREVISE\n## CRITERIA\n- Correctness: FAIL\n"
                     "## FINDINGS\n- [BLOCKING] cli.py:1600 — collect can drop "
@@ -13451,7 +13454,7 @@ def test_collect_grouped():
               fproc.returncode == 0 and after["output"] == original_out
               and after["repaired_output"] == faithful, "faithful stored", "?")
         _run_dispatcher(
-            ["collect", "--session-id", "sess", "--seats", "codex,partial",
+            ["collect", "--session-id", "sess", "--seats", "sol,partial",
              "--group", "-o", ".crew/reviews/sess/panel.md",
              "--full", ".crew/reviews/sess/panel-full.md"], cwd=td, timeout=30)
         dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
@@ -13470,7 +13473,7 @@ def test_collect_grouped():
     # overwritten by a degraded haiku rewrite). RAW/full shows the seat's GENUINE
     # review verbatim; the bad replacement text must NOT appear anywhere.
     with tempfile.TemporaryDirectory() as td:
-        rd = stage(td, ["codex", "partial"])
+        rd = stage(td, ["sol", "partial"])
         original = json.loads((rd / "partial.json").read_text())["output"]
         bad = Path(td) / "bad.txt"
         bad.write_text("still just prose, no schema headers at all\n", encoding="utf-8")
@@ -13488,7 +13491,7 @@ def test_collect_grouped():
               after == original and "still just prose" not in after,
               "original preserved", repr(after[:60]))
         proc = _run_dispatcher(
-            ["collect", "--session-id", "sess", "--seats", "codex,partial",
+            ["collect", "--session-id", "sess", "--seats", "sol,partial",
              "--group", "-o", ".crew/reviews/sess/panel.md"], cwd=td, timeout=30)
         dig = (Path(td) / ".crew/reviews/sess/panel.md").read_text()
         check("repair-seat: STILL-non-compliant after repair -> RAW shows ORIGINAL, "
@@ -13719,14 +13722,14 @@ def test_persist_seat():
         check("overwrite: second persist replaces stale text",
               data.get("output") == "SECOND", "SECOND", str(data.get("output")))
 
-    # 7. Integration: persist "sonnet" + a fixture codex.json, then grouped collect
+    # 7. Integration: persist "sonnet" + a fixture sol.json, then grouped collect
     #    -> exit 0 and "- sonnet" in the VERDICTS roster (persisted seat flows
     #    through the SAME grouped collect).
     with tempfile.TemporaryDirectory() as td:
         rd = Path(td) / ".crew" / "reviews" / "S"
         rd.mkdir(parents=True, exist_ok=True)
-        (rd / "codex.json").write_text(
-            (FIXTURES_DIR / "compliant" / "codex.json").read_text(encoding="utf-8"),
+        (rd / "sol.json").write_text(
+            (FIXTURES_DIR / "compliant" / "sol.json").read_text(encoding="utf-8"),
             encoding="utf-8")
         sonnet_text = _fixture_result("compliant", "sonnet").output
         src = Path(td) / "sonnet.txt"
@@ -13735,7 +13738,7 @@ def test_persist_seat():
             ["persist-seat", "sonnet", "--session-id", "S", "--model", "sonnet",
              "-f", str(src)], cwd=td, timeout=30)
         cp = _run_dispatcher(
-            ["collect", "--session-id", "S", "--seats", "codex,sonnet", "--group",
+            ["collect", "--session-id", "S", "--seats", "sol,sonnet", "--group",
              "-o", ".crew/reviews/S/panel.md"], cwd=td, timeout=30)
         dig = (rd / "panel.md").read_text(encoding="utf-8") if (rd / "panel.md").exists() else ""
         check("integration: persist + grouped collect exit 0",
@@ -13842,7 +13845,7 @@ def test_persist_seat_scribe_gate_inputs():
         tdp = Path(td)
         _write_plan(tdp)
         prep = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex",
+            ["review-prep", "plan.md", "--seats", "sol",
              "--task-seats", "opus,sonnet", "--session-id", "S"],
             cwd=td, timeout=30)
         o = json.loads(prep.stdout) if prep.returncode == 0 else {}
@@ -13914,7 +13917,7 @@ def test_persist_seat_verify():
         tdp = Path(td)
         _write_plan(tdp)
         prep = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex",
+            ["review-prep", "plan.md", "--seats", "sol",
              "--task-seats", "opus,sonnet", "--session-id", "S"],
             cwd=td, timeout=30)
         prep_data = json.loads(prep.stdout) if prep.returncode == 0 else {}
@@ -14288,7 +14291,7 @@ _ROSTER_FIXTURES = TESTS_DIR / "fixtures" / "seat-roster"
 
 # The built-in subprocess panel: what a bare `crew seats` must print, and what
 # _resolve_seats(None) must return, on a machine with no crew config at all.
-_BUILTIN_FOUR = ["codex", "codex-luna", "cursor-auto", "cursor-composer"]
+_BUILTIN_SUBPROCESS = ["astra", "sol", "luna", "cursor-auto", "cursor-composer"]
 
 # Fixed in BOTH the committed capture and the verify below: review-prep's
 # prompt_path embeds the session segment, so a run under a different id could
@@ -14338,9 +14341,10 @@ def test_seat_roster_drift_guard():
     # rather than derived from the same dicts it checks, so a change to how the
     # roster is assembled fails HERE, naming the seat that moved.
     expected_subprocess = [
-        ("codex",           "CodexProvider",  "gpt-5.6-sol",           False),
-        ("codex-luna",      "CodexProvider",  "gpt-5.6-luna",          False),
-        ("codex-terra",     "CodexProvider",  "gpt-5.6-terra",         True),
+        ("astra",         "CodexProvider",  "gpt-6-astra",           False),
+        ("sol",           "CodexProvider",  "gpt-5.6-sol",           False),
+        ("luna",          "CodexProvider",  "gpt-5.6-luna",          False),
+        ("terra",         "CodexProvider",  "gpt-5.6-terra",         True),
         ("cursor-gpt",      "CursorProvider", "gpt-5.5-extra-high",    True),
         ("cursor-gemini",   "CursorProvider", "gemini-3.7-flash-high", True),
         ("cursor-glm",      "CursorProvider", "glm-5.2-max",           True),
@@ -14387,9 +14391,9 @@ def test_seat_roster_drift_guard():
 
     # --- 3. All five presets, verbatim ---------------------------------------
     expected_presets = {
-        "full": ["codex", "codex-luna", "cursor-auto", "cursor-composer",
+        "full": ["astra", "sol", "luna", "cursor-auto", "cursor-composer",
                  "opus", "sonnet"],
-        "quick": ["codex", "sonnet"],
+        "quick": ["astra", "sol", "sonnet"],
         "lite": ["opus", "sonnet"],
         "solo": ["opus"],
         "cursor": ["cursor"],  # the literal group token, unexpanded
@@ -14407,10 +14411,10 @@ def test_seat_roster_drift_guard():
     # is the behavior.
     with crew_config():
         resolved = cli._resolve_seats(None)
-    check("_resolve_seats(None) == the built-in four (isolated config)",
-          resolved == _BUILTIN_FOUR, str(_BUILTIN_FOUR), str(resolved))
+    check("_resolve_seats(None) == the built-in five (isolated config)",
+          resolved == _BUILTIN_SUBPROCESS, str(_BUILTIN_SUBPROCESS), str(resolved))
     check("no opt-in premium seat rides the default panel",
-          not ({"codex-terra", "cursor-gpt", "cursor-gemini", "cursor-glm",
+          not ({"terra", "cursor-gpt", "cursor-gemini", "cursor-glm",
                 "cursor-grok", "fable"} & set(resolved)),
           "no opt-in seat", str(resolved))
 
@@ -14419,11 +14423,11 @@ def test_seat_roster_drift_guard():
     # Proving that here keeps the isolation from being mistaken for boilerplate
     # and quietly dropped.
     with crew_config(glob='default_panel = "personal"\n'
-                          '[panels]\npersonal = ["codex", "codex-terra", "opus"]\n'):
+                          '[panels]\npersonal = ["sol", "terra", "opus"]\n'):
         configured = cli._resolve_seats(None)
     check("a global config REDEFINES that same resolution (isolation is load-bearing)",
-          configured == ["codex", "codex-terra"] and configured != _BUILTIN_FOUR,
-          "['codex', 'codex-terra']", str(configured))
+          configured == ["sol", "terra"] and configured != _BUILTIN_SUBPROCESS,
+          "['sol', 'terra']", str(configured))
 
     # --- 4b. The cursor GROUP token expands to the SORTED cursor seats --------
     # The fan-out order for `--seats cursor` is stable by name (not by catalog
@@ -14502,7 +14506,7 @@ def test_config_declared_seats():
     """A seat that exists NOWHERE in the Python source registers, on EVERY
     provider kind, from a config file alone (the headline capability).
 
-    Every seat here has a FRESH name: a shipped name (codex) would be a TUNE of
+    Every seat here has a FRESH name: a shipped name (sol) would be a TUNE of
     an existing seat, not a declaration, and `agy` is a reserved group token (the
     config-declared shape is `[seats.agy-gemini]`). demo-cursor is deliberately NOT named
     cursor-* so its group membership can only come from the provider KIND, never a
@@ -14699,11 +14703,11 @@ def test_config_declared_negative():
     # A wrong-TYPE provider. On a SHIPPED seat the bad key is dropped and the seat
     # keeps its shipped provider (field-level). On a DECLARED seat that same bad
     # type leaves it with no provider at all, so the whole seat drops (seat-level).
-    cat, warn, full = load(glob='[seats.codex]\nprovider = 123\n')
+    cat, warn, full = load(glob='[seats.sol]\nprovider = 123\n')
     check("shipped seat + bad-type provider: KEY dropped, seat SURVIVES as codex",
-          "codex" in cat and cat["codex"].provider == "codex" and "codex" in full
+          "sol" in cat and cat["sol"].provider == "codex" and "sol" in full
           and "provider" in warn,
-          "codex survives, full unchanged, warn", str(cat.get("codex")))
+          "codex survives, full unchanged, warn", str(cat.get("sol")))
     cat, warn, full = load(glob='[seats.brandnew]\nprovider = 123\n')
     check("declared seat + SAME bad-type provider: WHOLE SEAT dropped (seat-level)",
           "brandnew" not in cat, "absent", "present")
@@ -14712,14 +14716,14 @@ def test_config_declared_negative():
     # (repo/global over shipped) for provider like any other key, so a config
     # layer can repurpose a shipped seat's provider. The seat survives and stays
     # in full; only a wrong-TYPE or unknown-kind value is a drop.
-    cat, warn, full = load(glob='[seats.codex]\nprovider = "agy"\n')
-    check("shipped [seats.codex] provider='agy': per-key override, codex stays in full",
-          cat["codex"].provider == "agy" and "codex" in full,
-          "codex provider overridden to agy, still in full", str(cat.get("codex")))
+    cat, warn, full = load(glob='[seats.sol]\nprovider = "agy"\n')
+    check("shipped [seats.sol] provider='agy': per-key override, sol stays in full",
+          cat["sol"].provider == "agy" and "sol" in full,
+          "codex provider overridden to agy, still in full", str(cat.get("sol")))
 
     # --- wrong type on EVERY tune key of a SHIPPED seat: key dropped, shipped
-    #     value kept, codex stays in full (field-level, one row per key). ---
-    base_codex = load()[0]["codex"]
+    #     value kept, sol stays in full (field-level, one row per key). ---
+    base_codex = load()[0]["sol"]
     for body, key in (
         ("model = 123", "model"),
         ('opt_in = "yes"', "opt_in"),
@@ -14727,14 +14731,14 @@ def test_config_declared_negative():
         ("reasoning_effort = 5", "reasoning_effort"),
         ("print_timeout = true", "print_timeout"),
     ):
-        cat, warn, full = load(glob=f"[seats.codex]\n{body}\n")
-        kept = (cat["codex"].model == base_codex.model
-                and cat["codex"].opt_in is False
-                and cat["codex"].available is True)
-        check(f"shipped codex bad-type {key}: key dropped, shipped value kept, codex in full",
-              kept and "codex" in full and key in warn,
+        cat, warn, full = load(glob=f"[seats.sol]\n{body}\n")
+        kept = (cat["sol"].model == base_codex.model
+                and cat["sol"].opt_in is False
+                and cat["sol"].available is True)
+        check(f"shipped sol bad-type {key}: key dropped, shipped value kept, sol in full",
+              kept and "sol" in full and key in warn,
               "shipped value kept + warn + in full",
-              f"spec={cat.get('codex')} warn={warn[:80]!r}")
+              f"spec={cat.get('sol')} warn={warn[:80]!r}")
 
     # --- seat-level drops (declared seat only): each bad input drops the WHOLE
     #     seat with a warn, and the panel still resolves. ---
@@ -14747,11 +14751,12 @@ def test_config_declared_negative():
         ("claude-code bad alias", '[seats.x]\nprovider = "claude-code"\nmodel = "opus-4.6"\n', "x"),
         ("reserved token cursor", '[seats.cursor]\nprovider = "cursor"\n', "cursor"),
         ("reserved token agy", '[seats.agy]\nvia = ["agy"]\nmodel = "x"\n', "agy"),
+        ("reserved token codex", '[seats.codex]\nvia = ["codex"]\nmodel = "x"\n', "codex"),
     )
     for label, body, name in seat_level:
         cat, warn, full = load(glob=body)
         check(f"declared seat dropped + panel still resolves: {label}",
-              name not in cat and warn.strip() != "" and "codex" in full,
+              name not in cat and warn.strip() != "" and "sol" in full,
               "seat dropped, warn, panel intact",
               f"present={name in cat} warn={warn[:70]!r}")
 
@@ -14771,42 +14776,66 @@ def test_config_declared_negative():
     for nm in ("a.b", "a b", "a+b", "café", "../x", "a/b", ".", "..", ""):
         cat, warn, full = load(glob=f'[seats."{nm}"]\nprovider = "codex"\n')
         check(f"unsafe seat name {nm!r} rejected (name != slug, or empty)",
-              nm not in cat and "codex" in full,
-              "name rejected, shipped codex intact", f"present={nm in cat}")
+              nm not in cat and "sol" in full,
+              "name rejected, shipped sol intact", f"present={nm in cat}")
     cat, warn, full = load(glob='[seats.""]\nprovider = "codex"\n')
     check("empty seat name [seats.\"\"] does NOT slug to 'seat' and register",
           "" not in cat and "seat" not in cat,
           "empty rejected, no 'seat' seat", f"empty_in={'' in cat} seat_in={'seat' in cat}")
 
-    # --- the compatibility hinge: a provider-LESS [seats.codex] TUNES the shipped
+    # --- the compatibility hinge: a provider-LESS [seats.sol] TUNES the shipped
     #     seat (which stays declared=False), registers NOTHING new, and codex
     #     STAYS in full. "declared" means "absent from the shipped catalog",
     #     NOT "came from config". ---
     no_config_n = len(load()[0])
-    cat, warn, full = load(glob='[seats.codex]\nmodel = "gpt-5.6-sol"\n')
-    check("provider-less [seats.codex] tunes codex (declared=False), adds no seat, stays in full",
-          "codex" in cat and cat["codex"].declared is False and "codex" in full
+    cat, warn, full = load(glob='[seats.sol]\nmodel = "gpt-5.6-sol"\n')
+    check("provider-less [seats.sol] tunes sol (declared=False), adds no seat, stays in full",
+          "sol" in cat and cat["sol"].declared is False and "sol" in full
           and len(cat) == no_config_n,
           "codex tuned + in full + no new seat + still shipped",
-          f"declared={cat.get('codex')} n={len(cat)} vs {no_config_n}")
+          f"declared={cat.get('sol')} n={len(cat)} vs {no_config_n}")
 
-    # --- collision matrix: codex is a SEAT, not a group token, so it passes
-    #     through _expand_seat_groups unchanged. agy is the opposite case: a
-    #     free-model kind with NO shipped seat, so the channel mints a token that
-    #     names whatever agy seats the config declares (none, by default).
-    #     full/quick resolve to the pinned roster. ---
+    # --- collision matrix: a SEAT (sol) passes through _expand_seat_groups
+    #     unchanged. codex is a free-model kind with NO shipped seat of that
+    #     name, so the channel mints a GROUP TOKEN naming every codex-via seat
+    #     (sorted, opt-in included, like cursor). agy is the same shape with no
+    #     shipped members: it names whatever agy seats the config declares
+    #     (none, by default). full/quick resolve to the pinned roster. ---
     with crew_config():
-        check("_expand_seat_groups(['codex']) == ['codex'] (a seat, not a token)",
-              cli._expand_seat_groups(["codex"]) == ["codex"],
-              "['codex']", str(cli._expand_seat_groups(["codex"])))
+        codex_via = sorted(n for n, sp in seats.merged_catalog().items()
+                           if sp.via == ("codex",))
+        check("_expand_seat_groups(['sol']) == ['sol'] (a seat, not a token)",
+              cli._expand_seat_groups(["sol"]) == ["sol"],
+              "['sol']", str(cli._expand_seat_groups(["sol"])))
+        check("the codex-via seats are exactly astra/luna/sol/terra",
+              codex_via == ["astra", "luna", "sol", "terra"],
+              "['astra', 'luna', 'sol', 'terra']", str(codex_via))
+        check("_expand_seat_groups(['codex']) == exactly the codex-via seats (a token)",
+              cli._expand_seat_groups(["codex"]) == codex_via,
+              str(codex_via), str(cli._expand_seat_groups(["codex"])))
+        check("'codex' is a group + reserved token, NOT a registered seat",
+              "codex" in seats.group_tokens()
+              and "codex" in seats.reserved_tokens()
+              and "codex" not in seats.merged_catalog()
+              and "codex" not in known_seat_names(),
+              "token yes, seat no",
+              f"tokens={sorted(seats.group_tokens())} "
+              f"seat={'codex' in seats.merged_catalog()}")
+        check("--seats codex expands to exactly the codex-via seats",
+              cli._resolve_seats("codex") == codex_via,
+              str(codex_via), str(cli._resolve_seats("codex")))
+        check("--seats codex,sol de-dupes (sol counted once, nothing else added)",
+              cli._resolve_seats("codex,sol").count("sol") == 1
+              and sorted(cli._resolve_seats("codex,sol")) == codex_via,
+              "sol once, set == codex-via", str(cli._resolve_seats("codex,sol")))
         check("_expand_seat_groups(['agy']) == [] (a token with no shipped members)",
               cli._expand_seat_groups(["agy"]) == [],
               "[]", str(cli._expand_seat_groups(["agy"])))
         panels = seats.merged_panels()
         check("full/quick resolve to the exact pinned roster",
-              panels["full"] == ["codex", "codex-luna", "cursor-auto",
+              panels["full"] == ["astra", "sol", "luna", "cursor-auto",
                                  "cursor-composer", "opus", "sonnet"]
-              and panels["quick"] == ["codex", "sonnet"],
+              and panels["quick"] == ["astra", "sol", "sonnet"],
               "pinned full + quick", f"{panels['full']} / {panels['quick']}")
     with project_config(agy_seat_toml()):
         check("_expand_seat_groups(['agy']) names the config-declared agy seat",
@@ -14958,7 +14987,7 @@ def test_config_split_seat_layers():
             return cat, panels, buf.getvalue()
 
     cat2, panels2, warn2 = load_both(
-        glob='[panels]\nclash = ["codex"]\n\n'
+        glob='[panels]\nclash = ["sol"]\n\n'
              '[seats.clash]\nprovider = "codex"\nmodel = "gpt-5.6-sol"\n')
     check("[panels] row named after a declared seat: seat registers, panel dropped",
           cat2.get("clash") is not None and "clash" not in panels2
@@ -14975,20 +15004,20 @@ def test_config_split_seat_layers():
           "seat in catalog, panel absent",
           f"seat={'selfref' in cat2} panel={'selfref' in panels2}")
     # A [panels] row named after a SHIPPED seat is dropped the same way.
-    cat2, panels2, warn2 = load_both(glob='[panels]\ncodex = ["opus"]\n')
+    cat2, panels2, warn2 = load_both(glob='[panels]\nsol = ["opus"]\n')
     check("[panels] row named after a shipped seat: panel dropped, seat intact",
-          cat2.get("codex") is not None and "codex" not in panels2
+          cat2.get("sol") is not None and "sol" not in panels2
           and "the seat wins" in warn2,
           "codex seat intact, panel absent",
-          f"seat={'codex' in cat2} panel={'codex' in panels2}")
+          f"seat={'sol' in cat2} panel={'sol' in panels2}")
 
     # declared marks catalog ABSENCE, not config contact: tuning a shipped seat
     # must not flip it (the scaffold filter and premium-off derivation key on it).
-    cat, warn = load(glob='[seats.codex]\nreasoning_effort = "high"\n')
+    cat, warn = load(glob='[seats.sol]\nreasoning_effort = "high"\n')
     check("tuned SHIPPED seat keeps declared=False",
-          cat.get("codex") and cat["codex"].declared is False
-          and cat["codex"].reasoning_effort == "high",
-          "declared=False, tune applied", str(cat.get("codex")))
+          cat.get("sol") and cat["sol"].declared is False
+          and cat["sol"].reasoning_effort == "high",
+          "declared=False, tune applied", str(cat.get("sol")))
 
     # Repo-over-global holds for the ALIAS rule too: a bad global alias a repo
     # layer overrides must not drop the declared seat (merged-spec judgement).
@@ -15031,12 +15060,12 @@ def test_config_split_seat_layers():
     # SHIPPED-seat split merges are judged on the merged spec too: a provider
     # conversion in one layer + the alias in the other makes ONE claude-code
     # seat, never a part-applied executor running the alias as its model.
-    cat, warn = load(glob='[seats.codex]\nprovider = "claude-code"\n',
-                     project='[seats.codex]\nmodel = "fable"\n')
+    cat, warn = load(glob='[seats.sol]\nprovider = "claude-code"\n',
+                     project='[seats.sol]\nmodel = "fable"\n')
     check("shipped seat split-converted across layers: merged claude-code seat",
-          cat.get("codex") and cat["codex"].provider == "claude-code"
-          and cat["codex"].model == "fable",
-          "codex converted to claude-code/fable", str(cat.get("codex")))
+          cat.get("sol") and cat["sol"].provider == "claude-code"
+          and cat["sol"].model == "fable",
+          "codex converted to claude-code/fable", str(cat.get("sol")))
     # ...and a bad alias TUNE on a shipped Task seat degrades per key: the model
     # falls back to the shipped value while INDEPENDENT tunes survive (an
     # explicit available = false must never be undone by an unrelated typo).
@@ -15048,13 +15077,13 @@ def test_config_split_seat_layers():
           "opus model reverted, still disabled", str(cat.get("opus")))
     # A conversion to claude-code with NO valid alias anywhere reverts the
     # provider/model PAIR and keeps the rest.
-    cat, warn = load(glob='[seats.codex]\nprovider = "claude-code"\n'
+    cat, warn = load(glob='[seats.sol]\nprovider = "claude-code"\n'
                           'opt_in = true\n')
     check("shipped seat converted with no valid alias: conversion ignored, tune kept",
-          cat.get("codex") and cat["codex"].provider == "codex"
-          and cat["codex"].model == "gpt-5.6-sol" and cat["codex"].opt_in is True
+          cat.get("sol") and cat["sol"].provider == "codex"
+          and cat["sol"].model == "gpt-5.6-sol" and cat["sol"].opt_in is True
           and "ignoring the conversion" in warn,
-          "codex stays codex, opt_in tune kept", str(cat.get("codex")))
+          "sol stays on codex, opt_in tune kept", str(cat.get("sol")))
 
     # Seat names must be LOWERCASE: result file names are not case-sensitive on
     # every filesystem (macOS APFS, Windows), so a declared [seats.Opus] would
@@ -15123,17 +15152,17 @@ def test_via_migration():
 
     # A legacy row and its channel-first spelling must fold to the same spec,
     # including an execution-key override on a shipped seat.
-    legacy, _, legacy_warn = load(glob='[seats.codex]\nprovider = "agy"\n'
+    legacy, _, legacy_warn = load(glob='[seats.sol]\nprovider = "agy"\n'
                                         'reasoning_effort = "high"\n')
-    current, _, current_warn = load(glob='[seats.codex]\nvia = ["agy"]\n'
+    current, _, current_warn = load(glob='[seats.sol]\nvia = ["agy"]\n'
                                          'reasoning_effort = "high"\n')
     check("legacy provider override and via override are behavior-identical",
-          legacy.get("codex") == current.get("codex")
-          and legacy["codex"].via == ("agy",)
-          and legacy["codex"].provider == "agy"
+          legacy.get("sol") == current.get("sol")
+          and legacy["sol"].via == ("agy",)
+          and legacy["sol"].provider == "agy"
           and not legacy_warn and not current_warn,
           "equal converted catalog rows, no warnings",
-          f"legacy={legacy.get('codex')} current={current.get('codex')} "
+          f"legacy={legacy.get('sol')} current={current.get('sol')} "
           f"warn={legacy_warn!r}/{current_warn!r}")
 
     # Stage 1: shape, including a declared invalid row, must not fall through
@@ -15148,10 +15177,10 @@ def test_via_migration():
 
     # The same invalid via shape on a SHIPPED row emits the same stage
     # diagnostic while the shipped execution key remains available.
-    cat, _, warn = load(glob='[seats.codex]\nvia = "codex"\n')
+    cat, _, warn = load(glob='[seats.sol]\nvia = "codex"\n')
     check("via stage 1 on a shipped row keeps the shipped seat and exact diagnostic",
-          cat.get("codex") is not None
-          and "[seats.codex].via must be a list of channel-name strings; "
+          cat.get("sol") is not None
+          and "[seats.sol].via must be a list of channel-name strings; "
               "ignoring 'codex'" in warn
           and "names no known seat and declares no provider or via" not in warn,
           "shipped seat + the same shape warning", warn)
@@ -15160,14 +15189,14 @@ def test_via_migration():
     # considered; the panel parser still remains usable in the same config.
     cat, panels, warn = load(
         glob='[seats.multi-channel]\nvia = ["codex", "bogus"]\nmodel = "x"\n'
-             '[panels]\nsafe = ["codex"]\n', panels=True)
+             '[panels]\nsafe = ["sol"]\n', panels=True)
     check("via stage 2 rejects multi-channel rows without an unknown-channel warn",
           "multi-channel" not in cat
           and "[seats.multi-channel].via = ['codex', 'bogus'] names more than one "
               "channel (one channel per seat until a second host exists); ignoring the seat" in warn
           and "names unknown channel" not in warn
           and "lists no usable channel" not in warn
-          and panels.get("safe") == ["codex"],
+          and panels.get("safe") == ["sol"],
           "seat dropped, exact cardinality warning, safe panel survives",
           f"cat={cat.get('multi-channel')} panels={panels} warn={warn}")
 
@@ -15212,14 +15241,14 @@ def test_via_migration():
 
     # Legacy malformed providers still return the missing-key sentinel: a
     # shipped seat keeps its base execution key while a sibling tune survives.
-    cat, _, warn = load(glob='[seats.codex]\nprovider = 123\n'
+    cat, _, warn = load(glob='[seats.sol]\nprovider = 123\n'
                               'reasoning_effort = "medium"\n')
     check("malformed legacy provider preserves shipped execution and sibling tune",
-          cat.get("codex") and cat["codex"].provider == "codex"
-          and cat["codex"].reasoning_effort == "medium"
-          and "[seats.codex].provider must be a non-empty string; ignoring 123" in warn,
+          cat.get("sol") and cat["sol"].provider == "codex"
+          and cat["sol"].reasoning_effort == "medium"
+          and "[seats.sol].provider must be a non-empty string; ignoring 123" in warn,
           "codex base + reasoning_effort=medium + legacy shape warning",
-          f"spec={cat.get('codex')} warn={warn}")
+          f"spec={cat.get('sol')} warn={warn}")
 
     # The same malformed legacy key on the higher layer must not erase a valid
     # provider seeded by the lower layer or its independent tuning.
@@ -15304,7 +15333,7 @@ def test_resolver():
           resolved is not None and resolved.channel == "codex"
           and resolved.model is None and resolved.engine_runnable
           and resolved.supports_workspace_write and calls == {},
-          "codex, no probe, writable", f"resolved={resolved!r} calls={calls}")
+          "sol, no probe, writable", f"resolved={resolved!r} calls={calls}")
 
     saved_default = channels._default_capabilities
     channels._default_capabilities = lambda: (_ for _ in ()).throw(
@@ -15543,7 +15572,7 @@ def test_routing_parameter_neutrality():
 
             prep_full = run("review-prep", ".crew/plans/p.md", "--panel", "full",
                             "--session-id", "neutral")
-            prep_override = run("review-prep", ".crew/plans/p.md", "--seats", "codex",
+            prep_override = run("review-prep", ".crew/plans/p.md", "--seats", "sol",
                                 "--task-seats", "custom-task", "--session-id", "neutral2")
             captured[host] = {
                 # The two per-host project roots, so a cross-host comparison
@@ -15608,10 +15637,10 @@ def test_routing_parameter_neutrality():
             override = captured[host]["prep_override"]
             check(f"an explicit --task-seats name keeps its channel on host={host}",
                   override["seat_channels"] == {
-                      "codex": "codex",
+                      "sol": "codex",
                       "custom-task": "claude" if native_here else None,
                   },
-                  repr({"codex": "codex",
+                  repr({"sol": "codex",
                         "custom-task": "claude" if native_here else None}),
                   repr(override["seat_channels"]))
 
@@ -15892,7 +15921,7 @@ def test_codex_host_fail_closed():
         project = Path(td)
         _write_plan(project)
         disabled = [
-            "codex", "codex-luna", "cursor-auto", "cursor-composer",
+            "astra", "sol", "luna", "cursor-auto", "cursor-composer",
             "opus", "sonnet",
         ]
         crew = project / ".crew"
@@ -15909,7 +15938,7 @@ def test_codex_host_fail_closed():
         )
         payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
         expected = [
-            "codex", "codex-luna", "cursor-auto", "cursor-composer",
+            "astra", "sol", "luna", "cursor-auto", "cursor-composer",
             "opus", "sonnet",
         ]
         check("Codex-host whole-panel availability fallback restores resolver output",
@@ -15934,7 +15963,7 @@ def test_unknown_host_conservative():
         )
         payload = json.loads(proc.stdout) if proc.stdout.strip() else {}
         expected = [
-            "codex", "codex-luna", "cursor-auto", "cursor-composer",
+            "astra", "sol", "luna", "cursor-auto", "cursor-composer",
             "opus", "sonnet",
         ]
         check("unknown host resolves every full-panel seat externally",
@@ -16009,7 +16038,7 @@ def test_roster_channel_invariant():
     """Ensure every emitted final roster member has exactly one channel entry."""
     log_section("final roster and seat-channel map invariant")
     full_subprocess = [
-        "codex", "codex-luna", "cursor-auto", "cursor-composer",
+        "astra", "sol", "luna", "cursor-auto", "cursor-composer",
     ]
     full_task = ["opus", "sonnet"]
 
@@ -16024,10 +16053,12 @@ def test_roster_channel_invariant():
     def assert_invariant(label: str, payload: dict, expected_subprocess: list[str],
                          expected_task: list[str]) -> None:
         roster = expected_subprocess + expected_task
+        # Hand-written: the codex-via seats share no name prefix to key off.
+        _CODEX_VIA_SEATS = {"astra", "sol", "luna", "terra"}
         expected_channels = {
             name: ("claude" if name in expected_task
                    else "cursor" if name.startswith("cursor-")
-                   else "codex" if name.startswith("codex") else "agy")
+                   else "codex" if name in _CODEX_VIA_SEATS else "agy")
             for name in roster
         }
         check(
@@ -16135,7 +16166,7 @@ def test_roster_channel_invariant():
         try:
             os.environ["CREW_HOST"] = "claude"
             proc = _run_dispatcher(
-                ["review-prep", "plan.md", "--seats", "", "--task-seats", "codex",
+                ["review-prep", "plan.md", "--seats", "", "--task-seats", "sol",
                  "--session-id", "catalog-task-codex"],
                 cwd=td, env=_clean_env(td), timeout=30,
             )
@@ -16150,9 +16181,9 @@ def test_roster_channel_invariant():
         check(
             "catalog --task-seats name keeps its catalog channel",
             proc.returncode == 0
-            and payload.get("task_seats") == ["codex"]
-            and payload.get("seat_channels") == {"codex": "codex"},
-            "task_seats=['codex'], seat_channels={'codex': 'codex'}",
+            and payload.get("task_seats") == ["sol"]
+            and payload.get("seat_channels") == {"sol": "codex"},
+            "task_seats=['sol'], seat_channels={'sol': 'codex'}",
             f"rc={proc.returncode} payload={payload} stderr={proc.stderr!r}",
         )
 
@@ -16169,7 +16200,7 @@ def test_review_runs():
 
     TSHA = _hl.sha256(b"content").hexdigest()
     SIGS = {
-        "codex": {"kind": "subprocess", "provider": "codex", "model": "gpt-5.6-sol"},
+        "sol": {"kind": "subprocess", "provider": "codex", "model": "gpt-5.6-sol"},
         "opus": {"kind": "task", "model": "opus"},
         "sonnet": {"kind": "task", "model": "sonnet"},
     }
@@ -16189,19 +16220,19 @@ def test_review_runs():
         "spec": {**BASE_KW, "target_spec": "other.md"},
         "base": {**BASE_KW, "target_base": "develop"},
         "panel (seat added)": {**BASE_KW, "seat_signatures": {
-            **SIGS, "codex-luna": {"kind": "subprocess", "model": "gpt-5.6-luna"}}},
+            **SIGS, "luna": {"kind": "subprocess", "model": "gpt-5.6-luna"}}},
         "SUBPROCESS seat's resolved model": {**BASE_KW, "seat_signatures": {
-            **SIGS, "codex": {"kind": "subprocess", "provider": "codex",
+            **SIGS, "sol": {"kind": "subprocess", "provider": "codex",
                               "model": "gpt-other"}}},
         "SUBPROCESS seat's resolved PROVIDER (same model)": {**BASE_KW,
             "seat_signatures": {
-                **SIGS, "codex": {"kind": "subprocess", "provider": "cursor",
+                **SIGS, "sol": {"kind": "subprocess", "provider": "cursor",
                                   "model": "gpt-5.6-sol"}}},
         "task seat's model pin": {**BASE_KW, "seat_signatures": {
             **SIGS, "opus": {"kind": "task", "model": "fable"}}},
         "seat's execution KIND (same name, same model)": {**BASE_KW,
             "seat_signatures": {
-                **SIGS, "codex": {"kind": "task", "model": "gpt-5.6-sol"}}},
+                **SIGS, "sol": {"kind": "task", "model": "gpt-5.6-sol"}}},
     }
     for label, kw in variants.items():
         check(f"mint_identity changes when the {label} changes",
@@ -16209,7 +16240,7 @@ def test_review_runs():
     # The signature map is keyed by name and canonically sorted, so insertion
     # order never splits an identity.
     reordered_sigs = {
-        "sonnet": SIGS["sonnet"], "codex": SIGS["codex"], "opus": SIGS["opus"],
+        "sonnet": SIGS["sonnet"], "sol": SIGS["sol"], "opus": SIGS["opus"],
     }
     r_id, _ = review_runs.mint_identity(
         **{**BASE_KW, "seat_signatures": reordered_sigs})
@@ -16217,7 +16248,7 @@ def test_review_runs():
 
     # A malformed seat_signatures field in an otherwise-valid record raises the
     # module's own error type, never a bare TypeError/ValueError.
-    for bad_sigs in (["codex"], "codex", 7):
+    for bad_sigs in (["sol"], "sol", 7):
         try:
             review_runs.recompute_identity({"seat_signatures": bad_sigs})
             check(f"recompute_identity rejects malformed seat_signatures ({type(bad_sigs).__name__})",
@@ -16248,7 +16279,7 @@ def test_review_runs():
         record = {"run_id": a, "identity_digest": dig, "target_sha256": TSHA,
                   "target_spec": "plan.md", "target_base": "main",
                   "target_descriptor": "plan: plan.md",
-                  "snapshot": "target.md", "subprocess_seats": ["codex"],
+                  "snapshot": "target.md", "subprocess_seats": ["sol"],
                   "task_seats": ["opus", "sonnet"],
                   "task_seat_models": {"opus": "opus", "sonnet": "sonnet"},
                   "seat_signatures": SIGS,
@@ -16346,18 +16377,18 @@ def test_review_runs():
     # --- landed-and-valid predicate -------------------------------------------
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
-        ok_stamped = {"name": "codex", "ok": True, "run_id": a, "target_sha256": TSHA}
+        ok_stamped = {"name": "sol", "ok": True, "run_id": a, "target_sha256": TSHA}
         cases = [
             ("valid stamped success", ok_stamped, True),
             ("ok but wrong run_id", {**ok_stamped, "run_id": "run-000000000000"}, False),
             ("ok but wrong target_sha256",
              {**ok_stamped, "target_sha256": "0" * 64}, False),
-            ("ok but unstamped", {"name": "codex", "ok": True}, False),
+            ("ok but unstamped", {"name": "sol", "ok": True}, False),
             ("stamped failure", {**ok_stamped, "ok": False}, False),
         ]
         for label, data, want in cases:
-            (d / "codex.json").write_text(json.dumps(data), encoding="utf-8")
-            got = review_runs.seat_landed_valid(d, "codex", a, TSHA)
+            (d / "sol.json").write_text(json.dumps(data), encoding="utf-8")
+            got = review_runs.seat_landed_valid(d, "sol", a, TSHA)
             check(f"seat_landed_valid: {label} -> {want}", got is want,
                   str(want), str(got))
         # Name binding: a valid same-run result COPIED to another seat's
@@ -16367,13 +16398,13 @@ def test_review_runs():
               review_runs.seat_landed_valid(d, "sonnet", a, TSHA) is False,
               "False", "True")
         check("result_valid binds the stored name when one is expected",
-              review_runs.result_valid(ok_stamped, a, TSHA, name="codex") is True
+              review_runs.result_valid(ok_stamped, a, TSHA, name="sol") is True
               and review_runs.result_valid(ok_stamped, a, TSHA, name="sonnet") is False
               and review_runs.result_valid(ok_stamped, a, TSHA) is True,
               "True/False/True (name unchecked when not given)", "?")
-        (d / "codex.json").write_text("{broken", encoding="utf-8")
+        (d / "sol.json").write_text("{broken", encoding="utf-8")
         check("seat_landed_valid: unparseable file -> False",
-              review_runs.seat_landed_valid(d, "codex", a, TSHA) is False,
+              review_runs.seat_landed_valid(d, "sol", a, TSHA) is False,
               "False", "True")
         check("seat_landed_valid: missing file -> False",
               review_runs.seat_landed_valid(d, "missing", a, TSHA) is False,
@@ -16381,30 +16412,30 @@ def test_review_runs():
 
     # --- preserve-valid write: sequential rule --------------------------------
     def _payload(ok, body="x"):
-        return json.dumps({"name": "codex", "ok": ok, "output": body,
+        return json.dumps({"name": "sol", "ok": ok, "output": body,
                            "run_id": a, "target_sha256": TSHA})
 
     with tempfile.TemporaryDirectory() as td:
-        p = Path(td) / "codex.json"
+        p = Path(td) / "sol.json"
         w, _ = review_runs.preserve_valid_write(
             p, _payload(False), incoming_ok=False, run_id=a, target_sha256=TSHA,
-            name="codex")
+            name="sol")
         check("preserve-valid: a failure with no prior file writes", w is True,
               "written", "skipped")
         w, _ = review_runs.preserve_valid_write(
             p, _payload(True, "GOOD"), incoming_ok=True, run_id=a,
-            target_sha256=TSHA, name="codex")
+            target_sha256=TSHA, name="sol")
         check("preserve-valid: ok=true replaces a failure", w is True, "written", "skipped")
         w, note = review_runs.preserve_valid_write(
             p, _payload(False), incoming_ok=False, run_id=a, target_sha256=TSHA,
-            name="codex")
+            name="sol")
         data = json.loads(p.read_text())
         check("preserve-valid: a failure NEVER replaces a landed valid success (note emitted)",
               w is False and note and data["ok"] is True and data["output"] == "GOOD",
               "kept GOOD + note", f"w={w} data={data}")
         w, _ = review_runs.preserve_valid_write(
             p, _payload(True, "BETTER"), incoming_ok=True, run_id=a,
-            target_sha256=TSHA, name="codex")
+            target_sha256=TSHA, name="sol")
         check("preserve-valid: a fresh ok=true replaces anything (a better retry wins)",
               w is True and json.loads(p.read_text())["output"] == "BETTER",
               "BETTER", json.loads(p.read_text()).get("output"))
@@ -16428,7 +16459,7 @@ def test_review_runs():
     # so the failure path can never clobber the landed success. Without the lock
     # a failure that passed its check before the success landed would replace it.
     with tempfile.TemporaryDirectory() as td:
-        p = Path(td) / "codex.json"
+        p = Path(td) / "sol.json"
         n_fail = 10
         barrier = threading.Barrier(n_fail + 1)
         errors = []
@@ -16438,7 +16469,7 @@ def test_review_runs():
             try:
                 review_runs.preserve_valid_write(
                     p, _payload(False), incoming_ok=False,
-                    run_id=a, target_sha256=TSHA, name="codex")
+                    run_id=a, target_sha256=TSHA, name="sol")
             except Exception as exc:  # pragma: no cover - diagnostics only
                 errors.append(exc)
 
@@ -16447,7 +16478,7 @@ def test_review_runs():
             try:
                 review_runs.preserve_valid_write(
                     p, _payload(True, "SURVIVES"), incoming_ok=True,
-                    run_id=a, target_sha256=TSHA, name="codex")
+                    run_id=a, target_sha256=TSHA, name="sol")
             except Exception as exc:  # pragma: no cover - diagnostics only
                 errors.append(exc)
 
@@ -16589,7 +16620,7 @@ def test_run_scoped_reviews():
         obj = json.loads(proc.stdout) if proc.returncode == 0 and proc.stdout.strip() else None
         return proc, obj
 
-    ARGS = ["plan.md", "--seats", "codex", "--task-seats", "opus,sonnet",
+    ARGS = ["plan.md", "--seats", "sol", "--task-seats", "opus,sonnet",
             "--session-id", "S"]
 
     # 1. Same-identity re-prep: same run_dir, run.json BYTE-UNTOUCHED
@@ -16623,8 +16654,8 @@ def test_run_scoped_reviews():
         check("same-identity re-prep keeps the landed seat and excludes it from pending",
               opus_f.exists()
               and o2["pending_task_seats"] == ["sonnet"]
-              and o2["pending_subprocess_seats"] == ["codex"],
-              "pending: sonnet + codex only",
+              and o2["pending_subprocess_seats"] == ["sol"],
+              "pending: sonnet + sol only",
               f"pending_task={o2['pending_task_seats']} pending_sub={o2['pending_subprocess_seats']}")
         # changed content -> different dir, old seat unreachable via new prep
         (tdp / "plan.md").write_text("# Plan\nrevised body\n", encoding="utf-8")
@@ -16645,9 +16676,9 @@ def test_run_scoped_reviews():
         _write_plan(tdp)
         env = _neutral_env()
         env["CLAUDE_PROJECT_DIR"] = td
-        _, oa = _prep_json(["plan.md", "--seats", "codex",
+        _, oa = _prep_json(["plan.md", "--seats", "sol",
                             "--task-seats", "opus", "--session-id", "S"], td, env)
-        _, ob = _prep_json(["plan.md", "--seats", "codex,codex-luna",
+        _, ob = _prep_json(["plan.md", "--seats", "sol,luna",
                             "--task-seats", "opus", "--session-id", "S"], td, env)
         check("same content, different panel -> DIFFERENT run_dir",
               oa and ob and oa["run_dir"] != ob["run_dir"]
@@ -16657,19 +16688,19 @@ def test_run_scoped_reviews():
         crew_dir.mkdir(exist_ok=True)
         (crew_dir / "config.toml").write_text('[seats.opus]\nmodel = "fable"\n',
                                               encoding="utf-8")
-        _, oc = _prep_json(["plan.md", "--seats", "codex",
+        _, oc = _prep_json(["plan.md", "--seats", "sol",
                             "--task-seats", "opus", "--session-id", "S"], td, env)
         check("same roster with a changed Task-seat model pin -> DIFFERENT run_dir",
               oc is not None and oc["run_dir"] != oa["run_dir"]
               and oc["task_seat_models"] == {"opus": "fable"},
               "different dir + fable pin", str(oc))
         # A SUBPROCESS seat's config-resolved model is in the identity too: a
-        # [seats.codex].model flip must mint a new run, or an unchanged-content
+        # [seats.sol].model flip must mint a new run, or an unchanged-content
         # re-prep would resume the OLD model's landed result as this panel's.
         (crew_dir / "config.toml").write_text(
-            '[seats.opus]\nmodel = "fable"\n[seats.codex]\nmodel = "gpt-other"\n',
+            '[seats.opus]\nmodel = "fable"\n[seats.sol]\nmodel = "gpt-other"\n',
             encoding="utf-8")
-        _, od = _prep_json(["plan.md", "--seats", "codex",
+        _, od = _prep_json(["plan.md", "--seats", "sol",
                             "--task-seats", "opus", "--session-id", "S"], td, env)
         check("same roster with a changed SUBPROCESS seat model -> DIFFERENT run_dir",
               od is not None and od["run_dir"] != oc["run_dir"],
@@ -16687,10 +16718,10 @@ def test_run_scoped_reviews():
         env["CLAUDE_PROJECT_DIR"] = td
         _, o1 = _prep_json(ARGS, td, env)
         _fake_codex_writer(bins, "CODEX GOOD APPROVED", 0)
-        r1 = _run_dispatcher(["run", "codex", "--session-id", "S",
+        r1 = _run_dispatcher(["run", "sol", "--session-id", "S",
                               "--run-id", o1["run_id"], "--json"],
                              cwd=td, env=env, timeout=30)
-        codex_f = tdp / o1["run_dir"] / "codex.json"
+        codex_f = tdp / o1["run_dir"] / "sol.json"
         data = json.loads(codex_f.read_text()) if codex_f.exists() else {}
         check("run --run-id derives -f/-o from the run dir and stamps the result",
               r1.returncode == 0 and data.get("ok") is True
@@ -16704,7 +16735,7 @@ def test_run_scoped_reviews():
               and o2["run_dir"] == o1["run_dir"],
               "codex excluded", str(o2 and o2["pending_subprocess_seats"]))
         _fake_codex_writer(bins, "", 1)  # forced failure
-        r2 = _run_dispatcher(["run", "codex", "--session-id", "S",
+        r2 = _run_dispatcher(["run", "sol", "--session-id", "S",
                               "--run-id", o1["run_id"], "--json"],
                              cwd=td, env=env, timeout=30)
         data = json.loads(codex_f.read_text())
@@ -16714,7 +16745,7 @@ def test_run_scoped_reviews():
               "exit 0 + note + ok=true kept",
               f"rc={r2.returncode} err={r2.stderr[:150]!r} ok={data.get('ok')}")
         _fake_codex_writer(bins, "CODEX BETTER APPROVED", 0)
-        r3 = _run_dispatcher(["run", "codex", "--session-id", "S",
+        r3 = _run_dispatcher(["run", "sol", "--session-id", "S",
                               "--run-id", o1["run_id"], "--json"],
                              cwd=td, env=env, timeout=30)
         data = json.loads(codex_f.read_text())
@@ -16753,9 +16784,9 @@ def test_run_scoped_reviews():
         env = path_with(bins)
         env["CLAUDE_PROJECT_DIR"] = td
         _, o1 = _prep_json(ARGS, td, env)
-        rp = _run_dispatcher(["run", "codex", "--session-id", "S", "--json"],
+        rp = _run_dispatcher(["run", "sol", "--session-id", "S", "--json"],
                              cwd=td, env=env, timeout=30)
-        codex_f = tdp / o1["run_dir"] / "codex.json"
+        codex_f = tdp / o1["run_dir"] / "sol.json"
         data = json.loads(codex_f.read_text()) if codex_f.exists() else {}
         check("run without --run-id follows the session pointer into the run dir (stamped)",
               rp.returncode == 0 and data.get("ok") is True
@@ -16783,20 +16814,20 @@ def test_run_scoped_reviews():
               and not (tdp / o2["run_dir"] / "opus.json").exists(),
               "old dir + old stamp, new dir clean", str(odata)[:150])
 
-    # 5. Stale-fold regression: a pre-change FLAT ok=true codex.json is never
+    # 5. Stale-fold regression: a pre-change FLAT ok=true sol.json is never
     #    seen once a run is live; the legacy collect invocation (no --run-id)
-    #    follows the pointer and renders codex as named-but-missing SKIPPED.
+    #    follows the pointer and renders sol as named-but-missing SKIPPED.
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         _write_plan(tdp)
         flat = tdp / ".crew" / "reviews" / "S"
         flat.mkdir(parents=True)
-        (flat / "codex.json").write_text(json.dumps(
-            {"name": "codex", "model": "m", "ok": True,
+        (flat / "sol.json").write_text(json.dumps(
+            {"name": "sol", "model": "m", "ok": True,
              "output": "STALE APPROVED", "error": None, "elapsed": 1.0}),
             encoding="utf-8")
         _prep_json(ARGS, td)
-        cp = _run_dispatcher(["collect", "--session-id", "S", "--seats", "codex",
+        cp = _run_dispatcher(["collect", "--session-id", "S", "--seats", "sol",
                               "--group"], cwd=td, timeout=30)
         check("stale-fold regression: pointer-routed collect renders the stale flat seat as SKIPPED",
               cp.returncode == 0 and "STALE APPROVED" not in cp.stdout
@@ -16804,7 +16835,7 @@ def test_run_scoped_reviews():
               "SKIPPED, no stale fold", cp.stdout[:200])
         # explicit --run-id routes the same way
         _, o1 = _prep_json(ARGS, td)
-        cr = _run_dispatcher(["collect", "--session-id", "S", "--seats", "codex",
+        cr = _run_dispatcher(["collect", "--session-id", "S", "--seats", "sol",
                               "--run-id", o1["run_id"]], cwd=td, timeout=30)
         check("collect --run-id reads the run dir (stale flat file never seen)",
               cr.returncode == 0 and "STALE APPROVED" not in cr.stdout,
@@ -16821,14 +16852,14 @@ def test_run_scoped_reviews():
         (flat / "prompt-seat.txt").write_text("prompt", encoding="utf-8")
         env = path_with(bins)
         env["CLAUDE_PROJECT_DIR"] = td
-        rf = _run_dispatcher(["run", "codex", "--session-id", "F", "--json"],
+        rf = _run_dispatcher(["run", "sol", "--session-id", "F", "--json"],
                              cwd=td, env=env, timeout=30)
-        data = json.loads((flat / "codex.json").read_text()) if (flat / "codex.json").exists() else {}
+        data = json.loads((flat / "sol.json").read_text()) if (flat / "sol.json").exists() else {}
         check("pointer-absent run falls back to the flat session dir, UNSTAMPED",
               rf.returncode == 0 and data.get("ok") is True
               and "run_id" not in data and "target_sha256" not in data,
               "flat six-field result", str(data)[:150])
-        cf = _run_dispatcher(["collect", "--session-id", "F", "--seats", "codex"],
+        cf = _run_dispatcher(["collect", "--session-id", "F", "--seats", "sol"],
                              cwd=td, timeout=30)
         check("pointer-absent collect reads the flat session dir",
               cf.returncode == 0 and "FLAT OK" in cf.stdout,
@@ -16871,7 +16902,7 @@ def test_run_scoped_reviews():
         tdp = Path(td)
         _write_plan(tdp)
         _, o1 = _prep_json(ARGS, td)
-        bad = _run_dispatcher(["run", "codex", "--session-id", "S",
+        bad = _run_dispatcher(["run", "sol", "--session-id", "S",
                                "--run-id", "../../evil", "--json"],
                               cwd=td, timeout=30)
         check("run rejects a hostile --run-id (traversal guard, exit 2)",
@@ -16887,11 +16918,11 @@ def test_run_scoped_reviews():
         check("persist-seat rejects a --run-id with no minted run (exit 2)",
               badp.returncode == 2 and "no run record" in badp.stderr,
               "exit 2 + no run record", f"rc={badp.returncode} err={badp.stderr[:150]!r}")
-        badc = _run_dispatcher(["collect", "--session-id", "S", "--seats", "codex",
+        badc = _run_dispatcher(["collect", "--session-id", "S", "--seats", "sol",
                                 "--run-id", "run-a/b"], cwd=td, timeout=30)
         check("collect rejects a hostile --run-id (exit 2)",
               badc.returncode == 2, "exit 2", str(badc.returncode))
-        oflag = _run_dispatcher(["run", "codex", "--session-id", "S",
+        oflag = _run_dispatcher(["run", "sol", "--session-id", "S",
                                  "--run-id", o1["run_id"], "-o", "elsewhere.json",
                                  "--json"], cwd=td, timeout=30)
         check("run --run-id with an explicit -o is rejected as contradictory routing (exit 2)",
@@ -16899,7 +16930,7 @@ def test_run_scoped_reviews():
               and not (tdp / "elsewhere.json").exists(),
               "exit 2, nothing written", f"rc={oflag.returncode} err={oflag.stderr[:150]!r}")
         hostile_sid = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex", "--task-seats", "opus",
+            ["review-prep", "plan.md", "--seats", "sol", "--task-seats", "opus",
              "--session-id", "../../esc"], cwd=td, timeout=30)
         hobj = json.loads(hostile_sid.stdout) if hostile_sid.returncode == 0 else {}
         esc_prefix = str(tdp.resolve() / ".crew" / "reviews" / "esc" / "run-")
@@ -16915,15 +16946,15 @@ def test_run_scoped_reviews():
         tdp = Path(td)
         _write_plan(tdp)
         dup = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex",
-             "--task-seats", "codex", "--session-id", "S"], cwd=td, timeout=30)
+            ["review-prep", "plan.md", "--seats", "sol",
+             "--task-seats", "sol", "--session-id", "S"], cwd=td, timeout=30)
         check("duplicate seat across subprocess+task exits 2",
               dup.returncode == 2 and "duplicate" in dup.stderr.lower(),
               "exit 2 + duplicate named", f"rc={dup.returncode} err={dup.stderr[:150]!r}")
         check("duplicate-manifest rejection writes NOTHING (no run dir, no pointer)",
               not (tdp / ".crew").exists(), ".crew absent", "artifacts written")
         col = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex",
+            ["review-prep", "plan.md", "--seats", "sol",
              "--task-seats", "a.b,ab", "--session-id", "S"], cwd=td, timeout=30)
         check("non-filename-safe task seat (slug collision class) exits 2, nothing written",
               col.returncode == 2 and "a.b" in col.stderr
@@ -16934,7 +16965,7 @@ def test_run_scoped_reviews():
         # "seat" would stage prompt-seat.txt ONTO the shared subprocess prompt.
         for stem in ("run", "current-run", "current-standalone-review", "seat"):
             res = _run_dispatcher(
-                ["review-prep", "plan.md", "--seats", "codex",
+                ["review-prep", "plan.md", "--seats", "sol",
                  "--task-seats", stem, "--session-id", "S"], cwd=td, timeout=30)
             check(f"reserved seat name {stem!r} exits 2 with nothing written",
                   res.returncode == 2 and "reserved" in res.stderr
@@ -16952,7 +16983,7 @@ def test_run_scoped_reviews():
             "SEAT",
         ):
             res = _run_dispatcher(
-                ["review-prep", "plan.md", "--seats", "codex",
+                ["review-prep", "plan.md", "--seats", "sol",
                  "--task-seats", cased, "--session-id", "S"], cwd=td, timeout=30)
             check(f"case-variant reserved task seat {cased!r} exits 2 with nothing written",
                   res.returncode == 2 and "reserved" in res.stderr
@@ -16960,7 +16991,7 @@ def test_run_scoped_reviews():
                   "exit 2 reserved + nothing written",
                   f"rc={res.returncode} err={res.stderr[:150]!r}")
         cased = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex",
+            ["review-prep", "plan.md", "--seats", "sol",
              "--task-seats", "Opus", "--session-id", "S"], cwd=td, timeout=30)
         check("ordinary non-lowercase task seat 'Opus' exits 2 with nothing written",
               cased.returncode == 2 and "lowercase" in cased.stderr
@@ -16970,7 +17001,7 @@ def test_run_scoped_reviews():
         # Discuss never preps: a discuss prep would collide with the review
         # run's identity and overwrite its staged prompts.
         disc = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex", "--mode", "discuss",
+            ["review-prep", "plan.md", "--seats", "sol", "--mode", "discuss",
              "--session-id", "S"], cwd=td, timeout=30)
         check("review-prep --mode discuss exits 2 (pointer at render) with nothing written",
               disc.returncode == 2 and "render --mode discuss" in disc.stderr
@@ -16985,7 +17016,7 @@ def test_run_scoped_reviews():
         tdp = Path(td)
         _write_plan(tdp)
         workflow_task = _run_dispatcher(
-            ["review-prep", "plan.md", "--seats", "codex",
+            ["review-prep", "plan.md", "--seats", "sol",
              "--task-seats", "workflow", "--session-id", "workflow-local"],
             cwd=td, timeout=30)
         workflow_payload = (
@@ -17262,12 +17293,12 @@ def test_run_scoped_reviews():
                     and (run_d / "opus.json").read_bytes() == opus_bytes)
 
         # run: non-member subprocess seat (registry-valid, not in this panel).
-        nm = _run_dispatcher(["run", "codex-luna", "--session-id", "S",
+        nm = _run_dispatcher(["run", "luna", "--session-id", "S",
                               "--run-id", o1["run_id"], "--json"],
                              cwd=td, env=env, timeout=30)
         check("run-scoped run with a NON-MEMBER seat exits 2, nothing written",
               nm.returncode == 2 and "not a subprocess member" in nm.stderr
-              and not (run_d / "codex-luna.json").exists() and _intact(),
+              and not (run_d / "luna.json").exists() and _intact(),
               "exit 2 + no file", f"rc={nm.returncode} err={nm.stderr[:150]!r}")
         # run: a task-kind name never reaches a run-scoped write (the engine
         # refuses Task seats outright).
@@ -17278,40 +17309,40 @@ def test_run_scoped_reviews():
               tk.returncode == 2 and "Task seat" in tk.stderr and _intact(),
               "exit 2", f"rc={tk.returncode} err={tk.stderr[:150]!r}")
         # run: explicit -f rejected (the frozen prompt is the only input).
-        ef = _run_dispatcher(["run", "codex", "--session-id", "S",
+        ef = _run_dispatcher(["run", "sol", "--session-id", "S",
                               "--run-id", o1["run_id"], "-f", str(src),
                               "--json"], cwd=td, env=env, timeout=30)
         check("run-scoped run with an explicit -f exits 2, nothing written",
               ef.returncode == 2 and "sanctioned input" in ef.stderr
-              and not (run_d / "codex.json").exists() and _intact(),
+              and not (run_d / "sol.json").exists() and _intact(),
               "exit 2 + no file", f"rc={ef.returncode} err={ef.stderr[:150]!r}")
         # run: without --json the plain path would write raw text into the
         # run dir's <seat>.json.
-        nj = _run_dispatcher(["run", "codex", "--session-id", "S",
+        nj = _run_dispatcher(["run", "sol", "--session-id", "S",
                               "--run-id", o1["run_id"]],
                              cwd=td, env=env, timeout=30)
         check("run-scoped run without --json exits 2, nothing written",
               nj.returncode == 2 and "requires --json" in nj.stderr
-              and not (run_d / "codex.json").exists() and _intact(),
+              and not (run_d / "sol.json").exists() and _intact(),
               "exit 2 + no file", f"rc={nj.returncode} err={nj.stderr[:150]!r}")
         # run: an explicit --model differing from the manifest signature would
         # stamp a result the identity does not describe.
-        mm = _run_dispatcher(["run", "codex", "--session-id", "S",
+        mm = _run_dispatcher(["run", "sol", "--session-id", "S",
                               "--run-id", o1["run_id"], "-m", "gpt-other",
                               "--json"], cwd=td, env=env, timeout=30)
         check("run-scoped run with a mismatched --model exits 2 naming the manifest model",
               mm.returncode == 2 and "'gpt-5.6-sol'" in mm.stderr
-              and not (run_d / "codex.json").exists() and _intact(),
+              and not (run_d / "sol.json").exists() and _intact(),
               "exit 2 + manifest model named",
               f"rc={mm.returncode} err={mm.stderr[:200]!r}")
         # run: run-scoped review runs are hardcoded read-only, so an explicit
         # --sandbox override is refused outright.
-        sb = _run_dispatcher(["run", "codex", "--session-id", "S",
+        sb = _run_dispatcher(["run", "sol", "--session-id", "S",
                               "--run-id", o1["run_id"], "-s", "workspace-write",
                               "--json"], cwd=td, env=env, timeout=30)
         check("run-scoped run with an explicit --sandbox exits 2, nothing written",
               sb.returncode == 2 and "sandbox" in sb.stderr
-              and not (run_d / "codex.json").exists() and _intact(),
+              and not (run_d / "sol.json").exists() and _intact(),
               "exit 2 + no file", f"rc={sb.returncode} err={sb.stderr[:150]!r}")
         # persist-seat: --model must equal the manifest signature model.
         wm = _run_dispatcher(["persist-seat", "opus", "--session-id", "S",
@@ -17322,12 +17353,12 @@ def test_run_scoped_reviews():
               "exit 2 + expected model named",
               f"rc={wm.returncode} err={wm.stderr[:200]!r}")
         # persist-seat: a subprocess-kind member is not persistable.
-        sk = _run_dispatcher(["persist-seat", "codex", "--session-id", "S",
+        sk = _run_dispatcher(["persist-seat", "sol", "--session-id", "S",
                               "--run-id", o1["run_id"], "--model", "gpt-5.6-sol",
                               "-f", str(src)], cwd=td, env=env, timeout=30)
         check("persist-seat with a subprocess-kind seat exits 2",
               sk.returncode == 2 and "not a task member" in sk.stderr
-              and not (run_d / "codex.json").exists() and _intact(),
+              and not (run_d / "sol.json").exists() and _intact(),
               "exit 2 + run.json intact", f"rc={sk.returncode} err={sk.stderr[:150]!r}")
         # persist-seat: non-member task label.
         nmp = _run_dispatcher(["persist-seat", "fable", "--session-id", "S",
@@ -17338,10 +17369,10 @@ def test_run_scoped_reviews():
               and not (run_d / "fable.json").exists() and _intact(),
               "exit 2 + no file", f"rc={nmp.returncode} err={nmp.stderr[:150]!r}")
         # The member subprocess seat over the frozen prompt still works.
-        ok = _run_dispatcher(["run", "codex", "--session-id", "S",
+        ok = _run_dispatcher(["run", "sol", "--session-id", "S",
                               "--run-id", o1["run_id"], "--json"],
                              cwd=td, env=env, timeout=30)
-        cdata = json.loads((run_d / "codex.json").read_text()) if (run_d / "codex.json").exists() else {}
+        cdata = json.loads((run_d / "sol.json").read_text()) if (run_d / "sol.json").exists() else {}
         check("the manifest member still writes normally after the refusals",
               ok.returncode == 0 and cdata.get("ok") is True
               and cdata.get("run_id") == o1["run_id"],
@@ -17390,20 +17421,20 @@ def test_run_scoped_reviews():
         crew_cfg = tdp / ".crew"
         crew_cfg.mkdir(exist_ok=True)
         (crew_cfg / "config.toml").write_text(
-            '[seats.codex]\nmodel = "model-a"\n', encoding="utf-8")
+            '[seats.sol]\nmodel = "model-a"\n', encoding="utf-8")
         _, o1 = _prep_json(ARGS, td, env)
         rec = json.loads((tdp / o1["run_dir"] / "run.json").read_text())
         check("prep recorded the config-resolved subprocess model in the signature",
-              rec["seat_signatures"]["codex"]["model"] == "model-a",
-              "model-a", str(rec["seat_signatures"]["codex"]))
+              rec["seat_signatures"]["sol"]["model"] == "model-a",
+              "model-a", str(rec["seat_signatures"]["sol"]))
         (crew_cfg / "config.toml").write_text(
-            '[seats.codex]\nmodel = "model-b"\n', encoding="utf-8")
-        rr = _run_dispatcher(["run", "codex", "--session-id", "S",
+            '[seats.sol]\nmodel = "model-b"\n', encoding="utf-8")
+        rr = _run_dispatcher(["run", "sol", "--session-id", "S",
                               "--run-id", o1["run_id"], "--json"],
                              cwd=td, env=env, timeout=30)
         argv = json.loads(argv_file.read_text()) if argv_file.exists() else []
-        data = json.loads((tdp / o1["run_dir"] / "codex.json").read_text()) \
-            if (tdp / o1["run_dir"] / "codex.json").exists() else {}
+        data = json.loads((tdp / o1["run_dir"] / "sol.json").read_text()) \
+            if (tdp / o1["run_dir"] / "sol.json").exists() else {}
         check("omitted --model runs the manifest model after a config flip (provider argv)",
               rr.returncode == 0 and "model-a" in argv and "model-b" not in argv,
               "argv carries model-a, never model-b", str(argv)[:200])
@@ -17456,7 +17487,7 @@ def test_run_scoped_reviews():
                   pw.returncode == 2 and "error:" in pw.stderr
                   and "Traceback" not in pw.stderr,
                   "exit 2 + clean error", f"rc={pw.returncode} err={pw.stderr[:200]!r}")
-            rw = _run_dispatcher(["run", "codex", "--session-id", "S",
+            rw = _run_dispatcher(["run", "sol", "--session-id", "S",
                                   "--run-id", o1["run_id"], "--json"],
                                  cwd=td, env=env, timeout=30)
             check("run into a read-only run dir exits 2 with a clean error (no traceback)",
@@ -17657,7 +17688,7 @@ def test_run_scoped_reviews():
         tdp = Path(td)
         _init_repo(td)
         (tdp / "a.txt").write_text("hello\nchanged\n")
-        proc, o1 = _prep_json(["auto", "--seats", "codex", "--task-seats", "opus",
+        proc, o1 = _prep_json(["auto", "--seats", "sol", "--task-seats", "opus",
                                "--session-id", "S"], td)
         rec_text = (tdp / o1["run_dir"] / "run.json").read_text(encoding="utf-8")
         rec = json.loads(rec_text)
@@ -17686,7 +17717,7 @@ def test_collect_run_scoped():
         obj = json.loads(proc.stdout) if proc.returncode == 0 and proc.stdout.strip() else None
         return proc, obj
 
-    ARGS = ["plan.md", "--seats", "codex", "--task-seats", "opus,sonnet",
+    ARGS = ["plan.md", "--seats", "sol", "--task-seats", "opus,sonnet",
             "--session-id", "S"]
 
     def _land_opus(td, o):
@@ -17711,7 +17742,7 @@ def test_collect_run_scoped():
         check("run.json persists the host and final seat-channel map",
               record.get("host") == "claude"
               and record.get("seat_channels") == {
-                  "codex": "codex", "opus": "claude", "sonnet": "claude",
+                  "sol": "codex", "opus": "claude", "sonnet": "claude",
               },
               "host=claude and three final seat channels",
               str({key: record.get(key) for key in ("host", "seat_channels")}))
@@ -17741,11 +17772,11 @@ def test_collect_run_scoped():
               cp.returncode == 0 and "SKIPPED" in cp.stdout
               and "stale result" in cp.stdout and "APPROVED" not in cp.stdout,
               "SKIPPED stale, no fold", cp.stdout[:200])
-        (run_d / "codex.json").write_text(json.dumps(
-            {"name": "codex", "model": "m", "ok": True,
+        (run_d / "sol.json").write_text(json.dumps(
+            {"name": "sol", "model": "m", "ok": True,
              "output": "HANDPLACED APPROVED", "error": None, "elapsed": 1.0}),
             encoding="utf-8")
-        ch = _collect(td, "codex", ("--run-id", o1["run_id"]))
+        ch = _collect(td, "sol", ("--run-id", o1["run_id"]))
         check("an unstamped hand-placed file renders SKIPPED naming (run unstamped, current run X)",
               ch.returncode == 0 and "stale result (run unstamped, "
               f"current run {o1['run_id']})" in ch.stdout
@@ -17809,19 +17840,19 @@ def test_collect_run_scoped():
               "OK after repair", cr.stdout[:150])
         # Grouped e2e over the run dir: landed opus in the VERDICTS roster,
         # stale-stamped codex visible as skipped, its text never folded.
-        (run_d / "codex.json").write_text(json.dumps(
-            {"name": "codex", "model": "m", "ok": True,
+        (run_d / "sol.json").write_text(json.dumps(
+            {"name": "sol", "model": "m", "ok": True,
              "output": "STALE BODY APPROVED", "error": None, "elapsed": 1.0,
              "run_id": "run-000000000000", "target_sha256": "0" * 64}),
             encoding="utf-8")
         cg = _run_dispatcher(["collect", "--session-id", "S",
-                              "--seats", "codex,opus",
+                              "--seats", "sol,opus",
                               "--run-id", o1["run_id"], "--group",
                               "-o", str(run_d / "panel.md")], cwd=td, timeout=30)
         digest = (run_d / "panel.md").read_text(encoding="utf-8") \
             if (run_d / "panel.md").exists() else ""
         check("grouped --run-id digest: landed seat in VERDICTS, stale seat skipped, stale text never folded",
-              cg.returncode == 0 and "- opus" in digest and "- codex" in digest
+              cg.returncode == 0 and "- opus" in digest and "- sol" in digest
               and "skipped" in digest.lower()
               and "STALE BODY" not in digest,
               "one landed + one skipped in digest", digest[:300])
@@ -17853,11 +17884,11 @@ def test_collect_run_scoped():
     with tempfile.TemporaryDirectory() as td:
         flat = Path(td) / ".crew" / "reviews" / "S"
         flat.mkdir(parents=True)
-        (flat / "codex.json").write_text(json.dumps(
-            {"name": "codex", "model": "m", "ok": True,
+        (flat / "sol.json").write_text(json.dumps(
+            {"name": "sol", "model": "m", "ok": True,
              "output": "LEGACY FLAT APPROVED", "error": None, "elapsed": 1.0}),
             encoding="utf-8")
-        cl = _collect(td, "codex")
+        cl = _collect(td, "sol")
         check("an unstamped legacy file with no pointer still collects flat (no validation)",
               cl.returncode == 0 and "LEGACY FLAT APPROVED" in cl.stdout
               and "stale" not in cl.stdout,
@@ -17873,19 +17904,19 @@ def test_collect_run_scoped():
         rid = "run-abcdef123456"
         run_d = tdp / ".crew" / "reviews" / "S" / rid
         run_d.mkdir(parents=True)
-        (run_d / "codex.json").write_text(json.dumps(
-            {"name": "codex", "model": "m", "ok": True,
+        (run_d / "sol.json").write_text(json.dumps(
+            {"name": "sol", "model": "m", "ok": True,
              "output": "UNVALIDATED APPROVED", "error": None, "elapsed": 1.0}),
             encoding="utf-8")
         out = run_d / "panel.md"
-        ce = _collect(td, "codex", ("--run-id", rid, "-o", str(out)))
+        ce = _collect(td, "sol", ("--run-id", rid, "-o", str(out)))
         check("explicit --run-id with a MISSING run.json exits 2, nothing folded, no output file",
               ce.returncode == 2 and "error:" in ce.stderr
               and "Traceback" not in ce.stderr and not out.exists()
               and "UNVALIDATED" not in ce.stdout,
               "exit 2 + no panel.md", f"rc={ce.returncode} err={ce.stderr[:200]!r}")
         (run_d / "run.json").write_text("{broken", encoding="utf-8")
-        cb = _collect(td, "codex", ("--run-id", rid, "-o", str(out)))
+        cb = _collect(td, "sol", ("--run-id", rid, "-o", str(out)))
         check("explicit --run-id with an UNREADABLE run.json exits 2, no output file",
               cb.returncode == 2 and "error:" in cb.stderr
               and not out.exists(),
@@ -17899,7 +17930,7 @@ def test_collect_run_scoped():
             json.dumps({"run_id": rid, "target_sha256": "0" * 64,
                         "created_at": "2026-01-01T00:00:00+00:00"}),
             encoding="utf-8")
-        cptr = _collect(td, "codex", ("-o", str(out)))
+        cptr = _collect(td, "sol", ("-o", str(out)))
         check("pointer-resolved scope with a missing run.json exits 2, nothing folded, no output file",
               cptr.returncode == 2 and "error:" in cptr.stderr
               and "Traceback" not in cptr.stderr and not out.exists()
@@ -17939,29 +17970,29 @@ def test_collect_run_scoped():
         # ad-hoc flat read.
         pointer = tdp / ".crew" / "reviews" / "S" / "current-run.json"
         pointer.write_text("{broken", encoding="utf-8")
-        (tdp / ".crew" / "reviews" / "S" / "codex.json").write_text(json.dumps(
-            {"name": "codex", "model": "m", "ok": True,
+        (tdp / ".crew" / "reviews" / "S" / "sol.json").write_text(json.dumps(
+            {"name": "sol", "model": "m", "ok": True,
              "output": "FLAT UNDER BROKEN POINTER", "error": None,
              "elapsed": 1.0}), encoding="utf-8")
-        cbp = _collect(td, "codex")
+        cbp = _collect(td, "sol")
         check("a PRESENT-but-corrupt pointer exits 2 naming the pointer (never a flat fold)",
               cbp.returncode == 2 and "current-run.json" in cbp.stderr
               and "FLAT UNDER BROKEN POINTER" not in cbp.stdout,
               "exit 2 naming pointer", f"rc={cbp.returncode} err={cbp.stderr[:200]!r}")
         pointer.unlink()
-        cok = _collect(td, "codex")
+        cok = _collect(td, "sol")
         check("removing the pointer restores the flat, validation-free read",
               cok.returncode == 0 and "FLAT UNDER BROKEN POINTER" in cok.stdout,
               "flat OK after pointer removal", cok.stdout[:150])
         # An explicitly EMPTY --run-id is SUPPLIED run-scoped input, never a
         # silent flat/pointer fallback: it fails run-id validation at all
         # three intakes.
-        ce2 = _collect(td, "codex", ("--run-id", ""))
+        ce2 = _collect(td, "sol", ("--run-id", ""))
         check("collect with an explicitly empty --run-id exits 2 (never a flat fallback)",
               ce2.returncode == 2 and "invalid run-id" in ce2.stderr
               and "FLAT UNDER BROKEN POINTER" not in ce2.stdout,
               "exit 2 invalid run-id", f"rc={ce2.returncode} err={ce2.stderr[:150]!r}")
-        re2 = _run_dispatcher(["run", "codex", "--session-id", "S",
+        re2 = _run_dispatcher(["run", "sol", "--session-id", "S",
                                "--run-id", "", "--json"], cwd=td, timeout=30)
         check("run with an explicitly empty --run-id exits 2 (never pointer-rerouted)",
               re2.returncode == 2 and "invalid run-id" in re2.stderr,
@@ -18008,7 +18039,7 @@ def test_wait():
              "error": None if ok else "seat blew up", "elapsed": 1.0}),
             encoding="utf-8")
 
-    ARGS = ["plan.md", "--seats", "codex,codex-luna", "--task-seats", "opus",
+    ARGS = ["plan.md", "--seats", "sol,luna", "--task-seats", "opus",
             "--session-id", "S"]
 
     with tempfile.TemporaryDirectory() as td:
@@ -18020,7 +18051,7 @@ def test_wait():
         # 1. Timeout: one landed, one missing -> exit 1 naming ONLY the
         #    missing seat; the default seat list is the manifest's subprocess
         #    names (opus, the task seat, is never waited on).
-        _land_file(run_d, "codex")
+        _land_file(run_d, "sol")
         w1 = _run_dispatcher(["wait", "--session-id", "S",
                               "--run-id", o1["run_id"], "--timeout", "2",
                               "--json"], cwd=td, timeout=30)
@@ -18029,15 +18060,15 @@ def test_wait():
         except (json.JSONDecodeError, ValueError):
             j1 = {}
         check("timeout: exit 1, --json names the missing seat only (task seat never waited on)",
-              w1.returncode == 1 and j1.get("landed") == ["codex"]
-              and j1.get("missing") == ["codex-luna"]
-              and "codex-luna" in w1.stderr and "opus" not in w1.stderr,
-              "landed=[codex] missing=[codex-luna]",
+              w1.returncode == 1 and j1.get("landed") == ["sol"]
+              and j1.get("missing") == ["luna"]
+              and "luna" in w1.stderr and "opus" not in w1.stderr,
+              "landed=[sol] missing=[luna]",
               f"rc={w1.returncode} out={w1.stdout[:120]!r} err={w1.stderr[:120]!r}")
 
         # 2. A FAILED seat counts as landed (it has finished; result_valid is
         #    the certification tier, not the barrier's).
-        _land_file(run_d, "codex-luna", ok=False)
+        _land_file(run_d, "luna", ok=False)
         start = _time_now()
         w2 = _run_dispatcher(["wait", "--session-id", "S",
                               "--run-id", o1["run_id"], "--timeout", "10"],
@@ -18073,7 +18104,7 @@ def test_wait():
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         _write_plan(tdp)
-        _, o1 = _prep_json(["plan.md", "--seats", "codex",
+        _, o1 = _prep_json(["plan.md", "--seats", "sol",
                             "--task-seats", "opus", "--session-id", "S"], td)
         run_d = tdp / o1["run_dir"]
         try:
@@ -18087,7 +18118,7 @@ def test_wait():
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         import time as _t
         _t.sleep(2)
-        _land_file(run_d, "codex")
+        _land_file(run_d, "sol")
         out, err = proc.communicate(timeout=30)
         check("a seat landing mid-wait releases the barrier (exit 0)",
               proc.returncode == 0 and "landed 1/1" in out,
@@ -18106,8 +18137,8 @@ def test_wait():
         check("flat mode without --seats exits 2",
               wf.returncode == 2 and "--seats" in wf.stderr,
               "exit 2 requiring --seats", f"rc={wf.returncode} err={wf.stderr[:150]!r}")
-        _land_file(flat, "codex")
-        wl = _run_dispatcher(["wait", "--session-id", "S", "--seats", "codex",
+        _land_file(flat, "sol")
+        wl = _run_dispatcher(["wait", "--session-id", "S", "--seats", "sol",
                               "--timeout", "5"], cwd=td, timeout=30)
         check("flat mode with --seats and a landed file exits 0",
               wl.returncode == 0 and "landed 1/1" in wl.stdout,
@@ -18143,12 +18174,12 @@ def test_wait():
         bins.mkdir()
         env = path_with(bins)
         env["CLAUDE_PROJECT_DIR"] = td
-        PREP = ["review-prep", "plan.md", "--seats", "codex",
+        PREP = ["review-prep", "plan.md", "--seats", "sol",
                 "--task-seats", "opus,sonnet", "--session-id", "S"]
         pp = _run_dispatcher(PREP, cwd=td, env=env, timeout=30)
         o1 = json.loads(pp.stdout)
         run_d = tdp / o1["run_dir"]
-        codex_f = run_d / "codex.json"
+        codex_f = run_d / "sol.json"
 
         def _stale_failed(seat):
             (run_d / f"{seat}.json").write_text(json.dumps(
@@ -18164,16 +18195,16 @@ def test_wait():
         _run_dispatcher(["persist-seat", "opus", "--session-id", "S",
                          "--run-id", o1["run_id"], "--model", "opus",
                          "-f", str(src)], cwd=td, env=env, timeout=30)
-        _stale_failed("codex")
+        _stale_failed("sol")
         _stale_failed("sonnet")
         p2 = _run_dispatcher(PREP, cwd=td, env=env, timeout=30)
         o2 = json.loads(p2.stdout)
         check("re-prep clears subprocess failure and preserves Task failure",
               p2.returncode == 0 and not codex_f.exists()
               and (run_d / "sonnet.json").exists()
-              and o2["pending_subprocess_seats"] == ["codex"]
+              and o2["pending_subprocess_seats"] == ["sol"]
               and o2["pending_task_seats"] == ["sonnet"],
-              "codex.json gone, sonnet.json survives, both still pending",
+              "sol.json gone, sonnet.json survives, both still pending",
               f"rc={p2.returncode} codex={codex_f.exists()} "
               f"sonnet={(run_d / 'sonnet.json').exists()} "
               f"pend={o2.get('pending_subprocess_seats')}/"
@@ -18188,7 +18219,7 @@ def test_wait():
         #     IMMEDIATELY. The only correct behavior is blocked until the
         #     retry writes; an early release means the barrier saw a stale
         #     file.
-        _stale_failed("codex")
+        _stale_failed("sol")
         _run_dispatcher(PREP, cwd=td, env=env, timeout=30)
         make_fake_bin(bins, "codex", """
         import sys, time
@@ -18205,7 +18236,7 @@ def test_wait():
         """)
         import time as _t
         run_p = subprocess.Popen(
-            [str(CREW_DISPATCHER), "run", "codex", "--session-id", "S",
+            [str(CREW_DISPATCHER), "run", "sol", "--session-id", "S",
              "--run-id", o1["run_id"], "--json"],
             cwd=td, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -18233,9 +18264,9 @@ def test_wait():
         #     clears its own stale failure at launch. This deletion-poll
         #     tests the clear MECHANISM only; the barrier ordering guarantee
         #     is prep's (6a/6b).
-        _stale_failed("codex")
+        _stale_failed("sol")
         run_p2 = subprocess.Popen(
-            [str(CREW_DISPATCHER), "run", "codex", "--session-id", "S",
+            [str(CREW_DISPATCHER), "run", "sol", "--session-id", "S",
              "--run-id", o1["run_id"], "--json"],
             cwd=td, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -18258,7 +18289,7 @@ def test_wait():
         # retry finds it in place and preserve-valid keeps it (if the launch
         # had wrongly cleared it, the failure would land with no kept note).
         _fake_codex_writer(bins, "", 1)
-        r2 = _run_dispatcher(["run", "codex", "--session-id", "S",
+        r2 = _run_dispatcher(["run", "sol", "--session-id", "S",
                               "--run-id", o1["run_id"], "--json"],
                              cwd=td, env=env, timeout=30)
         data = json.loads(codex_f.read_text())
@@ -18271,14 +18302,14 @@ def test_wait():
 
         # An explicit -o keeps ad-hoc freedom: nothing is cleared, neither
         # the run dir's stale file nor the -o destination itself.
-        stale = json.dumps({"name": "codex", "model": "m", "ok": False,
+        stale = json.dumps({"name": "sol", "model": "m", "ok": False,
                             "output": "", "error": "old", "elapsed": 1.0,
                             "run_id": o1["run_id"],
                             "target_sha256": o1["target_sha256"]})
         codex_f.write_text(stale, encoding="utf-8")
         out_f = tdp / "adhoc.json"
         out_f.write_text("SENTINEL", encoding="utf-8")
-        ro = _run_dispatcher(["run", "codex", "--session-id", "S",
+        ro = _run_dispatcher(["run", "sol", "--session-id", "S",
                               "-o", str(out_f)], cwd=td, env=env, timeout=30)
         check("an explicit -o launch clears nothing (run-dir stale file and -o sentinel both intact)",
               ro.returncode == 1
@@ -18294,7 +18325,7 @@ def test_wait():
     with tempfile.TemporaryDirectory() as td:
         for bad in ("nan", "inf", "0", "-3"):
             wb = _run_dispatcher(["wait", "--session-id", "S",
-                                  "--seats", "codex", "--timeout", bad],
+                                  "--seats", "sol", "--timeout", bad],
                                  cwd=td, timeout=30)
             check(f"--timeout {bad} is rejected at parse (exit 2)",
                   wb.returncode == 2 and "positive finite" in wb.stderr,
@@ -18306,11 +18337,11 @@ def test_wait():
         tdp = Path(td)
         flat = tdp / ".crew" / "reviews" / "S"
         flat.mkdir(parents=True)
-        _land_file(flat, "codex")
+        _land_file(flat, "sol")
         wd = _run_dispatcher(["wait", "--session-id", "S",
-                              "--seats", "codex,codex", "--timeout", "5"],
+                              "--seats", "sol,sol", "--timeout", "5"],
                              cwd=td, timeout=30)
-        check("--seats codex,codex dedupes to landed 1/1 (one file is one seat)",
+        check("--seats sol,sol dedupes to landed 1/1 (one file is one seat)",
               wd.returncode == 0 and "landed 1/1" in wd.stdout,
               "landed 1/1", f"rc={wd.returncode} out={wd.stdout[:100]!r}")
     with tempfile.TemporaryDirectory() as td:
@@ -18479,7 +18510,7 @@ def test_signal():
 
         # 10. Misuse: --signal and the SCOPE flags name different targets.
         wc = _run_dispatcher(["wait", "--session-id", "S", "--signal", "exec-1",
-                              "--seats", "codex", "--timeout", "2"],
+                              "--seats", "sol", "--timeout", "2"],
                              cwd=td, timeout=30)
         check("--signal with --seats exits 2 naming the conflict",
               wc.returncode == 2 and "--seats" in wc.stderr
@@ -18703,7 +18734,7 @@ def test_signal():
         # The conflict check must run for an empty tag too: seat mode would have
         # accepted --seats silently.
         wq = _run_dispatcher(["wait", "--session-id", "S", "--signal", "",
-                              "--seats", "codex", "--timeout", "2"],
+                              "--seats", "sol", "--timeout", "2"],
                              cwd=td, timeout=30)
         check("wait --signal '' --seats still exits 2 (the conflict check ran)",
               wq.returncode == 2 and "--signal" in wq.stderr,
@@ -18761,7 +18792,7 @@ def test_quorum_header():
         tdp = Path(td)
         _write_plan(tdp)
         _, o1 = _prep_json(
-            ["plan.md", "--seats", "codex,codex-luna,codex-terra,cursor-auto,cursor-composer",
+            ["plan.md", "--seats", "sol,luna,terra,cursor-auto,cursor-composer",
              "--task-seats", "opus,sonnet", "--session-id", "S"], td)
         roster = ",".join(o1["subprocess_seats"] + o1["task_seats"])
         check("the 7-seat manifest resolved intact (explicit names survive availability)",
@@ -18961,15 +18992,15 @@ def test_build_executor():
     with project_config(""):
         check("unset -> build_executor() is None",
               config.build_executor() is None, "None", repr(config.build_executor()))
-    with project_config('[build]\nexecutor = "codex-luna"\n'):
-        check('[build].executor="codex-luna" -> "codex-luna"',
-              config.build_executor() == "codex-luna",
-              "codex-luna", repr(config.build_executor()))
-    with crew_config(project='[build]\nexecutor = "codex-luna"\n',
-                     glob='[build]\nexecutor = "codex"\n'):
-        check("[build].executor per-repo (codex-luna) beats global (codex)",
-              config.build_executor() == "codex-luna",
-              "codex-luna", repr(config.build_executor()))
+    with project_config('[build]\nexecutor = "luna"\n'):
+        check('[build].executor="luna" -> "luna"',
+              config.build_executor() == "luna",
+              "luna", repr(config.build_executor()))
+    with crew_config(project='[build]\nexecutor = "luna"\n',
+                     glob='[build]\nexecutor = "sol"\n'):
+        check("[build].executor per-repo (luna) beats global (sol)",
+              config.build_executor() == "luna",
+              "luna", repr(config.build_executor()))
     with project_config('[build]\nexecutor = 5\n'):
         buf = _io.StringIO()
         with redirect_stderr(buf):
@@ -19063,14 +19094,14 @@ def test_build_executor():
               "fresh source is builtin/config/flag", f"source={j.get('source')!r}")
 
     # A known write-capable subprocess seat in [build].executor routes through.
-    with project_config('[build]\nexecutor = "codex-luna"\n'):
+    with project_config('[build]\nexecutor = "luna"\n'):
         rc, out, err = _run_be_fresh()
         j = json.loads(out) if out.strip() else {}
-        check("[build].executor=codex-luna -> exit 0, source config",
-              rc == 0 and j.get("executor") == "codex-luna"
+        check("[build].executor=luna -> exit 0, source config",
+              rc == 0 and j.get("executor") == "luna"
               and j.get("source") == "config" and j.get("resume_executor") is True
               and j.get("channel") == "codex",
-              "codex-luna/config", f"rc={rc} out={out!r}")
+              "luna/config", f"rc={rc} out={out!r}")
 
     with project_config(""):
         rc, out, err = _run_be_fresh()
@@ -19107,8 +19138,13 @@ def test_build_executor():
         check("executor=cursor (group token) -> exit 2, no stdout",
               rc == 2 and "cursor" in err and out.strip() == "",
               "exit2", f"rc={rc} err={err!r}")
+    with project_config('[build]\nexecutor = "codex"\n'):
+        rc, out, err = _run_be_fresh()
+        check("executor=codex (group token, no seat of that name) -> exit 2, no stdout",
+              rc == 2 and "codex" in err and out.strip() == "",
+              "exit2", f"rc={rc} err={err!r}")
 
-    # Known-seat guard NON-VACUITY: an unknown seat exits 2; a KNOWN one (codex,
+    # Known-seat guard NON-VACUITY: an unknown seat exits 2; a KNOWN one (sol,
     # exercised at exit 0 just below) passes, so the gate is not always-firing.
     with project_config('[build]\nexecutor = "bogus-seat"\n'):
         rc, out, err = _run_be_fresh()
@@ -19119,7 +19155,7 @@ def test_build_executor():
     # Write-capable guard NON-VACUITY: all shipped subprocess channels ARE
     # write-capable, so inject a KNOWN channel as read-only and prove the gate
     # fires; then the same seat with its real mapping passes.
-    with project_config('[build]\nexecutor = "codex"\n'):
+    with project_config('[build]\nexecutor = "sol"\n'):
         channels.set_capabilities({
             "codex": channels.ChannelCapability(False, lambda: True),
         })
@@ -19130,21 +19166,21 @@ def test_build_executor():
         check("write-capable guard: known read-only seat -> exit 2 naming read-only",
               rc == 2 and "read-only" in err and out.strip() == "",
               "exit2 read-only", f"rc={rc} err={err!r}")
-    with project_config('[build]\nexecutor = "codex"\n'):
+    with project_config('[build]\nexecutor = "sol"\n'):
         rc, out, err = _run_be_fresh()
         j = json.loads(out) if out.strip() else {}
         check("write-capable guard non-vacuity: same seat, real provider -> exit 0",
-              rc == 0 and j.get("executor") == "codex",
-              "exit0 codex", f"rc={rc} out={out!r}")
+              rc == 0 and j.get("executor") == "sol",
+              "exit0 sol", f"rc={rc} out={out!r}")
 
     # executor_retries surfaces in the JSON; an out-of-range 3 falls to 0 with the
     # warn (NOT clamped to 2), proving None-means-safe-default-0.
-    with project_config('[build]\nexecutor = "codex-luna"\nexecutor_retries = 1\n'):
+    with project_config('[build]\nexecutor = "luna"\nexecutor_retries = 1\n'):
         rc, out, err = _run_be_fresh()
         j = json.loads(out) if out.strip() else {}
         check("executor_retries=1 surfaced in JSON",
               rc == 0 and j.get("retries") == 1, "retries=1", f"{out!r}")
-    with project_config('[build]\nexecutor = "codex-luna"\nexecutor_retries = 3\n'):
+    with project_config('[build]\nexecutor = "luna"\nexecutor_retries = 3\n'):
         rc, out, err = _run_be_fresh()
         j = json.loads(out) if out.strip() else {}
         check("executor_retries=3 -> resolves to 0 with the warn (not clamped to 2)",
@@ -19153,13 +19189,13 @@ def test_build_executor():
 
     # Flag precedence: --executor beats [build].executor; it can also name the
     # sentinel explicitly to force the Task path back on.
-    with project_config('[build]\nexecutor = "codex-luna"\n'):
-        rc, out, err = _run_be_fresh("codex")
+    with project_config('[build]\nexecutor = "luna"\n'):
+        rc, out, err = _run_be_fresh("sol")
         j = json.loads(out) if out.strip() else {}
         check("--executor flag beats [build].executor config, source=flag",
-              rc == 0 and j.get("executor") == "codex" and j.get("source") == "flag",
-              "codex/flag", f"{out!r}")
-    with project_config('[build]\nexecutor = "codex-luna"\n'):
+              rc == 0 and j.get("executor") == "sol" and j.get("source") == "flag",
+              "sol/flag", f"{out!r}")
+    with project_config('[build]\nexecutor = "luna"\n'):
         rc, out, err = _run_be_fresh("crew:executor")
         j = json.loads(out) if out.strip() else {}
         check("--executor crew:executor overrides config back to the Task path",
@@ -19192,35 +19228,35 @@ def test_build_executor_state_recovery():
         return json.loads(output) if output.strip() else {}
 
     with project_config(
-        '[build]\nexecutor = "codex"\nresume_executor = true\n'
+        '[build]\nexecutor = "sol"\nresume_executor = true\n'
     ) as repo:
         _write_build_state_for_dispatch(
-            repo, "S", executor="codex-luna", resume_executor=False,
+            repo, "S", executor="luna", resume_executor=False,
         )
         rc, out, err = _run_be(session_id="S")
         payload = result_json(out)
         check(
             "resume reads the active executor and resume stamp",
-            rc == 0 and payload.get("executor") == "codex-luna"
+            rc == 0 and payload.get("executor") == "luna"
             and payload.get("source") == "state"
             and payload.get("resume_executor") is False,
-            "state/codex-luna/false",
+            "state/luna/false",
             f"rc={rc} out={out!r} err={err!r}",
         )
 
-    with project_config('[build]\nexecutor = "codex"\n') as repo:
-        _write_build_state_for_dispatch(repo, "S", executor="codex-luna")
+    with project_config('[build]\nexecutor = "sol"\n') as repo:
+        _write_build_state_for_dispatch(repo, "S", executor="luna")
         rc, out, err = _run_be("cursor-composer", session_id="S")
         payload = result_json(out)
         check(
             "active stamp wins over a new executor flag",
-            rc == 0 and payload.get("executor") == "codex-luna"
+            rc == 0 and payload.get("executor") == "luna"
             and payload.get("source") == "state",
-            "state/codex-luna",
+            "state/luna",
             f"rc={rc} out={out!r} err={err!r}",
         )
 
-    with project_config('[build]\nexecutor = "codex"\n') as repo:
+    with project_config('[build]\nexecutor = "sol"\n') as repo:
         _write_build_state_for_dispatch(repo, "S", executor="crew:executor")
         rc, out, err = _run_be(session_id="S")
         payload = result_json(out)
@@ -19234,7 +19270,7 @@ def test_build_executor_state_recovery():
 
     with project_config('[build]\nresume_executor = true\n') as repo:
         _write_build_state_for_dispatch(
-            repo, "S", executor="codex", resume_executor=False,
+            repo, "S", executor="sol", resume_executor=False,
         )
         rc, out, err = _run_be(session_id="S")
         payload = result_json(out)
@@ -19248,7 +19284,7 @@ def test_build_executor_state_recovery():
 
     with project_config('[build]\nresume_executor = false\n') as repo:
         _write_build_state_for_dispatch(
-            repo, "S", executor="codex", resume_executor=True,
+            repo, "S", executor="sol", resume_executor=True,
         )
         rc, out, err = _run_be(session_id="S")
         payload = result_json(out)
@@ -19262,87 +19298,87 @@ def test_build_executor_state_recovery():
 
     with project_config('[build]\nresume_executor = false\n') as repo:
         _write_build_state_for_dispatch(
-            repo, "S", executor="codex", resume_executor="yes",
+            repo, "S", executor="sol", resume_executor="yes",
         )
         rc, out, err = _run_be(session_id="S")
         payload = result_json(out)
         check(
             "non-bool stamped resume setting falls back to config",
             rc == 0 and payload.get("source") == "state"
-            and payload.get("executor") == "codex"
+            and payload.get("executor") == "sol"
             and payload.get("resume_executor") is False,
-            "state/codex/false",
+            "state/sol/false",
             f"rc={rc} out={out!r} err={err!r}",
         )
 
-    with project_config('[build]\nexecutor = "codex-luna"\n') as repo:
+    with project_config('[build]\nexecutor = "luna"\n') as repo:
         _write_build_state_for_dispatch(
-            repo, "", unsuffixed=True, inner_session_id="", executor="codex",
+            repo, "", unsuffixed=True, inner_session_id="", executor="sol",
         )
         with controlled_session():
             rc, out, err = _run_be()
         payload = result_json(out)
         check(
             "valid unsuffixed active loop resumes with an empty session id",
-            rc == 0 and payload.get("executor") == "codex"
+            rc == 0 and payload.get("executor") == "sol"
             and payload.get("source") == "state",
-            "state/codex",
+            "state/sol",
             f"rc={rc} out={out!r} err={err!r}",
         )
 
-    with project_config('[build]\nexecutor = "codex-luna"\n') as repo:
+    with project_config('[build]\nexecutor = "luna"\n') as repo:
         _write_build_state_for_dispatch(repo, "S", executor="")
         with controlled_session("S"):
             rc, out, err = _run_be(session_id="S")
         payload = result_json(out)
         check(
             "legacy empty executor stamp falls back fresh",
-            rc == 0 and payload.get("executor") == "codex-luna"
+            rc == 0 and payload.get("executor") == "luna"
             and payload.get("source") == "config",
-            "config/codex-luna",
+            "config/luna",
             f"rc={rc} out={out!r} err={err!r}",
         )
 
-    with project_config('[build]\nexecutor = "codex-luna"\n') as repo:
+    with project_config('[build]\nexecutor = "luna"\n') as repo:
         _write_build_state_for_dispatch(
-            repo, "S", active=False, executor="codex",
+            repo, "S", active=False, executor="sol",
         )
         with controlled_session("S"):
             rc, out, err = _run_be(session_id="S")
         payload = result_json(out)
         check(
             "inactive stamped loop falls back fresh",
-            rc == 0 and payload.get("executor") == "codex-luna"
+            rc == 0 and payload.get("executor") == "luna"
             and payload.get("source") == "config",
-            "config/codex-luna",
+            "config/luna",
             f"rc={rc} out={out!r} err={err!r}",
         )
 
-    with project_config('[build]\nexecutor = "codex-luna"\n') as repo:
+    with project_config('[build]\nexecutor = "luna"\n') as repo:
         with controlled_session():
             rc, out, err = _run_be()
         payload = result_json(out)
         check(
             "no session and no unsuffixed state resolve fresh",
-            rc == 0 and payload.get("executor") == "codex-luna"
+            rc == 0 and payload.get("executor") == "luna"
             and payload.get("source") == "config"
             and payload.get("source") != "state",
-            "config/codex-luna",
+            "config/luna",
             f"rc={rc} out={out!r} err={err!r}",
         )
-        _write_build_state_for_dispatch(repo, "S", executor="codex")
+        _write_build_state_for_dispatch(repo, "S", executor="sol")
         with controlled_session("S"):
             rc, out, err = _run_be()
         payload = result_json(out)
         check(
             "omitted session flag still uses CLAUDE_SESSION_ID recovery",
-            rc == 0 and payload.get("executor") == "codex"
+            rc == 0 and payload.get("executor") == "sol"
             and payload.get("source") == "state",
-            "state/codex",
+            "state/sol",
             f"rc={rc} out={out!r} err={err!r}",
         )
 
-    with project_config('[build]\nexecutor = "codex"\n') as repo:
+    with project_config('[build]\nexecutor = "sol"\n') as repo:
         state_path = repo / ".crew" / "build-state-S.json"
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text("not json", encoding="utf-8")
@@ -19354,7 +19390,7 @@ def test_build_executor_state_recovery():
             f"rc={rc} out={out!r} err={err!r}",
         )
 
-    with project_config('[build]\nexecutor = "codex"\n') as repo:
+    with project_config('[build]\nexecutor = "sol"\n') as repo:
         state_path = repo / ".crew" / "build-state.json"
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text("[]", encoding="utf-8")
@@ -19367,7 +19403,7 @@ def test_build_executor_state_recovery():
             f"rc={rc} out={out!r} err={err!r}",
         )
 
-    with project_config('[build]\nexecutor = "codex"\n') as repo:
+    with project_config('[build]\nexecutor = "sol"\n') as repo:
         state_path = repo / ".crew" / "build-state.json"
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text("[]", encoding="utf-8")
@@ -19376,13 +19412,13 @@ def test_build_executor_state_recovery():
         payload = result_json(out)
         check(
             "corrupt non-empty-session legacy state stays fresh",
-            rc == 0 and payload.get("executor") == "codex"
+            rc == 0 and payload.get("executor") == "sol"
             and payload.get("source") == "config" and payload.get("source") != "state",
-            "config/codex",
+            "config/sol",
             f"rc={rc} out={out!r} err={err!r}",
         )
 
-    with project_config('[build]\nexecutor = "codex"\n') as repo:
+    with project_config('[build]\nexecutor = "sol"\n') as repo:
         state_path = repo / ".crew" / "build-state-S.json"
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(
@@ -19390,7 +19426,7 @@ def test_build_executor_state_recovery():
                 "schema": SCHEMA_VERSION + 1,
                 "active": True,
                 "session_id": "S",
-                "executor": "codex",
+                "executor": "sol",
             }),
             encoding="utf-8",
         )
@@ -19402,10 +19438,10 @@ def test_build_executor_state_recovery():
             f"rc={rc} out={out!r} err={err!r}",
         )
 
-    with project_config('[build]\nexecutor = "codex"\n') as repo:
+    with project_config('[build]\nexecutor = "sol"\n') as repo:
         state_path = repo / ".crew" / "build-state-S.json"
         _write_build_state_for_dispatch(
-            repo, "S", executor="codex", inner_session_id="OTHER",
+            repo, "S", executor="sol", inner_session_id="OTHER",
         )
         rc, out, err = _run_be(session_id="S")
         check(
@@ -19416,7 +19452,7 @@ def test_build_executor_state_recovery():
             f"rc={rc} out={out!r} err={err!r}",
         )
 
-    with project_config('[build]\nexecutor = "codex"\n') as repo:
+    with project_config('[build]\nexecutor = "sol"\n') as repo:
         _write_build_state_for_dispatch(repo, "S", executor="opus")
         rc, out, err = _run_be(session_id="S")
         check(
@@ -19425,14 +19461,14 @@ def test_build_executor_state_recovery():
             "exit 2 naming opus, no stdout",
             f"rc={rc} out={out!r} err={err!r}",
         )
-        _write_build_state_for_dispatch(repo, "S", executor="codex")
+        _write_build_state_for_dispatch(repo, "S", executor="sol")
         rc, out, err = _run_be(session_id="S")
         payload = result_json(out)
         check(
             "stamped valid seat proves the validation gate is non-vacuous",
-            rc == 0 and payload.get("executor") == "codex"
+            rc == 0 and payload.get("executor") == "sol"
             and payload.get("source") == "state",
-            "exit 0/state/codex",
+            "exit 0/state/sol",
             f"rc={rc} out={out!r} err={err!r}",
         )
 
@@ -19441,7 +19477,7 @@ def test_build_executor_placeholder_session_id():
     """A literal recipe placeholder must not fall through to fresh resolution."""
     log_section("build-executor: placeholder session id guard")
 
-    with project_config('[build]\nexecutor = "codex"\n'):
+    with project_config('[build]\nexecutor = "sol"\n'):
         rc, out, err = _run_be(session_id="<session-id>")
         check(
             "literal placeholder session id exits 2 before fresh resolve",
@@ -19522,23 +19558,23 @@ def test_workplan_contract_freeze():
         (
             "default panel",
             ["review-prep", "plan.md", "--session-id", "freeze-default"],
-            ["codex", "codex-luna", "cursor-auto", "cursor-composer"],
+            ["astra", "sol", "luna", "cursor-auto", "cursor-composer"],
             ["opus", "sonnet"],
             {"opus": "opus", "sonnet": "sonnet"},
-            {"codex": "codex", "codex-luna": "codex",
+            {"astra": "codex", "sol": "codex", "luna": "codex",
              "cursor-auto": "cursor", "cursor-composer": "cursor",
              "opus": "claude", "sonnet": "claude"},
         ),
         (
             "explicit mixed seats",
             [
-                "review-prep", "plan.md", "--seats", "codex,opus",
+                "review-prep", "plan.md", "--seats", "sol,opus",
                 "--session-id", "freeze-mixed",
             ],
-            ["codex"],
+            ["sol"],
             ["opus"],
             {"opus": "opus"},
-            {"codex": "codex", "opus": "claude"},
+            {"sol": "codex", "opus": "claude"},
         ),
         (
             "task-only solo panel",
@@ -19554,13 +19590,13 @@ def test_workplan_contract_freeze():
         (
             "external-only explicit seat",
             [
-                "review-prep", "plan.md", "--seats", "codex",
+                "review-prep", "plan.md", "--seats", "sol",
                 "--session-id", "freeze-external",
             ],
-            ["codex"],
+            ["sol"],
             [],
             {},
-            {"codex": "codex"},
+            {"sol": "codex"},
         ),
         (
             "external-only cursor panel",
@@ -19695,15 +19731,16 @@ def test_build_executor_contract_freeze():
             os.environ.pop("CREW_HOST", None)
         else:
             os.environ["CREW_HOST"] = saved_host
-    with project_config('[build]\nexecutor = "codex-luna"\n'):
+    with project_config('[build]\nexecutor = "luna"\n'):
         assert_source("config source", "config")
     with project_config(""):
-        assert_source("flag source", "flag", executor_flag="codex")
-    with project_config('[build]\nexecutor = "codex"\n') as repo:
-        _write_build_state_for_dispatch(repo, "freeze-state", executor="codex-luna")
+        assert_source("flag source", "flag", executor_flag="sol")
+    with project_config('[build]\nexecutor = "sol"\n') as repo:
+        _write_build_state_for_dispatch(repo, "freeze-state", executor="luna")
         assert_source("state source", "state", session_id="freeze-state")
 
-    for executor, label in (("opus", "Task seat"), ("cursor", "group token")):
+    for executor, label in (("opus", "Task seat"), ("cursor", "group token"),
+                            ("codex", "group token")):
         with project_config(f'[build]\nexecutor = "{executor}"\n'):
             # The diagnostic's valid-seat list must come from the same isolated
             # project configuration as the resolver, never from the caller's
@@ -19742,14 +19779,14 @@ def test_build_executor_contract_freeze():
         f"rc={rc} stdout={out!r} stderr={err!r}",
     )
 
-    with project_config('[build]\nexecutor = "codex"\n'):
+    with project_config('[build]\nexecutor = "sol"\n'):
         saved_resolve = channels.resolve_seat
         channels.resolve_seat = lambda *args, **kwargs: None
         try:
             rc, out, err = run_fresh()
         finally:
             channels.resolve_seat = saved_resolve
-    expected = "error: executor seat 'codex' resolves to no eligible execution channel\n"
+    expected = "error: executor seat 'sol' resolves to no eligible execution channel\n"
     check(
         "catalog hit with no eligible resolved channel uses its pinned diagnostic",
         rc == 2 and out == "" and err == expected,
@@ -19757,7 +19794,7 @@ def test_build_executor_contract_freeze():
         f"rc={rc} stdout={out!r} stderr={err!r}",
     )
 
-    with project_config('[build]\nexecutor = "codex"\n'):
+    with project_config('[build]\nexecutor = "sol"\n'):
         channels.set_capabilities({
             "codex": channels.ChannelCapability(False, lambda: True),
         })
@@ -19766,7 +19803,7 @@ def test_build_executor_contract_freeze():
         finally:
             channels.set_capabilities(None)
     expected = (
-        "error: build executor 'codex' is read-only (does not support "
+        "error: build executor 'sol' is read-only (does not support "
         "workspace-write); the build seam dispatches it in write mode, so it "
         "cannot implement the task\n"
     )
@@ -19785,9 +19822,9 @@ def test_run_identity_freeze():
 
     check(
         "subprocess identity provider remains a legacy provider kind",
-        cli._subprocess_seat_provider("codex") == "codex",
+        cli._subprocess_seat_provider("sol") == "codex",
         "codex",
-        repr(cli._subprocess_seat_provider("codex")),
+        repr(cli._subprocess_seat_provider("sol")),
     )
     native_spec = seats.seat_spec("opus")
     check(
@@ -19799,6 +19836,8 @@ def test_run_identity_freeze():
         repr(native_spec),
     )
 
+    # The keys are opaque hash INPUT frozen with the digests below, not a catalog
+    # lookup: renaming one would change the golden without the algorithm moving.
     seat_signatures = {
         "codex": {
             "kind": "subprocess",
@@ -20457,7 +20496,7 @@ def test_swab():
         orphan = reviews / "run-abc123def456"
         orphan.mkdir()
         (orphan / "run.json").write_text('{"run_id":"run-abc123def456"}')
-        (orphan / "codex.json").write_text('{"ok":true}')
+        (orphan / "sol.json").write_text('{"ok":true}')
 
         # Foreign / malformed names that must NEVER be candidates.
         for bad in ("run-backup", "run-notes2", "run-DEADBEEF", "run-gggggggggggg"):

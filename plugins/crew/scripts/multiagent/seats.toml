@@ -32,15 +32,19 @@
 # ORDER IS LOAD-BEARING: the built-in subprocess panel, the premium-off set, and
 # the scaffolded config all read this table in the order written here.
 
-[seats.codex]
+[seats.astra]
+via = ["codex"]
+model = "gpt-6-astra"
+
+[seats.sol]
 via = ["codex"]
 model = "gpt-5.6-sol"
 
-[seats.codex-luna]
+[seats.luna]
 via = ["codex"]
 model = "gpt-5.6-luna"
 
-[seats.codex-terra]
+[seats.terra]
 via = ["codex"]
 model = "gpt-5.6-terra"
 opt_in = true
@@ -94,8 +98,8 @@ opt_in = true
 # cursor-* list: the token is expanded at resolution time so it grows with the
 # catalog. A [panels] table in a user config redefines a panel by name.
 [panels]
-full = ["codex", "codex-luna", "cursor-auto", "cursor-composer", "opus", "sonnet"]
-quick = ["codex", "sonnet"]
+full = ["astra", "sol", "luna", "cursor-auto", "cursor-composer", "opus", "sonnet"]
+quick = ["astra", "sol", "sonnet"]
 lite = ["opus", "sonnet"]
 solo = ["opus"]
 cursor = ["cursor"]

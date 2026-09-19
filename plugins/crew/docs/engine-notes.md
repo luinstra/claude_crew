@@ -54,20 +54,20 @@ unregistered seat 'agy'; valid registered seats: ...`.
 
 The default panel roster of record is scripts/CLAUDE.md + `seats.toml`'s `[panels]`
 table (loaded via `seats.merged_panels()`)
-(the two DEFAULT codex seats are distinct OpenAI voices, `gpt-5.6-sol` and
-`gpt-5.6-luna`, on the one codex CLI — a deliberate same-lineage pairing at
+(the DEFAULT codex-channel seats are distinct OpenAI voices, `gpt-6-astra`,
+`gpt-5.6-sol`, and `gpt-5.6-luna`, on the one codex CLI: a deliberate same-lineage grouping at
 different reasoning styles). Seats fall out of the default panel for two distinct
 reasons, redundancy or cost.
 
 Opt-in for REDUNDANCY (not bucket cost):
 
-- `codex-terra`: the two default codex-family seats already span the OpenAI
+- `terra`: the default codex-family seats already span the OpenAI
   lineage, so a third OpenAI voice is redundant on every default review (run via
-  `--seats codex-terra`).
+  `--seats terra`).
 
 Opt-in for COST (premium/metered Cursor buckets):
 
-- `cursor-gpt` — codex already covers the GPT lineage, so it isn't defaulted.
+- `cursor-gpt`: the codex-channel seats already cover the GPT lineage, so it isn't defaulted.
 - `cursor-gemini` (pinned `gemini-3.7-flash-high`, a Flash-class model) is a
   metered Cursor seat, not the flat-rate composer/auto bucket; its exact
   billing tier for a Flash model is UNVERIFIED. It stays opt-in because no
@@ -337,8 +337,8 @@ nothing to spawn or a role quietly stood in for.
 
 **A support role is never a hard dependency for a roster that needs nothing
 else from the host.** The formatter mint asks only whether the host HAS a role
-row, so on a Cursor host an all-external roster (`--panel quick` is codex plus a
-Claude voice, both external there) still mints a native `crew-formatter` at the
+row, so on a Cursor host an all-external roster (`--panel quick` is codex-channel seats plus a
+Claude voice, all external there) still mints a native `crew-formatter` at the
 support model. That model's exact slug has to be one the account's subagent
 surface offers (family enabled, variant matching), and
 the recorded live capture had every registered cursor seat model rejected on
@@ -347,7 +347,7 @@ never asked for. The fix is a reroute, not a mint-time gate: `formatter_task_los
 recovery rewrites the action to `driver=parent`, the route codex and unknown
 hosts already take, keeping the action id and every path. Two alternatives were
 rejected. Gating the mint on "does the roster contain a native seat" would have
-demoted a Claude host's `--seats codex` panel to a parent-context repair for no
+demoted a Claude host's `--seats sol` panel to a parent-context repair for no
 gain, and would still leave entitled seats with an unentitled support model
 hard-failing. Pinning the Cursor support roles unspawnable would encode one
 account's current enablement as a permanent design fact, which is exactly what

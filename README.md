@@ -117,7 +117,7 @@ repo-relative path.
 | `/crew:execute "task or plan"` | Execute a task or plan via executor agent (keeps main context clean) |
 | `/crew:review "the plan \| diff"` | Multi-model review of a plan or code diff using the fixed target grammar below → `APPROVED`/`REVISE` verdict |
 | `/crew:debate "question"` | Engine-owned council on a free-form question: a single round of independent takes from the configured debate panel, synthesized into areas of agreement, key disagreements, and a recommendation (no verdict); --rounds N (1 to 5) runs N rounds, each seat seeing every earlier round as data, with one synthesis over the trajectory |
-| `/crew:dispatch "[--seat <name>] <task>"` | Delegate a WORK task to ONE non-Claude seat (default `codex`) in write mode — it edits the working tree and leaves changes UNCOMMITTED + UNSTAGED for you to review (keep / revert / pipe into `/crew:review`) |
+| `/crew:dispatch "[--seat <name>] <task>"` | Delegate a WORK task to ONE non-Claude seat (default `luna`) in write mode — it edits the working tree and leaves changes UNCOMMITTED + UNSTAGED for you to review (keep / revert / pipe into `/crew:review`) |
 | `/crew:build "task"` | Start a persistence loop: persists toward completion, also ending on a completing verdict, your cancel, or a safety bound |
 | `/crew:cancel-build` | Exit an active build loop early |
 | `/crew:measure-twice "task"` | Start a self-refining plan loop — generates plan, reviews, revises toward loop completion (a panel's completing verdict, or a human `--force`) |
@@ -189,19 +189,19 @@ synthesizes one verdict from the admitted results. The built-in default panel
 and the presets:
 
 <!-- seat-roster:default -->
-- Default panel: `codex`, `codex-luna`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`
+- Default panel: `astra`, `sol`, `luna`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`
 <!-- seat-roster:preset:lite -->
 - `--panel lite`: `opus`, `sonnet`
 <!-- seat-roster:preset:solo -->
 - `--panel solo`: `opus`
 <!-- seat-roster:preset:quick -->
-- `--panel quick`: `codex`, `sonnet`
+- `--panel quick`: `astra`, `sol`, `sonnet`
 <!-- seat-roster:opt-in -->
-- Opt-in external seats (add via `--seats`): `codex-terra`, `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`
+- Opt-in external seats (add via `--seats`): `terra`, `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`
 <!-- seat-roster:task-opt-in -->
 - Opt-in Claude voice (add via `--seats`): `fable`
 <!-- seat-roster:all -->
-- Every registered seat: `codex`, `codex-luna`, `codex-terra`, `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`, `fable`
+- Every registered seat: `astra`, `sol`, `luna`, `terra`, `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`, `fable`
 
 These lines document the BUILT-IN roster; a configured `default_panel`/`[panels]`
 override changes what actually runs. `"${CLAUDE_PLUGIN_ROOT}/crew" seats` prints
@@ -213,8 +213,8 @@ preview of a standalone review's roster: on a Cursor host the `cursor-*` seats
 print as external here while standalone `/crew:review` issues them in-session.
 
 External seats run via the bundled `multiagent` engine
-(`plugins/crew/scripts/multiagent/`): the two codex seats are distinct OpenAI
-voices (`gpt-5.6-sol` and `gpt-5.6-luna`) on the one codex CLI. Which seats run
+(`plugins/crew/scripts/multiagent/`): the default codex-channel seats are distinct OpenAI
+voices (`gpt-6-astra`, `gpt-5.6-sol`, and `gpt-5.6-luna`) on the one codex CLI. Which seats run
 in-session instead depends on the host: on Claude Code the Claude voices take
 the native `crew:reviewer` Task path, and on a Cursor host standalone review
 issues the `cursor-*` seats natively as `crew-reviewer` while the Claude voices
@@ -235,7 +235,7 @@ and `/crew:measure-twice` loops a human may still authorize completion over a
 `NOT MET` panel with `--force`, which is recorded as an explicit override for the
 audit trail.
 
-**Why some seats are opt-in.** `codex` already covers the GPT lineage, so the
+**Why some seats are opt-in.** The codex-channel seats already cover the GPT lineage, so the
 GPT cursor seat stays off the default; the GLM and Grok cursor seats draw on
 Cursor's shared premium MAX allotment, so the cheap/dedicated `cursor-auto`
 takes the default slot. `cursor-gemini` (pinned `gemini-3.7-flash-high`, a
@@ -250,17 +250,18 @@ routine reviews never silently spend it; add it explicitly for the hardest calls
 `/crew:measure-twice` all accept panel flags at the start of their argument:
 
 - `--panel full` = the default panel listed above · `--panel lite`/`solo`/`quick`
-  as listed above (`quick` is the cheapest cross-model pair)
+  as listed above (`quick` is the cheapest cross-model panel)
 - `--panel cursor` = all Cursor model-seats (`--seats cursor`, which the engine
   expands to every registered `cursor-*` seat) — a pure cross-model Cursor panel,
-  no codex and no Claude Task seats
+  no codex-channel and no Claude Task seats. `--seats codex` is the same kind of
+  group token: it expands to every codex-channel seat, opt-in ones included
 - `--seats <list>` — an explicit subset of the registered seats listed above
-  (e.g. `/crew:build --seats codex,opus "fix the bug"`). The opt-in seats work
+  (e.g. `/crew:build --seats sol,opus "fix the bug"`). The opt-in seats work
   via `--seats` (or `--panel cursor`) but are never in a built-in default panel
 
 Not every change needs the full panel: `lite` (the two Claude voices, native
 on a Claude host and external through `claude` elsewhere), `quick` (the
-cheapest cross-model pair) for routine diffs, or a single seat is plenty for
+cheapest cross-model panel) for routine diffs, or a single seat is plenty for
 routine work.
 
 #### Per-repo config
@@ -287,7 +288,7 @@ Debate precedence is **`--panel`/`--seats` (explicit) >
 inside the debate workflow.
 `/crew:dispatch` picks its default seat from `[dispatch].seat` (validated
 against the known seats — a panel name or group token like `cursor` is
-rejected), falling back to the built-in `codex`; an explicit `--seat` overrides.
+rejected), falling back to the built-in `luna`; an explicit `--seat` overrides.
 Per-provider write-mode dispatch tuning lives under `[dispatch.<kind>]` (keyed
 by provider kind, keys declared by each provider; `crew dispatch --options`
 lists them, non-billable).
@@ -306,7 +307,7 @@ run/probe seat wall clock. Dispatch precedence is
 > `[tuning].timeout` no longer affects dispatch.
 `/crew:build`'s implement step normally runs the `crew:executor` Task agent
 (Claude); `[build].executor` can instead route each round through a write-capable
-subprocess seat (e.g. `codex-luna`), and `[build].executor_retries` (0..2, default
+subprocess seat (e.g. `luna`), and `[build].executor_retries` (0..2, default
 0) caps how many times a FAILED external-executor round is retried. `[build].resume_executor`
 (bool, default `true`) lets a supporting external executor REUSE its provider
 conversation across rounds; set `false` to opt out and run each round fresh; only
@@ -326,7 +327,7 @@ default_panel = "lite"            # default panel when you name none
 panel = "full"                    # /crew:debate-only default; falls back to default_panel, then full
 
 [dispatch]
-seat = "codex"                    # default seat for /crew:dispatch; validated vs known seats, falls back to built-in codex
+seat = "luna"                     # default seat for /crew:dispatch; validated vs known seats, falls back to built-in luna
 # timeout = 1800                   # dispatch WORK wall-clock; provider floors raise
 #                                   the effective timeout only when the resolved
 #                                   [dispatch].timeout is below the floor; agy's floor is
@@ -343,11 +344,11 @@ seat = "codex"                    # default seat for /crew:dispatch; validated v
 # approve_mcps = true   # pass --approve-mcps: auto-approve every configured MCP server
 
 [build]
-executor = "crew:executor"        # /crew:build implement-step executor; a write-capable seat (e.g. codex-luna) routes each round through that model
+executor = "crew:executor"        # /crew:build implement-step executor; a write-capable seat (e.g. luna) routes each round through that model
 executor_retries = 0              # retries for a FAILED external-executor round (0..2); retries STACK on partial edits, so the cap is low
 resume_executor = true             # default ON; codex/cursor reuse conversations, other executors always start fresh
 
-[seats.codex]
+[seats.sol]
 model = "gpt-5.5"
 reasoning_effort = "high"
 
@@ -385,8 +386,8 @@ the per-repo file.
 default_panel = "lite"            # your machine-wide default
 
 [panels]
-full    = ["codex", "opus", "sonnet"]   # redefine a built-in preset's roster
-nightly = ["codex", "opus"]             # add a custom preset (use via --panel nightly)
+full    = ["sol", "opus", "sonnet"]     # redefine a built-in preset's roster
+nightly = ["sol", "opus"]               # add a custom preset (use via --panel nightly)
 
 [seats.cursor-glm]
 available = false                 # not authed here -> dropped from any panel;
@@ -395,7 +396,8 @@ available = false                 # not authed here -> dropped from any panel;
 ```
 
 A `[panels]` entry names known seats (registered external or Claude-channel
-seats, or a group token, `cursor` or `agy`); an unknown name is dropped with a
+seats, or a group token: `cursor`, `codex`, or `agy`, each expanding to every
+seat on that channel); an unknown name is dropped with a
 one-time note. Panel names and seat names share ONE namespace: a `[panels]` entry named
 after a live seat is ignored with a note (the seat wins), so `--panel` and
 `--seats` can never resolve the same word to two different rosters. Group
@@ -441,10 +443,10 @@ launcher run directly via its shebang + exec bit — no `python` prefix, no
 
 ```bash
 # prompt from a file (handles "the cat" for you)
-"${CLAUDE_PLUGIN_ROOT}/crew" run codex -f <prompt-file>
+"${CLAUDE_PLUGIN_ROOT}/crew" run sol -f <prompt-file>
 
 # or a direct prompt string
-"${CLAUDE_PLUGIN_ROOT}/crew" run codex-luna "summarize this"
+"${CLAUDE_PLUGIN_ROOT}/crew" run luna "summarize this"
 ```
 
 `run <seat>` accepts any registered seat resolved external for the current host,

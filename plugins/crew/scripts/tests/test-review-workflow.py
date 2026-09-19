@@ -75,7 +75,7 @@ class _Provider:
         ok: bool = True,
         output: str = VALID_REVIEW,
         *,
-        name: str = "codex",
+        name: str = "sol",
         returned_name: str | None = None,
         returned_model: str | None = None,
         reported_model: str | None = None,
@@ -130,7 +130,7 @@ class _BarrierProvider:
 
 
 class _UnavailableProvider(_Provider):
-    def __init__(self, name: str = "codex") -> None:
+    def __init__(self, name: str = "sol") -> None:
         super().__init__(name=name)
 
     def is_available(self) -> tuple[bool, str]:
@@ -203,7 +203,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         os.environ.pop("CLAUDE_PROJECT_DIR", None)
         os.environ.pop("CREW_HOST", None)
 
-    def _start(self, *, seats: str = "codex", session: str = "s", timeout: int | None = 1,
+    def _start(self, *, seats: str = "sol", session: str = "s", timeout: int | None = 1,
                force_external: tuple[str, ...] | None = None):
         return review_workflow.start_review(review_workflow.ReviewRequest(
             str(self.plan), seats=seats, session_id=session, timeout_seconds=timeout,
@@ -258,7 +258,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             with mock.patch.object(
                 review_workflow,
                 "get_provider_for_channel",
-                return_value=_Provider(ok=False, name="codex"),
+                return_value=_Provider(ok=False, name="sol"),
             ):
                 start = self._start(session=session)
                 terminal = review_workflow.execute_external_review(
@@ -269,7 +269,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             os.environ["CREW_HOST"] = "codex"
 
             def provider(name: str, _channel: str):
-                return _Provider(ok=name == "codex", name=name)
+                return _Provider(ok=name == "sol", name=name)
 
             with mock.patch.object(
                 review_workflow,
@@ -277,7 +277,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 side_effect=provider,
             ):
                 start = self._start(
-                    seats="codex,codex-luna",
+                    seats="sol,luna",
                     session=session,
                 )
                 synthesis_step = start
@@ -475,7 +475,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         self.assertEqual((run / "workflow.json").read_bytes(), before)
 
     def test_placeholder_session_ids_fail_before_review_storage_or_provider(self) -> None:
-        provider_factory = mock.Mock(return_value=_Provider(name="codex"))
+        provider_factory = mock.Mock(return_value=_Provider(name="sol"))
         for raw_session in ("<session-id>", "real<session>"):
             with self.subTest(session=raw_session), mock.patch.object(
                 review_workflow,
@@ -485,7 +485,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 with self.assertRaises(review_workflow.WorkflowError) as failure:
                     review_workflow.start_review(review_workflow.ReviewRequest(
                         str(self.plan),
-                        seats="codex",
+                        seats="sol",
                         session_id=raw_session,
                         timeout_seconds=1,
                     ))
@@ -507,7 +507,7 @@ class ReviewWorkflowTest(unittest.TestCase):
     def test_placeholder_session_cli_is_exact_exit_two_json_with_no_stderr(self) -> None:
         output = io.StringIO()
         error_output = io.StringIO()
-        provider_factory = mock.Mock(return_value=_Provider(name="codex"))
+        provider_factory = mock.Mock(return_value=_Provider(name="sol"))
         with (
             mock.patch.object(
                 review_workflow,
@@ -523,7 +523,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 "--session-id",
                 "<session-id>",
                 "--seats",
-                "codex",
+                "sol",
                 "--timeout",
                 "1",
             ])
@@ -569,7 +569,7 @@ class ReviewWorkflowTest(unittest.TestCase):
 
         cases = [
             (cli.cmd_review, SimpleNamespace(
-                target=str(self.plan), base="main", panel=None, seats="codex",
+                target=str(self.plan), base="main", panel=None, seats="sol",
                 session_id="session", timeout=1, inline_diff=False,
                 force_external=None,
             ), "start_review"),
@@ -585,7 +585,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             ), "recover_review_action"),
             (cli.cmd_review_retry, SimpleNamespace(**ref_args, seats=None), "retry_review"),
             (cli.cmd_debate, SimpleNamespace(
-                question="question", file=None, panel=None, seats="codex",
+                question="question", file=None, panel=None, seats="sol",
                 session_id="session", timeout=1, rounds=1, force_external=None,
             ), "start_debate"),
         ]
@@ -616,14 +616,14 @@ class ReviewWorkflowTest(unittest.TestCase):
             run_id="run-123456789abc",
             attempt_id="attempt-0001",
             target_sha256="a" * 64,
-            seats=" codex , codex-luna , ",
+            seats=" sol , luna , ",
         )
         with (
             mock.patch.object(review_workflow, "retry_review", side_effect=retry),
             redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(cli.cmd_review_retry(args), 0)
-        self.assertEqual(captured[0].seats, ("codex", "codex-luna"))
+        self.assertEqual(captured[0].seats, ("sol", "luna"))
 
     def test_recovery_diagnostic_map_has_exactly_five_actions(self) -> None:
         self.assertEqual(review_workflow.RECOVERY_DIAGNOSTICS, {
@@ -710,7 +710,7 @@ class ReviewWorkflowTest(unittest.TestCase):
     def test_attribution_is_stamped_and_never_changes_quorum(self) -> None:
         def run_case(session: str, *, reported_model: str | None, ok: bool = True):
             provider = _Provider(
-                name="codex",
+                name="sol",
                 ok=ok,
                 reported_model=reported_model,
             )
@@ -720,7 +720,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 return_value=provider,
             ):
                 step = self._start(
-                    seats="cursor-composer,codex",
+                    seats="cursor-composer,sol",
                     session=session,
                 )
                 native = next(item for item in step.work_items if item.driver == "native")
@@ -751,7 +751,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             ("requested-only", None),
         )
         self.assertEqual(
-            (actions["codex"]["model_attribution"], actions["codex"]["reported_model"]),
+            (actions["sol"]["model_attribution"], actions["sol"]["reported_model"]),
             ("runtime-reported", "GPT Test"),
         )
         raw = json.loads(Path(reported_item.result_path).read_text(encoding="utf-8"))
@@ -784,7 +784,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         self.assertNotIn("[requested-only]", unreported_panel)
         codex_action = next(
             action for action in unreported_workflow["actions"]
-            if action.get("seat") == "codex"
+            if action.get("seat") == "sol"
             and action["kind"] == review_workflow.ActionKind.REVIEWER
         )
         self.assertEqual(
@@ -804,7 +804,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         self.assertTrue(
             failed_panel.startswith("PANEL: 2 launched · 1 usable · 0 attributed · quorum 2: NOT MET")
         )
-        self.assertIn("- codex  (unparsed)", failed_panel)
+        self.assertIn("- sol  (unparsed)", failed_panel)
         self.assertIn("[runtime-reported: GPT Test]", failed_panel)
 
     def test_native_actions_are_requested_only_on_every_host(self) -> None:
@@ -851,7 +851,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 )
 
     def test_digest_row_escapes_a_control_character_in_reported_model(self) -> None:
-        provider = _Provider(name="codex", reported_model="GPT\nTest")
+        provider = _Provider(name="sol", reported_model="GPT\nTest")
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
@@ -873,7 +873,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         panel = (run / "panel.md").read_text(encoding="utf-8")
         self.assertIn("[runtime-reported: GPT\\x0aTest]", panel)
         self.assertEqual(
-            len([line for line in panel.splitlines() if line.startswith("- codex")]),
+            len([line for line in panel.splitlines() if line.startswith("- sol")]),
             1,
         )
 
@@ -890,7 +890,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         targets.resolve = lambda value, base="main": fake
         try:
             code_step = review_workflow.start_review(review_workflow.ReviewRequest(
-                "working-tree", seats="codex", session_id="code", timeout_seconds=1,
+                "working-tree", seats="sol", session_id="code", timeout_seconds=1,
             ))
         finally:
             targets.resolve = original
@@ -909,7 +909,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             diff_cmd="git --no-pager diff HEAD",
             replay_spec="working-tree",
         )
-        provider = _Provider(ok=False, name="codex")
+        provider = _Provider(ok=False, name="sol")
         with mock.patch.object(targets, "resolve", return_value=fake), mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
@@ -917,7 +917,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         ):
             first = review_workflow.start_review(review_workflow.ReviewRequest(
                 "working-tree",
-                seats="codex",
+                seats="sol",
                 session_id="prompt-metadata",
                 timeout_seconds=1,
             ))
@@ -955,7 +955,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             with mock.patch.object(targets, "resolve", return_value=changed):
                 reminted = review_workflow.start_review(review_workflow.ReviewRequest(
                     "working-tree",
-                    seats="codex",
+                    seats="sol",
                     session_id="prompt-metadata",
                     timeout_seconds=1,
                 ))
@@ -968,7 +968,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 command_reminted = review_workflow.start_review(
                     review_workflow.ReviewRequest(
                         "working-tree",
-                        seats="codex",
+                        seats="sol",
                         session_id="prompt-metadata",
                         timeout_seconds=1,
                     )
@@ -1011,13 +1011,13 @@ class ReviewWorkflowTest(unittest.TestCase):
         ):
             first = review_workflow.start_review(review_workflow.ReviewRequest(
                 "working-tree",
-                seats="codex",
+                seats="sol",
                 session_id="descriptor-remint",
                 timeout_seconds=1,
             ))
             second = review_workflow.start_review(review_workflow.ReviewRequest(
                 "working-tree",
-                seats="codex",
+                seats="sol",
                 session_id="descriptor-remint",
                 timeout_seconds=1,
             ))
@@ -1054,7 +1054,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             original_identity,
         )
 
-        provider_factory = mock.Mock(return_value=_Provider(name="codex"))
+        provider_factory = mock.Mock(return_value=_Provider(name="sol"))
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
@@ -1100,7 +1100,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             original_identity,
         )
 
-        provider_factory = mock.Mock(return_value=_Provider(name="codex"))
+        provider_factory = mock.Mock(return_value=_Provider(name="sol"))
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
@@ -1121,15 +1121,15 @@ class ReviewWorkflowTest(unittest.TestCase):
         sentinel.write_text("outside sentinel", encoding="utf-8")
         digest = review_workflow._hash_action("attempt-0001:reviewer:0001")
         cases = (
-            ("reviewer-prompt", "codex", "attempts/attempt-0001/prompts", True),
+            ("reviewer-prompt", "sol", "attempts/attempt-0001/prompts", True),
             ("reviewer-transport", "opus", "attempts/attempt-0001/transport/scribe-0001.txt", False),
-            ("external-result", "codex", "attempts/attempt-0001/results/0001.json", False),
+            ("external-result", "sol", "attempts/attempt-0001/results/0001.json", False),
             ("submission", "opus", f"attempts/attempt-0001/submissions/{digest}.json", False),
         )
         for label, seat, relative, directory_link in cases:
             with self.subTest(path=label):
                 os.environ["CREW_HOST"] = "claude" if seat == "opus" else "codex"
-                provider = _Provider(name="codex")
+                provider = _Provider(name="sol")
                 planted = False
                 original_write = review_workflow._write_run_text
 
@@ -1164,7 +1164,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         for label, output in (("formatter", "RAW"), ("synthesis", VALID_REVIEW)):
             with self.subTest(path=f"{label}-ingress"):
                 os.environ["CREW_HOST"] = "codex"
-                provider = _Provider(output=output, name="codex")
+                provider = _Provider(output=output, name="sol")
                 with mock.patch.object(
                     review_workflow,
                     "get_provider_for_channel",
@@ -1185,7 +1185,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 self.assertEqual(provider.calls, 1)
                 self.assertEqual(sentinel.read_bytes(), before)
 
-        provider = _Provider(ok=False, name="codex")
+        provider = _Provider(ok=False, name="sol")
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
@@ -1308,7 +1308,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         outside = self.root / "outside-authority.txt"
         outside.write_text("outside sentinel", encoding="utf-8")
         mutations = {
-            "seat": lambda action: action.update(seat="codex-luna"),
+            "seat": lambda action: action.update(seat="luna"),
             "model": lambda action: action.update(model="wrong-model"),
             "provider": lambda action: action.update(provider="agy"),
             "channel": lambda action: action.update(channel="agy"),
@@ -1326,7 +1326,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         }
         for label, mutate in mutations.items():
             with self.subTest(field=label):
-                provider = _Provider(name="codex")
+                provider = _Provider(name="sol")
                 with mock.patch.object(
                     review_workflow,
                     "get_provider_for_channel",
@@ -1368,7 +1368,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         }
         for label, mutate in mutations.items():
             with self.subTest(field=label):
-                provider = _Provider(name="codex")
+                provider = _Provider(name="sol")
                 with mock.patch.object(
                     review_workflow,
                     "get_provider_for_channel",
@@ -1394,7 +1394,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 self.assertEqual(outside.read_bytes(), outside_before)
 
     def test_exact_issued_result_symlink_fails_before_provider_or_outside_io(self) -> None:
-        provider = _Provider(name="codex")
+        provider = _Provider(name="sol")
         outside = self.root / "outside-result.json"
         outside.write_text("outside sentinel", encoding="utf-8")
         with mock.patch.object(
@@ -1454,7 +1454,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                         )
                         session.symlink_to(target, target_is_directory=True)
 
-                provider = _Provider(name="codex")
+                provider = _Provider(name="sol")
                 os.environ["CLAUDE_PROJECT_DIR"] = str(project)
                 with (
                     mock.patch.object(targets, "resolve", return_value=fake),
@@ -1468,7 +1468,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                     with self.assertRaises(review_workflow.WorkflowError) as failure:
                         review_workflow.start_review(review_workflow.ReviewRequest(
                             "virtual.md",
-                            seats="codex",
+                            seats="sol",
                             session_id="unsafe-session",
                             timeout_seconds=1,
                         ))
@@ -1496,7 +1496,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             ref_path="virtual.md",
             replay_spec="virtual.md",
         )
-        provider = _Provider(name="codex")
+        provider = _Provider(name="sol")
         os.environ["CLAUDE_PROJECT_DIR"] = str(project)
         output = io.StringIO()
         with (
@@ -1515,7 +1515,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 "--session-id",
                 "unsafe-cli",
                 "--seats",
-                "codex",
+                "sol",
                 "--timeout",
                 "1",
             ])
@@ -1549,11 +1549,11 @@ class ReviewWorkflowTest(unittest.TestCase):
             with self.subTest(destination=destination):
                 project = self.root / f"run-link-project-{destination}"
                 project.mkdir()
-                provider = _Provider(name="codex")
+                provider = _Provider(name="sol")
                 os.environ["CLAUDE_PROJECT_DIR"] = str(project)
                 request = review_workflow.ReviewRequest(
                     "virtual.md",
-                    seats="codex",
+                    seats="sol",
                     session_id="run-link",
                     timeout_seconds=1,
                 )
@@ -1597,7 +1597,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 plan = project / "plan.md"
                 plan.write_text("# plan\n", encoding="utf-8")
                 os.environ["CLAUDE_PROJECT_DIR"] = str(project)
-                provider = _Provider(name="codex")
+                provider = _Provider(name="sol")
                 with mock.patch.object(
                     review_workflow,
                     "get_provider_for_channel",
@@ -1605,7 +1605,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 ):
                     step = review_workflow.start_review(review_workflow.ReviewRequest(
                         str(plan),
-                        seats="codex",
+                        seats="sol",
                         session_id="swap-session",
                         timeout_seconds=1,
                     ))
@@ -1646,7 +1646,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         ):
             step = review_workflow.start_review(review_workflow.ReviewRequest(
                 "virtual.md",
-                seats="codex",
+                seats="sol",
                 session_id="nested-session",
                 timeout_seconds=1,
             ))
@@ -1704,7 +1704,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         }
         for label, mutate in formatter_mutations.items():
             with self.subTest(kind="formatter", path=label):
-                provider = _Provider(output="RAW", name="codex")
+                provider = _Provider(output="RAW", name="sol")
                 with mock.patch.object(
                     review_workflow,
                     "get_provider_for_channel",
@@ -1745,7 +1745,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         }
         for label, mutate in synthesis_mutations.items():
             with self.subTest(kind="synthesis", path=label):
-                provider = _Provider(name="codex")
+                provider = _Provider(name="sol")
                 with mock.patch.object(
                     review_workflow,
                     "get_provider_for_channel",
@@ -1794,7 +1794,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
-            return_value=_Provider(output="RAW", name="codex"),
+            return_value=_Provider(output="RAW", name="sol"),
         ):
             formatter_start = self._start(session="prompt-formatter")
             formatter_step = review_workflow.execute_external_review(
@@ -1810,7 +1810,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
-            return_value=_Provider(name="codex"),
+            return_value=_Provider(name="sol"),
         ):
             synthesis_start = self._start(session="prompt-synthesis")
             synthesis_step = review_workflow.execute_external_review(
@@ -1908,7 +1908,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         self.assertEqual(json.loads(pointer_path.read_text(encoding="utf-8"))["run_id"], old.ref.run_id)
 
     def test_standalone_pointer_discovers_the_workflow_owned_retry_attempt(self) -> None:
-        provider = _Provider(ok=False, name="codex")
+        provider = _Provider(ok=False, name="sol")
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
@@ -1939,7 +1939,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         targets.resolve = lambda value, base="main": fake
         try:
             step = review_workflow.start_review(review_workflow.ReviewRequest(
-                "branch", base="trunk", seats="codex", session_id="pointer", timeout_seconds=1,
+                "branch", base="trunk", seats="sol", session_id="pointer", timeout_seconds=1,
             ))
         finally:
             targets.resolve = original
@@ -2017,7 +2017,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 ambiguous = review_workflow.start_review(
                     review_workflow.ReviewRequest(
                         text,
-                        seats="codex",
+                        seats="sol",
                         session_id=f"ambiguous-{ordinal}",
                         timeout_seconds=1,
                     )
@@ -2048,7 +2048,7 @@ class ReviewWorkflowTest(unittest.TestCase):
 
         step = review_workflow.start_review(review_workflow.ReviewRequest(
             "",
-            seats="codex",
+            seats="sol",
             session_id="newest-real-plan",
             timeout_seconds=1,
         ))
@@ -2064,7 +2064,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         outside = self.root / "outside-only.md"
         outside.write_text("# outside\n", encoding="utf-8")
         (self.plan.parent / "only.md").symlink_to(outside)
-        provider_factory = mock.Mock(return_value=_Provider(name="codex"))
+        provider_factory = mock.Mock(return_value=_Provider(name="sol"))
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
@@ -2073,7 +2073,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             with self.assertRaises(review_workflow.WorkflowError) as failure:
                 review_workflow.start_review(review_workflow.ReviewRequest(
                     "latest plan",
-                    seats="codex",
+                    seats="sol",
                     session_id="newest-symlink-only",
                     timeout_seconds=1,
                 ))
@@ -2085,7 +2085,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         real_plans = self.root / "real-plans"
         self.plan.parent.rename(real_plans)
         (self.root / ".crew" / "plans").symlink_to(real_plans)
-        provider_factory = mock.Mock(return_value=_Provider(name="codex"))
+        provider_factory = mock.Mock(return_value=_Provider(name="sol"))
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
@@ -2094,7 +2094,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             with self.assertRaises(review_workflow.WorkflowError) as failure:
                 review_workflow.start_review(review_workflow.ReviewRequest(
                     "the plan",
-                    seats="codex",
+                    seats="sol",
                     session_id="newest-symlinked-plans",
                     timeout_seconds=1,
                 ))
@@ -2124,13 +2124,13 @@ class ReviewWorkflowTest(unittest.TestCase):
         step = review_workflow.start_review(review_workflow.ReviewRequest(
             str(self.plan),
             panel="full",
-            seats="codex",
+            seats="sol",
             session_id="independent",
             timeout_seconds=1,
         ))
         self.assertEqual(
             [item.seat for item in step.work_items],
-            ["codex", "opus", "sonnet"],
+            ["sol", "opus", "sonnet"],
         )
         self.assertEqual(
             [item.driver for item in step.work_items],
@@ -2234,7 +2234,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         self.assertFalse((self.root / ".crew" / "reviews").exists())
 
     def test_external_execute_and_typed_synthesis(self) -> None:
-        provider = _Provider(name="codex")
+        provider = _Provider(name="sol")
         original = review_workflow.get_provider_for_channel
         review_workflow.get_provider_for_channel = lambda name, channel: provider
         try:
@@ -2878,7 +2878,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
-            return_value=_Provider(output="RAW", name="codex"),
+            return_value=_Provider(output="RAW", name="sol"),
         ):
             step = self._start(session="formatter-invalid-utf8")
             formatter_step = review_workflow.execute_external_review(
@@ -3253,7 +3253,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             side_effect=self._no_cursor_provider(),
         ):
             step = self._start(
-                seats="cursor-auto,cursor-composer,codex",
+                seats="cursor-auto,cursor-composer,sol",
                 session="cursor-no-provider",
             )
             for item in step.work_items:
@@ -3291,7 +3291,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                     "get_provider_for_channel",
                     side_effect=lambda name, channel: _Provider(output="RAW", name=name),
                 ):
-                    step = self._start(seats="codex", session=f"formatter-role-{host}")
+                    step = self._start(seats="sol", session=f"formatter-role-{host}")
                     formatter_step = review_workflow.execute_external_review(
                         step.ref, step.work_items[0].action_id,
                     )
@@ -3316,7 +3316,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             "get_provider_for_channel",
             side_effect=lambda name, channel: _Provider(output="RAW", name=name),
         ):
-            step = self._start(seats="codex", session=session)
+            step = self._start(seats="sol", session=session)
             formatter_step = review_workflow.execute_external_review(
                 step.ref, step.work_items[0].action_id,
             )
@@ -3414,7 +3414,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             "get_provider_for_channel",
             side_effect=lambda name, channel: _Provider(output="RAW", name=name),
         ):
-            step = self._start(seats="codex", session="formatter-reroute-mark")
+            step = self._start(seats="sol", session="formatter-reroute-mark")
             formatter_step = review_workflow.execute_external_review(
                 step.ref, step.work_items[0].action_id,
             )
@@ -3664,13 +3664,13 @@ class ReviewWorkflowTest(unittest.TestCase):
             ):
                 with redirect_stderr(stderr):
                     step = self._start(
-                        seats="cursor-composer,codex",
+                        seats="cursor-composer,sol",
                         session="cursor-override",
                     )
             self.assertNotIn("dropping it from this panel", stderr.getvalue())
             roles = self._cursor_roles()
             self.assertEqual(
-                [item.seat for item in step.work_items], ["cursor-composer", "codex"]
+                [item.seat for item in step.work_items], ["cursor-composer", "sol"]
             )
             native = next(
                 item for item in step.work_items if item.seat == "cursor-composer"
@@ -3709,7 +3709,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 side_effect=self._no_cursor_provider(),
             ):
                 step = self._start(
-                    seats="cursor-composer,codex",
+                    seats="cursor-composer,sol",
                     session="cursor-model-override",
                 )
             native = next(item for item in step.work_items if item.seat == "cursor-composer")
@@ -3743,8 +3743,8 @@ class ReviewWorkflowTest(unittest.TestCase):
             "get_provider_for_channel",
             side_effect=self._no_cursor_provider(),
         ), redirect_stderr(stderr):
-            step = self._start(seats="cursor-gpt,codex", session="cursor-opt-in-drop")
-        self.assertEqual([item.seat for item in step.work_items], ["codex"])
+            step = self._start(seats="cursor-gpt,sol", session="cursor-opt-in-drop")
+        self.assertEqual([item.seat for item in step.work_items], ["sol"])
         self.assertIn("cursor-gpt", stderr.getvalue())
         self.assertIn("native_model", stderr.getvalue())
         self.assertIn("badge", stderr.getvalue())
@@ -3911,13 +3911,13 @@ class ReviewWorkflowTest(unittest.TestCase):
             side_effect=lambda name, channel: _Provider(name=name),
         ):
             step = self._start(
-                seats="opus,codex",
+                seats="opus,sol",
                 session="force-own-channel",
                 force_external=("claude",),
             )
         self.assertEqual(
             {(item.seat, item.driver, item.channel) for item in step.work_items},
-            {("opus", "external", "claude"), ("codex", "external", "codex")},
+            {("opus", "external", "claude"), ("sol", "external", "codex")},
         )
         self.assertEqual(self._identity(step)["force_external_channels"], ["claude"])
 
@@ -3996,7 +3996,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         # And it reaches the caller as a typed envelope, not a traceback.
         output = io.StringIO()
         args = SimpleNamespace(
-            target=str(self.plan), base="main", panel=None, seats="codex",
+            target=str(self.plan), base="main", panel=None, seats="sol",
             session_id="force-typo-cli", timeout=1, inline_diff=False,
             force_external="cursur",
         )
@@ -4054,7 +4054,7 @@ class ReviewWorkflowTest(unittest.TestCase):
     def test_panel_bytes_do_not_depend_on_host(self) -> None:
         self.maxDiff = None
         def provider(name: str, _channel: str):
-            if name == "codex":
+            if name == "sol":
                 return _Provider(ok=False, name=name)
             return _UnavailableProvider(name=name)
 
@@ -4065,7 +4065,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             side_effect=provider,
         ):
             step = self._start(
-                seats="codex,codex-luna",
+                seats="sol,luna",
                 session="cursor-all-failed-golden",
             )
             terminal = step
@@ -4346,12 +4346,12 @@ class ReviewWorkflowTest(unittest.TestCase):
             "get_provider_for_channel",
             side_effect=lambda name, channel: _Provider(name=name),
         ):
-            step = self._start(seats=f"opus,codex,{AGY_SEAT}", session="access-tier")
+            step = self._start(seats=f"opus,sol,{AGY_SEAT}", session="access-tier")
         self.assertEqual(
             {(item.seat, item.access) for item in step.work_items},
             {
                 ("opus", "read-only-advisory"),
-                ("codex", "read-only"),
+                ("sol", "read-only"),
                 # Same run, same "external", different adapter posture.
                 (AGY_SEAT, "read-only-advisory"),
             },
@@ -4507,7 +4507,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             )
             self.assertEqual((provider.calls, terminal.outcome["status"]), (0, "all_failed"))
             raw = json.loads(Path(step.work_items[0].result_path).read_text(encoding="utf-8"))
-            self.assertEqual(raw["name"], "codex")
+            self.assertEqual(raw["name"], "sol")
             self.assertEqual(raw["channel"], "codex")
             self.assertEqual(raw["run_id"], step.ref.run_id)
             self.assertEqual(raw["target_sha256"], step.ref.target_sha256)
@@ -4526,7 +4526,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             review_workflow.get_provider_for_channel = original
 
     def test_blank_provider_exception_lands_a_nonblank_failure_and_reconciles(self) -> None:
-        provider = _BlankExceptionProvider(name="codex")
+        provider = _BlankExceptionProvider(name="sol")
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
@@ -4562,11 +4562,11 @@ class ReviewWorkflowTest(unittest.TestCase):
 
     def test_external_provider_result_is_sanitized_to_the_exact_standalone_shape(self) -> None:
         provider = _Provider(
-            output="RAW", name="codex", reported_model="Composer 2.5"
+            output="RAW", name="sol", reported_model="Composer 2.5"
         )
         def injected_run(prompt, *, model=None, timeout):
             injected = ProviderResult(
-                "codex",
+                "sol",
                 model,
                 True,
                 "RAW",
@@ -4689,7 +4689,7 @@ class ReviewWorkflowTest(unittest.TestCase):
     def test_settled_external_evidence_must_match_action_outcome_and_diagnostic(self) -> None:
         for label in ("action-ok-mismatch", "result-ok-mismatch", "diagnostic-mismatch"):
             with self.subTest(case=label):
-                provider = _Provider(name="codex", output=VALID_REVIEW)
+                provider = _Provider(name="sol", output=VALID_REVIEW)
                 with mock.patch.object(
                     review_workflow,
                     "get_provider_for_channel",
@@ -4755,12 +4755,12 @@ class ReviewWorkflowTest(unittest.TestCase):
                 expected = "empty seat output" if suffix == "whitespace" else "not valid UTF-8"
                 self.assertIn(expected, raw["error"])
 
-        mixed = self._start(seats="codex,codex-luna", session="external-mixed")
+        mixed = self._start(seats="sol,luna", session="external-mixed")
 
         def mixed_provider(name: str, channel: str):
             return _Provider(
                 name=name,
-                output=VALID_REVIEW if name == "codex" else " \n",
+                output=VALID_REVIEW if name == "sol" else " \n",
             )
 
         with mock.patch.object(
@@ -4772,8 +4772,8 @@ class ReviewWorkflowTest(unittest.TestCase):
             for item in mixed.work_items:
                 after = review_workflow.execute_external_review(mixed.ref, item.action_id)
         self.assertEqual(after.panel["usable"], 1)
-        self.assertEqual(after.panel["failed"], ["codex-luna"])
-        self.assertEqual(after.panel["pending"], ["codex-luna"])
+        self.assertEqual(after.panel["failed"], ["luna"])
+        self.assertEqual(after.panel["pending"], ["luna"])
         self.assertEqual([item.kind for item in after.work_items], ["synthesis"])
 
     def test_native_reviewer_consumes_primary_fallback_whitespace_and_invalid_utf8(self) -> None:
@@ -5040,7 +5040,7 @@ class ReviewWorkflowTest(unittest.TestCase):
     def test_all_failed_panel_artifacts_match_exact_goldens(self) -> None:
         self.maxDiff = None
         def provider(name: str, _channel: str):
-            if name == "codex":
+            if name == "sol":
                 return _Provider(ok=False, name=name)
             return _UnavailableProvider(name=name)
 
@@ -5050,7 +5050,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             side_effect=provider,
         ):
             step = self._start(
-                seats="codex,codex-luna",
+                seats="sol,luna",
                 session="all-failed-golden",
             )
             terminal = step
@@ -5061,7 +5061,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 )
         self.assertEqual(terminal.outcome["status"], "all_failed")
         self.assertEqual(terminal.outcome["usable"], 0)
-        self.assertEqual(terminal.outcome["failed"], ["codex", "codex-luna"])
+        self.assertEqual(terminal.outcome["failed"], ["sol", "luna"])
         run, _workflow = self._workflow(terminal)
         panel = (run / "panel.md").read_bytes()
         full = (run / "panel-full.md").read_bytes()
@@ -5084,7 +5084,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             b"an APPROVED verdict is not backed by quorum from this panel\n\n"
         )
         self.assertEqual(panel, header + full)
-        self.assertLess(full.index(b"### seat: codex  |"), full.index(b"### seat: codex-luna  |"))
+        self.assertLess(full.index(b"### seat: sol  |"), full.index(b"### seat: luna  |"))
         self.assertIn(b"status: FAILED", full)
         self.assertIn(b"status: SKIPPED", full)
         self.assertNotIn(b"VERDICTS", panel)
@@ -5092,10 +5092,10 @@ class ReviewWorkflowTest(unittest.TestCase):
     def test_below_quorum_synthesis_is_explicitly_non_certifying(self) -> None:
         original = review_workflow.get_provider_for_channel
         review_workflow.get_provider_for_channel = lambda name, channel: _Provider(
-            ok=name == "codex", name=name,
+            ok=name == "sol", name=name,
         )
         try:
-            step = self._start(seats="codex,codex-luna", session="below-quorum")
+            step = self._start(seats="sol,luna", session="below-quorum")
             after = step
             for item in step.work_items:
                 after = review_workflow.execute_external_review(
@@ -5117,8 +5117,8 @@ class ReviewWorkflowTest(unittest.TestCase):
             )
             self.assertEqual(terminal.outcome["status"], "quorum_not_met")
             self.assertFalse(terminal.outcome["quorum_met"])
-            self.assertEqual(terminal.outcome["pending"], ["codex-luna"])
-            self.assertEqual(terminal.outcome["failed"], ["codex-luna"])
+            self.assertEqual(terminal.outcome["pending"], ["luna"])
+            self.assertEqual(terminal.outcome["failed"], ["luna"])
             self.assertIn("non-certifying", terminal.outcome["diagnostic"])
         finally:
             review_workflow.get_provider_for_channel = original
@@ -5223,11 +5223,11 @@ class ReviewWorkflowTest(unittest.TestCase):
             lambda name, channel: _Provider(ok=False, name=name)
         )
         try:
-            step = self._start(seats="codex,codex-luna", session="retry")
+            step = self._start(seats="sol,luna", session="retry")
             for item in step.work_items:
                 review_workflow.execute_external_review(step.ref, item.action_id)
             terminal = review_workflow.next_review(step.ref)
-            retried = review_workflow.retry_review(review_workflow.RetryRequest(step.ref, ("codex",)))
+            retried = review_workflow.retry_review(review_workflow.RetryRequest(step.ref, ("sol",)))
             self.assertEqual(retried.ref.attempt_id, "attempt-0002")
             fresh = retried.work_items[0]
             self.assertIn("attempt-0002", fresh.result_path)
@@ -5248,23 +5248,23 @@ class ReviewWorkflowTest(unittest.TestCase):
             lambda name, channel: _Provider(ok=False, name=name)
         )
         try:
-            step = self._start(seats="codex,codex-luna", session="receipt")
+            step = self._start(seats="sol,luna", session="receipt")
             for item in step.work_items:
                 review_workflow.execute_external_review(step.ref, item.action_id)
             omitted = review_workflow.retry_review(review_workflow.RetryRequest(step.ref, None))
             omitted_replay = review_workflow.retry_review(review_workflow.RetryRequest(step.ref, None))
             explicit_replay = review_workflow.retry_review(
-                review_workflow.RetryRequest(step.ref, ("codex-luna", "codex"))
+                review_workflow.RetryRequest(step.ref, ("luna", "sol"))
             )
             self.assertEqual(omitted.ref, omitted_replay.ref)
             self.assertEqual(omitted.ref, explicit_replay.ref)
-            self.assertEqual([item.seat for item in omitted.work_items], ["codex", "codex-luna"])
+            self.assertEqual([item.seat for item in omitted.work_items], ["sol", "luna"])
             _run, wf = self._workflow(omitted)
             [(key, receipt)] = list(wf["retry_receipts"].items())
             self.assertTrue(key.startswith("seat_retry:attempt-0001:"))
             self.assertEqual(receipt["kind"], "seat_retry")
             self.assertEqual(receipt["source_attempt_id"], "attempt-0001")
-            self.assertEqual(receipt["normalized_seats"], ["codex", "codex-luna"])
+            self.assertEqual(receipt["normalized_seats"], ["sol", "luna"])
             self.assertEqual(receipt["created_attempt_id"], "attempt-0002")
             self.assertEqual(
                 receipt["created_action_ids"],
@@ -5279,11 +5279,11 @@ class ReviewWorkflowTest(unittest.TestCase):
             lambda name, channel: _Provider(ok=False, name=name)
         )
         try:
-            step = self._start(seats="codex,codex-luna", session="subset-receipt")
+            step = self._start(seats="sol,luna", session="subset-receipt")
             for item in step.work_items:
                 review_workflow.execute_external_review(step.ref, item.action_id)
             review_workflow.retry_review(
-                review_workflow.RetryRequest(step.ref, ("codex",))
+                review_workflow.RetryRequest(step.ref, ("sol",))
             )
             with self.assertRaises(review_workflow.WorkflowError) as conflict:
                 review_workflow.retry_review(
@@ -5305,7 +5305,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                     side_effect=fail_all,
                 ):
                     start = self._start(
-                        seats="codex,codex-luna",
+                        seats="sol,luna",
                         session=f"receipt-{case}",
                     )
                     for item in start.work_items:
@@ -5319,7 +5319,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 run, workflow = self._workflow(retried)
                 [(receipt_key, receipt)] = list(workflow["retry_receipts"].items())
                 if case == "seat-mismatch":
-                    names = ["codex"]
+                    names = ["sol"]
                     request_sha = review_workflow._retry_sha(names)
                     del workflow["retry_receipts"][receipt_key]
                     receipt["normalized_seats"] = names
@@ -5497,7 +5497,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         )
 
         def initial_route(name: str, _channel: str) -> _Provider:
-            return _Provider(ok=name == "codex", name=name)
+            return _Provider(ok=name == "sol", name=name)
 
         session = "valid-retry-restart-chain"
         with mock.patch.object(
@@ -5506,7 +5506,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             side_effect=initial_route,
         ):
             start = self._start(
-                seats="codex,codex-luna",
+                seats="sol,luna",
                 session=session,
             )
             synthesis_step = start
@@ -5551,7 +5551,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             diagnostic="second synthesis failed",
         )
         restarted = self._start(
-            seats="codex,codex-luna",
+            seats="sol,luna",
             session=session,
         )
         self.assertEqual(restarted.ref.attempt_id, "attempt-0003")
@@ -5570,10 +5570,10 @@ class ReviewWorkflowTest(unittest.TestCase):
 
     def test_retry_is_reviewer_only_even_when_synthesis_failed(self) -> None:
         def terminal_with_mixed_reviewers(session: str):
-            provider = _Provider(name="codex")
+            provider = _Provider(name="sol")
 
             def routed(name: str, _channel: str):
-                return _Provider(ok=name == "codex", name=name)
+                return _Provider(ok=name == "sol", name=name)
 
             with mock.patch.object(
                 review_workflow,
@@ -5581,7 +5581,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 side_effect=routed,
             ):
                 step = self._start(
-                    seats="codex,codex-luna",
+                    seats="sol,luna",
                     session=session,
                 )
                 after = step
@@ -5600,7 +5600,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 diagnostic="synthesis failed",
             )
             self.assertEqual(terminal.outcome["status"], "synthesis_failed")
-            self.assertEqual(terminal.panel["pending"], ["codex-luna"])
+            self.assertEqual(terminal.panel["pending"], ["luna"])
             return step, terminal
 
         omitted_source, _terminal = terminal_with_mixed_reviewers("retry-mixed-omitted")
@@ -5609,23 +5609,23 @@ class ReviewWorkflowTest(unittest.TestCase):
         )
         self.assertEqual(
             [(item.kind, item.seat) for item in omitted.work_items],
-            [("reviewer", "codex-luna")],
+            [("reviewer", "luna")],
         )
 
         named_source, _terminal = terminal_with_mixed_reviewers("retry-mixed-named")
         named = review_workflow.retry_review(
-            review_workflow.RetryRequest(named_source.ref, ("codex-luna",))
+            review_workflow.RetryRequest(named_source.ref, ("luna",))
         )
         self.assertEqual(
             [(item.kind, item.seat) for item in named.work_items],
-            [("reviewer", "codex-luna")],
+            [("reviewer", "luna")],
         )
 
     def test_retry_refuses_synthesis_only_failure_but_identical_start_restarts_it(self) -> None:
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
-            return_value=_Provider(name="codex"),
+            return_value=_Provider(name="sol"),
         ):
             step = self._start(session="synthesis-only-restart")
             synthesis_step = review_workflow.execute_external_review(
@@ -5656,7 +5656,7 @@ class ReviewWorkflowTest(unittest.TestCase):
 
     def test_identical_start_and_reviewer_retry_race_create_one_attempt_receipt(self) -> None:
         def routed(name: str, _channel: str):
-            return _Provider(ok=name == "codex", name=name)
+            return _Provider(ok=name == "sol", name=name)
 
         with mock.patch.object(
             review_workflow,
@@ -5664,7 +5664,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             side_effect=routed,
         ):
             step = self._start(
-                seats="codex,codex-luna",
+                seats="sol,luna",
                 session="start-retry-race",
             )
             after = step
@@ -5678,7 +5678,7 @@ class ReviewWorkflowTest(unittest.TestCase):
 
         def same_start():
             return self._start(
-                seats="codex,codex-luna",
+                seats="sol,luna",
                 session="start-retry-race",
             )
 
@@ -5731,7 +5731,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             lambda name, channel: _Provider(ok=False, name=name)
         )
         try:
-            step = self._start(seats="codex", session="retry-race")
+            step = self._start(seats="sol", session="retry-race")
             review_workflow.execute_external_review(step.ref, step.work_items[0].action_id)
             ctx = multiprocessing.get_context("fork")
             queue = ctx.Queue()
@@ -5889,7 +5889,7 @@ class ReviewWorkflowTest(unittest.TestCase):
 
     def test_formatter_failure_continues_and_synthesis_failure_is_terminal(self) -> None:
         os.environ["CREW_HOST"] = "codex"
-        provider = _Provider(output="RAW", name="codex")
+        provider = _Provider(output="RAW", name="sol")
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
@@ -5927,7 +5927,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         self.assertEqual(terminal.outcome["diagnostic"], "synthesis timeout")
 
     def test_prune_protects_all_active_and_malformed_standalone_runs(self) -> None:
-        provider = _Provider(ok=False, name="codex")
+        provider = _Provider(ok=False, name="sol")
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
@@ -6047,7 +6047,7 @@ class ReviewWorkflowTest(unittest.TestCase):
 
         roster = self._start(session="prune-corrupt-roster")
         run, workflow = self._workflow(roster)
-        workflow["roster"] = ["codex-luna"]
+        workflow["roster"] = ["luna"]
         review_workflow._atomic(run / "workflow.json", workflow)
         (run.parent / review_workflow.STANDALONE_POINTER).unlink(missing_ok=True)
         corrupt_runs["roster"] = run
@@ -6055,7 +6055,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
-            return_value=_Provider(output="RAW", name="codex"),
+            return_value=_Provider(output="RAW", name="sol"),
         ):
             source_start = self._start(session="prune-corrupt-source")
             formatter_step = review_workflow.execute_external_review(
@@ -6216,7 +6216,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 "--session-id",
                 "timeout-cli-1800",
                 "--seats",
-                "codex",
+                "sol",
                 "--timeout",
                 "1800",
             ])
@@ -6362,7 +6362,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         )
         worker = None
         try:
-            step = self._start(seats="codex", session="recover-race")
+            step = self._start(seats="sol", session="recover-race")
             item = step.work_items[0]
             ctx = multiprocessing.get_context("fork")
             queue = ctx.Queue()
@@ -6417,7 +6417,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             lambda name, channel: _BarrierProvider(str(marker), str(release), name)
         )
         try:
-            step = self._start(seats="codex,codex-luna", session="concurrent")
+            step = self._start(seats="sol,luna", session="concurrent")
             ctx = multiprocessing.get_context("fork")
             queue = ctx.Queue()
             ref_data = review_workflow.review_ref_to_dict(step.ref)
@@ -6438,7 +6438,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 time.sleep(0.01)
             waiting = review_workflow.next_review(step.ref)
             self.assertEqual(waiting.type, "waiting")
-            resumed = self._start(seats="codex,codex-luna", session="concurrent")
+            resumed = self._start(seats="sol,luna", session="concurrent")
             self.assertEqual(resumed.type, "waiting")
             duplicate = ctx.Process(target=_execute_child, args=(ref_data, step.work_items[0].action_id, queue))
             duplicate.start()
@@ -6476,7 +6476,7 @@ class DebateWorkflowTest(unittest.TestCase):
         self,
         question: str = "Should we ship this?",
         *,
-        seats: str = "codex",
+        seats: str = "sol",
         session: str = "d",
         timeout: int | None = 1,
         panel: str | None = None,
@@ -6546,7 +6546,7 @@ class DebateWorkflowTest(unittest.TestCase):
             current = review_workflow.execute_external_review(step.ref, item.action_id)
         return current
 
-    def _round_one_close(self, *, session: str, seats: str = "codex,codex-luna", rounds: int = 2):
+    def _round_one_close(self, *, session: str, seats: str = "sol,luna", rounds: int = 2):
         with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
             first = self._start(
                 seats=seats,
@@ -6603,7 +6603,7 @@ class DebateWorkflowTest(unittest.TestCase):
         question = "Should we ship this?"
         self.plan.write_bytes(question.encode())
         review = review_workflow.start_review(review_workflow.ReviewRequest(
-            str(self.plan), seats="codex", session_id="identity", timeout_seconds=1,
+            str(self.plan), seats="sol", session_id="identity", timeout_seconds=1,
         ))
         self.assertNotEqual(first.ref.run_id, review.ref.run_id)
         session_dir = self.root / ".crew" / "reviews" / "identity"
@@ -6619,16 +6619,16 @@ class DebateWorkflowTest(unittest.TestCase):
 
     def test_debate_identical_start_resumes_after_a_settled_seat_without_reissue(self) -> None:
         with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
-            start = self._start(seats="codex,codex-luna", session="resume", timeout=None)
+            start = self._start(seats="sol,luna", session="resume", timeout=None)
             resumed = review_workflow.execute_external_review(
                 start.ref, start.work_items[0].action_id
             )
-            identical = self._start(seats="codex,codex-luna", session="resume", timeout=None)
+            identical = self._start(seats="sol,luna", session="resume", timeout=None)
         self.assertEqual(start.ref, identical.ref)
         self.assertEqual(identical.in_flight, ())
-        self.assertEqual([item.seat for item in identical.work_items], ["codex-luna"])
+        self.assertEqual([item.seat for item in identical.work_items], ["luna"])
         self.assertEqual(len(self._workflow(identical)[1]["actions"]), 2)
-        self.assertEqual(resumed.work_items[0].seat, "codex-luna")
+        self.assertEqual(resumed.work_items[0].seat, "luna")
 
     def test_debate_never_applies_the_review_target_grammar(self) -> None:
         with mock.patch.object(review_workflow, "_newest_plan_target", side_effect=AssertionError):
@@ -6660,8 +6660,8 @@ class DebateWorkflowTest(unittest.TestCase):
         self.assertEqual([item.seat for item in quick.work_items], seats.merged_panels()["quick"])
         solo = self._start(seats=None, panel="solo", session="precedence-solo")
         self.assertEqual([item.seat for item in solo.work_items], seats.merged_panels()["solo"])
-        explicit = self._start(seats="codex", session="precedence-seat")
-        self.assertEqual([item.seat for item in explicit.work_items], ["codex"])
+        explicit = self._start(seats="sol", session="precedence-seat")
+        self.assertEqual([item.seat for item in explicit.work_items], ["sol"])
 
     def test_debate_native_panelist_is_issued_on_claude_and_cursor(self) -> None:
         for host, seat in (("claude", "opus"), ("cursor", "cursor-composer")):
@@ -6702,13 +6702,13 @@ class DebateWorkflowTest(unittest.TestCase):
                 captured.append(prompt)
                 return super().run(prompt, model=model, timeout=timeout)
 
-        provider = CaptureProvider(name="codex", output="DIRECT TAKE: yes\n")
+        provider = CaptureProvider(name="sol", output="DIRECT TAKE: yes\n")
         with mock.patch.object(review_workflow, "get_provider_for_channel", return_value=provider):
             step = self._start(session="external-prompt")
             run, _workflow = self._workflow(step)
-            expected = prompts.council("Should we ship this?", seat_role="codex")
+            expected = prompts.council("Should we ship this?", seat_role="sol")
             self.assertEqual(Path(step.work_items[0].prompt_path).read_bytes(), expected.encode())
-            self.assertIn("acting as the **codex** seat", expected)
+            self.assertIn("acting as the **sol** seat", expected)
             self.assertIn("DIRECT TAKE", expected)
             self.assertIn("Give no verdict and no rubric score", expected)
             self.assertIn("Should we ship this?", expected)
@@ -6722,7 +6722,7 @@ class DebateWorkflowTest(unittest.TestCase):
         run, _workflow = self._workflow(step)
         out = self.root / "rendered.txt"
         cli.main([
-            "render", "--mode", "discuss", "--seat-role", "codex",
+            "render", "--mode", "discuss", "--seat-role", "sol",
             "-f", str(run / "question.md"), "-o", str(out),
         ])
         self.assertEqual(out.read_bytes(), Path(step.work_items[0].prompt_path).read_bytes())
@@ -6754,10 +6754,10 @@ class DebateWorkflowTest(unittest.TestCase):
 
     def test_debate_partial_failure_mints_synthesis_and_is_non_certifying(self) -> None:
         def provider(name: str, _channel: str):
-            return _Provider(ok=name == "codex", name=name, output="DIRECT TAKE: yes\n")
+            return _Provider(ok=name == "sol", name=name, output="DIRECT TAKE: yes\n")
 
         with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=provider):
-            step = self._start(seats="codex,codex-luna", session="partial")
+            step = self._start(seats="sol,luna", session="partial")
             after = review_workflow.execute_external_review(step.ref, step.work_items[0].action_id)
             synthesis = review_workflow.execute_external_review(after.ref, after.work_items[0].action_id)
         self.assertEqual([item.kind for item in synthesis.work_items], ["synthesis"])
@@ -6776,7 +6776,7 @@ class DebateWorkflowTest(unittest.TestCase):
         self.maxDiff = None
 
         def provider(name: str, _channel: str):
-            if name == "codex":
+            if name == "sol":
                 return _Provider(ok=False, name=name)
             return _UnavailableProvider(name=name)
 
@@ -6786,7 +6786,7 @@ class DebateWorkflowTest(unittest.TestCase):
             side_effect=provider,
         ):
             step = self._start(
-                seats="codex,codex-luna",
+                seats="sol,luna",
                 session="debate-all-failed-golden",
             )
             terminal = step
@@ -6835,7 +6835,7 @@ class DebateWorkflowTest(unittest.TestCase):
         self.assertNotIn("## CRITERIA MATRIX", panel)
 
     def test_debate_unavailable_external_seat_is_skipped_and_all_failed(self) -> None:
-        provider = _UnavailableProvider(name="codex")
+        provider = _UnavailableProvider(name="sol")
         with mock.patch.object(review_workflow, "get_provider_for_channel", return_value=provider):
             step = self._start(session="unavailable")
             terminal = review_workflow.execute_external_review(step.ref, step.work_items[0].action_id)
@@ -6873,7 +6873,7 @@ class DebateWorkflowTest(unittest.TestCase):
     def test_debate_round_two_folds_round_one_as_frozen_data(self) -> None:
         with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
             first = self._start(
-                seats="codex,codex-luna", session="rounds", timeout=None, rounds=2,
+                seats="sol,luna", session="rounds", timeout=None, rounds=2,
             )
             after_first = review_workflow.execute_external_review(
                 first.ref, first.work_items[0].action_id,
@@ -6890,12 +6890,12 @@ class DebateWorkflowTest(unittest.TestCase):
         run_two, workflow_two = self._workflow(next_step)
         self.assertNotEqual(run_one, run_two)
         self.assertEqual(next_step.ref.attempt_id, "attempt-0001")
-        self.assertEqual([item.seat for item in next_step.work_items], ["codex", "codex-luna"])
+        self.assertEqual([item.seat for item in next_step.work_items], ["sol", "luna"])
         self.assertEqual((run_one / "workflow.json").read_bytes(), workflow_one_bytes)
         prior = (run_two / "prior-rounds.md").read_text(encoding="utf-8")
         self.assertIn("### Round 1", prior)
-        self.assertIn("### seat: codex", prior)
-        self.assertIn("### seat: codex-luna", prior)
+        self.assertIn("### seat: sol", prior)
+        self.assertIn("### seat: luna", prior)
         record_two = json.loads((run_two / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(record_two["workflow_identity"]["round"], 2)
         self.assertEqual(record_two["workflow_identity"]["rounds"], 2)
@@ -6926,10 +6926,10 @@ class DebateWorkflowTest(unittest.TestCase):
 
     def test_debate_seat_failed_in_round_one_is_issued_fresh_in_round_two(self) -> None:
         def provider(name: str, _channel: str):
-            return _Provider(ok=name == "codex", name=name, output="DIRECT TAKE: yes\n")
+            return _Provider(ok=name == "sol", name=name, output="DIRECT TAKE: yes\n")
 
         with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=provider):
-            first = self._start(seats="codex,codex-luna", session="fresh-failed", timeout=None, rounds=2)
+            first = self._start(seats="sol,luna", session="fresh-failed", timeout=None, rounds=2)
             closed = first
             for item in first.work_items:
                 closed = review_workflow.execute_external_review(first.ref, item.action_id)
@@ -6937,7 +6937,7 @@ class DebateWorkflowTest(unittest.TestCase):
         run_one, _workflow_one = self._workflow(closed)
         second = review_workflow.next_review(first.ref)
         run_two, _workflow_two = self._workflow(second)
-        self.assertEqual({item.seat for item in second.work_items}, {"codex", "codex-luna"})
+        self.assertEqual({item.seat for item in second.work_items}, {"sol", "luna"})
         self.assertIn("FAILED", (run_one / "panel-full.md").read_text(encoding="utf-8"))
         self.assertIn("FAILED", (run_two / "prior-rounds.md").read_text(encoding="utf-8"))
 
@@ -6945,9 +6945,9 @@ class DebateWorkflowTest(unittest.TestCase):
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
-            return_value=_Provider(ok=False, name="codex"),
+            return_value=_Provider(ok=False, name="sol"),
         ):
-            first = self._start(seats="codex,codex-luna", session="zero", timeout=None, rounds=2)
+            first = self._start(seats="sol,luna", session="zero", timeout=None, rounds=2)
             terminal = first
             for item in first.work_items:
                 terminal = review_workflow.execute_external_review(first.ref, item.action_id)
@@ -6959,7 +6959,7 @@ class DebateWorkflowTest(unittest.TestCase):
 
     def test_debate_intermediate_round_mints_no_synthesis_and_final_round_mints_one(self) -> None:
         with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
-            step = self._start(seats="codex,codex-luna", session="three", timeout=None, rounds=3)
+            step = self._start(seats="sol,luna", session="three", timeout=None, rounds=3)
             synthesis_counts = []
             for round_number in (1, 2):
                 current = step
@@ -6984,10 +6984,10 @@ class DebateWorkflowTest(unittest.TestCase):
 
     def test_debate_partial_round_continues_and_final_quorum_labels_the_terminal(self) -> None:
         def provider(name: str, _channel: str):
-            return _Provider(ok=name == "codex", name=name, output="DIRECT TAKE: yes\n")
+            return _Provider(ok=name == "sol", name=name, output="DIRECT TAKE: yes\n")
 
         with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=provider):
-            first = self._start(seats="codex,codex-luna", session="partial-round", timeout=None, rounds=2)
+            first = self._start(seats="sol,luna", session="partial-round", timeout=None, rounds=2)
             closed = first
             for item in first.work_items:
                 closed = review_workflow.execute_external_review(first.ref, item.action_id)
@@ -7009,7 +7009,7 @@ class DebateWorkflowTest(unittest.TestCase):
 
     def test_debate_retry_on_a_closed_round_is_refused(self) -> None:
         with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
-            first = self._start(seats="codex,codex-luna", session="retry-round", timeout=None, rounds=2)
+            first = self._start(seats="sol,luna", session="retry-round", timeout=None, rounds=2)
             closed = first
             for item in first.work_items:
                 closed = review_workflow.execute_external_review(first.ref, item.action_id)
@@ -7024,7 +7024,7 @@ class DebateWorkflowTest(unittest.TestCase):
 
     def test_debate_tampered_prior_rounds_fail_closed(self) -> None:
         with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
-            first = self._start(seats="codex,codex-luna", session="tamper-round", timeout=None, rounds=2)
+            first = self._start(seats="sol,luna", session="tamper-round", timeout=None, rounds=2)
             for item in first.work_items:
                 closed = review_workflow.execute_external_review(first.ref, item.action_id)
         second = review_workflow.next_review(first.ref)
@@ -7132,7 +7132,7 @@ class DebateWorkflowTest(unittest.TestCase):
 
         with mock.patch.object(review_workflow, "get_provider_for_channel", side_effect=self._provider):
             status, first, _errors = self._cli([
-                "debate", "--session-id", "cli-round-walk", "--seats", "codex,codex-luna",
+                "debate", "--session-id", "cli-round-walk", "--seats", "sol,luna",
                 "--rounds", "2", "--timeout", "1", "--", "Question",
             ])
             self.assertEqual((status, first["type"]), (0, "work_batch"))
@@ -7195,7 +7195,7 @@ class DebateWorkflowTest(unittest.TestCase):
         self.assertNotIn(review_workflow.STANDALONE_POINTER, debate_error.exception.message)
 
         review = review_workflow.start_review(review_workflow.ReviewRequest(
-            str(self.plan), seats="codex", session_id="obsolete-review", timeout_seconds=1,
+            str(self.plan), seats="sol", session_id="obsolete-review", timeout_seconds=1,
         ))
         review_run, review_workflow_data = self._workflow(review)
         review_workflow_data.pop("workflow_identity")
@@ -7212,7 +7212,7 @@ class DebateWorkflowTest(unittest.TestCase):
         rendered = self.root / "round-two-rendered.txt"
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             self.assertEqual(cli.main([
-                "render", "--mode", "discuss", "--seat-role", "codex",
+                "render", "--mode", "discuss", "--seat-role", "sol",
                 "-f", str(run / "question.md"),
                 "--prior-round", str(run / "prior-rounds.md"),
                 "-o", str(rendered),
@@ -7225,7 +7225,7 @@ class DebateWorkflowTest(unittest.TestCase):
         run_two, workflow_two = self._workflow(second)
         resumed = self._start(
             session="resume-current",
-            seats="codex,codex-luna",
+            seats="sol,luna",
             timeout=None,
             rounds=2,
         )
@@ -7236,7 +7236,7 @@ class DebateWorkflowTest(unittest.TestCase):
         shutil.rmtree(run_two.parent / first.ref.run_id)
         resumed_after_removal = self._start(
             session="resume-current",
-            seats="codex,codex-luna",
+            seats="sol,luna",
             timeout=None,
             rounds=2,
         )
@@ -7245,7 +7245,7 @@ class DebateWorkflowTest(unittest.TestCase):
         different_timeout = frozen_timeout - 1 if frozen_timeout > 1 else frozen_timeout + 1
         reminted = self._start(
             session="resume-current",
-            seats="codex,codex-luna",
+            seats="sol,luna",
             timeout=different_timeout,
             rounds=2,
         )
@@ -7319,7 +7319,7 @@ class DebateWorkflowTest(unittest.TestCase):
     def test_debate_review_next_reports_a_round_it_closes_and_follows_a_round_it_finds_closed(self) -> None:
         first, closed = self._round_one_close(session="next-close-follow", rounds=2)
         run_one = self._workflow(closed)[0]
-        self._reopen_external_action(run_one, "codex-luna")
+        self._reopen_external_action(run_one, "luna")
         self.assertIsNotNone(review_workflow._workflow(run_one))
 
         reports_close = review_workflow.next_review(first.ref)
@@ -7427,7 +7427,7 @@ class DebateWorkflowTest(unittest.TestCase):
 
         self._point_at(run_one)
         adopted_from_start = self._start(
-            session="pointer-ownership", seats="codex,codex-luna", timeout=None, rounds=2,
+            session="pointer-ownership", seats="sol,luna", timeout=None, rounds=2,
         )
         self.assertEqual(adopted_from_start.ref.run_id, second.ref.run_id)
         self.assertEqual(json.loads(pointer.read_text())["run_id"], second.ref.run_id)
@@ -7483,7 +7483,7 @@ class DebateWorkflowTest(unittest.TestCase):
             closed_second = self._execute_all(second)
         self.assertEqual(closed_second.outcome["status"], "round_complete")
         run_two = self._workflow(closed_second)[0]
-        self._reopen_external_action(run_two, "codex-luna")
+        self._reopen_external_action(run_two, "luna")
         self.assertIsNotNone(review_workflow._workflow(run_two))
 
         reports_close = review_workflow.next_review(first.ref)
@@ -7505,7 +7505,7 @@ class DebateWorkflowTest(unittest.TestCase):
 
     def test_debate_successor_walk_refuses_a_run_dir_holding_a_foreign_identity(self) -> None:
         first, _closed = self._round_one_close(
-            session="successor-collision", seats="codex,codex-luna", rounds=2,
+            session="successor-collision", seats="sol,luna", rounds=2,
         )
         seed = review_workflow._successor_seed(first.ref)
         real = review_runs.mint_identity

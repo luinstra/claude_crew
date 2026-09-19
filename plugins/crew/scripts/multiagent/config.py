@@ -39,7 +39,7 @@ Precedence (enforced HERE, each getter resolves per-key, per-repo first):
     explicit CLI flag  >  per-repo .crew/config.toml  >  global ~/.crew-config.toml  >  built-in
 
 For ``[seats.<name>]`` tables the resolution is PER-SEAT-PER-KEY: a per-repo
-``[seats.codex].model`` wins over a global one, and a seat tuned only in the
+``[seats.sol].model`` wins over a global one, and a seat tuned only in the
 global file still applies (no whole-table deep-merge, key-by-key resolution is
 predictable). The ``CREW_MA_*`` env surface is RETIRED: it is consulted nowhere.
 
@@ -311,7 +311,7 @@ def dispatch_seat() -> str | None:
     """The configured ``/crew:dispatch`` default seat (``[dispatch].seat``),
     validated against ``known_seat_names()`` (per-repo wins). ``None`` when
     unset/invalid in BOTH layers so the caller falls back to the built-in
-    ``codex``."""
+    ``luna``."""
     return _first(
         _extract_dispatch_seat(_load(), "repo"),
         _extract_dispatch_seat(_global_load(), "global"),
@@ -339,7 +339,7 @@ def _extract_dispatch_options(
         skipped silently
         (the other getter's key); a dict named after an executor-bearing kind is
         a provider table; anything else (unknown table like ``[dispatch.codx]``,
-        a seat-name table like ``[dispatch.codex-luna]``, scalar junk like
+        a seat-name table like ``[dispatch.luna]``, scalar junk like
         ``codex = "oops"``) warns and is ignored.
       * key grammar ``dispatch_options:{layer}:{kind}:{key}`` — per-key type
         rules for the REQUESTED kind's table only (str: non-empty and
@@ -432,7 +432,7 @@ def _extract_dispatch_options(
 def dispatch_provider_options(kind: str) -> dict:
     """The validated ``[dispatch.<kind>]`` options for one provider KIND.
 
-    Tables are keyed by provider kind, not seat name (codex and codex-luna share
+    Tables are keyed by provider kind, not seat name (sol and luna share
     invocation mechanics), and the valid keys per kind come from each provider
     class's ``DISPATCH_OPTIONS`` declaration (lazy call-time import,
     ``from multiagent.providers import dispatch_options_by_kind``, the same
@@ -440,7 +440,7 @@ def dispatch_provider_options(kind: str) -> dict:
 
     Key-level validation is LAZY: it fires at consumption time, for the
     REQUESTED kind's table only, so a wrong-typed key in another known kind's
-    table (say ``[dispatch.cursor] force = "yes"`` while dispatching codex)
+    table (say ``[dispatch.cursor] force = "yes"`` while dispatching a codex-kind seat)
     warns only when THAT kind is dispatched. There is no whole-config lint pass;
     what does run on every call is the table-level hygiene scan over the whole
     ``[dispatch]`` table (unknown tables, scalar junk, a non-table

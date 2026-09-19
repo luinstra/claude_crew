@@ -75,7 +75,7 @@ class ProviderResult:
     six-field core by the orchestrator (commands/review.md) before synthesis.
     """
 
-    name: str            # seat name, e.g. "codex"
+    name: str            # seat name, e.g. "sol"
     model: str | None
     ok: bool
     output: str          # cleaned stdout (ANSI + banner noise stripped)

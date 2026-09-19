@@ -226,7 +226,7 @@ def _filter_available(names: list[str], explicit: set[str]) -> list[str]:
 def _resolve_timeout(arg: int | None) -> int:
     # Default NON-DISPATCH seat wall-clock ceiling. Reference mode (the default) makes the
     # seat do its own fetch + scoped read, which is more work than reviewing an
-    # inlined diff — a thorough seat (codex) can legitimately need several
+    # inlined diff — a thorough seat (sol) can legitimately need several
     # minutes on a large review. We'd rather give a real review room than
     # silently drop a default seat to a too-short timeout, so the floor is
     # generous (10 min). The reference prompt keeps the seat SCOPED to the diff
@@ -455,9 +455,9 @@ def resolve_review_selection(
 def _resolve_seats(seats_arg: str | None) -> list[str]:
     """Resolve the comma-separated --seats arg to host-resolved external seats.
 
-    Group tokens (``cursor``, ``agy``) are expanded to every seat of that kind
+    Group tokens (``cursor``, ``codex``, ``agy``) are expanded to every seat of that kind
     in the catalog, so ``--seats cursor`` runs the whole Cursor panel and
-    ``--seats cursor,codex`` adds codex. When no ``--seats`` is given, the
+    ``--seats cursor,sol`` adds sol. When no ``--seats`` is given, the
     CONFIGURED default panel (``config.default_panel()`` + ``[panels]``)
     resolves through the single shared ``_panel_seat_list`` point (→ built-in
     ``full``), so ad-hoc ``crew review``/``seats`` honor the roster
@@ -1156,7 +1156,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 # =============================================================================
 #
 # The execution complement to read-only review/debate: ONE chosen seat (default
-# codex) runs in ``sandbox="workspace-write"`` and may edit files, but is
+# luna) runs in ``sandbox="workspace-write"`` and may edit files, but is
 # instructed to leave everything UNCOMMITTED and UNSTAGED and on the same branch
 # (prompts.dispatch). A Python guard captures HEAD + staged-index + branch state
 # BEFORE and AFTER the seat runs — pinned to the SAME tree the seat edits — so a
@@ -1408,10 +1408,10 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         _print_dispatch_options()
         return 0
 
-    # (a) Resolve the seat: --seat > [dispatch].seat > built-in codex. Compute the
+    # (a) Resolve the seat: --seat > [dispatch].seat > built-in luna. Compute the
     # pinned guard tree ONCE — every _git_* helper runs with cwd=repo_dir, the
     # SAME tree the codex/agy workspace-write cwd pin (and cursor's own pin) edit.
-    seat = args.seat or config.dispatch_seat() or "codex"
+    seat = args.seat or config.dispatch_seat() or "luna"
     repo_dir = os.environ.get("CLAUDE_WORKING_DIRECTORY") or os.getcwd()
 
     # (b) Seat-name guards — pre-run, exit 2, NO envelope (parity with cmd_run).
@@ -1476,7 +1476,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         return 2
 
     # (b2) Resolve the seat's provider KIND -> its validated [dispatch.<kind>]
-    # options. Keyed by KIND, not seat name (codex and codex-luna share
+    # options. Keyed by KIND, not seat name (sol and luna share
     # invocation mechanics); safe because the seat passed known_seat_names()
     # above, so it is a catalog row. The getter warns + drops anything invalid
     # and returns {} when unconfigured (never-choke: dispatch always runs).
@@ -2460,7 +2460,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
     # FILENAME (`<seat>.json`), so a name with `/`, `.`, or `..` could escape the
     # session dir. Mirror _stage_path's charset guard, but REJECT (loud, nonzero)
     # rather than silently sanitize — a sanitized name would name the WRONG file
-    # (e.g. `../../foo` -> `foo`). Registry seat names (codex, cursor-*) pass.
+    # (e.g. `../../foo` -> `foo`). Registry seat names (sol, cursor-*) pass.
     for s in seats:
         if re.sub(r"[^A-Za-z0-9_-]", "", s) != s:
             print(
@@ -2924,7 +2924,7 @@ def cmd_wait(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    # Deduped: `--seats codex,codex` names one file and must count as one
+    # Deduped: `--seats sol,sol` names one file and must count as one
     # seat, not report an inflated landed 2/2.
     requested = list(dict.fromkeys(
         s.strip() for s in (args.seats or "").split(",") if s.strip()
@@ -4196,8 +4196,8 @@ def _render_config_template(
     """Render the COMMENTED starter config: ONLY keys the loader reads.
 
     ``native_model`` and ``reasoning_effort`` are emitted as per-seat knobs under
-    the relevant seat tables (``[seats.codex]``
-    / ``[seats.codex-luna]``, resolved per seat). ``print_timeout`` is NOT emitted
+    the relevant seat tables (``[seats.sol]``
+    / ``[seats.luna]``, resolved per seat). ``print_timeout`` is NOT emitted
     by the scaffold (no line, no comment): the getters read it only from a
     config-declared agy-channel seat table, and the seat loop below skips
     declared seats. The knob is documented in ``seats.toml``'s header key list
@@ -4222,7 +4222,7 @@ def _render_config_template(
     L.append("# Every key below is OPTIONAL; delete what you don't need. Python 3.11+ required to load.")
     L.append("")
     L.append("# Default panel when you name neither --panel nor --seats.")
-    L.append("# Cost-safe built-in full = codex + codex-luna + cursor-auto + cursor-composer + opus + sonnet.")
+    L.append("# Cost-safe built-in full = astra + sol + luna + cursor-auto + cursor-composer + opus + sonnet.")
     L.append(f"default_panel = {_toml_str(default_panel)}")
     L.append("")
     L.append("# [debate].panel — /crew:debate's default panel (can default fuller than reviews).")
@@ -4262,11 +4262,11 @@ def _render_config_template(
         L.append("")
     L.append("# [panels] — redefine a built-in preset or add a custom one (usable via --panel <name>).")
     L.append("# [panels]")
-    L.append('# nightly = ["codex", "opus"]')
+    L.append('# nightly = ["sol", "opus"]')
     L.append("")
     L.append("# [build].executor: /crew:build's implement-step executor. Default is the")
     L.append("#   crew:executor Task agent (Claude); set it to ONE write-capable subprocess")
-    L.append("#   seat (e.g. codex-luna) to route each round through that model instead. The")
+    L.append("#   seat (e.g. luna) to route each round through that model instead. The")
     L.append('#   Resolution: active-loop stamp (source: "state") > --executor <seat>')
     L.append("#   flag > [build].executor config > built-in. With no active-loop stamp, the")
     L.append("#   --executor <seat> flag overrides this config for a fresh resolve.")
@@ -4374,7 +4374,7 @@ def _override_note(label: str) -> str:
 
 
 # A TOML table header: ``[name]`` tolerating an optional trailing inline comment
-# (``[seats.codex] # note``). The captured name is then NORMALIZED before any
+# (``[seats.sol] # note``). The captured name is then NORMALIZED before any
 # comparison so quoted components / internal whitespace also resolve.
 _HEADER_RE = re.compile(r"\s*\[([^\]]+)\]\s*(#.*)?$")
 
@@ -4384,9 +4384,9 @@ def _normalize_section(raw: str) -> str | None:
 
     Splits the dotted key into segments (a ``.`` inside a quoted segment does NOT
     separate), strips surrounding whitespace per segment, and strips matching
-    quotes from a quoted segment, so ``seats."cursor-glm"``, ``[ seats.codex-luna ]``
-    and ``seats.'codex'`` compare equal to the bare ``seats.cursor-glm`` /
-    ``seats.codex-luna`` / ``seats.codex`` targets. Returns ``None`` for a header the
+    quotes from a quoted segment, so ``seats."cursor-glm"``, ``[ seats.luna ]``
+    and ``seats.'sol'`` compare equal to the bare ``seats.cursor-glm`` /
+    ``seats.luna`` / ``seats.sol`` targets. Returns ``None`` for a header the
     parser cannot make sense of (empty / unterminated quote / stray char), so the
     caller treats it as UNRECOGNIZED rather than guessing."""
     s = raw.strip()
@@ -4658,7 +4658,7 @@ def cmd_scaffold_config(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    dispatch_seat = args.dispatch_seat or "codex"
+    dispatch_seat = args.dispatch_seat or "luna"
     known = set(known_seat_names())
     if dispatch_seat not in known:
         print(
@@ -4999,7 +4999,7 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument(
         "--seats", default=None,
         help="comma-separated registered seats (host-resolved native Claude or external; e.g. "
-             "codex,cursor-auto,cursor-composer)",
+             "sol,cursor-auto,cursor-composer)",
     )
     review.add_argument("--panel", default=None, help="named standalone review panel")
     review.add_argument("--session-id", dest="session_id", required=True, help="literal harness session id")
@@ -5151,7 +5151,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     coll.add_argument(
         "--seats", dest="seats", default="",
-        help="comma-separated resolved seat names: subprocess (any external CLI seat: codex-*, cursor-*, or a config-declared agy seat) "
+        help="comma-separated resolved seat names: subprocess (any external CLI seat: a codex-channel seat, cursor-*, or a config-declared agy seat) "
              "AND the Task seats (opus/sonnet/fable plus any config-declared "
              "claude-code seat). collect reads "
              "EXACTLY <seat>.json for each; a missing seat renders as a SKIPPED "
@@ -5296,7 +5296,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rs.add_argument(
         "seat_name", nargs="?", default=None,
-        help="seat NAME (e.g. codex, sonnet): the engine derives the seat file "
+        help="seat NAME (e.g. sol, sonnet): the engine derives the seat file "
              "as <run_dir>/<seat>.json from --session-id/--run-id itself, so "
              "the recipe reconstructs no run-dir path. Mutually exclusive with "
              "the explicit --seat path form.",
@@ -5512,7 +5512,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     disp = sub.add_parser(
         "dispatch",
-        help="Send ONE subprocess seat (default codex) at the working tree in "
+        help="Send ONE subprocess seat (default luna) at the working tree in "
              "WRITE mode (workspace-write): it edits files in place and leaves "
              "changes UNCOMMITTED + UNSTAGED. Emits a 16-field JSON envelope "
              "(seat output + HEAD/staged/branch guards + guard_warnings) and prints the resolved "
@@ -5535,7 +5535,7 @@ def build_parser() -> argparse.ArgumentParser:
     disp.add_argument(
         "--seat", dest="seat", default=None,
         help="the subprocess seat to dispatch (default: [dispatch].seat config, "
-             "else codex). An explicit --seat bypasses the config availability "
+             "else luna). An explicit --seat bypasses the config availability "
              "filter (the named seat always runs).",
     )
     disp.add_argument("--model", dest="model", default=None, help="override the seat's model")
@@ -5584,7 +5584,7 @@ def build_parser() -> argparse.ArgumentParser:
     be.add_argument(
         "--executor", dest="executor", default=None,
         help="explicit executor seat: a write-capable subprocess seat (e.g. "
-             "codex-luna) or the crew:executor sentinel for the default Task "
+             "luna) or the crew:executor sentinel for the default Task "
              "path. Active-loop stamp source: \"state\" wins over this flag; "
              "otherwise this flag wins over [build].executor config and the "
              "builtin crew:executor.",
@@ -5743,7 +5743,7 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument(
         "--dispatch-seat", dest="dispatch_seat", default=None,
         help="[dispatch].seat value (validated vs known_seat_names(); read-only seats "
-             "are refused by dispatch at runtime; default codex)",
+             "are refused by dispatch at runtime; default luna)",
     )
     sc.add_argument(
         "--add-seat", dest="add_seat", action="append", default=None,

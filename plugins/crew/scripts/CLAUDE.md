@@ -410,9 +410,9 @@ Key contracts (do NOT regress):
   defines presets, or hardcodes a model pin (the engine EXECUTES the
   host-resolved external subset, skipped when empty).
 <!-- seat-roster:default -->
-- Built-in default panel: `codex`, `codex-luna`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`
+- Built-in default panel: `astra`, `sol`, `luna`, `cursor-auto`, `cursor-composer`, `opus`, `sonnet`
 <!-- seat-roster:opt-in -->
-- Registered but opt-in: `codex-terra`, `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`
+- Registered but opt-in: `terra`, `cursor-gpt`, `cursor-gemini`, `cursor-glm`, `cursor-grok`
 <!-- seat-roster:task-opt-in -->
 - Opt-in Task seats: `fable`
 - These lines document the BUILT-IN roster; a configured `default_panel`/`[panels]`
@@ -449,12 +449,15 @@ Key contracts (do NOT regress):
 ### Group tokens & staging
 
 - `--panel cursor` = `--seats cursor` (every registered cursor-* seat, grows with
-  the cursor rows of the catalog; no codex, no Claude). `agy` is the other
-  minted GROUP TOKEN: with no shipped seat of that name, `--seats agy` expands
-  to the config-declared agy seats (none by default).
+  the cursor rows of the catalog; no codex-channel seat, no Claude). Group tokens
+  are STRUCTURAL: a free-model executor kind mints one unless a shipped seat
+  bears its name. No shipped seat is named `codex`, so `--seats codex` expands
+  to every codex-via seat (opt-in included). `agy` is the third minted GROUP
+  TOKEN: with no shipped seat of that name, `--seats agy` expands to the
+  config-declared agy seats (none by default).
 - The registered-seat allowlist is registry-derived via `known_seat_names()` (no
   hardcoded codex/agy list); host resolution decides which registered seats are
-  external for the current call. A GROUP TOKEN (`cursor`, `agy`; in `--seats` and
+  external for the current call. A GROUP TOKEN (`cursor`, `codex`, `agy`; in `--seats` and
   `[panels]` rosters) expands to every registered seat of its kind via `_expand_seat_groups`, so it grows
   with that kind's rows of the catalog (`seats.group_tokens()` supplies the expansion members).
 - `render --stage --session-id <id>` stages a seat prompt to the FLAT
@@ -641,7 +644,7 @@ Key contracts (do NOT regress):
   `/crew:debate` are workflow-owned; neither uses `collect`.
 - **`dispatch` (write-mode single-seat WORK delegation).** The EXECUTION
   complement to read-only review/debate: `crew dispatch "<task>" [--seat <name>]`
-  sends ONE subprocess seat (default `codex`; resolution `--seat` >
+  sends ONE subprocess seat (default `luna`; resolution `--seat` >
   `config.dispatch_seat()` (`[dispatch].seat`) > builtin) at the working tree in
   `sandbox="workspace-write"`. Its dispatch-WORK wall-clock resolution is
   `--timeout` > `[dispatch].timeout` > builtin 1800, except where a provider's own
@@ -702,7 +705,7 @@ Key contracts (do NOT regress):
   answer that does win; CLI `--force-external` outranks it),
   `[debate].panel`, `[dispatch].seat`
   (the `/crew:dispatch` default seat, validated against `known_seat_names()` —
-  a panel name / group token like `cursor` is rejected), `[dispatch].timeout`
+  a panel name / group token like `cursor` or `codex` is rejected), `[dispatch].timeout`
   (dispatch WORK only, default 1800 seconds; provider floors raise the effective
   timeout only when the resolved value is below the floor; agy's floor is its
   print timeout plus grace, about 8 minutes by default, so the 1800-second
@@ -777,7 +780,7 @@ Key contracts (do NOT regress):
     collapses, so the written path is `.crew/reviews/<session_segment>/doctor.json`. The JSON
     is ALWAYS printed to stdout (no `--json` flag — output is always JSON).
   - **`scaffold-config`** renders a COMMENTED starter config emitting ONLY loader-read
-    keys (`reasoning_effort` under a per-codex-seat table, e.g. `[seats.codex]`; `print_timeout` is NOT emitted, since it is read only from a config-declared agy-channel table such as `[seats.agy-gemini]` and the template skips declared seats;
+    keys (`reasoning_effort` under a per-codex-seat table, e.g. `[seats.sol]`; `print_timeout` is NOT emitted, since it is read only from a config-declared agy-channel table such as `[seats.agy-gemini]` and the template skips declared seats;
     cost-safe defaults, premium seats `available=false`). It consumes `doctor`'s JSON via
     `--detection` (ABSENT flag → omit per-seat `available` lines + a stderr "detection
     skipped" note; GIVEN-but-missing/empty/malformed → error+nonzero). ONE output

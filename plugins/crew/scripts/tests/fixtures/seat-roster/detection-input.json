@@ -1,14 +1,15 @@
 {
   "subprocess": {
-    "codex": {"available": true, "diag": ""},
-    "codex-luna": {"available": true, "diag": ""},
-    "codex-terra": {"available": true, "diag": ""},
+    "astra": {"available": true, "diag": ""},
     "cursor-auto": {"available": true, "diag": ""},
     "cursor-composer": {"available": true, "diag": ""},
     "cursor-gemini": {"available": true, "diag": ""},
     "cursor-glm": {"available": true, "diag": ""},
     "cursor-gpt": {"available": true, "diag": ""},
-    "cursor-grok": {"available": false, "diag": "cursor CLI not found on PATH"}
+    "cursor-grok": {"available": false, "diag": "cursor CLI not found on PATH"},
+    "luna": {"available": true, "diag": ""},
+    "sol": {"available": true, "diag": ""},
+    "terra": {"available": true, "diag": ""}
   },
   "task": {
     "fable": {"available": true, "diag": "Claude subscription (in-session); opt-in (premium tier)"},

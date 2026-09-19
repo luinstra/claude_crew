@@ -262,10 +262,10 @@ owed.
 
 Refresh the `claude-crew` marketplace, run `claude plugin update crew@claude-crew`,
 and open a NEW Claude session at the repo root. Confirm `codex --version` returns
-inside 10 seconds and that the plugin-root `crew probe codex` passes, then paste
+inside 10 seconds and that the plugin-root `crew probe sol` passes, then paste
 exactly:
 
-`/crew:debate --seats codex,opus Should a single-round council keep rendering the strict-majority quorum header when it produces no verdict?`
+`/crew:debate --seats sol,opus Should a single-round council keep rendering the strict-majority quorum header when it produces no verdict?`
 
 Assert the observable route: one work batch with two reviewer items, one
 `driver=external channel=codex` at `gpt-5.6-sol` with `access: read-only`, and one
@@ -300,7 +300,7 @@ and `ls .crew/debates` is byte-identical to a listing taken before the run.
 Then repeat the whole thing with the flag in the leading prefix, since the debate
 driver parses options only before the question:
 
-`/crew:debate --timeout 1 --seats codex,opus Should a single-round council keep rendering the strict-majority quorum header when it produces no verdict?`
+`/crew:debate --timeout 1 --seats sol,opus Should a single-round council keep rendering the strict-majority quorum header when it produces no verdict?`
 
 Expect the external seat to land `ok=false` with a timeout diagnostic while the
 native seat completes, terminal `quorum_not_met` with `synthesis_path` present,

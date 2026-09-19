@@ -55,7 +55,7 @@ the task.
 
 - `--panel full|lite|solo|cursor|quick|<custom>` = a named preset (`<custom>`
   = any `[panels]` roster in config). `--seats <comma-list>` = an explicit
-  subset of any registered seat (e.g. `--seats codex,opus`); it wins if both
+  subset of any registered seat (e.g. `--seats sol,opus`); it wins if both
   are given.
   Some registered seats are opt-in and not in the built-in default panel
   (premium cursor model-seats; the `fable` Claude voice): pass their exact

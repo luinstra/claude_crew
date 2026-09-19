@@ -490,7 +490,7 @@ def main():
     def _live_shell(status):
         """The live Stop payload's shell entry (probed shape)."""
         return {"id": "b06o335yc", "type": "shell", "status": status,
-                "description": "run the codex seat", "command": "crew run codex"}
+                "description": "run the sol seat", "command": "crew run sol"}
 
     for _label, _task, _want in (
         ("a running shell", _live_shell("running"), True),
@@ -504,7 +504,7 @@ def main():
         # Fail safe: keep waiting on anything not KNOWN to have finished, rather
         # than waving unverified work through.
         ("an entry with no status key",
-         {"id": "x1", "type": "shell", "command": "crew run codex"}, True),
+         {"id": "x1", "type": "shell", "command": "crew run sol"}, True),
         ("a non-string status", _live_shell(5), True),
         ("an unrecognized status", _live_shell("pending"), True),
         ("a non-dict entry", "not-a-dict", True),
@@ -1983,16 +1983,16 @@ def main():
             stamp_project = test_path / "step5-stamp-project"
             stamp_project.mkdir()
             _, stamp_err, stamp_code = run_crew_state(
-                ["init", "bl", "--prompt", "stamped task", "--executor", "codex-luna",
+                ["init", "bl", "--prompt", "stamped task", "--executor", "luna",
                  "--resume-executor", "false", "--session-id", "stampS"], stamp_project)
             stamped_path = stamp_project / ".crew" / "build-state-stampS.json"
             stamped = json.loads(stamped_path.read_text()) if stamped_path.exists() else {}
-            if (stamp_code == 0 and stamped.get("executor") == "codex-luna"
+            if (stamp_code == 0 and stamped.get("executor") == "luna"
                     and stamped.get("resume_executor") is False):
                 log_pass("init bl stamps executor + resume_executor settings")
             else:
                 log_fail("init bl stamps executor + resume_executor settings",
-                         "executor=codex-luna, resume_executor=false",
+                         "executor=luna, resume_executor=false",
                          f"code={stamp_code} state={stamped} err={stamp_err[:120]}")
 
             _, default_err, default_code = run_crew_state(
@@ -3386,14 +3386,14 @@ def main():
             rp_orphan = rp_sess1 / "run-aaaaaaaaaaaa"
             rp_orphan.mkdir()
             (rp_orphan / "run.json").write_text("{}")
-            (rp_orphan / "codex.json").write_text("{}")
+            (rp_orphan / "sol.json").write_text("{}")
 
             # A review run frozen in an ACTIVE loop state: PROTECTED (not a
             # candidate), so it is neither reported nor deleted nor errors.
             rp_live = rp_sess1 / "run-cccccccccccc"
             rp_live.mkdir()
             (rp_live / "run.json").write_text("{}")
-            (rp_live / "codex.json").write_text("{}")
+            (rp_live / "sol.json").write_text("{}")
             rp_live_state = rp_crew_dir / "build-state-sess1.json"
             rp_live_state.write_text(json.dumps({
                 "active": True, "task": "live loop", "session_id": "sess1",
@@ -3547,7 +3547,7 @@ def main():
             fx1_orphan = fx1_reviews / "run-aaaaaaaaaaaa"
             fx1_orphan.mkdir()
             (fx1_orphan / "run.json").write_text("{}")
-            (fx1_orphan / "codex.json").write_text("{}")
+            (fx1_orphan / "sol.json").write_text("{}")
 
             fx1_dirty_ctx = _session_start_context(fx1_proj)
             if "stale crew artifact(s)" in fx1_dirty_ctx and "crew swab" in fx1_dirty_ctx:
@@ -3687,7 +3687,7 @@ def main():
                 d = crew_dir / "reviews" / "sess1" / name
                 d.mkdir(parents=True, exist_ok=True)
                 (d / "run.json").write_text("{}")
-                (d / "codex.json").write_text("{}")
+                (d / "sol.json").write_text("{}")
                 return d
 
             def _mk_aged_marker(crew_dir: Path, tag: str) -> Path:
@@ -5063,12 +5063,12 @@ def main():
                 return json.dumps({"directory": str(test_path), "background_tasks": tasks})
 
             # Shape of a live in-flight entry; only its NON-EMPTINESS is load-bearing.
-            one_task = [{"id": "bash-1", "status": "running", "command": "crew run codex"}]
+            one_task = [{"id": "bash-1", "status": "running", "command": "crew run sol"}]
 
             def _shell_task(status):
                 """A background_tasks shell entry in the live payload's shape."""
                 return {"id": "b06o335yc", "type": "shell", "status": status,
-                        "description": "run the codex seat", "command": "crew run codex"}
+                        "description": "run the sol seat", "command": "crew run sol"}
 
             def _subagent_task(status):
                 """A background_tasks Task-seat entry (a panel seat on opus/sonnet)."""
@@ -5351,7 +5351,7 @@ def main():
                 # wait rather than to waving unverified work through ---
                 for safe_label, safe_task in (
                     ("an entry with no status key",
-                     {"id": "x1", "type": "shell", "command": "crew run codex"}),
+                     {"id": "x1", "type": "shell", "command": "crew run sol"}),
                     ("a non-string status", _shell_task(5)),
                     ("an unrecognized status", _shell_task("pending")),
                     ("a non-dict entry", "not-a-dict"),
@@ -6133,7 +6133,7 @@ def main():
                 tsha = rr.sha256_text(plan.read_text(encoding="utf-8"))
                 run_id, run_d = _rv_mint(
                     sid, spec=plan.name, base="", tsha=tsha,
-                    seats=("codex", "agy"), task_seats=("opus", "agy"))
+                    seats=("sol", "agy"), task_seats=("opus", "agy"))
                 _rv_init(loop, sid)
                 sp = _rv_state_path(loop, sid)
 
@@ -6142,12 +6142,12 @@ def main():
                 if (code == 0 and st["phase"] == "reviewing" and st["run_id"] == run_id
                         and st["target_sha256"] == tsha
                         and st["target_spec"] == plan.name and st["target_base"] == ""
-                        and st["expected_seats"] == ["codex", "agy", "opus"]):
+                        and st["expected_seats"] == ["sol", "agy", "opus"]):
                     log_pass(f"{tag} begin-review from drafting freezes run id, full hash, "
                              f"spec, base and a deduped manifest")
                 else:
                     log_fail(f"{tag} begin-review from drafting freezes the run identity",
-                             f"phase=reviewing, run_id={run_id}, seats=[codex, agy, opus]",
+                             f"phase=reviewing, run_id={run_id}, seats=[sol, agy, opus]",
                              f"exit {code}, stderr={err[:160]!r}, state={st}")
 
                 frozen = sp.read_bytes()
@@ -6160,7 +6160,7 @@ def main():
                              f"exit {code}, stderr={err[:160]!r}, "
                              f"changed={sp.read_bytes() != frozen}")
 
-                _rv_land(run_d, "codex", run_id, tsha)
+                _rv_land(run_d, "sol", run_id, tsha)
                 before = sp.read_bytes()
                 _, err, code = _rv_verdict(loop, sid, "APPROVED")
                 _rv_advisory(f"{tag} APPROVED without quorum (1 of 3 usable) is advisory",
@@ -6212,11 +6212,11 @@ def main():
                 drift_plan.write_text(original, encoding="utf-8")
                 tsha = rr.sha256_text(original)
                 run_id, run_d = _rv_mint(sid, spec=drift_plan.name, base="", tsha=tsha,
-                                         seats=("codex",))
+                                         seats=("sol",))
                 _rv_init(loop, sid)
                 sp = _rv_state_path(loop, sid)
                 _rv_begin(loop, sid)
-                _rv_land(run_d, "codex", run_id, tsha)
+                _rv_land(run_d, "sol", run_id, tsha)
 
                 drift_plan.write_text(original + "an edit the panel never read\n",
                                       encoding="utf-8")
@@ -6252,11 +6252,11 @@ def main():
                     sid = f"rv-{loop}-{kind}"
                     run_id, run_d = _rv_mint(sid, spec=resolved["spec"],
                                              base=stored_base, tsha=resolved["sha"],
-                                             seats=("codex",))
+                                             seats=("sol",))
                     _rv_init(loop, sid)
                     sp = _rv_state_path(loop, sid)
                     _rv_begin(loop, sid)
-                    _rv_land(run_d, "codex", run_id, resolved["sha"])
+                    _rv_land(run_d, "sol", run_id, resolved["sha"])
 
                     if drift is not None:
                         # The code targets drift the way real ones do (an edit, a
@@ -6300,11 +6300,11 @@ def main():
                 gone.write_text("# soon to be deleted\n", encoding="utf-8")
                 tsha = rr.sha256_text(gone.read_text(encoding="utf-8"))
                 run_id, run_d = _rv_mint(sid, spec=gone.name, base="", tsha=tsha,
-                                         seats=("codex",))
+                                         seats=("sol",))
                 _rv_init(loop, sid)
                 sp = _rv_state_path(loop, sid)
                 _rv_begin(loop, sid)
-                _rv_land(run_d, "codex", run_id, tsha)
+                _rv_land(run_d, "sol", run_id, tsha)
                 gone.unlink()
                 before = sp.read_bytes()
                 _, err, code = _rv_verdict(loop, sid, "APPROVED")
@@ -6317,17 +6317,17 @@ def main():
                 p1.write_text("# pointer plan\n", encoding="utf-8")
                 tsha = rr.sha256_text(p1.read_text(encoding="utf-8"))
                 run_id, run_d = _rv_mint(sid, spec=p1.name, base="", tsha=tsha,
-                                         seats=("codex",))
+                                         seats=("sol",))
                 _rv_init(loop, sid)
                 sp = _rv_state_path(loop, sid)
                 _rv_begin(loop, sid)
-                _rv_land(run_d, "codex", run_id, tsha)
+                _rv_land(run_d, "sol", run_id, tsha)
                 # A re-prep of DIFFERENT content moves the pointer to a new run.
                 p2 = rv_root / f"ptr2-{loop}.md"
                 p2.write_text("# a second plan\n", encoding="utf-8")
                 _rv_mint(sid, spec=p2.name, base="",
                          tsha=rr.sha256_text(p2.read_text(encoding="utf-8")),
-                         seats=("codex",))
+                         seats=("sol",))
                 before = sp.read_bytes()
                 _, err, code = _rv_verdict(loop, sid, "APPROVED")
                 _rv_advisory(f"{tag} APPROVED after a re-prep moved the pointer is advisory",
@@ -6350,12 +6350,12 @@ def main():
                 fp.write_text("# flat plan\n", encoding="utf-8")
                 tsha = rr.sha256_text(fp.read_text(encoding="utf-8"))
                 run_id, run_d = _rv_mint(sid, spec=fp.name, base="", tsha=tsha,
-                                         seats=("codex", "agy"))
+                                         seats=("sol", "agy"))
                 _rv_init(loop, sid)
                 sp = _rv_state_path(loop, sid)
                 _rv_begin(loop, sid)
                 shutil.rmtree(run_d)
-                for seat in ("codex", "agy"):
+                for seat in ("sol", "agy"):
                     _rv_land(_rv_reviews(sid), seat, run_id, tsha)
                 before = sp.read_bytes()
                 _, err, code = _rv_verdict(loop, sid, "APPROVED")
@@ -6368,7 +6368,7 @@ def main():
                 ff.write_text("# failed-panel plan\n", encoding="utf-8")
                 tsha = rr.sha256_text(ff.read_text(encoding="utf-8"))
                 run_id, run_d = _rv_mint(sid, spec=ff.name, base="", tsha=tsha,
-                                         seats=("codex", "agy"))
+                                         seats=("sol", "agy"))
                 _rv_init(loop, sid)
                 sp = _rv_state_path(loop, sid)
                 _rv_begin(loop, sid)
@@ -6384,7 +6384,7 @@ def main():
                              f"exit {code}, stderr={err[:160]!r}, state={st}")
 
                 _rv_begin(loop, sid)
-                _rv_land(run_d, "codex", run_id, tsha)
+                _rv_land(run_d, "sol", run_id, tsha)
                 before = sp.read_bytes()
                 _, err, code = _rv_verdict(loop, sid, "FAILED")
                 _rv_refused(f"{tag} FAILED with a usable review present is refused",
@@ -6406,16 +6406,16 @@ def main():
                 # not shrink the panel (and with it the quorum threshold) on a
                 # record that still verifies ---
                 for i, (case, sub, task) in enumerate((
-                    ("a seat removed", ["codex"], []),
-                    ("a bogus seat added", ["codex", "agy", "ghost"], ["opus", "ghost2"]),
-                    ("a list replaced by a string", "codex", ["opus"]),
+                    ("a seat removed", ["sol"], []),
+                    ("a bogus seat added", ["sol", "agy", "ghost"], ["opus", "ghost2"]),
+                    ("a list replaced by a string", "sol", ["opus"]),
                 )):
                     sid = f"rv-{loop}-tamper{i}"
                     tp = rv_root / f"tamper{i}-{loop}.md"
                     tp.write_text(f"# tamper plan {i}\n", encoding="utf-8")
                     tsha = rr.sha256_text(tp.read_text(encoding="utf-8"))
                     run_id, run_d = _rv_mint(sid, spec=tp.name, base="", tsha=tsha,
-                                             seats=("codex", "agy"), task_seats=("opus",))
+                                             seats=("sol", "agy"), task_seats=("opus",))
                     rj = run_d / rr.RUN_JSON_NAME
                     rec = json.loads(rj.read_text(encoding="utf-8"))
                     rec["subprocess_seats"] = sub
@@ -6425,18 +6425,18 @@ def main():
                     sp = _rv_state_path(loop, sid)
                     _, err, code = _rv_begin(loop, sid)
                     st = json.loads(sp.read_text())
-                    if code == 0 and st["expected_seats"] == ["codex", "agy", "opus"]:
+                    if code == 0 and st["expected_seats"] == ["sol", "agy", "opus"]:
                         log_pass(f"{tag} begin-review freezes the signed roster with "
                                  f"{case} in the lists")
                     else:
                         log_fail(f"{tag} begin-review freezes the signed roster with "
                                  f"{case} in the lists",
-                                 "exit 0, expected_seats=[codex, agy, opus]",
+                                 "exit 0, expected_seats=[sol, agy, opus]",
                                  f"exit {code}, stderr={err[:160]!r}, state={st}")
 
                     # The threshold the gate enforces is the SIGNED panel's: read
                     # off the shrunk list this would be 1 of 1 and sign off.
-                    _rv_land(run_d, "codex", run_id, tsha)
+                    _rv_land(run_d, "sol", run_id, tsha)
                     before = sp.read_bytes()
                     _, err, code = _rv_verdict(loop, sid, "APPROVED")
                     _rv_advisory(f"{tag} {case} in the roster lists does not lower the "
@@ -6451,7 +6451,7 @@ def main():
                 ep.write_text("# empty-panel plan\n", encoding="utf-8")
                 tsha = rr.sha256_text(ep.read_text(encoding="utf-8"))
                 run_id, run_d = _rv_mint(sid, spec=ep.name, base="", tsha=tsha,
-                                         seats=("codex", "agy"))
+                                         seats=("sol", "agy"))
                 _rv_init(loop, sid)
                 sp = _rv_state_path(loop, sid)
                 _rv_begin(loop, sid)
@@ -6473,7 +6473,7 @@ def main():
                              "consecutive_review_failures=1, phase=reviewing",
                              f"state={st}")
 
-                _rv_land(run_d, "codex", run_id, tsha)
+                _rv_land(run_d, "sol", run_id, tsha)
                 _, err, code = _rv_verdict(loop, sid, "REVISE")
                 st = json.loads(sp.read_text())
                 if (code == 0 and st["consecutive_review_failures"] == 0
@@ -6494,7 +6494,7 @@ def main():
                 tf.write_text("# terminal plan\n", encoding="utf-8")
                 tsha = rr.sha256_text(tf.read_text(encoding="utf-8"))
                 run_id, run_d = _rv_mint(sid, spec=tf.name, base="", tsha=tsha,
-                                         seats=("codex",))
+                                         seats=("sol",))
                 _rv_init(loop, sid)
                 sp = _rv_state_path(loop, sid)
                 _rv_begin(loop, sid)
@@ -6535,11 +6535,11 @@ def main():
                 mf.write_text("# minor plan\n", encoding="utf-8")
                 tsha = rr.sha256_text(mf.read_text(encoding="utf-8"))
                 run_id, run_d = _rv_mint(sid, spec=mf.name, base="", tsha=tsha,
-                                         seats=("codex", "agy"))
+                                         seats=("sol", "agy"))
                 _rv_init(loop, sid)
                 sp = _rv_state_path(loop, sid)
                 _rv_begin(loop, sid)
-                _rv_land(run_d, "codex", run_id, tsha)
+                _rv_land(run_d, "sol", run_id, tsha)
                 before = sp.read_bytes()
                 _, err, code = _rv_verdict(loop, sid, "REVISE", "--minor-only")
                 _rv_advisory(f"{tag} REVISE --minor-only without quorum is advisory (it completes)",
@@ -6571,11 +6571,11 @@ def main():
                 f1.write_text("# force one plan\n", encoding="utf-8")
                 tsha = rr.sha256_text(f1.read_text(encoding="utf-8"))
                 run_id, run_d = _rv_mint(sid, spec=f1.name, base="", tsha=tsha,
-                                         seats=("codex", "agy"))
+                                         seats=("sol", "agy"))
                 _rv_init(loop, sid)
                 sp = _rv_state_path(loop, sid)
                 _rv_begin(loop, sid)
-                _rv_land(run_d, "codex", run_id, tsha)  # 1 of 2 usable: no quorum
+                _rv_land(run_d, "sol", run_id, tsha)  # 1 of 2 usable: no quorum
                 _, err, code = _rv_verdict(loop, sid, "APPROVED", "--force")
                 st = json.loads(sp.read_text())
                 if (code == 0 and st["phase"] == "done"
@@ -6599,11 +6599,11 @@ def main():
                 f2.write_text(original, encoding="utf-8")
                 tsha = rr.sha256_text(original)
                 run_id, run_d = _rv_mint(sid, spec=f2.name, base="", tsha=tsha,
-                                         seats=("codex", "agy"))
+                                         seats=("sol", "agy"))
                 _rv_init(loop, sid)
                 sp = _rv_state_path(loop, sid)
                 _rv_begin(loop, sid)
-                _rv_land(run_d, "codex", run_id, tsha)  # 1 of 2 usable
+                _rv_land(run_d, "sol", run_id, tsha)  # 1 of 2 usable
                 f2.write_text(original + "an edit the panel never read\n",
                               encoding="utf-8")  # drift
                 before = sp.read_bytes()
@@ -6637,11 +6637,11 @@ def main():
                 f3.write_text("# clean plan\n", encoding="utf-8")
                 tsha = rr.sha256_text(f3.read_text(encoding="utf-8"))
                 run_id, run_d = _rv_mint(sid, spec=f3.name, base="", tsha=tsha,
-                                         seats=("codex", "agy"))
+                                         seats=("sol", "agy"))
                 _rv_init(loop, sid)
                 sp = _rv_state_path(loop, sid)
                 _rv_begin(loop, sid)
-                _rv_land(run_d, "codex", run_id, tsha)
+                _rv_land(run_d, "sol", run_id, tsha)
                 _rv_land(run_d, "agy", run_id, tsha)  # 2 of 2 usable: quorum met
                 _, err, code = _rv_verdict(loop, sid, "APPROVED")
                 st = json.loads(sp.read_text())
@@ -6666,7 +6666,7 @@ def main():
                 fz.write_text("# force-zero plan\n", encoding="utf-8")
                 tsha = rr.sha256_text(fz.read_text(encoding="utf-8"))
                 run_id, run_d = _rv_mint(sid, spec=fz.name, base="", tsha=tsha,
-                                         seats=("codex", "agy"))
+                                         seats=("sol", "agy"))
                 _rv_init(loop, sid)
                 sp = _rv_state_path(loop, sid)
                 _rv_begin(loop, sid)  # land NOTHING: 0 usable
@@ -6693,16 +6693,16 @@ def main():
                 fp1.write_text("# force-pointer plan\n", encoding="utf-8")
                 tsha = rr.sha256_text(fp1.read_text(encoding="utf-8"))
                 run_id, run_d = _rv_mint(sid, spec=fp1.name, base="", tsha=tsha,
-                                         seats=("codex",))
+                                         seats=("sol",))
                 _rv_init(loop, sid)
                 sp = _rv_state_path(loop, sid)
                 _rv_begin(loop, sid)
-                _rv_land(run_d, "codex", run_id, tsha)  # 1 of 1 usable: quorum met
+                _rv_land(run_d, "sol", run_id, tsha)  # 1 of 1 usable: quorum met
                 fp2 = rv_root / f"forceptr2-{loop}.md"
                 fp2.write_text("# a different plan\n", encoding="utf-8")
                 _rv_mint(sid, spec=fp2.name, base="",
                          tsha=rr.sha256_text(fp2.read_text(encoding="utf-8")),
-                         seats=("codex",))  # moves the pointer
+                         seats=("sol",))  # moves the pointer
                 _, err, code = _rv_verdict(loop, sid, "APPROVED", "--force")
                 st = json.loads(sp.read_text())
                 if (code == 0 and st["phase"] == "done"
@@ -6726,11 +6726,11 @@ def main():
                 fg.write_text("# force-gone plan\n", encoding="utf-8")
                 tsha = rr.sha256_text(fg.read_text(encoding="utf-8"))
                 run_id, run_d = _rv_mint(sid, spec=fg.name, base="", tsha=tsha,
-                                         seats=("codex",))
+                                         seats=("sol",))
                 _rv_init(loop, sid)
                 sp = _rv_state_path(loop, sid)
                 _rv_begin(loop, sid)
-                _rv_land(run_d, "codex", run_id, tsha)  # 1 of 1 usable: quorum met
+                _rv_land(run_d, "sol", run_id, tsha)  # 1 of 1 usable: quorum met
                 fg.unlink()  # the stored target no longer resolves
                 _, err, code = _rv_verdict(loop, sid, "APPROVED", "--force")
                 st = json.loads(sp.read_text())
@@ -6798,11 +6798,11 @@ def main():
                     tgt.write_text(f"# {name} plan\n", encoding="utf-8")
                     tsha_ = rr.sha256_text(tgt.read_text(encoding="utf-8"))
                     rid, rd = _rv_mint(sid_, spec=tgt.name, base="", tsha=tsha_,
-                                       seats=("codex",))
+                                       seats=("sol",))
                     _rv_init(loop, sid_)
                     _rv_begin(loop, sid_)
                     if verdict:
-                        _rv_land(rd, "codex", rid, tsha_)
+                        _rv_land(rd, "sol", rid, tsha_)
                         _rv_verdict(loop, sid_, verdict)
                     return sid_, _rv_state_path(loop, sid_)
 
@@ -6916,13 +6916,13 @@ def main():
                 spec=target.name,
                 base="",
                 tsha=target_sha,
-                seats=("codex",),
+                seats=("sol",),
             )
             _rv_init("bl", sid)
             _rv_begin("bl", sid)
             _rv_land(
                 run_d,
-                "codex",
+                "sol",
                 run_id,
                 target_sha,
                 reported_model="GPT Test",
@@ -6946,7 +6946,7 @@ def main():
             tplan.write_text("# truthy plan\n", encoding="utf-8")
             tsha = rr.sha256_text(tplan.read_text(encoding="utf-8"))
             run_id, run_d = _rv_mint(sid, spec=tplan.name, base="", tsha=tsha,
-                                     seats=("codex",))
+                                     seats=("sol",))
             _rv_init("bl", sid)
             sp = _rv_state_path("bl", sid)
             st = json.loads(sp.read_text())
@@ -6964,7 +6964,7 @@ def main():
                          f"run_id={st.get('run_id')!r}")
 
             # …and the verdict verb agrees, so the loop can actually finish.
-            _rv_land(run_d, "codex", run_id, tsha)
+            _rv_land(run_d, "sol", run_id, tsha)
             st = json.loads(sp.read_text())
             st["active"] = "true"
             sp.write_text(json.dumps(st), encoding="utf-8")
@@ -6991,7 +6991,7 @@ def main():
             rp.write_text("# root plan\n", encoding="utf-8")
             tsha = rr.sha256_text(rp.read_text(encoding="utf-8"))
             run_id, run_d = _rv_mint(sid, spec=rp.name, base="", tsha=tsha,
-                                     seats=("codex",))
+                                     seats=("sol",))
             _rv_init("bl", sid)
             sp = _rv_state_path("bl", sid)
             out = subprocess.run(
@@ -7032,7 +7032,7 @@ def main():
             # Flat mint (empty session) so begin-review's empty-id reviews dir
             # (`.crew/reviews/`) is the one holding the pointer + run.json.
             leg_run_id, _ = _rv_mint("", spec=leg_plan.name, base="", tsha=leg_tsha,
-                                     seats=("codex",))
+                                     seats=("sol",))
             legacy_state.write_text(json.dumps({
                 "active": True, "task": "legacy adopt begin", "session_id": "stored-owner",
                 "phase": "drafting"}), encoding="utf-8")
@@ -7056,7 +7056,7 @@ def main():
             # gets re-tied to the resolving session.
             scoped_state = rv_root / ".crew" / "build-state-real-owner.json"
             leg_run_id2, _ = _rv_mint("real-owner", spec=leg_plan.name, base="",
-                                      tsha=leg_tsha, seats=("codex",))
+                                      tsha=leg_tsha, seats=("sol",))
             scoped_state.write_text(json.dumps({
                 "active": True, "task": "scoped begin", "session_id": "old-owner",
                 "phase": "drafting"}), encoding="utf-8")
