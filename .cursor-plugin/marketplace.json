@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Persistence, specialized agents, workflow commands, and tech-stack skills",
-    "version": "0.43.0",
+    "version": "0.43.1",
     "pluginRoot": "./plugins"
   },
   "plugins": [
