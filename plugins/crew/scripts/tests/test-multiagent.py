@@ -2548,12 +2548,12 @@ def test_registry():
               isinstance(get_provider(seat_name), CodexProvider)
               and get_provider(seat_name)._default_model == spec.model,
               f"CodexProvider({spec.model})", repr(get_provider(seat_name).__dict__))
-    check("CODEX_SEATS pins sol to gpt-5.6-sol",
-          CODEX_SEATS.get("sol").model == "gpt-5.6-sol",
-          "gpt-5.6-sol", str(CODEX_SEATS.get("sol")))
-    check("CODEX_SEATS pins luna to gpt-5.6-luna",
-          CODEX_SEATS.get("luna").model == "gpt-5.6-luna",
-          "gpt-5.6-luna", str(CODEX_SEATS.get("luna")))
+    check("CODEX_SEATS pins sol to gpt-6-sol",
+          CODEX_SEATS.get("sol").model == "gpt-6-sol",
+          "gpt-6-sol", str(CODEX_SEATS.get("sol")))
+    check("CODEX_SEATS pins luna to gpt-6-luna",
+          CODEX_SEATS.get("luna").model == "gpt-6-luna",
+          "gpt-6-luna", str(CODEX_SEATS.get("luna")))
     # The opt-in terra seat's model pin (registered, run via --seats).
     check("CODEX_SEATS pins terra to gpt-5.6-terra",
           CODEX_SEATS.get("terra").model == "gpt-5.6-terra",
@@ -4232,13 +4232,13 @@ def test_run_subcommand():
             obj = json.loads(proc.stdout)
             ok_json = (obj["ok"] is False and bool(obj["error"])
                        and obj["name"] == "sol"
-                       and obj["model"] == "gpt-5.6-sol"
+                       and obj["model"] == "gpt-6-sol"
                        and obj["channel"] == "codex")
         except Exception:
             ok_json = False
         check("run --json on failed provider stamps model and channel provenance",
               proc.returncode == 0 and ok_json,
-              "exit0 + ok=False + model=gpt-5.6-sol + channel=codex",
+              "exit0 + ok=False + model=gpt-6-sol + channel=codex",
               f"{proc.returncode}: {proc.stdout!r}")
 
     # -------------------------------------------------------------------------
@@ -5592,11 +5592,11 @@ def test_config():
     # 7c2. No config in either layer -> _codex_model falls back to the seat's
     #      built-in CODEX_SEATS pin (per codex seat, not None).
     with crew_config():
-        check("no config: _codex_model() -> codex's built-in pin gpt-5.6-sol",
-              _codex_model() == "gpt-5.6-sol", "gpt-5.6-sol", str(_codex_model()))
-        check("no config: _codex_model('luna') -> its pin gpt-5.6-luna",
-              _codex_model("luna") == "gpt-5.6-luna",
-              "gpt-5.6-luna", str(_codex_model("luna")))
+        check("no config: _codex_model() -> codex's built-in pin gpt-6-sol",
+              _codex_model() == "gpt-6-sol", "gpt-6-sol", str(_codex_model()))
+        check("no config: _codex_model('luna') -> its pin gpt-6-luna",
+              _codex_model("luna") == "gpt-6-luna",
+              "gpt-6-luna", str(_codex_model("luna")))
     # A [seats.luna].model override beats the pin AND stays seat-scoped
     # (the sol seat keeps its own pin).
     with crew_config(project="[seats.luna]\nmodel = \"luna-repo\"\n"):
@@ -5604,7 +5604,7 @@ def test_config():
               _codex_model("luna") == "luna-repo",
               "luna-repo", str(_codex_model("luna")))
         check("luna config does NOT leak into the sol seat",
-              _codex_model() == "gpt-5.6-sol", "gpt-5.6-sol", str(_codex_model()))
+              _codex_model() == "gpt-6-sol", "gpt-6-sol", str(_codex_model()))
 
     # ---- Per-seat argv/resolution assertions (NO metered seat calls) ------------
     # 8. codex reasoning_effort from config flows into the -c argv; absent -> xhigh.
@@ -5688,14 +5688,14 @@ def test_config():
                 argv_codex = json.loads(cap.read_text())
             finally:
                 os.environ["PATH"] = old_path
-            check("per-seat: luna argv carries its pinned --model gpt-5.6-luna",
-                  "--model" in argv_luna and "gpt-5.6-luna" in argv_luna,
-                  "--model gpt-5.6-luna", str(argv_luna))
+            check("per-seat: luna argv carries its pinned --model gpt-6-luna",
+                  "--model" in argv_luna and "gpt-6-luna" in argv_luna,
+                  "--model gpt-6-luna", str(argv_luna))
             check("per-seat: [seats.luna].reasoning_effort -> luna argv effort=low",
                   "model_reasoning_effort=low" in argv_luna, "low in argv", str(argv_luna))
-            check("per-seat: sol argv carries its pinned --model gpt-5.6-sol",
-                  "--model" in argv_codex and "gpt-5.6-sol" in argv_codex,
-                  "--model gpt-5.6-sol", str(argv_codex))
+            check("per-seat: sol argv carries its pinned --model gpt-6-sol",
+                  "--model" in argv_codex and "gpt-6-sol" in argv_codex,
+                  "--model gpt-6-sol", str(argv_codex))
             check("per-seat: luna effort does NOT leak into sol (stays xhigh)",
                   "model_reasoning_effort=xhigh" in argv_codex,
                   "xhigh in argv", str(argv_codex))
@@ -14342,8 +14342,8 @@ def test_seat_roster_drift_guard():
     # roster is assembled fails HERE, naming the seat that moved.
     expected_subprocess = [
         ("astra",         "CodexProvider",  "gpt-6-astra",           False),
-        ("sol",           "CodexProvider",  "gpt-5.6-sol",           False),
-        ("luna",          "CodexProvider",  "gpt-5.6-luna",          False),
+        ("sol",           "CodexProvider",  "gpt-6-sol",           False),
+        ("luna",          "CodexProvider",  "gpt-6-luna",          False),
         ("terra",         "CodexProvider",  "gpt-5.6-terra",         True),
         ("cursor-gpt",      "CursorProvider", "gpt-5.5-extra-high",    True),
         ("cursor-gemini",   "CursorProvider", "gemini-3.7-flash-high", True),
@@ -15081,7 +15081,7 @@ def test_config_split_seat_layers():
                           'opt_in = true\n')
     check("shipped seat converted with no valid alias: conversion ignored, tune kept",
           cat.get("sol") and cat["sol"].provider == "codex"
-          and cat["sol"].model == "gpt-5.6-sol" and cat["sol"].opt_in is True
+          and cat["sol"].model == "gpt-6-sol" and cat["sol"].opt_in is True
           and "ignoring the conversion" in warn,
           "sol stays on codex, opt_in tune kept", str(cat.get("sol")))
 
@@ -17331,7 +17331,7 @@ def test_run_scoped_reviews():
                               "--run-id", o1["run_id"], "-m", "gpt-other",
                               "--json"], cwd=td, env=env, timeout=30)
         check("run-scoped run with a mismatched --model exits 2 naming the manifest model",
-              mm.returncode == 2 and "'gpt-5.6-sol'" in mm.stderr
+              mm.returncode == 2 and "'gpt-6-sol'" in mm.stderr
               and not (run_d / "sol.json").exists() and _intact(),
               "exit 2 + manifest model named",
               f"rc={mm.returncode} err={mm.stderr[:200]!r}")
@@ -17354,7 +17354,7 @@ def test_run_scoped_reviews():
               f"rc={wm.returncode} err={wm.stderr[:200]!r}")
         # persist-seat: a subprocess-kind member is not persistable.
         sk = _run_dispatcher(["persist-seat", "sol", "--session-id", "S",
-                              "--run-id", o1["run_id"], "--model", "gpt-5.6-sol",
+                              "--run-id", o1["run_id"], "--model", "gpt-6-sol",
                               "-f", str(src)], cwd=td, env=env, timeout=30)
         check("persist-seat with a subprocess-kind seat exits 2",
               sk.returncode == 2 and "not a task member" in sk.stderr

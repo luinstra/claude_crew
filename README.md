@@ -214,7 +214,7 @@ print as external here while standalone `/crew:review` issues them in-session.
 
 External seats run via the bundled `multiagent` engine
 (`plugins/crew/scripts/multiagent/`): the default codex-channel seats are distinct OpenAI
-voices (`gpt-6-astra`, `gpt-5.6-sol`, and `gpt-5.6-luna`) on the one codex CLI. Which seats run
+voices (`gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`) on the one codex CLI. Which seats run
 in-session instead depends on the host: on Claude Code the Claude voices take
 the native `crew:reviewer` Task path, and on a Cursor host standalone review
 issues the `cursor-*` seats natively as `crew-reviewer` while the Claude voices

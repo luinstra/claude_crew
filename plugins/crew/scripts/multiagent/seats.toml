@@ -38,11 +38,11 @@ model = "gpt-6-astra"
 
 [seats.sol]
 via = ["codex"]
-model = "gpt-5.6-sol"
+model = "gpt-6-sol"
 
 [seats.luna]
 via = ["codex"]
-model = "gpt-5.6-luna"
+model = "gpt-6-luna"
 
 [seats.terra]
 via = ["codex"]

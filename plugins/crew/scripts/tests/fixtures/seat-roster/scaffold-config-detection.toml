@@ -66,11 +66,11 @@ seat = "luna"
 # reasoning_effort = "xhigh"     # codex-seat knob (read per seat: [seats.astra] here)
 
 [seats.sol]
-# model = "gpt-5.6-sol"
+# model = "gpt-6-sol"
 # reasoning_effort = "xhigh"     # codex-seat knob (read per seat: [seats.sol] here)
 
 [seats.luna]
-# model = "gpt-5.6-luna"
+# model = "gpt-6-luna"
 # reasoning_effort = "xhigh"     # codex-seat knob (read per seat: [seats.luna] here)
 
 [seats.cursor-auto]

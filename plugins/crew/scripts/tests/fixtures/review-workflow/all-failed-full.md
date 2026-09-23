@@ -1,4 +1,4 @@
-### seat: sol  |  model: gpt-5.6-sol  |  0.0s
+### seat: sol  |  model: gpt-6-sol  |  0.0s
 status: FAILED
 
 ERROR: seat failed

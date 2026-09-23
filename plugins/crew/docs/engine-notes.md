@@ -55,7 +55,7 @@ unregistered seat 'agy'; valid registered seats: ...`.
 The default panel roster of record is scripts/CLAUDE.md + `seats.toml`'s `[panels]`
 table (loaded via `seats.merged_panels()`)
 (the DEFAULT codex-channel seats are distinct OpenAI voices, `gpt-6-astra`,
-`gpt-5.6-sol`, and `gpt-5.6-luna`, on the one codex CLI: a deliberate same-lineage grouping at
+`gpt-6-sol`, and `gpt-6-luna`, on the one codex CLI: a deliberate same-lineage grouping at
 different reasoning styles). Seats fall out of the default panel for two distinct
 reasons, redundancy or cost.
 
