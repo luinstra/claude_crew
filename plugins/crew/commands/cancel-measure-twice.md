@@ -27,6 +27,11 @@ veto would not be one).
 
 ## After Running
 
+The guarded cancellation invalidates migrated claims and review bindings in
+that same loop-state transaction. Stop only this loop's owned handles if the
+host exposes a cancellation API; report if it does not. Late staging/evidence
+files may remain but cannot advance the cancelled lifetime.
+
 The measure-twice loop is now cancelled.
 
 **You may:**
@@ -34,4 +39,7 @@ The measure-twice loop is now cancelled.
 - Stop working
 - Start a new task
 
-To start a new loop later: `/crew:measure-twice "task description"`
+An identical request replays this terminal lifetime. A different immutable
+request can start a fresh lifetime after normal completion or cancellation.
+Only safety-force-exited lifetimes require explicit human restart authorization;
+see `docs/measure-twice-protocol.md`. Resuming never resets an active lifetime.

@@ -1,0 +1,76 @@
+{
+  "source_baseline": "b39f647",
+  "evidence_kind": "deterministic_public_api_runtime",
+  "scenario": "document -> advisor -> two native reviewers -> synthesis -> approve",
+  "target": {
+    "utf8": "# Plan\nWrite a harmless text file.\n",
+    "sha256": "843a4b0cd69b3a3e33f0141c684e4886dfc4ce99f95adb9fa42455fe3c5f600c"
+  },
+  "panel": {
+    "seats": [
+      "opus",
+      "sonnet"
+    ],
+    "pins": [
+      "opus",
+      "sonnet"
+    ]
+  },
+  "response_types": [
+    "work_batch",
+    "work_batch",
+    "work_batch",
+    "terminal"
+  ],
+  "events": [
+    "launch:advisor",
+    "wait:notifications",
+    "return:advisor",
+    "launch:reviewer",
+    "launch:reviewer",
+    "wait:notifications",
+    "return:reviewer",
+    "return:reviewer",
+    "launch:synthesis",
+    "wait:notifications",
+    "return:synthesis"
+  ],
+  "counts": {
+    "advisor": 1,
+    "reviewer": 2,
+    "formatter": 0,
+    "scribe": 0,
+    "parent_synthesis": 1
+  },
+  "intervals": [
+    {
+      "kind": "advisor",
+      "model": "inherit",
+      "start": 0,
+      "end": 1
+    },
+    {
+      "kind": "reviewer",
+      "model": "opus",
+      "start": 0,
+      "end": 1
+    },
+    {
+      "kind": "reviewer",
+      "model": "sonnet",
+      "start": 0,
+      "end": 2
+    },
+    {
+      "kind": "synthesis",
+      "model": null,
+      "start": 0,
+      "end": 1
+    }
+  ],
+  "clock": "simulated units, not observed provider wall time",
+  "terminal_replay_paid_work": 0,
+  "live_costs": null,
+  "claude_markdown_scribes": 2,
+  "limits": "The direct runtime is a deterministic fake. Claude retains reviewer scribes; no app gate or live token/latency claim."
+}

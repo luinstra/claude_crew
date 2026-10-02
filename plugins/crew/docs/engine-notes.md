@@ -169,7 +169,7 @@ outstanding gates live in docs/operator-followups.md.
 ## Review-bearing command decisions (labels moved out of the command docs)
 
 The `review`/`build`/`measure-twice` markdown used to carry these bare labels
-inline. The RULE each names is still stated in the command docs; only the label
+inline. The historical rules remain in the legacy build command; workflow paths now issue their transport in Python; only the label
 gloss lives here.
 
 - **Decision-H** — persist EACH normalized Task seat through `crew persist-seat`
@@ -188,8 +188,9 @@ gloss lives here.
 
 ## T3a reference-spawn (build and measure-twice history)
 
-This section describes the still-current `review-prep` transport in build and
-measure-twice. Standalone review no longer duplicates it in Markdown: Python
+This section describes the current build `review-prep` transport and historical
+measure-twice behavior before its engine cutover. Workflow-owned review and mt
+no longer duplicate it in Markdown: Python
 issues the reviewer prompt, exact primary scribe ingress, distinct fallback,
 typed submission, formatter, and synthesis actions through `review_workflow`.
 
@@ -206,8 +207,8 @@ typed submission, formatter, and synthesis actions through `review_workflow`.
   path the orchestrator hands that returned text INLINE to a `crew:scribe`
   sub-agent (Write-only), which Writes it to the tmp-seat file inside its OWN
   transcript, so the persist-Write never renders back into orchestrator context.
-  The orchestrator keeps the landing authority. build.md and measure-twice.md
-  call `persist-seat --verify` and gate on its exit code for
+  The orchestrator keeps the landing authority. The legacy build recipe calls
+  `persist-seat --verify` and gates on its exit code for
   the landed record. The scribe's self-reported line is never the gate. On any
   scribe failure it falls back to
   Writing a DISTINCT `-fallback` path itself and persisting that, so a timed-out
@@ -262,8 +263,8 @@ unknown, uses parent-context formatter work and keeps every seat external.
 Codex-host all-external protocol compatibility is
 covered deterministically through the Python CLI in this phase, but the Codex
 plugin does not yet expose standalone `/crew:review`; its app-native adapter
-remains deferred. Build and measure-twice continue to use `review-prep` until
-their later workflow phases migrate them.
+remains deferred. Build retains `review-prep`; measure-twice now composes this
+review seam through its own typed engine and explicit owner binding.
 
 ## Cursor host: the native reviewer channel, and why it took a design pass
 
@@ -518,3 +519,35 @@ attributed count is the available signal, and no arbitrary floor is added.
 An in-flight standalone run frozen before these bytes fails action validation
 at its next command because the action key set is exact. Finish or abandon it
 first, then start a fresh review.
+
+## Engine-owned measure-twice
+
+The stage machine lives in measure_twice.py because interview identity, advisor
+promotion, review generation and human decisions must survive host re-entry.
+Advisor admission belongs in HostRoles metadata so the workflow does not become
+a Claude-specific state machine. Only Claude's existing advisor/inherit route
+is admitted in production; no Cursor, Codex or OpenHands planner is added.
+
+Loop-bound review identity, accepted-action evidence and loop-before-review lock
+order keep mutable standalone/build pointers from selecting a plan's verdict.
+Preparation checkpoints inputs before filesystem work so a crash/config change
+cannot mint another paid evaluation. Explicit synthesis-only retry preserves
+successful seats. One loop_state guard owns completion policy for build and mt;
+loop_projection keeps lifecycle hooks independent of providers and review IO.
+
+Action-specific staging, immutable seal and canonical promotion isolate late
+advisor writes from a replacement lifetime. Human waits and explicit quiescence
+attestation preserve legacy work without inferring completion from files.
+Schema 4 makes an older install refuse application load/mutation/cleanup rather
+than strip the journal. Raw whole-state save is still only for fresh replacement;
+live writers use guarded update_state_json.
+
+Deterministic capture removes model-generated hashes/envelopes. The injected
+runtime proves full native batch admission before notification waits and zero
+scribes for direct byte returns. Claude Code 2.1.287's demonstrated owned native
+JSONL result surface now has an opt-in deterministic capture boundary, bound to
+owner/action/prompt/handle and used only after actual completion. Its direct
+captures preserve exact EOF and need zero scribes. Other surfaces retain the
+advisory scribe/host-Write bridge; no general byte-fidelity or write confinement
+is claimed. Real CLI lifecycle cases include automatic Stop continuation. See the
+[protocol](measure-twice-protocol.md) and [evidence](phase-4-measure-twice-evidence.md).

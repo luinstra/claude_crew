@@ -38,8 +38,8 @@ Codex package contains the shared `commands/review.md` source, its migrated
 command skills do not register standalone `/crew:review`, so the Codex plugin
 does not expose that invocation yet; a first-class Codex adapter remains
 deferred (verified: installed 0.74.1 package inventory and Phase 1 deterministic
-workflow tests, 2026-08-20). Build and measure-twice retain `review-prep` until
-their later workflow phases.
+workflow tests, 2026-08-20). Build retains `review-prep`. Measure-twice uses the
+engine-owned workflow; production planning admission currently requires Claude.
 
 - Panel prep is host-truthful: review-prep under this host emits host codex, classifies opus as an external claude-channel subprocess seat, and stamps seat_channels with real provenance (verified: probe 2026-08-12 S1/P5, codex 0.147.0)
 - The claude CLI resolves on PATH but is NOT authenticated inside the Codex sandbox: claude -p answers "Not logged in", so external claude seats fail closed with truthful envelopes, ok false, channel claude, real run identity stamps (verified: probe 2026-08-12 S1/P5, codex 0.147.0)
@@ -53,3 +53,11 @@ their later workflow phases.
 
 - 2026-08-12 S1, codex 0.147.0: P0 preamble (locate, doctor, both host checks, gate propagation, project-root reading), P1 first env capture, P2 payload-key capture over two turns, P4 two-seat approval probe, P5 live gate (pong denied by sandbox auth, external-seat fail-closed envelopes, detection read, missing-CLI skip path), P3 stop-block probe (three attempts, all coerced), wrap-up clean
 - 2026-08-12 S2, codex 0.147.0: second env capture, emulation booleans, claude on PATH confirmed
+
+## Measure-twice source cutover
+
+The source planning engine now uses typed state/review binding. Codex has no
+admitted production advisor route: new planning returns
+`unsupported_planning_host` before activation. Historical legacy Stop probes
+above do not prove the Phase 4 installed-Claude gate. See
+[protocol](measure-twice-protocol.md) and [Claude CLI gate evidence](phase-4-measure-twice-evidence.md).

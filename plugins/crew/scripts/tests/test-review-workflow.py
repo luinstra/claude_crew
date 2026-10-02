@@ -2102,6 +2102,139 @@ class ReviewWorkflowTest(unittest.TestCase):
         self.assertEqual(provider_factory.call_count, 0)
         self.assertFalse((self.root / ".crew" / "reviews").exists())
 
+    def history_plans(self, count: int) -> Path:
+        stamp = time.time_ns() + 1_000_000
+        for index in range(count):
+            lifetime = self.plan.parent / f"history-00000000-0000-0000-0000-{index:012x}"
+            lifetime.mkdir()
+            plan = lifetime / "plan-1.md"
+            plan.write_text(f"# retained plan {index}\n", encoding="utf-8")
+            os.utime(plan, ns=(stamp + index, stamp + index))
+        return plan
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX descriptor limits and no-follow directory handles")
+    def test_latest_plan_high_history_under_low_descriptor_limit_through_public_start(self) -> None:
+        newest = self.history_plans(160)
+        code = """import json, resource, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from multiagent import review_workflow as rw
+soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+cap = 32 if hard == resource.RLIM_INFINITY else min(32, hard)
+resource.setrlimit(resource.RLIMIT_NOFILE, (cap, hard))
+results = []
+for index, intent in enumerate(("", "latest plan")):
+    step = rw.start_review(rw.ReviewRequest(intent, seats="opus", session_id=f"history-{index}", timeout_seconds=1))
+    run = Path(sys.argv[2]) / ".crew" / "reviews" / step.ref.session_segment / step.ref.run_id
+    results.append([step.resolved_target["scope"], (run / "target.md").read_text(encoding="utf-8")])
+print(json.dumps(results))
+"""
+        result = subprocess.run([sys.executable, "-c", code,
+            str(Path(review_workflow.__file__).parents[1]), str(self.root)],
+            cwd=self.root, env={**os.environ, "CREW_HOST": "claude"}, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        expected = [newest.relative_to(self.root).as_posix(), newest.read_text(encoding="utf-8")]
+        self.assertEqual(json.loads(result.stdout), [expected, expected])
+        self.assertEqual(len(list(self.plan.parent.glob("history-*"))), 160)
+
+    def test_latest_plan_directory_descriptors_are_bounded_and_closed_on_scan_failure(self) -> None:
+        newest = self.history_plans(80)
+        original_open, original_close, original_listdir = os.open, os.close, os.listdir
+        for fail_scan in (False, True):
+            with self.subTest(fail_scan=fail_scan):
+                active: set[int] = set()
+                peak = 0
+                def open_directory(path, flags, *args, **kwargs):
+                    nonlocal peak
+                    fd = original_open(path, flags, *args, **kwargs)
+                    if flags & os.O_DIRECTORY:
+                        active.add(fd)
+                        peak = max(peak, len(active))
+                    return fd
+                def close_directory(fd: int) -> None:
+                    try:
+                        original_close(fd)
+                    finally:
+                        active.discard(fd)
+                def scan_directory(path):
+                    if fail_scan and isinstance(path, int) and len(active) == 4:
+                        raise OSError("injected lifetime scan failure")
+                    return original_listdir(path)
+                with mock.patch.object(os, "open", open_directory), mock.patch.object(os, "close", close_directory), mock.patch.object(os, "listdir", scan_directory):
+                    if fail_scan:
+                        with self.assertRaises(review_workflow.WorkflowError) as failed:
+                            review_workflow._newest_plan_target()
+                        self.assertEqual(failed.exception.code, "no_plan_found")
+                    else:
+                        self.assertEqual(review_workflow._newest_plan_target().replay_spec, newest.relative_to(self.root).as_posix())
+                self.assertEqual(active, set())
+                self.assertLessEqual(peak, 4)
+
+    def test_latest_plan_reopen_rejects_directory_and_file_replacement_or_symlink_races(self) -> None:
+        original_open = os.open
+        for race in ("scan_replace", "parent_replace", "parent_symlink", "file_replace", "file_symlink"):
+            with self.subTest(race=race):
+                root = self.root / race
+                plans = root / ".crew" / "plans"
+                lifetime = plans / "race-00000000-0000-0000-0000-000000000001"
+                lifetime.mkdir(parents=True)
+                selected = lifetime / "plan-1.md"
+                selected.write_text("# reviewed bytes\n", encoding="utf-8")
+                outside = root / "outside"
+                outside.mkdir()
+                (outside / "plan-1.md").write_text("# outside bytes\n", encoding="utf-8")
+                opens = 0
+                changed = False
+                def race_open(path, flags, *args, **kwargs):
+                    nonlocal opens, changed
+                    if str(path) == lifetime.name and flags & os.O_DIRECTORY:
+                        opens += 1
+                        trigger = opens == (1 if race == "scan_replace" else 2)
+                        if trigger and race in {"scan_replace", "parent_replace", "parent_symlink"}:
+                            retained = root / "retained"
+                            lifetime.rename(retained)
+                            if race == "parent_symlink":
+                                lifetime.symlink_to(outside, target_is_directory=True)
+                            else:
+                                lifetime.mkdir()
+                                # Keep the file inode identical; parent identity must still refuse.
+                                os.link(retained / "plan-1.md", selected)
+                            changed = True
+                    if str(path) == "plan-1.md" and not flags & os.O_DIRECTORY and race in {"file_replace", "file_symlink"}:
+                        selected.rename(root / "retained-file.md")
+                        if race == "file_symlink":
+                            selected.symlink_to(outside / "plan-1.md")
+                        else:
+                            selected.write_text("# replacement bytes\n", encoding="utf-8")
+                        changed = True
+                    return original_open(path, flags, *args, **kwargs)
+                factory = mock.Mock(side_effect=AssertionError("a raced target must fail before provider admission"))
+                with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(root)}), mock.patch.object(os, "open", race_open), mock.patch.object(review_workflow, "get_provider_for_channel", factory):
+                    with self.assertRaises(review_workflow.WorkflowError) as failed:
+                        review_workflow.start_review(review_workflow.ReviewRequest("latest plan", seats="sol",
+                            session_id="raced", timeout_seconds=1))
+                self.assertTrue(changed)
+                self.assertEqual(failed.exception.code, "no_plan_found")
+                factory.assert_not_called()
+                self.assertFalse((root / ".crew" / "reviews").exists())
+
+    def test_latest_plan_lifetime_and_flat_mtime_path_ties_preserve_text_semantics(self) -> None:
+        canonical = self.history_plans(1)
+        body = b"# canonical\r\ninvalid: \xff\r\n"
+        canonical.write_bytes(body)
+        stamp = time.time_ns()
+        os.utime(self.plan, ns=(stamp, stamp))
+        os.utime(canonical, ns=(stamp, stamp))
+        chosen = max((self.plan, canonical), key=lambda path: path.relative_to(self.root).as_posix())
+        target = review_workflow._newest_plan_target()
+        self.assertEqual(target.replay_spec, chosen.relative_to(self.root).as_posix())
+        self.assertEqual(target.content, chosen.read_text(encoding="utf-8", errors="replace"))
+        # A newer canonical candidate wins; transport and invalid ordinal names do not.
+        for name in ("requirements.md", "synthesis.md", "plan-0.md", "plan-01.md"):
+            (canonical.parent / name).write_text("newer transport data", encoding="utf-8")
+        os.utime(canonical, ns=(stamp + 1, stamp + 1))
+        self.assertEqual(review_workflow._newest_plan_target().content, "# canonical\ninvalid: \ufffd\n")
+
     def test_plan_state_uses_canonical_worktree_dirtiness(self) -> None:
         original = targets.is_dirty
         targets.is_dirty = lambda cwd=None: True

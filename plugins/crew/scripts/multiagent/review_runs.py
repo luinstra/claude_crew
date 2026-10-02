@@ -96,6 +96,12 @@ def session_segment(session_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "", session_id or "")
 
 
+def valid_harness_session_id(session_id: str) -> bool:
+    """Whether a literal harness id can issue a session-bound command."""
+    return bool(session_id.strip() and "<" not in session_id and ">" not in session_id
+                and session_segment(session_id))
+
+
 def reviews_dir(session_id: str, *, base: str | None = None) -> Path:
     """Resolve ``.crew/reviews/<sanitized-session-id>`` (flat when no session).
 

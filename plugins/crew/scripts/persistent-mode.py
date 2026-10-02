@@ -27,7 +27,9 @@ if sys.version_info < (3, 11):
 import shlex
 from dataclasses import asdict
 from pathlib import Path
+from collections.abc import Callable
 
+from loop_projection import project_measure
 from models import (
     StopInput,
     HookResult,
@@ -44,6 +46,7 @@ from models import (
     effective_count,
     effective_deadline,
     effective_started_at,
+    loop_bound_reason,
     NO_DEADLINE,
     DEFAULT_MAX_STOP_FIRES,
     DEFAULT_MAX_PARKED_FIRES,
@@ -190,25 +193,7 @@ def _termination_reason(state):
     single panel seat can take minutes, and any late-landing seat would reset a
     stall clock forever.
     """
-    if state.stop_fires >= state.max_stop_fires:
-        return (
-            f"livelock circuit breaker: {state.stop_fires} Stop fires without "
-            f"the loop finishing (limit {state.max_stop_fires})"
-        )
-    deadline = effective_deadline(
-        state.deadline_minutes,
-        opted_out=getattr(state, "no_deadline", False) is True)
-    if deadline == NO_DEADLINE:
-        # The operator opted the clock off at init (both marker halves present);
-        # the stop-fires cap remains the bound.
-        return None
-    minutes = elapsed_minutes(state.started_at)
-    if minutes is not None and minutes >= deadline:
-        return (
-            f"deadline reached: {minutes:.0f} minutes elapsed "
-            f"(limit {deadline})"
-        )
-    return None
+    return loop_bound_reason(vars(state))
 
 
 def _elapsed_note(state) -> str:
@@ -290,7 +275,7 @@ def _force_exit(loop_file: Path, state, reason: str) -> bool:
     """Turn the loop off the way `crew state deactivate` does, stamping
     `completed_at` + `reason` alongside `active=False`. Without them a
     force-exited loop is indistinguishable from a clean finish on later
-    inspection. This is the ONE writer of `exit_kind="force_exit"` (the `reason`
+    inspection. This is the Stop hook writer of `exit_kind="force_exit"` (the `reason`
     alongside it says WHICH bound tripped). The `force_exit` marker is what `crew
     state init` reads to refuse a fresh loop over a tripped bound without
     `--force`.
@@ -368,8 +353,10 @@ def _done_body(loop, session_flag, closing, cancel_cmd, state) -> str:
 {closing} To exit without that: `{cancel_cmd}`"""
 
 
-def _handle_loop(loop_file, state, parked, banner, task_text, detail_lines, recipe,
-                 cancel_cmd, done_body=""):
+def _handle_loop(loop_file: Path, state: LoopState, parked: bool, banner: str,
+                 task_text: str, detail_lines: list[str], recipe: str,
+                 cancel_cmd: str, done_body: str = "", *,
+                 project_body: Callable[[LoopState], str] | None = None) -> bool:
     """Shared Stop handling for both loops. Emits output; returns True if handled.
 
     The hook writes ONLY what it can honestly observe: `stop_fires`,
@@ -452,13 +439,13 @@ what did not, and what you were waiting on."""
     # keeps blocking. The terse wait guard is wrong here too (a recorded verdict
     # means no seat is in flight), so `done` overrides verbosity rather than
     # sitting behind it.
-    if done_body and completed:
+    if project_body is not None:
+        body = project_body(state)
+    elif done_body and completed:
         body = done_body
-    # Otherwise the full recipe is CREW_VERBOSE-only. It used to also print on the
-    # first fire, but the first fire is not special: the loop parks and re-fires
-    # many times per round, so that only bought a wall of text at the least useful
-    # moment. The one line that must survive terse mode is the wait guard:
-    # re-running a panel mid-flight deletes the seats that already landed.
+    # Build's full recipe is CREW_VERBOSE-only; its wait guard prevents rerunning
+    # a panel mid-flight. Engine-owned loops supply next-action guidance even in
+    # terse mode, so automatic re-entry never has to guess a command.
     elif is_verbose():
         body = recipe
     else:
@@ -554,9 +541,6 @@ To exit early: `/crew:cancel-build`""",
 
             if measure_state.active:
                 armed_state = measure_state
-                # adoption stamp (see build loop above).
-                if not measure_state.session_id and session_id:
-                    measure_state.session_id = session_id
                 _handle_loop(
                     measure_file,
                     measure_state,
@@ -564,25 +548,8 @@ To exit early: `/crew:cancel-build`""",
                     banner="Measure-Twice Loop",
                     task_text=truncate(measure_state.task, 120),
                     detail_lines=[f"Plan: {measure_state.plan_file}"],
-                    recipe=f"""
-Continue refining the plan. Verify via the multi-model panel
-(/crew:measure-twice Phase 3):
-1. If you just received panel feedback, revise the plan to address [BLOCKING] issues
-2. "${{CLAUDE_PLUGIN_ROOT}}/crew" review-prep {shlex.quote(measure_state.plan_file)}{session_flag}
-3. "${{CLAUDE_PLUGIN_ROOT}}/crew" state begin-review mt{session_flag} (freeze the run identity BEFORE any seat runs; leave the plan alone until the verdict is recorded)
-4. Fan out the PENDING seats from the prep JSON (a resumed run relaunches only those), wait for every seat, collect the FULL roster, synthesize
-5. Choose the verdict the digest supports. If its quorum header reads NOT MET, a COMPLETING verdict (APPROVED, or REVISE --minor-only) needs the user's explicit --force at step 6: quorum gates sign-off only. Where the usable seats found real blocking issues, choose a plain REVISE (or REJECT); otherwise relaunch the pending seats (same --run-id) or surface the shortfall, then re-collect and choose from the new digest
-6. Record that ONE chosen verdict: "${{CLAUDE_PLUGIN_ROOT}}/crew" state record-verdict mt <APPROVED|REVISE [--minor-only]|REJECT|FAILED>{session_flag} (the ONE place any verdict is recorded, whichever branch chose it; FAILED only when no seat returned anything usable). A completing verdict may exit 3 (a completion advisory tripped: short quorum, a drifted plan): it recorded NOTHING. Do NOT add --force yourself. Surface the advisory to the user, say what --force would do, and WAIT; re-run with --force ONLY on the user's explicit say-so (it is the human's authorization, never yours to originate)
-7. If that verdict completed the loop (APPROVED, or REVISE --minor-only), it printed phase=done: deactivate the loop and present the final plan
-
-If you are WAITING on seats that are still running, just wait. Do NOT re-run
-the panel and do NOT clear seat files that already landed.
-
-To exit early: `/crew:cancel-measure-twice`""",
-                    done_body=_done_body(
-                        "mt", session_flag,
-                        "Then present the final plan.",
-                        "/crew:cancel-measure-twice", measure_state),
+                    recipe="",
+                    project_body=lambda state: project_measure(vars(state), session_id=session_id).render(),
                     cancel_cmd="/crew:cancel-measure-twice",
                 )
                 return

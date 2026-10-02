@@ -18,13 +18,15 @@ This directory contains the Python backend for crew's persistence features. Hook
 ```
 scripts/
 ├── crew-state.py        # CLI for loop state management (reached via `crew state …`)
-├── models.py            # Dataclasses for all JSON structures
+├── models.py            # Dataclasses, schema-4 state and shared safety predicate
+├── loop_state.py        # Loop transactions and common verdict guard
+├── loop_projection.py   # Lightweight mt lifecycle text; no engine imports
 ├── persistent-mode.py   # Stop hook: enforces continuation
 ├── session-start.py     # SessionStart hook: restores state
 ├── cursor-env-capture.py # In-process capture helper called by session-start.py: records Cursor hook env names, the safe-value allowlist, and probe metadata
 ├── host_detect.py       # Stdlib host detector for the hook entry points
 ├── artifact_prune.py    # ENUMERATE-only stale-artifact finder (single source shared by `crew swab` + the session-start reporter); never deletes
-├── tests/               # Unit tests (test-review-workflow.py, test-hooks.py, test-multiagent.py, fixtures/)
+├── tests/               # Unit tests (test-measure-twice.py, test-review-workflow.py, test-hooks.py, test-multiagent.py, fixtures/)
 └── multiagent/          # Multi-model review and council engine (see below)
 ```
 
@@ -33,7 +35,8 @@ scripts/
 The engine powers `/crew:review`, `/crew:debate`, and the review steps of
 `/crew:build` and `/crew:measure-twice`. Standalone review is owned by
 `review_workflow.py`; its Markdown is only a host transport for issued actions.
-Build and measure-twice still use `review-prep`. Both paths resolve each catalog
+Measure-twice composes the shared review workflow through `measure_twice.py`.
+Build still uses `review-prep`. Both paths resolve each catalog
 seat against the current host: Claude seats are native Task seats on a Claude
 host and external `claude` CLI seats elsewhere; codex and agy rows are always
 external provider seats. Cursor rows are external everywhere EXCEPT standalone
@@ -162,7 +165,9 @@ launched so nested crew calls re-detect their host.
 ```
 multiagent/
 ├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher); subcommands: review | debate | review-next | review-claim | review-execute | review-submit | review-recover | review-retry | run | dispatch | build-executor | render (incl. --stage-all) | seats | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | wait (incl. --signal) | signal | doctor | probe | scaffold-config | swab
-├── review_workflow.py   # standalone review authority: exact schema transport, snapshot, lock/advance transaction, attempt history, repair, retry, and synthesis readiness
+├── measure_twice.py     # planning decisions, requirements, promotion, human questions and loop binding
+├── workflow_transport.py # deterministic capture and injected notification-driven native runner
+├── review_workflow.py   # shared review authority: exact schema transport, snapshot, lock/advance transaction, attempt history, repair, retry, and synthesis readiness
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
 ├── targets.py           # resolve a plan .md or git diff target (working-tree/branch/range A..B/commit/auto; untracked files as new-file diffs)
 ├── rounds.py            # run-id grammar (+traversal guard) shared with review runs, and the prior-round fold. NO model calls.
@@ -399,8 +404,9 @@ Key contracts (do NOT regress):
 
 ### Presets & config precedence
 
-- **Panel selection** — build and measure-twice accept `--panel full|lite|solo|cursor|quick` / `--seats <subset>`
-  and pass them STRAIGHT to `crew review-prep`. Review and review-prep keep the
+- **Panel selection** — build accepts `--panel full|lite|solo|cursor|quick` / `--seats <subset>`
+  and passes them to `crew review-prep`. Measure-twice resolves these flags in
+  its loop-owned review workflow. Review and review-prep keep the
   options independent: `--seats` replaces only the external subprocess subset,
   while `--panel` supplies native task seats when explicit seats name none.
   `review_workflow` uses the same shared resolver. The Python engine OWNS the resolution (`seats.merged_panels()`
@@ -462,7 +468,7 @@ Key contracts (do NOT regress):
   with that kind's rows of the catalog (`seats.group_tokens()` supplies the expansion members).
 - `render --stage --session-id <id>` stages a seat prompt to the FLAT
   `.crew/reviews/<session-id>/prompt-<seat-role>.txt`, pointer or no pointer:
-  only the Python run owners (`review-prep` for loops and `review_workflow` for
+  only the Python run owners (`review-prep` for build and `review_workflow` for
   standalone review) may write a run dir's frozen prompt files (session resolved in Python — arg →
   `CLAUDE_SESSION_ID` env — so the command carries no `${…}` expansion).
 - **Plugin-root `crew` dispatcher (canonical invocation).** Commands invoke the
@@ -480,7 +486,7 @@ Key contracts (do NOT regress):
   `prompt-<role>.txt` each in the FLAT session dir (never a run dir; see the
   `--stage` bullet) — and prints a JSON `{role: path}` map. The
   review-bearing commands (`review`/`build`/`measure-twice`) NO LONGER call it:
-  `review-prep` stages every Task-seat prompt itself against the run's frozen
+  Build’s `review-prep` stages every Task-seat prompt itself against the run's frozen
   snapshot (`task_prompt_paths` in its JSON), because a separate render would
   re-resolve the LIVE target and reopen the drift window the snapshot closes.
   Each role gets its own
@@ -517,11 +523,11 @@ Key contracts (do NOT regress):
   launch's failure): this is the clear that keeps `wait`'s existence barrier honest. Task-seat files
   remain in place because `wait` refuses Task seats; the next `persist-seat` overwrites a stale file.
 
-### Subprocess fan-out
+### Legacy build subprocess fan-out
 
-- **Per-seat fan-out (visibility).** Build and measure-twice fan subprocess seats
+- **Per-seat fan-out (visibility).** Build fans subprocess seats
   out ONE `crew run <seat>` call PER seat — each a separate, visible, killable
-  shell. Standalone review is workflow-only: it issues one external `WorkItem`
+  shell. Standalone review and migrated measure-twice are workflow-only: it issues one external `WorkItem`
   per seat and the thin host adapter invokes `review-execute` once per item; it
   never enters an ad-hoc fan-out.
 - The orchestrator then iterates `pending_subprocess_seats`, running each via `run <seat> --session-id
@@ -542,10 +548,10 @@ Key contracts (do NOT regress):
   all-failed abort to handle). Run-scoped misuse exits 2 with nothing written; the markdown-templated
   calls never hit those paths.
 
-### Task-seat dispatch & persist
+### Legacy build Task-seat dispatch & persist
 
 - (`review-prep` resolves BOTH seat kinds but EXECUTES neither — the Claude Task seats stay
-  orchestrator-DISPATCHED; build and measure-twice spawn each PENDING Task seat over its prep-staged prompt
+  orchestrator-DISPATCHED; build spawns each PENDING Task seat over its prep-staged prompt
   (`task_prompt_paths[seat]`) with `model = task_seat_models[seat]`, so it is no longer the
   opaque echo the commands ignored.)
 - After the fan-out, the orchestrator persists EACH normalized Task seat (opus/sonnet/fable) via `crew
@@ -556,15 +562,15 @@ Key contracts (do NOT regress):
   Write tool. Without `--run-id` while the session pointer exists, `persist-seat` exits 2 naming the
   fix (completion-time attribution by mutable pointer is the TOCTOU bug this closes).
   On the SUCCESS path a `crew:scribe` sub-agent does the tmp-seat `Write` (so the persist-Write does
-  not render into orchestrator context). In build.md and measure-twice.md, the
+  not render into orchestrator context). In build.md, the
   orchestrator's landing gate is the `persist-seat --verify` exit code against the on-disk
   record: exit 0 is done; on the success path, exit 4 routes to the FALLBACK, the fixed
   missing-file exit 2 also routes to the FALLBACK, and any other exit 2 is a hard stop.
-  Both loop docs use `persist-seat --verify`. In each, the scribe's self-reported line is not the landing
+  The build recipe uses `persist-seat --verify`; the scribe's self-reported line is not the landing
   authority, and a fallback uses a DISTINCT `tmp-seat-<seat>-fallback.md` path so a timed-out
   scribe's late write to the original tmp cannot clobber the fallback bytes.
 
-### Repair & collect
+### Legacy build repair & collect (shared low-level commands)
 
 - Each Task seat lands as a `<seat>.json` too, so the WHOLE panel (subprocess AND Task seats) flows
   through ONE `collect`. It then collapses the per-seat files into ONE GROUPED markdown digest with
@@ -592,12 +598,10 @@ Key contracts (do NOT regress):
     manifest names from `run.json`; usable = the success-only `result_valid` tier; NOT MET adds
     "an APPROVED verdict is not backed by quorum from this panel", a capability-NEUTRAL statement
     of fact, since this rubric is SHARED with standalone `/crew:review`, which has no override verb;
-    the `--force` guidance lives only in build.md / measure-twice.md). The loop
-    command markdown and standalone Python workflow HONOR this header at
+    build uses `--force`; migrated mt uses an exact bound human decision). Build markdown and the shared Python verdict guard HONOR this header at
     synthesis time: a NOT MET digest must not certify an APPROVED (nor a
     REVISE-minor-only completion) without the user's explicit `--force`. The header is ADVISORY (a
-    digest reader's summary); `crew state
-    record-verdict` recounts usable seats itself against the identity frozen in loop state, and that
+    digest reader's summary); the common `loop_state.apply_verdict` guard recounts usable seats against the identity frozen in loop state, and that
     count is what decides (a below-quorum completion is exit 3, clearable with `--force`, not a hard
     refusal). Non-skipped VERDICTS rows carry `[runtime-reported: <model>]` or,
     when any result in the digest has a runtime report, including failed or
@@ -640,8 +644,7 @@ Key contracts (do NOT regress):
   `run` repeats the subprocess clear at launch as the backstop for a re-prep-free relaunch; one derived
   file per seat, no globs). `collect` gains `--run-id` (fallback: the session pointer; with
   neither, the flat dir, byte-identical no-flag behavior). The orchestrator WAITS
-  for BOTH every subprocess run shell AND every Task-seat persist before collecting. `review` and
-  `/crew:debate` are workflow-owned; neither uses `collect`.
+  for BOTH every subprocess run shell AND every Task-seat persist before collecting. `review`, `/crew:debate` and migrated mt are workflow-owned; none uses the CLI `collect` recipe.
 - **`dispatch` (write-mode single-seat WORK delegation).** The EXECUTION
   complement to read-only review/debate: `crew dispatch "<task>" [--seat <name>]`
   sends ONE subprocess seat (default `luna`; resolution `--seat` >
@@ -916,7 +919,48 @@ the same way: crew cannot verify what it was asserting.
 A regression test in `tests/test-hooks.py` asserts crew's guidance names no
 `sk:`, no `select:LSP`, and no stack line even on a Kotlin tree.
 
-## crew-state CLI
+## Engine-owned measure-twice
+
+The normative public types, request-file grammar, exact document detection,
+question identities and CLI examples are in
+[measure-twice-protocol.md](../docs/measure-twice-protocol.md). Python owns all mt
+decisions; Markdown transports four MeasureStep responses. Advisor admission is
+static HostRoles metadata (Claude advisor/inherit/advisory access), not a
+host-specific stage machine. Unsupported advisor hosts refuse before activation.
+
+One optional `LoopState.mt_workflow` journal stores progress, actions and receipts;
+hook budgets remain in LoopState. Advisor output promotes from action staging to
+an immutable lifetime canonical path before review. Preparation freezes all
+inputs before run creation. `loop_review` identities include session/lifetime/
+generation; runs use no pointer. Every shared review action checks active owner
+under loop-before-review lock order. Standalone `review-next` refuses loop runs;
+review-local responses never advance mt. Explicit synthesis-only retry retains
+successful reviewers. `loop_state.apply_verdict` is the common build/mt guard.
+
+`loop_projection.py` is a leaf lifecycle renderer imported below hook version
+guards: no provider, review-engine or advisor dispatch. Hooks retain their
+termination-before-parking, bounded waits and counters. mt nudges contain only
+engine resume/next, including done finalization; build recipes remain intact.
+The mt projection renders after persisted Stop counter updates, in default and
+verbose modes. Build keeps its original body selection.
+Active bound/pending refs protect runs in artifact_prune. Terminal lifetime plan
+artifacts are reported for attended cleanup and never automatically deleted.
+
+Do not run upgraded source state verbs against an installed older live loop.
+Source regression sessions must use isolated project roots and session identities.
+`multiagent/claude_native_transport.py` binds actual Claude Code 2.1.287 native
+launch metadata to claimed owner/action/prompt/handle, then captures the exact
+JSONL `SubagentHandback.input.message` only after observed completion. The known
+host task alias is allowed only to its exact project/session/handle transcript.
+It uses existing guarded capture/receipts, preserves EOF and accepted replay,
+does not infer completion and adds no policy owner or model invocation.
+Unsupported surfaces retain the scribe/host-Write fallback. Keep CLI-owned
+background work alive until completion; an actual killed command requires
+confirmed recovery, preserving successful reviewers.
+The mandatory real Claude Code Stop/lifecycle cases and remaining limits are
+recorded in [Phase 4 evidence](../docs/phase-4-measure-twice-evidence.md).
+
+## crew-state CLI (build and legacy compatibility)
 
 Loop state management ships in `crew-state.py` but the commands invoke it through
 the plugin-root dispatcher as `crew state <sub> …` (one allowlist rule covering
@@ -942,7 +986,7 @@ crew state init mt --task "Add user profiles" --auto-plan --session-id abc123
 # may contain $(…)/backticks/quotes) OFF the shell line. -f maps to the loop's
 # text field and is mutually exclusive with --prompt/--task; a missing/unreadable
 # (incl. non-UTF-8) file exits nonzero with NO state file created. The loop
-# commands (build.md / measure-twice.md) Write the spill file and init with
+# build command Writes the spill file and initializes with
 # --consume, which deletes it after a SUCCESSFUL init (a failed init leaves it
 # for retry; --consume without -f exits 2; the session-start orphan-cleanup
 # patterns do NOT cover these task files). A RELATIVE -f resolves against the
@@ -964,6 +1008,8 @@ crew state init bl --prompt "Fix the auth bug" --deadline-minutes 90 --session-i
 # Check if this session has conflicts (other sessions ignored)
 crew state check-conflicts --session-id abc123
 
+# These setters/begin-review/record-verdict REFUSE migrated mt. Its typed engine
+# owns the plan path and accepted review binding. Build and legacy remain compatible.
 # Set a field. ONLY the loop's AGENT_SETTABLE allowlist (plan_file, for both
 # loops). Any other field exits 2 and writes nothing: the hook owns the bounds,
 # and the verdict/run-identity fields belong to the review verbs.
@@ -1055,9 +1101,9 @@ crew state deactivate bl --cancel --reason "User cancelled" --session-id abc123
 - `measure-twice-state-{session_id}.json`
 
 **Schema version + refuse-to-touch.** Every write stamps
-`"schema": SCHEMA_VERSION` (currently 3; 2 added the hook-owned termination
-fields, 3 unified both loops into one LoopState with a single `task` field);
-an ABSENT `schema` loads as 1, and schema-1/2 files keep working: the load
+`"schema": SCHEMA_VERSION` (currently 4; 2 added hook-owned termination
+fields, 3 unified LoopState, 4 adds optional `mt_workflow`);
+an ABSENT `schema` loads as 1, and schema-1/2/3 files keep working: the load
 coalesces the legacy `prompt`/`task_description` into `task` (coalesce_task),
 and the hook stamps a missing `started_at` on first fire so an adopted old
 loop is still bounded). Reads classify a file via `read_state_json` /
@@ -1408,7 +1454,8 @@ old delete path also retired the three data-loss bugs the review-run sweep carri
 ## Testing
 
 ```bash
-# Run all tests
+# Run all tests (Python 3.11+, with subprocess PATH resolving that interpreter)
+python3 plugins/crew/scripts/tests/test-measure-twice.py
 python tests/test-hooks.py
 
 # Run with verbose output

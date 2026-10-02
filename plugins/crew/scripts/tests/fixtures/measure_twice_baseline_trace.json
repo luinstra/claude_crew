@@ -1,0 +1,47 @@
+{
+  "source_commit": "b39f647",
+  "installed_plugin_version": "0.83.1",
+  "evidence_kind": "deterministic_recipe_characterization",
+  "capture_source": "commands/measure-twice.md and legacy state/review artifacts; not a live tool or token trace",
+  "scenario": "document -> advisor -> two native reviewers -> synthesis -> approve",
+  "panel": {
+    "seats": [
+      "opus",
+      "sonnet"
+    ],
+    "pins": [
+      "opus",
+      "sonnet"
+    ]
+  },
+  "events": [
+    "init",
+    "advisor",
+    "review-prep",
+    "begin-review",
+    "reviewer",
+    "reviewer",
+    "scribe",
+    "scribe",
+    "persist-seat",
+    "persist-seat",
+    "collect",
+    "synthesis",
+    "record-verdict",
+    "deactivate"
+  ],
+  "live_costs": null,
+  "target": {
+    "utf8": "# Plan\nWrite a harmless text file.\n",
+    "sha256": "843a4b0cd69b3a3e33f0141c684e4886dfc4ce99f95adb9fa42455fe3c5f600c"
+  },
+  "counts": {
+    "advisor": 1,
+    "reviewer": 2,
+    "formatter": 0,
+    "scribe": 2,
+    "parent_synthesis": 1
+  },
+  "limits": "Recipe characterization only; no observed orchestrator token, latency, polling or interrupted-resume counts.",
+  "schema3_models_source_sha256": "fff7b461fc66720d8fae26d043e6b207f4461abbaba4e9c7214f2046bd7c4c4f"
+}

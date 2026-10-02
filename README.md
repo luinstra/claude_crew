@@ -24,12 +24,19 @@ is warned about and dropped from the panel, never rerouted). Phase 1 also covers
 protocol compatibility deterministically through the Python CLI, but the Codex
 plugin does not yet expose standalone `/crew:review`; its app-native adapter
 remains deferred.
-Build and measure-twice continue to use their existing `review-prep` interface
-while those workflows are migrated.
+Measure-twice now uses the engine-owned planning protocol; build retains its
+existing `review-prep` interface.
 
 - **Claude Code** is the full experience: 8 agents, Stop-enforced persistence loops, and sk stack detection.
 - **Codex** is supported; see [`plugins/crew/docs/codex-host.md`](plugins/crew/docs/codex-host.md).
-- **Cursor** is supported: commands import, hooks deliver, and the one-shot flows review and dispatch run end to end. Debate has the same engine support and a native panelist role, but its Cursor live gate is still owed, so treat it as unvalidated on this host. Persistence loops are enabled, with two caveats: stop-coercion is unverified on this host, so a loop's Stop-hook enforcement is best-effort there, and the hooks only emit Cursor-shaped output when the host is bound (export `CREW_HOST=cursor` in the shell that launches Cursor: crew's commands now detect this host on their own, but a hook process inherits the launch shell, where the markers that make that possible are absent). Standalone `/crew:review` routes cursor-channel seats through native Cursor subagents: a cursor seat spawns natively only when its catalog row carries a `native_model`, an unpinned seat is warned about and dropped before the run identity freezes, and the shipped pin (`composer-2.5-fast`) is badge-verified in the app; every other subagent-dependent command (`/crew:analyze`, `/crew:code-search`, `/crew:execute`, `/crew:deepinit`, and the loop commands' executor and advisor steps) still runs under documented-unsupported silent substitution, where a Cursor-native agent answers in the role instead of the named crew agent. See [`plugins/crew/docs/cursor-host.md`](plugins/crew/docs/cursor-host.md).
+- **Cursor** is supported: commands import, hooks deliver, and the one-shot flows review and dispatch run end to end. Debate has the same engine support and a native panelist role, but its Cursor live gate is still owed, so treat it as unvalidated on this host. Persistence loops are enabled, with two caveats: stop-coercion is unverified on this host, so a loop's Stop-hook enforcement is best-effort there, and the hooks only emit Cursor-shaped output when the host is bound (export `CREW_HOST=cursor` in the shell that launches Cursor: crew's commands now detect this host on their own, but a hook process inherits the launch shell, where the markers that make that possible are absent). Standalone `/crew:review` routes cursor-channel seats through native Cursor subagents: a cursor seat spawns natively only when its catalog row carries a `native_model`, an unpinned seat is warned about and dropped before the run identity freezes, and the shipped pin (`composer-2.5-fast`) is badge-verified in the app; every other subagent-dependent command (`/crew:analyze`, `/crew:code-search`, `/crew:execute`, `/crew:deepinit`, and build's executor step) still runs under documented-unsupported silent substitution, where a Cursor-native agent answers in the role instead of the named crew agent. See [`plugins/crew/docs/cursor-host.md`](plugins/crew/docs/cursor-host.md).
+
+Measure-twice production advisor admission currently exists only for the Claude
+host. The workflow itself is host-neutral; other planning hosts are unsupported.
+The Phase 4 Claude Code CLI lifecycle cases, including automatic Stop
+continuation and exact direct native capture, are recorded with their limits in the
+[request protocol](plugins/crew/docs/measure-twice-protocol.md) and
+[gate/evidence record](plugins/crew/docs/phase-4-measure-twice-evidence.md).
 
 ## The Workflow
 
@@ -124,7 +131,9 @@ repo-relative path.
 | `/crew:cancel-measure-twice` | Exit an active measure-twice loop early |
 
 `/crew:review` uses a fixed target grammar rather than guessing from arbitrary
-prose: an empty target or `latest plan` selects the newest `.crew/plans/*.md`;
+prose: an empty target or `latest plan` selects the newest flat `.crew/plans/*.md`
+or canonical `.crew/plans/<task>-<lifetime-uuid>/plan-N.md` (transport artifacts
+and symlinks are excluded);
 an explicit `.md` path selects that plan; and code review accepts `code`,
 `working-tree`, `branch`/`branch vs <base>`, `commit:<sha>` (or a bare SHA), and
 Git ref ranges. Ambiguous text returns `needs_input`, asks one exact question,
@@ -503,7 +512,7 @@ Specialized agents for different tasks. Use via `Task(subagent_type="crew:agent-
 | **reviewer** | Panel seat for `/crew:review` (read-only by convention — has `Bash` for git inspection, not sandbox-enforced; spawned at `model: opus` / `model: sonnet`) | (driven by `/crew:review`) |
 | **panelist** | Discuss-mode council seat issued by the debate workflow (Claude host; the Cursor host issues crew-panelist) | (driven by `/crew:debate`) |
 | **formatter** | Reformats one review seat's raw output into the structured FINDINGS schema (faithful transform, read-only, `model: haiku`) for the per-seat repair fallback | (driven by the review/build/measure-twice repair step) |
-| **scribe** | Lands one native review seat's text at an engine-issued ingress path so the Write does not render in the terminal (verbatim transcribe, `Write`-only, `model: haiku`) | (driven by standalone review transport and the build/measure-twice persist step) |
+| **scribe** | Lands one native review seat's text at an engine-issued ingress path so the Write does not render in the terminal (verbatim transcribe, `Write`-only, `model: haiku`) | (driven by workflow return transport and the legacy build persist step) |
 
 ### Quick Reference
 
@@ -659,7 +668,7 @@ The plugin creates state files in `.crew/`:
 | `.crew/build-state-<session-id>.json` | Build loop state (session-scoped) |
 | `.crew/measure-twice-state-<session-id>.json` | Measure-twice loop state (session-scoped) |
 | `.crew/context-snapshot.md` | Saved context (via /crew:save-context) |
-| `.crew/plans/*.md` | Generated plans |
+| `.crew/plans/*.md`, `.crew/plans/<task>-<lifetime-uuid>/plan-N.md` | Legacy and engine-owned canonical plans |
 
 State files are session-scoped (`-<session-id>` suffix) so concurrent sessions
 don't collide; a legacy unsuffixed `.crew/build-state.json` is still read for

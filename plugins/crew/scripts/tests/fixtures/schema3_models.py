@@ -1,3 +1,4 @@
+# Pinned downgrade fixture: b39f647 models.py (schema 3), do not modernize.
 #!/usr/bin/env python3
 """
 Data models for Claude Crew hooks.
@@ -10,7 +11,6 @@ from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import ClassVar, Optional, Any
-from collections.abc import Mapping
 import contextlib
 import json
 import os
@@ -291,9 +291,7 @@ class SessionStartResult:
 # the hook-owned bounds that motivated the historical schema-2 bump.  Only the
 # continuation-aware reader consults them, and an empty loop_instance_id is
 # explicitly non-reusable.
-SCHEMA_VERSION = 4
-# Schema 4 adds the optional engine-owned measure-twice journal. Schema-3
-# installs refuse these files; build's recipe and continuation fields are unchanged.
+SCHEMA_VERSION = 3
 
 # Termination bounds, both hook-owned. They are deliberately generous: a bound
 # that trips during legitimate work teaches the agent to route around it, which
@@ -419,19 +417,6 @@ def elapsed_minutes(started_at: str):
 # clock is normal; minutes ahead is not a clock, it is a value nothing should
 # trust with the only cost ceiling in the system.
 CLOCK_SKEW_TOLERANCE_MINUTES = 2
-
-
-def loop_bound_reason(data: Mapping[str, object]) -> str | None:
-    """Shared safety predicate for hook termination and workflow admission."""
-    fires = effective_count(data.get("stop_fires"), 0)
-    maximum = effective_count(data.get("max_stop_fires"), DEFAULT_MAX_STOP_FIRES)
-    if fires >= maximum:
-        return f"livelock circuit breaker: {fires} Stop fires without the loop finishing (limit {maximum})"
-    deadline = effective_deadline(data.get("deadline_minutes"), opted_out=data.get("no_deadline") is True)
-    minutes = elapsed_minutes(data.get("started_at"))
-    if deadline != NO_DEADLINE and minutes is not None and minutes >= deadline:
-        return f"deadline reached: {minutes:.0f} minutes elapsed (limit {deadline})"
-    return None
 
 
 def effective_started_at(value):
@@ -723,7 +708,6 @@ class LoopState:
     # A build-loop init stamps all three: loop_instance_id plus the executor and
     # resume_executor values the recipe resolved for this loop.
     loop_instance_id: str = ""
-    mt_workflow: dict[str, object] | None = None
     executor: str = ""
     resume_executor: bool | None = None
 
@@ -778,7 +762,6 @@ class LoopState:
                 if isinstance(data.get("loop_instance_id"), str)
                 else ""
             ),
-            mt_workflow=data.get("mt_workflow"),
             executor=(
                 data.get("executor")
                 if isinstance(data.get("executor"), str)

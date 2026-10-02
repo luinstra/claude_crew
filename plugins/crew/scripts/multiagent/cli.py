@@ -797,7 +797,7 @@ def cmd_review_retry(args: argparse.Namespace) -> int:
             for value in (args.seats or "").split(",")
             if (seat := value.strip())
         )
-        req = review_workflow.RetryRequest(_review_ref_from_args(args), seats_arg or None)
+        req = review_workflow.RetryRequest(_review_ref_from_args(args), () if getattr(args, "synthesis_only", False) else seats_arg or None)
         print(_workflow_step_json(review_workflow.retry_review(req)))
         return 0
     except (review_workflow.WorkflowError, review_runs.ReviewRunError, OSError) as exc:
@@ -4981,6 +4981,93 @@ def cmd_swab(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_measure_protocol(args: argparse.Namespace) -> int:
+    from multiagent import measure_twice as measure, workflow_transport as transport
+    from multiagent import claude_native_transport as native
+    import loop_state
+    try:
+        command = args.measure_command
+        if command in {"measure-twice", "measure-twice-resume"}:
+            session = review_workflow._session(review_workflow.ReviewRequest("", session_id=args.session_id))
+        if command == "measure-twice-resume":
+            data = loop_state.read(loop_state.resolve("mt", session))
+            raw = str(data.get("task") or data.get("task_description") or "")
+            if data.get("mt_workflow") is not None:
+                value = measure.step_to_dict(measure.next_measure_twice(measure._ref(data)))
+            else:
+                value = measure.step_to_dict(measure.start_measure_twice(measure.MeasureRequest(raw, session)))
+        elif command == "measure-twice":
+            path = Path(args.request_file)
+            request = measure.request_from_dict(json.loads(path.read_text(encoding="utf-8")), args.session_id)
+            if args.consume:
+                # The request is caller data; never consume a live state or source document.
+                state_path = loop_state.resolve("mt", session)
+                selected = measure._document(measure.parse_arguments(request.raw_arguments))
+                if path.resolve() == state_path.resolve() or (selected and path.resolve() == selected.resolve()):
+                    raise review_workflow.WorkflowError("invalid_request", "request spill collides with persistent input")
+            step = measure.start_measure_twice(request)
+            if args.consume:
+                path.unlink()
+            value = measure.step_to_dict(step)
+        elif command in {"review-native-bind", "review-native-capture"}:
+            launch = native.NativeLaunch(_review_ref_from_args(args), args.action_id, args.handle, Path(args.output_file))
+            value = (native.bind_native_launch(launch) if command.endswith("-bind") else
+                     review_workflow.review_step_to_dict(native.capture_native_return(launch,
+                         completion_observed=args.completion_observed, status=args.status, diagnostic=args.diagnostic)))
+        elif command == "review-capture":
+            content = Path(args.returned_file).read_bytes() if args.returned_file else b""
+            judgment = transport.SynthesisJudgment(args.verdict, args.minor_only) if args.verdict else None
+            value = review_workflow.review_step_to_dict(transport.capture_review_return(
+                _review_ref_from_args(args), args.action_id, content, status=args.status,
+                judgment=judgment, diagnostic=args.diagnostic, capture_path=args.returned_file))
+        else:
+            ref = measure.parse_measure_ref({"schema": 1, "session_segment": args.session_segment,
+                                            "loop_instance_id": args.loop_instance_id})
+            if command == "measure-twice-next":
+                value = measure.step_to_dict(measure.next_measure_twice(ref))
+            elif command == "measure-twice-claim":
+                value = measure.claim_measure_action(ref, args.action_id)
+            elif command == "measure-twice-submit":
+                result = measure.parse_measure_result(json.loads(Path(args.submission_file).read_text(encoding="utf-8")))
+                if result.ref != ref:
+                    raise review_workflow.WorkflowError("invalid_ref", "submission owner differs from command owner")
+                value = measure.step_to_dict(measure.submit_measure_action(measure.MeasureSubmission(result)))
+            elif command == "measure-twice-capture":
+                content = Path(args.returned_file).read_bytes() if args.returned_file else b""
+                value = measure.step_to_dict(transport.capture_measure_return(ref, args.action_id, content,
+                    status=args.status, diagnostic=args.diagnostic, capture_path=args.returned_file))
+            elif command in {"measure-twice-native-bind", "measure-twice-native-capture"}:
+                launch = native.NativeLaunch(ref, args.action_id, args.handle, Path(args.output_file))
+                value = (native.bind_native_launch(launch) if command.endswith("-bind") else
+                         measure.step_to_dict(native.capture_native_return(launch,
+                             completion_observed=args.completion_observed, status=args.status, diagnostic=args.diagnostic)))
+            elif command == "measure-twice-recover":
+                request = measure.MeasureRecovery(ref, args.action_id, "not_running" if args.confirm_not_running else "")
+                value = measure.step_to_dict(measure.recover_measure_action(request))
+            elif command == "measure-twice-cancel":
+                value = measure.step_to_dict(measure.cancel_measure_twice(ref, args.reason))
+            elif command == "measure-twice-decide":
+                requirements = None
+                if args.answers_file:
+                    answers = json.loads(Path(args.answers_file).read_text(encoding="utf-8"))
+                    if not isinstance(answers, list) or any(not isinstance(answer, str) for answer in answers):
+                        raise review_workflow.WorkflowError("invalid_request", "answers file must be an ordered string array")
+                    requirements = measure.CapturedRequirements(args.question_id, tuple(answers))
+                decision = measure.MeasureDecision(ref, args.question_id, args.kind, args.confirmation,
+                    args.retained_phase, args.retained_run_id, args.completed_action, args.plan_sha256, requirements)
+                value = measure.step_to_dict(measure.decide_measure_twice(ref, decision))
+            else:
+                raise review_workflow.WorkflowError("invalid_request", "unknown measure transport verb")
+        print(json.dumps(value, ensure_ascii=False))
+        return 0
+    except (review_workflow.WorkflowError, loop_state.LoopStateError, review_runs.ReviewRunError,
+            OSError, ValueError, TypeError) as exc:
+        if isinstance(exc, loop_state.LoopStateError):
+            exc = review_workflow.WorkflowError(exc.code, str(exc))
+        print(json.dumps(_review_command_error(exc), ensure_ascii=False))
+        return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multiagent",
@@ -5119,9 +5206,82 @@ def build_parser() -> argparse.ArgumentParser:
         help="retry pending standalone reviewer seats from a terminal attempt",
     )
     add_review_ref(review_retry)
-    review_retry.add_argument("--seats", default=None)
+    retry_mode = review_retry.add_mutually_exclusive_group()
+    retry_mode.add_argument("--seats", default=None)
+    retry_mode.add_argument("--synthesis-only", action="store_true")
     review_retry.set_defaults(func=cmd_review_retry)
 
+
+    start_measure = sub.add_parser("measure-twice", help="start or resume engine-owned planning")
+    start_measure.add_argument("-f", "--request-file", required=True, type=anchor_path)
+    start_measure.add_argument("--session-id", required=True)
+    start_measure.add_argument("--consume", action="store_true")
+    start_measure.set_defaults(func=cmd_measure_protocol, measure_command="measure-twice")
+
+    resume_measure = sub.add_parser("measure-twice-resume", help="resume the current lifetime or adopt legacy state")
+    resume_measure.add_argument("--session-id", required=True)
+    resume_measure.set_defaults(func=cmd_measure_protocol, measure_command="measure-twice-resume")
+
+    def add_measure_ref(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--session-segment", required=True)
+        parser.add_argument("--loop-instance-id", required=True)
+
+    def add_native_capture(parser: argparse.ArgumentParser, command: str) -> None:
+        parser.add_argument("--handle", required=True)
+        parser.add_argument("--output-file", required=True)
+        if command.endswith("-capture"):
+            parser.add_argument("--completion-observed", action="store_true")
+            parser.add_argument("--status", choices=("ok", "failed", "timeout", "cancelled"), default="ok")
+            parser.add_argument("--diagnostic")
+
+    for command in ("measure-twice-next", "measure-twice-claim", "measure-twice-submit",
+                    "measure-twice-capture", "measure-twice-recover", "measure-twice-decide", "measure-twice-cancel",
+                    "measure-twice-native-bind", "measure-twice-native-capture"):
+        measure_parser = sub.add_parser(command, help="engine-owned planning protocol")
+        add_measure_ref(measure_parser)
+        measure_parser.set_defaults(func=cmd_measure_protocol, measure_command=command)
+        if command in {"measure-twice-claim", "measure-twice-capture", "measure-twice-recover",
+                       "measure-twice-native-bind", "measure-twice-native-capture"}:
+            measure_parser.add_argument("--action-id", required=True)
+        if command in {"measure-twice-native-bind", "measure-twice-native-capture"}:
+            add_native_capture(measure_parser, command)
+        if command == "measure-twice-submit":
+            measure_parser.add_argument("-f", "--submission-file", required=True, type=anchor_path)
+        if command == "measure-twice-recover":
+            measure_parser.add_argument("--confirm-not-running", action="store_true")
+        if command == "measure-twice-cancel":
+            measure_parser.add_argument("--reason", required=True)
+        if command == "measure-twice-decide":
+            measure_parser.add_argument("--question-id", required=True)
+            measure_parser.add_argument("--kind", required=True, choices=("legacy_work_not_running", "requirements", "retry_requirements", "retry_advisor",
+                "retry_synthesis", "retry_review", "force", "continue", "cancel"))
+            measure_parser.add_argument("--confirmation")
+            measure_parser.add_argument("--retained-phase")
+            measure_parser.add_argument("--retained-run-id")
+            measure_parser.add_argument("--completed-action", choices=("initial_plan", "revision", "replan"))
+            measure_parser.add_argument("--plan-sha256")
+            measure_parser.add_argument("--answers-file", type=anchor_path)
+        if command == "measure-twice-capture":
+            measure_parser.add_argument("-f", "--returned-file", type=anchor_path)
+            measure_parser.add_argument("--status", choices=("ok", "failed", "timeout", "cancelled"), default="ok")
+            measure_parser.add_argument("--diagnostic")
+
+    capture = sub.add_parser("review-capture", help="hash and submit an issued native return directly")
+    add_review_ref(capture)
+    capture.add_argument("--action-id", required=True)
+    capture.add_argument("-f", "--returned-file", type=anchor_path)
+    capture.add_argument("--status", choices=("ok", "failed", "timeout", "cancelled"), default="ok")
+    capture.add_argument("--diagnostic")
+    capture.add_argument("--verdict", choices=("APPROVED", "REVISE", "REJECT"))
+    capture.add_argument("--minor-only", action="store_true")
+    capture.set_defaults(func=cmd_measure_protocol, measure_command="review-capture")
+
+    for command in ("review-native-bind", "review-native-capture"):
+        native_parser = sub.add_parser(command, help="bind or capture an observed Claude Code native return")
+        add_review_ref(native_parser)
+        native_parser.add_argument("--action-id", required=True)
+        add_native_capture(native_parser, command)
+        native_parser.set_defaults(func=cmd_measure_protocol, measure_command=command)
 
     seats_p = sub.add_parser(
         "seats",

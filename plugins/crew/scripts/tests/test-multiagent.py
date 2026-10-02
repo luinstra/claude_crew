@@ -7167,149 +7167,21 @@ def test_build_md_executor_fork_sentinels():
 
 
 def test_measure_twice_md_loop_sentinels():
-    log_section("measure-twice.md loop sentinels")
+    log_section("measure-twice host transport")
     raw = (SCRIPT_DIR.parent / "commands" / "measure-twice.md").read_text(encoding="utf-8")
-    norm = " ".join(raw.split())
-
-    pins = [
-        ("literal 1", "**If `$ARGUMENTS` contains a file path**"),
-        ("literal 2", "Do NOT re-interview the user."),
-        ("literal 3", "**Skip this phase if a design doc was referenced above.**"),
-        ("literal 4", "Then get the state to find the plan file path:"),
-        ("literal 5", 'subagent_type="crew:advisor"'),
-        ("literal 6", "Save the plan to: [plan_file from state]"),
-        ("literal 7", "No `--base`: a plan-file target ignores it."),
-        ("literal 8", "**Leave the plan file untouched until the verdict is recorded**"),
-        ("literal 9", "`record-verdict mt REVISE --minor-only`, then complete the loop"),
-        ("literal 10", "**`--force` is the HUMAN's authorization, carried out by you; you never originate it.**"),
-        ("literal 11", "REVISE and REJECT advance `revision_round`, the loop's only honest iteration count."),
-        ("literal 12", "FAILED is only for a panel that returned nothing usable; a SECOND consecutive FAILED ends the loop itself (stamps it inactive; no deactivate follows)."),
-        ("literal 13", "**On REVISE, diagnose the CLASS before revising.**"),
-        ("literal 14", "`--reason \"Completion forced over advisories\"`"),
-        ("literal 15", "could not verify quorum without the user's explicit --force:"),
-        ("literal 16", "could not review — all seats failed:"),
-        (
-            "literal 17",
-            "resolve a RELATIVE path against the project root "
-            "(`<project-root>/.crew/plans/bar.md`, per Conventions), never a bare "
-            "cwd-relative path a divergent cwd would resolve against the wrong "
-            "tree; an ABSOLUTE path is read as-is.",
-        ),
-    ]
-    offsets = {}
-    for label, phrase in pins:
-        normalized = " ".join(phrase.split())
-        offsets[label] = norm.find(normalized)
-        check(
-            f"measure-twice.md loop: {label} is present",
-            offsets[label] >= 0,
-            "normalized literal present",
-            phrase,
-        )
-
-    anchors = [
-        ("phase 2", "## Phase 2: Plan Generation"),
-        ("phase 3", "## Phase 3: Review Loop"),
-        ("3d", "#### 3d — Synthesize the verdict"),
-        ("step 4", "### Step 4: Handle Verdict"),
-        ("completing", "## Completing the Loop"),
-    ]
-    anchor_offsets = {}
-    for label, phrase in anchors:
-        anchor_offsets[label] = norm.find(phrase)
-        check(
-            f"measure-twice.md loop: {label} section anchor is present",
-            anchor_offsets[label] >= 0,
-            "normalized section anchor present",
-            phrase,
-        )
-
-    check(
-        "measure-twice.md loop: literal 2 precedes plan generation",
-        offsets["literal 2"] < anchor_offsets["phase 2"],
-        "literal 2 before phase 2",
-        f"literal={offsets['literal 2']} anchor={anchor_offsets['phase 2']}",
-    )
-    check(
-        "measure-twice.md loop: literal 5 lies in plan generation",
-        anchor_offsets["phase 2"] < offsets["literal 5"] < anchor_offsets["phase 3"],
-        "literal 5 between phases 2 and 3",
-        f"phase2={anchor_offsets['phase 2']} literal={offsets['literal 5']} phase3={anchor_offsets['phase 3']}",
-    )
-    for label in ("literal 15", "literal 16"):
-        check(
-            f"measure-twice.md loop: {label} is bounded in synthesis",
-            anchor_offsets["3d"] < offsets[label] < anchor_offsets["step 4"],
-            f"{label} between 3d and step 4",
-            f"3d={anchor_offsets['3d']} literal={offsets[label]} step4={anchor_offsets['step 4']}",
-        )
-    for label in ("literal 9", "literal 10"):
-        check(
-            f"measure-twice.md loop: {label} is bounded in verdict handling",
-            anchor_offsets["step 4"] < offsets[label] < anchor_offsets["completing"],
-            f"{label} between step 4 and completing",
-            f"step4={anchor_offsets['step 4']} literal={offsets[label]} completing={anchor_offsets['completing']}",
-        )
-    check(
-        "measure-twice.md loop: literal 14 follows completion anchor",
-        offsets["literal 14"] > anchor_offsets["completing"],
-        "literal 14 after completing",
-        f"literal={offsets['literal 14']} completing={anchor_offsets['completing']}",
-    )
-
-    fence_lines = _fence_lines("measure-twice.md")
-    state_specs = [
-        ("await", "state await mt --session-id", ()),
-        ("init", "state init mt", ("-f", "--session-id", "--auto-plan", "--consume")),
-        ("show", "state show mt --session-id", ()),
-        ("begin-review", "state begin-review mt --session-id", ()),
-        (
-            "record-verdict",
-            "state record-verdict mt",
-            ("<APPROVED|REVISE|REJECT|FAILED>", "[--minor-only]"),
-        ),
-        ("deactivate", "state deactivate mt --reason", ()),
-    ]
-    state_lines = {}
-    for label, verb, tokens in state_specs:
-        matches = [line for line in fence_lines if verb in line]
-        state_lines[label] = matches[0] if len(matches) == 1 else ""
-        check(
-            f"measure-twice.md loop: {label} argv appears once",
-            len(matches) == 1,
-            "one matching state fence",
-            str(matches),
-        )
-        for token in tokens:
-            check(
-                f"measure-twice.md loop: {label} argv includes {token}",
-                len(matches) == 1 and token in matches[0],
-                f"{token} is present on the state fence",
-                str(matches),
-            )
-
-    state_order = [
-        "await",
-        "init",
-        "show",
-        "begin-review",
-        "record-verdict",
-        "deactivate",
-    ]
-    positions = [fence_lines.index(state_lines[label]) if state_lines[label] else -1 for label in state_order]
-    check(
-        "measure-twice.md loop: every state argv position is present",
-        all(position >= 0 for position in positions),
-        "all state argv positions are nonnegative",
-        str(positions),
-    )
-    check(
-        "measure-twice.md loop: state verbs stay in loop order",
-        all(position >= 0 for position in positions)
-        and all(left < right for left, right in zip(positions, positions[1:])),
-        "await < init < show < begin-review < record-verdict < deactivate",
-        str(positions),
-    )
+    check("measure-twice delegates next steps to Python",
+          "measure-twice-next --session-segment" in raw and "MeasureStep" in raw,
+          "engine protocol", raw[:200])
+    check("measure-twice removes legacy panel and verdict recipes",
+          all(verb not in raw for verb in ("review-prep", "persist-seat", "state begin-review", "state record-verdict")),
+          "no old choreography", "old recipe remains")
+    check("measure-twice uses issued claim and capture commands",
+          "commands.claim" in raw and "commands.capture" in raw,
+          "issued commands", "missing claim/capture")
+    for line in _fence_lines("measure-twice.md"):
+        check("measure-twice shell fence is a simple dispatcher invocation",
+              line.startswith('"${CLAUDE_PLUGIN_ROOT}/crew"') and "&&" not in line and "$(" not in line,
+              "simple dispatcher", line)
 
 
 def test_debate_md_driver_sync():
@@ -7424,6 +7296,11 @@ def test_persist_seat_doc_sync():
 
     for rel in docs:
         text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
+        if rel == "commands/measure-twice.md":
+            check("measure-twice transport retains fresh claim-authorized Tasks and full batch overlap",
+                  "fresh" in text and "commands.claim" in text and "entire independent review batch" in text,
+                  "claim authorization and concurrency", "missing transport contract")
+            continue
         if rel == "commands/review.md":
             from multiagent import review_workflow as _review_workflow
             import shlex
@@ -7704,7 +7581,7 @@ def test_persist_seat_doc_sync():
     REF_SPAWN = "Read <run_dir>/prompt-"
     for rel in docs:
         text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
-        if rel == "commands/review.md":
+        if rel in {"commands/review.md", "commands/measure-twice.md"}:
             continue
         check(f"{rel} spawns Task seats BY REFERENCE: {REF_SPAWN!r}",
               REF_SPAWN in text, "present", "MISSING (drifted back to inline paste?)")
@@ -7727,7 +7604,7 @@ def test_persist_seat_doc_sync():
     ]
     for rel in docs:
         text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
-        if rel == "commands/review.md":
+        if rel in {"commands/review.md", "commands/measure-twice.md"}:
             continue
         for marker in RETURN_FILE_MARKERS:
             check(f"{rel} has NO reverted RETURN-FILE flow: {marker!r}",
@@ -7766,7 +7643,7 @@ def test_persist_seat_doc_sync():
     ]
     for rel in docs:
         text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
-        if rel == "commands/review.md":
+        if rel in {"commands/review.md", "commands/measure-twice.md"}:
             continue
         # Prose sentinels wrap across lines; collapse whitespace so a legit
         # line break inside a pinned phrase does not read as a drift.
@@ -11543,20 +11420,14 @@ def test_command_fences_no_expansions():
           "no task-bl rm fence", str([l for l in build_lines if "task-bl-" in l]))
 
     mt_lines = _fence_lines("measure-twice.md")
-    init_mt = [l for l in mt_lines if "state init mt" in l]
-    check("measure-twice.md: state init mt uses the quoted relative -f spill + --auto-plan + --consume",
-          len(init_mt) == 1
-          and '-f ".crew/task-mt-<session-id>.txt"' in init_mt[0]
-          and "--auto-plan" in init_mt[0] and "--consume" in init_mt[0],
-          "quoted relative -f + --auto-plan + --consume", str(init_mt))
-    check("measure-twice.md: no separate rm of the task-mt spill remains (--consume owns it)",
-          not any(l.split()[:1] == ["rm"] and "task-mt-" in l for l in mt_lines),
-          "no task-mt rm fence", str([l for l in mt_lines if "task-mt-" in l]))
-
+    starts = [line for line in mt_lines if 'crew" measure-twice -f' in line]
+    check("measure-twice uses a request-file spill and consumes it",
+          len(starts) == 1 and "--session-id" in starts[0] and "--consume" in starts[0],
+          "request spill with literal session", str(starts))
     # The run-dir reconstructions keep the sanitized <session_segment> stem
     # (never the raw <session-id>) and the relative .crew/reviews/ root.
     for name in ("review.md", "build.md", "measure-twice.md"):
-        if name == "review.md":
+        if name in {"review.md", "measure-twice.md"}:
             continue
         lines = _fence_lines(name)
         persist = [l for l in lines if "persist-seat" in l and "-f" in l.split()]
@@ -15993,6 +15864,11 @@ def test_workplan_doc_sync():
     }
     for filename, keys in expected.items():
         raw = (PLUGIN_ROOT / "commands" / filename).read_text(encoding="utf-8")
+        if filename == "measure-twice.md":
+            check("measure-twice documents the owned workflow ref and capture contract",
+                  "MeasureRef" in raw and "commands.capture" in raw and "raw_arguments" in raw,
+                  "measure protocol", "missing protocol")
+            continue
         if filename == "review.md":
             check("review.md documents the standalone workflow JSON/ref contract",
                   "review-next --session-segment" in raw

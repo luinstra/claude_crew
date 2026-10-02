@@ -501,12 +501,16 @@ def standalone_synthesis(
     panel_path: str,
     full_path: str,
     artifact_manifest: list[tuple[str, str]],
+    *,
+    allow_reject: bool = False,
 ) -> str:
     """Build the standalone synthesis prompt from engine-issued artifacts."""
     manifest = "\n".join(
         f"{ordinal}. {seat}: {path}"
         for ordinal, (seat, path) in enumerate(artifact_manifest, 1)
     )
+    blocking_verdict = "REVISE or REJECT" if allow_reject else "REVISE"
+    judgments = "APPROVED, REVISE or REJECT" if allow_reject else "APPROVED or REVISE"
     return (
         "Synthesize the issued review evidence into a concise judgment.\n"
         "Read the ordered effective artifacts in frozen-roster order, then the "
@@ -518,11 +522,11 @@ def standalone_synthesis(
         "Apply the product rubric exactly:\n"
         "- Reconcile VERDICTS, CRITERIA, GROUPED FINDINGS, and RAW/UNPARSED evidence.\n"
         "- Evaluate a singleton review on its merits; do not reject it merely for being alone.\n"
-        "- Any substantiated [BLOCKING] finding requires REVISE. [MINOR] findings alone do not.\n"
+        f"- Any substantiated [BLOCKING] finding requires {blocking_verdict}. [MINOR] findings alone do not.\n"
         "- Strict-majority quorum controls whether the result certifies approval, not whether synthesis runs.\n"
         "- Never choke on partial, failed, or malformed seats; preserve usable evidence and explain uncertainty.\n"
         "Write the concise synthesis artifact. Return the typed judgment separately "
-        "as APPROVED or REVISE with minor_only.\n"
+        f"as {judgments} with minor_only.\n"
     )
 
 

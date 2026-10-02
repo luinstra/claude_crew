@@ -1485,10 +1485,10 @@ def main():
 
             # Measure-twice restore banner: panel wording present
             test_contains(
-                "SessionStart (terse) - 'Continue until the panel approves the plan' nudge present",
+                "SessionStart (terse) - engine resume command present",
                 session_start,
                 json.dumps({"directory": str(test_path)}),
-                "Continue until the panel approves the plan",
+                "measure-twice-resume",
             )
 
             # Clean up measure-twice state for next test
@@ -1511,7 +1511,7 @@ def main():
                     f"SessionStart - a phase=done loop names `crew state deactivate {alias}`",
                     session_start,
                     json.dumps({"directory": str(test_path)}),
-                    f"`crew state deactivate {alias}`",
+                    f"`crew state deactivate {alias}`" if alias == "bl" else "measure-twice-resume",
                 )
                 (crew_dir / state_name).unlink()
 
@@ -1662,10 +1662,10 @@ def main():
                 '{"active": true, "task_description": "Design auth", "plan_file": ".crew/plans/auth.md"}'
             )
             test_contains_verbose(
-                "Measure-twice nudge (verbose) - prescribes panel (review-prep)",
+                "Measure-twice nudge (verbose) - asks engine to resume",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                "review-prep",
+                "measure-twice-resume",
             )
             (crew_dir / "measure-twice-state.json").write_text(
                 '{"active": true, "task_description": "Design auth", "plan_file": ".crew/plans/auth.md"}'
@@ -1685,10 +1685,10 @@ def main():
                 "plan_file": ".crew/plans/auth plan.md",
             }))
             test_contains_verbose(
-                "Measure-twice nudge (verbose) - shell-quotes spaced plan path",
+                "Measure-twice nudge (verbose) - displays spaced plan as data",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                "review-prep '.crew/plans/auth plan.md'",
+                "Plan: .crew/plans/auth plan.md",
             )
 
             # The measure-twice nudge renders the same shlex.quote'd session_flag
@@ -1880,7 +1880,7 @@ def main():
 
             (crew_dir / "build-state.json").unlink()
 
-            # Measure-twice terse/verbose (same contract as the build loop).
+            # Measure-twice always transports its engine continuation.
             (crew_dir / "measure-twice-state.json").write_text(
                 '{"active": true, "task_description": "Design profiles", "plan_file": ".crew/plans/profiles.md"}'
             )
@@ -1891,11 +1891,12 @@ def main():
                 log_fail("Terse nudge (mt): recipe absent",
                          "does NOT contain 'When APPROVED'", out_terse_mt[:300])
 
-            if "/crew:cancel-measure-twice" in out_terse_mt and "Just wait" in out_terse_mt:
-                log_pass("Terse nudge (mt): keeps the wait guard + exit command")
+            if ("/crew:cancel-measure-twice" in out_terse_mt and "Engine-owned" in out_terse_mt
+                    and out_terse_mt.count("measure-twice-resume") == 1 and "Just wait" not in out_terse_mt):
+                log_pass("Terse nudge (mt): issues engine continuation + exit command")
             else:
-                log_fail("Terse nudge (mt): keeps the wait guard + exit command",
-                         "contains 'Just wait' and '/crew:cancel-measure-twice'", out_terse_mt[:300])
+                log_fail("Terse nudge (mt): issues engine continuation + exit command",
+                         "one engine resume, '/crew:cancel-measure-twice', no generic wait guard", out_terse_mt[:300])
 
             if ("[Measure-Twice Loop]" in out_terse_mt and "stop fires: 1/150" in out_terse_mt
                     and "Round" not in out_terse_mt
@@ -1921,30 +1922,18 @@ def main():
                          "contains '[Measure-Twice Loop]' and 'stop fires: 2/150'", out_terse_mt2[:300])
 
             out_mt_v = run_script_verbose(persistent_mode, json.dumps({"directory": str(test_path)}))
-            if "Verify via the multi-model panel" in out_mt_v:
-                log_pass("Verbose nudge (mt): full recipe present")
+            if "measure-twice-resume" in out_mt_v and "Engine-owned" in out_mt_v:
+                log_pass("Verbose mt nudge renders engine continuation")
             else:
-                log_fail("Verbose nudge (mt): full recipe present",
-                         "contains 'Verify via the multi-model panel'", out_mt_v[:300])
-
-            if ("state begin-review mt" in out_mt_v
-                    and "state record-verdict mt" in out_mt_v):
-                log_pass("Verbose nudge (mt): recipe prescribes begin-review + record-verdict")
+                log_fail("Verbose mt nudge renders engine continuation", "engine resume", out_mt_v[:300])
+            if all(verb not in out_mt_v for verb in ("review-prep", "state begin-review mt", "state record-verdict mt")):
+                log_pass("Verbose mt nudge carries no panel or verdict policy")
             else:
-                log_fail("Verbose nudge (mt): recipe prescribes begin-review + record-verdict",
-                         "contains 'state begin-review mt' and 'state record-verdict mt'",
-                         out_mt_v[:600])
-
-            # EXACTLY ONE step owns record-verdict. A recipe that recorded, then
-            # said "record it, then deactivate" a step later prescribed a second
-            # call that record-verdict refuses from phase=done: an orchestrator
-            # following the steps literally could never complete the loop.
-            if out_mt_v.count("state record-verdict mt") == 1:
-                log_pass("Verbose nudge (mt): record-verdict prescribed exactly once")
+                log_fail("Verbose mt nudge carries no panel or verdict policy", "no old recipes", out_mt_v[:300])
+            if out_mt_v.count("measure-twice-resume") == 1:
+                log_pass("Verbose mt nudge issues one continuation command")
             else:
-                log_fail("Verbose nudge (mt): record-verdict prescribed exactly once",
-                         "1 occurrence of 'state record-verdict mt'",
-                         f"{out_mt_v.count('state record-verdict mt')} occurrences")
+                log_fail("Verbose mt nudge issues one continuation command", "one command", out_mt_v[:300])
 
             (crew_dir / "measure-twice-state.json").unlink()
 
@@ -3878,10 +3867,10 @@ def main():
                 _saved = json.load(f)
             # Schema 3 unified both loops into one LoopState (task/loop/review
             # fields); older schema-1/2 files still load, with coalesced task.
-            if _saved.get("schema") == 3:
-                log_pass("save() stamps schema:3")
+            if _saved.get("schema") == 4:
+                log_pass("save() stamps schema:4")
             else:
-                log_fail("save() stamps schema:3", "3", str(_saved.get("schema")))
+                log_fail("save() stamps schema:4", "3", str(_saved.get("schema")))
 
             # --- Atomicity: crash between temp-write and os.replace ---
             # A monkeypatched os.replace records the TEMP file's mode (proving
@@ -4358,11 +4347,11 @@ def main():
                 if (out_v1.get("decision") == "block"
                         and stamped
                         and models_module.parse_iso(stamped) is not None
-                        and after.get("schema") == 3):
+                        and after.get("schema") == 4):
                     log_pass(f"{loop}: schema-1 state with no started_at is stamped on the first Stop fire")
                 else:
                     log_fail(f"{loop}: schema-1 state with no started_at is stamped on the first Stop fire",
-                             "block + parseable started_at + schema:3",
+                             "block + parseable started_at + schema:4",
                              f"decision={out_v1.get('decision')}, started_at={stamped!r}, "
                              f"schema={after.get('schema')}")
 
@@ -4784,7 +4773,7 @@ def main():
             # to the one legal step left instead of force-exiting. ---
             for loop, banner, deactivate_cmd in (
                 ("bl", "Build Loop", "state deactivate bl"),
-                ("mt", "Measure-Twice Loop", "state deactivate mt"),
+                ("mt", "Measure-Twice Loop", "measure-twice-resume"),
             ):
                 for bound, extra in (
                     ("stop-fires cap", {"stop_fires": 2, "max_stop_fires": 2}),
@@ -7103,7 +7092,7 @@ def main():
                 # override verbosity rather than hide behind it.
                 for label, out in (("terse", run_script(persistent_mode, payload)),
                                    ("verbose", run_script_verbose(persistent_mode, payload))):
-                    routes_to_deactivate = f"state deactivate {loop}" in out
+                    routes_to_deactivate = (f"state deactivate {loop}" if loop == "bl" else "measure-twice-resume") in out
                     prescribes_dead_verbs = (f"state begin-review {loop}" in out
                                              or f"state record-verdict {loop}" in out)
                     if routes_to_deactivate and not prescribes_dead_verbs:

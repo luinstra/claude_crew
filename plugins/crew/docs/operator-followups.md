@@ -7,6 +7,14 @@
 > here: the related gate is marked "engine complete, app gate pending" in
 > `multi-harness-engine-roadmap.md` until the item is done.
 
+**Scheduling, 2026-09-03.** The Cursor items here (F2.1 through F2.5, F3.1, and
+F3.2) are DEFERRED to the end of the roadmap queue, after Phase 8A, and the
+roadmap says to stop and check with the operator before starting that section.
+Do not run them as part of ordinary phase work and do not treat them as blocking
+a phase gate; "Deferred: Cursor work" in `multi-harness-engine-roadmap.md`
+carries the reason. F3.0 is the exception: it is a Claude gate, it is not
+deferred, and it stays owed.
+
 Conventions for every item: run it from `<repo root>` and copy the prompt text
 verbatim. Results that land under `.crew/reviews/` need no paste; report the run
 id that contains them.
@@ -268,9 +276,15 @@ exactly:
 `/crew:debate --seats sol,opus Should a single-round council keep rendering the strict-majority quorum header when it produces no verdict?`
 
 Assert the observable route: one work batch with two reviewer items, one
-`driver=external channel=codex` at `gpt-5.6-sol` with `access: read-only`, and one
+`driver=external channel=codex` at the installed catalog/config's resolved `sol`
+model pin with `access: read-only`, and one
 `driver=native role=crew:panelist channel=claude model=opus` with `access:
 read-only-advisory`.
+
+Record the installed plugin version and the frozen `sol` model pin from
+`run.json` before comparing routes. The source exercise above used an older
+model generation; its historical pin is not the current installed gate's
+required model.
 
 Assert the action sequence: the external execute runs in the background while the
 native Task runs in the foreground, the native return lands through the issued

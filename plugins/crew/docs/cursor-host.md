@@ -39,7 +39,7 @@ batches are EXTERNAL `cursor-agent` CLI evidence only; see the scope warning.
 ## Loops
 
 - Whether Cursor honors a `followup_message` stop-coercion response is UNVERIFIED on this host (unverified, 2026-08-17)
-- Loops are ENABLED on this host by operator decision (2026-08-18): the build and measure-twice commands arm loops on Cursor exactly as on other hosts. A cursor-host guard that refused to arm shipped briefly and was removed by that decision
+- Loops are ENABLED on this host by operator decision (2026-08-18): legacy build and measure-twice recipes armed loops on Cursor as on other hosts; the source mt cutover now refuses unsupported advisor admission before new activation. A cursor-host guard that refused to arm shipped briefly and was removed by that decision
 - Honest caveat, unchanged by the enablement: whether Cursor honors `followup_message` stop coercion is unverified, and the Stop hook was observed NOT firing on a pure-text turn end, so loop persistence on this host is best-effort. Loop state, budgets, and the panel gates all work; what is unproven is the hook's ability to drag a stopping session back (unverified, 2026-08-18)
 
 ## Seat execution
@@ -82,11 +82,11 @@ Four consequences worth stating plainly:
   mints a fresh attempt on the FROZEN native route, so it gets a fresh in-session
   spawn and no more.
 - **Only review and debate are routed.** `/crew:analyze`, `/crew:code-search`,
-  `/crew:execute`, `/crew:deepinit`, and the loop commands' executor and advisor
+  `/crew:execute`, `/crew:deepinit`, and build's executor
   steps still run under the documented-unsupported silent substitution described
   in the routing row below: a Cursor-native agent answers in the role instead of
   the named crew agent. This native admission change applies to standalone
-  review and debate. Build and measure-twice retain their `review-prep` orchestration and
+  review and debate. Build retains its `review-prep` orchestration and
   existing admission until their later phases.
 - **Native role tools are inherited; `readonly: true` is SHIPPED but unverified
   here.** A reviewer, panelist, formatter, or scribe spawned in-session gets the launching
@@ -128,7 +128,7 @@ assumptions it exists to answer.
 - Historical pre-Phase-1 probe: the former `/crew:review` pipeline ran live end to end through review-prep, per-seat engine runs, and collect; this records the old route and is not evidence for the current workflow protocol (verified live, 2026-08-17)
 - All three external channels authenticate inside Cursor: the codex CLI, the cursor-agent CLI, and the claude CLI. Opus and fable ran as external Claude-channel seats with truthful channel provenance stamps (verified live, 2026-08-17)
 - Panel prep is host-truthful: with no native Claude channel on this host, every seat, including Claude voices, routes external through the `claude` CLI. Captured while detection still read `unknown`, and the routing it records is unchanged by the marker fill, since it follows from the absent Claude channel rather than from the host name (verified live, 2026-08-17)
-- Commands whose recipes spawn Claude Task agents (`/crew:analyze`, `/crew:code-search`, `/crew:execute`, `/crew:deepinit`, and the loop commands' default executor and advisor steps) run with SILENT SUBSTITUTION: a Cursor-native agent answers in the role instead of the named crew agent. This is documented-unsupported, not guarded (verified live, 2026-08-18)
+- Commands whose recipes spawn Claude Task agents (`/crew:analyze`, `/crew:code-search`, `/crew:execute`, `/crew:deepinit`, and build's default executor step) run with SILENT SUBSTITUTION: a Cursor-native agent answers in the role instead of the named crew agent. This is documented-unsupported, not guarded (verified live, 2026-08-18)
 
 ### In-flight reviews across this change
 
@@ -653,3 +653,11 @@ Consequences for crew:
   2 of 2, the external cursor seat `runtime-reported` (`Composer 2.5`) and the
   native sonnet seat `requested-only`. The cursor answer carried no review
   block, so the digest listed it unparsed. No app-surface probe ran.
+
+## Measure-twice source cutover
+
+Cursor has no admitted production advisor route in this phase: new engine-owned
+planning returns `unsupported_planning_host` before activation. The stage
+machine is host-neutral; this is static host-role admission, not a new Cursor
+lifecycle claim. The deferred Cursor Stop gate remains owed. See
+[protocol](measure-twice-protocol.md) and [Phase 4 evidence](phase-4-measure-twice-evidence.md).

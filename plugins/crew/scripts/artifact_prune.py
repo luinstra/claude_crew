@@ -178,9 +178,22 @@ def live_run_keys(crew_dir: Path) -> set:
         if not is_active_value(data.get("active", False)):
             continue
         run_id = data.get("run_id")
-        if not isinstance(run_id, str) or not MINTED_RUN_DIR_RE.match(run_id):
+        if isinstance(run_id, str) and MINTED_RUN_DIR_RE.fullmatch(run_id):
+            keys.add((session_segment(data.get("session_id") or ""), run_id))
+        journal = data.get("mt_workflow")
+        if not isinstance(journal, dict):
             continue
-        keys.add((session_segment(data.get("session_id") or ""), run_id))
+        pending = journal.get("pending_review_inputs")
+        refs = [journal.get("review_ref"), pending.get("ref") if isinstance(pending, dict) else None]
+        for ref in refs:
+            if (isinstance(ref, dict) and set(ref) == {"schema", "session_segment", "run_id", "attempt_id", "target_sha256"}
+                    and type(ref.get("schema")) is int and ref["schema"] == 1
+                    and isinstance(ref.get("session_segment"), str)
+                    and re.fullmatch(r"[A-Za-z0-9_-]+", ref["session_segment"])
+                    and isinstance(ref.get("run_id"), str) and MINTED_RUN_DIR_RE.fullmatch(ref["run_id"])
+                    and isinstance(ref.get("attempt_id"), str) and re.fullmatch(r"attempt-[0-9]{4}", ref["attempt_id"])
+                    and isinstance(ref.get("target_sha256"), str) and SHA256_RE.fullmatch(ref["target_sha256"])):
+                keys.add((ref["session_segment"], ref["run_id"]))
     return keys
 
 

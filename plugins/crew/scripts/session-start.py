@@ -38,6 +38,7 @@ import io
 from pathlib import Path
 
 import artifact_prune
+from loop_projection import project_measure
 from models import (
     SessionStartInput,
     SessionStartResult,
@@ -427,7 +428,7 @@ def loop_budget_line(data: dict) -> str:
     return f"Budget: stop fires {fires}/{max_fires} · elapsed {elapsed}/{limit} min"
 
 
-def loop_next_step(data: dict, ongoing: str, loop: str) -> str:
+def loop_next_step(data: dict, ongoing: str, loop: str, *, session_id: str = "") -> str:
     """What the restored loop's NEXT move is, which depends on its phase.
 
     From `done` a completing verdict (APPROVED, or REVISE --minor-only) is
@@ -441,6 +442,8 @@ def loop_next_step(data: dict, ongoing: str, loop: str) -> str:
     `crew state deactivate` just errors on the missing positional, so the one step
     the guidance names has to be the runnable command.
     """
+    if loop == "mt":
+        return project_measure(data, session_id=session_id).render()
     if (data.get("phase") or "drafting") == "done":
         note = override_completion_note(data.get("last_verdict_overrides"))
         if note:
@@ -557,7 +560,7 @@ def build_session_status(
                             f"Task: {task}\n"
                             f"Plan: {plan}\n"
                             + loop_next_step(
-                                data, "Continue until the panel approves the plan.", "mt")
+                                data, "Continue until the panel approves the plan.", "mt", session_id=session_id)
                         )
                     else:
                         other_session_loops.append(

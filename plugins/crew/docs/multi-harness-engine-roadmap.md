@@ -30,9 +30,11 @@ At completion:
 - native host subagents are used where supported, while existing external CLI
   providers remain first-class execution routes;
 - Claude behavior remains working throughout the migration;
-- Cursor gains first-class in-app subagents as the first new host target;
-- Codex receives a first-class adapter after the workflow design has been
-  proven in Claude and Cursor;
+- Cursor gained in-app review subagents as the first new host target, verified
+  live in the app; its debate seats ship on the same seam but are not yet
+  exercised there, and its remaining work is deferred (see "Deferred: Cursor
+  work");
+- Codex receives a first-class adapter once the workflow design is proven;
 - review seats remain fresh, executor continuation remains executor-only, and
   current frozen-target, quorum, failure-isolation, route, and loop-state
   invariants remain enforced; and
@@ -49,7 +51,40 @@ Other Task-oriented commands such as `analyze`, `code-search`, `execute`, and
 them into scope; their current silent substitution is not legitimized by this
 migration.
 
+## Queue order
+
+Phases run 1, 2, 3, 4, 5, 7, 8A. Phase 6 and the other remaining Cursor-native
+work are deferred to the end and collected under "Deferred: Cursor work"; STOP
+before starting that section and check with the operator. 8B (rebrand) is the
+operator's call and is not scheduled here. The reason for the reorder is in that
+section.
+
 ## Grounded starting point
+
+### Current handoff (2026-10-01)
+
+The current integration branch is `codex/multi-harness-engine`, with the
+Phase 1-3 engine work at `b39f647`. That work is pushed but has not been merged
+into `main`. Standalone review and council/debate use the Python workflow;
+measure-twice and build still use `review-prep` and own their loops in Markdown.
+The app gates listed in `operator-followups.md` remain owed.
+
+The next implementation is Phase 4, followed by Phase 5. Its implementation plan
+is saved alongside this roadmap as
+[phase-4-measure-twice-plan.md](phase-4-measure-twice-plan.md) and must be
+reviewed against the current integration tree. Publish the reviewed plan and
+roadmap together; this local planning update has not been committed or pushed.
+Phase 5 gets its plan only
+after Phase 4 proves the loop/review composition interface. This planning
+update does not implement either phase or close a host gate.
+
+The older machine-local `chunk-c-measure-twicemd-shim-refactor-*` and
+`chunk-c-buildmd-shim-refactor-*` plans describe an earlier prose-reduction
+approach. Their rules preserving Markdown loop decisions and prohibiting engine
+changes are superseded by Phases 4 and 5. Retain their invariant and transport
+history as reference, not as current execution instructions.
+
+### Existing implementation
 
 This is a restructuring of an existing Python engine, not a greenfield rewrite.
 Paths in this section are relative to `plugins/crew/`. The current code already
@@ -71,12 +106,12 @@ provides most of the difficult lower-level behavior:
 - `models.py` plus `crew-state.py` own the current build and measure-twice loop
   state and guarded transitions.
 
-The primary remaining problem is ownership. Command Markdown and hook recipes
-still decide which operation happens next, render some role prompts, invoke
-native Claude Tasks, perform workflow-specific retries and repair, synthesize
-outcomes, and branch on verdicts. That logic is duplicated across review,
-debate, measure-twice, and build and cannot be reused faithfully by Cursor or
-Codex.
+The remaining ownership problem is in measure-twice, build, and their lifecycle
+hooks. They still decide which operation happens next, carry planning or
+implementation prompts, perform review transport and repair, synthesize
+outcomes, and branch on verdicts. Standalone review and debate have migrated to
+the Python workflow. The loops must compose that implementation rather than
+retain another owner of review policy.
 
 The migration therefore deepens the existing Python modules behind one small
 workflow interface. It does not replace working providers, routing, state,
@@ -129,7 +164,42 @@ Commands, skills, agent definitions, and hooks become thin protocol drivers at
 the time their workflow migrates. Static host metadata and tool permissions may
 remain host-specific; canonical role instructions and flow decisions do not.
 
-### Routing and `via`
+### Deterministic transport and execution runtimes
+
+A model provider identifies the requested model service. An execution runtime
+identifies how an agent conversation is run. A native agent may use a model from
+any provider its runtime supports. Native versus external therefore does not
+decide whether Python can execute the work: some hosts expose native operations
+only to the parent agent, while an SDK adapter can run native conversations from
+code. Preserve the shipped seats, panels, and `via` selection semantics; expose
+only the minimal adapter seam the current phase exercises.
+
+The existing provider-specific native-channel mapping is the shipped Claude
+and Cursor implementation, not a requirement for every future harness. A future
+runtime that admits several model providers must not need a separate workflow
+or silently reroute existing seats. OpenHands integration and any general
+capability registry are deferred; a deterministic adapter using direct result
+capture is sufficient to test the new loop seam without claiming host support.
+
+Move argument parsing and quoting, artifact hashing, result-envelope
+construction, and mechanical persistence into code wherever the host can
+transport the required input. Keep host-specific spawning, awaiting,
+cancellation, and result return in the adapter. Do not add an agent for
+bookkeeping. Retain the existing scribe transport only where the host needs it
+for return/transcript handling, and document that limitation. A runtime with
+direct result capture persists the return in code rather than invoking a
+scribe. Deterministic helpers never reinterpret review text as instructions or
+discard its raw form.
+
+Each loop cutover must preserve overlapping independent reviews and avoid
+polling. Record orchestration tool calls, bookkeeping model invocations,
+reviewer freshness, elapsed wall time, provider time, and interruption/resume
+behavior on an equivalent baseline and migrated run with the same target,
+models, and panel. Deterministic execution traces gate the cutover; live token
+and latency observations are reported separately and are not a promised
+speedup. Explain any added orchestration calls before the phase closes.
+
+### Shipped routing and `via`
 
 The existing configuration model remains the routing foundation:
 
@@ -169,8 +239,8 @@ role either. `docs/engine-notes.md` carries the reasoning.
 | Hook serializers and host detection | Keep |
 | Workflow recipes embedded in hooks | Move into Python in the owning loop phase |
 | Claude agent definitions | Retain only as thin native-role adapters where needed |
-| Cursor agent surface | DONE for review: `agents-cursor/` ships the thin reviewer, scribe, and formatter roles the standalone review workflow drives. Advisor and executor roles remain for their own phases |
-| Codex skills and native roles | Add last against the proven interface |
+| Cursor agent surface | DONE for review and debate: `agents-cursor/` ships four thin roles (reviewer, panelist, scribe, formatter). Review is app-verified, debate is not yet. Advisor and executor roles are deferred |
+| Codex skills and native roles | Add against the proven interface, ahead of the deferred Cursor work |
 
 The deletion test governs the result: if the workflow module disappeared,
 workflow complexity should reappear across every harness. Deleting a harness
@@ -196,12 +266,30 @@ them.
 
 ## Development discipline
 
-Every numbered phase is separately planned, reviewed, implemented, verified,
-and merged before the next phase begins.
+Every numbered phase is separately planned, reviewed, implemented, and verified.
+Integrate its reviewed prerequisite work before starting the next implementation.
+The current branch handoff above is an explicit exception permitting the next
+plan to be reviewed before the outstanding Phase 1-3 merge; it does not authorize
+a merge or treat the phase's unrun host gates as passed.
+
+Two exceptions let a phase advance with a gate arm outstanding. Both keep the
+arm named in the phase's own gate, so nothing is quietly dropped, and no other
+exception is sanctioned:
+
+- An OPERATOR-ONLY arm, one needing a GUI, an account action, or a push, never
+  blocks engine work. It moves to `docs/operator-followups.md` and stays owed
+  there. This is the existing policy in that file, stated here so the two agree.
+- A SCOPE arm with an explicit entry in "Deferred: Cursor work" is rescheduled
+  to the end of the queue. A WHOLE phase may be deferred the same way, which is
+  why the queue runs 7 before 6; a deferred phase does not gate the phases that
+  follow it in number.
 
 For every phase:
 
-1. Start from current `main` on a dedicated branch.
+1. Establish the reviewed prerequisite baseline. Prefer current `main` after
+   integration; if preceding phases are still on an integration branch, name
+   that dependency explicitly and do not start from an older `main` missing
+   their engine. Do not rewrite pushed prerequisite history to fit a plan.
 2. Write an implementation plan limited to that phase's outcome and exit gate.
 3. Tell reviewers explicitly that downstream schemas and mechanics are out of
    scope unless the current phase cannot work without them.
@@ -227,7 +315,9 @@ For every phase:
    Do not carry the old executable phase tree to a final cleanup phase.
 10. Stop at the phase gate. Do not implement later-host or later-workflow
     machinery to make the current phase appear more comprehensive.
-11. Merge before producing the implementation plan for the next phase.
+11. Verify and integrate the phase before producing the next implementation
+    plan, except for the explicitly recorded current handoff above. A downstream
+    plan cannot claim a prerequisite gate passed merely because code is present.
 12. Keep exactly one final generated version-bump commit for each merged phase;
     intermediate bump commits are consolidated before merge.
 
@@ -371,9 +461,10 @@ Status: engine complete for council and debate; app gates pending (F3.0, F3.1, F
 
 #### Exit gate
 
-Claude and Cursor complete deterministic and bounded live council/debate
-scenarios through the same adapters, including fresh-seat and partial-failure
-cases. No debate or council phase tree remains in Markdown.
+Claude completes deterministic and bounded live council/debate scenarios
+through the shared adapters, including fresh-seat and partial-failure cases. No
+debate or council phase tree remains in Markdown. The Cursor arm of this gate
+(F3.1 and F3.2) is deferred: see "Deferred: Cursor work".
 
 #### Deferred
 
@@ -384,35 +475,46 @@ or executor roles.
 
 #### Outcome
 
-Measure-twice becomes a Python-owned workflow that composes review and can be
-driven or resumed in both Claude and Cursor.
+Measure-twice becomes a Python-owned workflow that composes review behind a
+host-neutral interface. Adding a host must not require new workflow policy.
+Claude is the only production harness this phase proves, and the phase claims
+nothing more.
 
 #### Scope
 
 - Move advisor instructions, planning prompts, requirements decisions, budgets,
   deadlines, cancellation, verdict handling, and revision transitions into
   Python.
-- Add the read-only Cursor-native advisor in this phase so Cursor can perform
-  the planning action needed by the phase's own exit gate. It uses the proven
-  Phase 2 native-work seam with a Python-rendered advisor prompt.
 - Reuse the current `LoopState` and guarded `crew-state.py` transitions rather
   than creating a parallel persistence system.
 - Compose the engine-owned review workflow.
+- Bind each child review to its owning loop and revision without overwriting
+  standalone-review pointers. Preserve the state completion gate's frozen run,
+  target hash, roster, drift, and human-only override checks; name the guarded
+  handoff and replay behavior in the phase plan.
+- Move deterministic transport behind code helpers, exercise direct result
+  capture with a fake runtime, and compare orchestration overhead with the
+  existing loop on equivalent work.
 - Reduce the measure-twice command to a protocol driver.
 - Migrate only the measure-twice branch of SessionStart and Stop to lifecycle
   translation plus a request for the engine's next action. The existing build
   branch remains intact until Phase 5 migrates it; shared-hook tests cover both
   branches and their current precedence during the transition.
 - Preserve Claude's existing automatic continuation behavior.
-- Make explicit resume complete and supported in Cursor; improve automatic
-  Cursor continuation only if live hook behavior proves it.
 
 #### Exit gate
 
 A harmless plan-only loop can start, pause, resume, revise, and complete in
-Claude and Cursor with the same Python decisions. Claude automatic continuation
-still works, and Cursor has an honest explicit-resume path even if its Stop hook
-cannot reliably force another turn.
+Claude with the same Python decisions, and Claude automatic continuation still
+works. The workflow stays host-neutral (no Claude-only assumption enters the
+Python), but the Cursor arm of this gate is deferred: see "Deferred: Cursor
+work".
+
+The gate also requires one production owner of planning/revision/review policy,
+safe interruption and replay without duplicate agent work or renewed budgets,
+an all-native direct-capture test with no scribe, unchanged build behavior, and
+recorded baseline/migrated orchestration counts. This phase does not claim an
+OpenHands implementation or mechanically enforced access without host evidence.
 
 ### Phase 5 — Engine-owned build using existing executor routes
 
@@ -429,55 +531,38 @@ continuation store, workspace guards, and review workflow.
 - Preserve existing external write-capable executor routes and guarded
   continuation behavior.
 - Keep reviewers fresh and continuation limited to the executor.
-- Allow Cursor to complete build using the existing external Codex CLI executor
-  before Cursor-native write execution is added. `cursor-agent` is not an
-  acceptable substitute, and the read-only Claude provider is not presented as
-  a write route. If the configured write-capable executor is unavailable on the
-  current machine, the phase gate blocks rather than silently changing routes.
+- Reuse the Phase 4 loop/review and transport seams. Preserve target and workspace
+  guards, and record comparable orchestration overhead for the disposable build.
+- Never present a read-only provider as a write route, and never substitute one
+  executor for another to get a build to run. If the configured write-capable
+  executor is unavailable on the current machine, the phase gate blocks rather
+  than silently changing routes. This is a route-honesty rule and holds on every
+  host.
 - Reduce the build command and remaining build hook recipe to protocol driving.
 
 #### Exit gate
 
-A disposable build completes in Claude and Cursor, route identity and workspace
-guards remain enforced, executor continuation works where configured, reviewers
-remain fresh, and no host driver owns build policy. Explicit resume is the
-complete Cursor baseline; automatic continuation is required only when the
-current installed Cursor hooks have proven actual re-entry.
+A disposable build completes in Claude, route identity and workspace guards
+remain enforced, executor continuation works where configured, reviewers remain
+fresh, and no host driver owns build policy. The Cursor arm of this gate is
+deferred: see "Deferred: Cursor work".
 
 ### Phase 6 — Cursor-native executor and proven lifecycle improvements
 
-#### Outcome
-
-Cursor gains a native executor without changing workflow semantics or weakening
-access controls.
-
-#### Scope
-
-- Add the Cursor-native executor adapter using Python-rendered prompts. The
-  read-only Cursor advisor already landed with the workflow that first needs it
-  in Phase 4.
-- Admit native writes only after a disposable-workspace probe proves the
-  requested access, role scope, cancellation, and result behavior.
-- Route the new Cursor-native build work through the same `via` and host
-  resolver seam already used by review and the Phase 4 advisor.
-- Improve Cursor automatic lifecycle continuation only when an observed hook
-  event actually re-enters the engine; otherwise keep explicit resume as the
-  truthful supported path.
-- Preserve all existing Claude behavior.
-
-#### Exit gate
-
-Cursor completes a disposable native-write build through the shared engine, and
-the Phase 4 native-advisor regression remains green. If automatic continuation
-is advertised, a live probe demonstrates actual re-entry; otherwise explicit
-resume remains the documented behavior.
+DEFERRED to the end of the queue, as deferred item 4. Its scope and exit gate
+live in "Deferred: Cursor work" at the end of this document, where one bullet
+changed: the read-only Cursor advisor it used to inherit from Phase 4 is now
+deferred item 1 and must land first. The number is kept so existing references
+stay valid.
 
 ### Phase 7 — First-class Codex adapter
 
 #### Outcome
 
-Codex becomes the third first-class workflow harness after the interface has
-been proven by Claude and Cursor.
+Codex becomes the next first-class workflow harness. The interface it reuses was
+proven by Claude, and by the Cursor review seats verified live in the app. The
+Cursor debate seats ship on that same interface but have not been exercised
+there, so they are not offered as evidence.
 
 #### Scope
 
@@ -497,7 +582,8 @@ been proven by Claude and Cursor.
 
 Codex completes review, council/debate, measure-twice, and build through the
 shared engine at its honestly verified native/external and lifecycle tiers. The
-Claude and Cursor regression gates remain green.
+Claude regression gates remain green, and no Cursor behavior already shipped
+regresses.
 
 ### Phase 8 — Cleanup, rebrand, and release
 
@@ -516,7 +602,10 @@ migrated workflow and an evidence-backed support statement.
   not create a stale compatibility repository or a parallel maintained fork.
 - Retain generic `crew` identifiers unless changing one provides a concrete
   product benefit.
-- Refresh and validate the current installed copy in Claude, Cursor, and Codex.
+- Refresh and validate the current installed copy in every harness whose
+  validation is runnable at the time: Claude and Codex in 8A, plus any Cursor
+  check that needs no GUI. The Cursor marketplace-refresh validation is F2.4 and
+  is deferred past 8A, so 8A neither requires nor waits on it.
 - Document the execution and lifecycle behavior actually demonstrated in each
   harness.
 - Publish the release notes.
@@ -526,25 +615,135 @@ that every removed path is unused, then **8B rebrand/release** renames and
 publishes the already-clean product. Naming cannot block or disguise the
 single-implementation cleanup gate.
 
+#### Exit gate for 8A (cleanup)
+
+Every path removed is proven unused; no superseded workflow implementation
+remains for any workflow already migrated; command Markdown, skills, hooks, and
+host adapters carry no workflow prompts or flow decisions; and the installed
+artifacts match the validated source on the harnesses whose installed validation
+is runnable under Phase 8A's scope. The deferred Cursor refresh stays owed at
+F2.4. 8A does not wait on the deferred Cursor work or on any naming change, and it is the last
+scheduled phase before the stop boundary.
+
+#### Exit gate for 8B (rebrand and release)
+
+The repository and user-visible product are presented as Motley Crew and the
+release notes are published. 8B is the operator's call and is not scheduled by
+this roadmap.
+
+#### Completion gate for the roadmap
+
+All four workflows use the same Python engine in every harness the roadmap
+claims to support, at the tiers each harness has actually demonstrated; F3.0 has
+run; and 8B has shipped. This gate is reached only after the deferred Cursor
+work is completed, or formally dropped.
+
+Formally dropping it is not a silent omission: it means editing "Desired
+outcome" and "Overall completion criteria" in the same change, so the roadmap
+stops claiming a harness it no longer intends to support. Until that edit
+happens, those sections stand and the deferred work is owed.
+
+## Deferred: Cursor work
+
+Everything in this section is queued AFTER Phase 8A. **Stop before starting it
+and check with the operator.**
+
+The recovered scheduling decision is dated 2026-09-03. It deferred remaining
+Cursor-specific work while shared-engine work continued. The historical draft
+motivated that choice with operator-reported model-access uncertainty; this
+roadmap does not assert that report as a current provider fact. The scheduling
+choice is retained, and changing it requires an explicit rescheduling decision.
+
+Existing Cursor review and debate seats, the four `agents-cursor/` role adapters,
+host detection, and hook output shapes remain shipped. Review is app-verified;
+debate is not, which is what F3.1 and F3.2 would settle. Deferral does not remove
+those paths or waive their regression coverage.
+
+### Deferred item 1: the read-only Cursor-native advisor
+
+Was Phase 4 scope. Add the read-only Cursor-native advisor so Cursor can perform
+the planning action, using the proven native-work seam with a Python-rendered
+advisor prompt. Phase 4 ships without it and its exit gate is Claude-only;
+nothing in the measure-twice workflow may assume a Claude host, so this stays a
+pure adapter addition.
+
+### Deferred item 2: Cursor lifecycle resume for the loops
+
+Was Phase 4 scope. Make explicit resume complete and supported in Cursor, and
+improve automatic Cursor continuation only if live hook behavior proves it.
+
+### Deferred item 3: the Cursor arms of the Phase 4 and Phase 5 exit gates
+
+The Phase 4 arm: a harmless plan-only loop starts, pauses, resumes, revises, and
+completes in Cursor with the same Python decisions Claude gets, and Cursor has an
+honest explicit-resume path even if its Stop hook cannot reliably force another
+turn. Automatic Cursor continuation is claimed only if live hook behavior proves
+re-entry.
+
+The Phase 5 arm: a disposable build completes in Cursor with route identity and
+workspace guards enforced, executor continuation working where configured,
+reviewers staying fresh, and no host driver owning build policy. Any verified
+write-capable route may carry it, external or native. The route-honesty rule in
+Phase 5 still holds: no substitution, and no read-only provider presented as a
+write route. Explicit resume is the complete baseline; automatic continuation is
+required only where the installed Cursor hooks have proven actual re-entry.
+
+Order depends on the machine. Where an external write-capable executor CLI is
+installed and verified, this item can pass on its own. If that route is absent
+when the gate runs, item 4 lands first and supplies the route this arm verifies.
+
+### Deferred item 4: Phase 6, the Cursor-native executor
+
+#### Outcome
+
+Cursor gains a native executor without changing workflow semantics or weakening
+access controls.
+
+#### Scope
+
+- Add the Cursor-native executor adapter using Python-rendered prompts. It
+  depends on deferred item 1, the read-only Cursor advisor, which Phase 4 no
+  longer ships; take them in that order.
+- Admit native writes only after a disposable-workspace probe proves the
+  requested access, role scope, cancellation, and result behavior.
+- Route the new Cursor-native build work through the same `via` and host
+  resolver seam already used by review and by the advisor in deferred item 1.
+- Improve Cursor automatic lifecycle continuation only when an observed hook
+  event actually re-enters the engine; otherwise keep explicit resume as the
+  truthful supported path.
+- Preserve all existing Claude behavior.
+
 #### Exit gate
 
-All four workflows use the same Python engine in all three harnesses; no
-superseded workflow implementation remains; the installed artifacts match the
-validated source; and the repository is presented as Motley Crew.
+Cursor completes a disposable native-write build through the shared engine, and
+the native-advisor regression from deferred item 1 remains green. If automatic
+continuation is advertised, a live probe demonstrates actual re-entry; otherwise explicit
+resume remains the documented behavior.
+
+### Deferred item 5: the unrun app gates
+
+`docs/operator-followups.md` holds them: F2.1 through F2.5 from the review MVP,
+and F3.1 and F3.2 for council and debate. The app surface is not unevidenced:
+the Phase 2 exit gate ran live in the app, and the shipped `native_model` pin
+was badge-verified there (`docs/cursor-host.md` carries both). These gates extend
+that evidence to read-only enforcement, cancellation, env capture, and the
+council and debate paths, none of which has been exercised on the app. F3.0 is
+NOT in this section: it is the Claude gate on the installed plugin and stays
+owed.
 
 ## Supported plateaus
 
 The roadmap intentionally provides useful stopping points:
 
 1. **After Phase 2:** Cursor can run mixed native Cursor and Claude CLI reviews.
-2. **After Phase 4:** Claude and Cursor share review, debate, and a portable
-   planning loop.
-3. **After Phase 5:** Claude and Cursor share all four workflows, with Cursor
-   using explicit resume and the external Codex CLI executor where native write
-   support has not landed.
-4. **After Phase 6:** Cursor has the complete native workflow experience,
-   subject only to honestly observed lifecycle limitations.
-5. **After Phase 7:** Claude, Cursor, and Codex share all core workflows.
+2. **After Phase 4:** review, debate, and a portable planning loop are all
+   Python-owned, proven on Claude.
+3. **After Phase 5:** all four workflows are Python-owned, proven on Claude,
+   with every host-neutral decision inside the engine.
+4. **After Phase 7:** Claude and Codex share all core workflows.
+5. **After Phase 8A:** one production implementation of each workflow. The
+   outstanding host work is then the deferred Cursor section plus F3.0, the
+   Claude gate on the installed plugin, which is owed and not deferred.
 
 These are completed increments, not partially installed future designs.
 
