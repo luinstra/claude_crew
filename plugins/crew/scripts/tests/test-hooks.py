@@ -34,6 +34,7 @@ PROJECT_DIR = SCRIPT_DIR.parent
 # test sat in scripts/, so scripts/ was sys.path[0] and that import resolved;
 # now that the test lives one level deeper, put scripts/ back on the path.
 sys.path.insert(0, str(SCRIPT_DIR))
+from models import SCHEMA_VERSION
 
 
 def log_pass(name: str) -> None:
@@ -986,7 +987,7 @@ def main():
         _persistent_module.detect_host = _saved_detect
     _cursor_diag_ok = (
         _cursor_diag_stdout.getvalue() == "{}\n{}\n"
-        and "corrupt JSON" in _cursor_diag_stderr.getvalue()
+        and "Unreadable build writer state" in _cursor_diag_stderr.getvalue()
         and "newer crew version" in _cursor_diag_stderr.getvalue()
     )
     if _cursor_diag_ok:
@@ -1459,10 +1460,10 @@ def main():
                 "SessionStart (terse) - panel completion nudge present",
                 session_start,
                 json.dumps({"directory": str(test_path)}),
-                "Continue until the multi-model panel approves completion",
+                "Follow its BuildStep",
             )
             output_bl_v = run_script_verbose(session_start, json.dumps({"directory": str(test_path)}))
-            if "Continue until the multi-model panel approves completion" in output_bl_v:
+            if "Follow its BuildStep" in output_bl_v:
                 log_pass("SessionStart (verbose) - panel completion nudge present")
             else:
                 log_fail("SessionStart (verbose) - panel completion nudge present",
@@ -1511,7 +1512,7 @@ def main():
                     f"SessionStart - a phase=done loop names `crew state deactivate {alias}`",
                     session_start,
                     json.dumps({"directory": str(test_path)}),
-                    f"`crew state deactivate {alias}`" if alias == "bl" else "measure-twice-resume",
+                    f"build-resume" if alias == "bl" else "measure-twice-resume",
                 )
                 (crew_dir / state_name).unlink()
 
@@ -1567,10 +1568,10 @@ def main():
                 '{"active": true, "prompt": "Complete the task", "completion_promise": "DONE"}'
             )
             test_contains_verbose(
-                "Build loop nudge (verbose) - prescribes panel (review-prep)",
+                "Build loop nudge (verbose) - issues engine projection",
                 persistent_mode,
                 json.dumps({"directory": str(test_path)}),
-                "review-prep",
+                "Follow its BuildStep",
             )
             (crew_dir / "build-state.json").write_text(
                 '{"active": true, "prompt": "Complete the task", "completion_promise": "DONE"}'
@@ -1601,13 +1602,13 @@ def main():
                 "Build loop nudge (verbose) - renders --session-id with value",
                 persistent_mode,
                 json.dumps({"directory": str(test_path), "session_id": "s9"}),
-                "--session-id s9",
+                "--session-segment s9",
             )
             test_contains_verbose(
                 "Build loop nudge (verbose) - build-executor carries session flag",
                 persistent_mode,
                 json.dumps({"directory": str(test_path), "session_id": "s9"}),
-                "crew build-executor --session-id s9",
+                "crew build-next --session-segment s9",
             )
             # A session_id carrying a space/shell metacharacter must be
             # shlex.quote'd in the copy-pasteable nudge (complements the spaced
@@ -1616,10 +1617,10 @@ def main():
                 '{"active": true, "prompt": "Complete the task", "completion_promise": "DONE"}'
             )
             test_contains_verbose(
-                "Build loop nudge (verbose) - shell-quotes session_id with metacharacter",
+                "Build loop nudge (verbose) - sanitizes session owner segment with metacharacter",
                 persistent_mode,
                 json.dumps({"directory": str(test_path), "session_id": "s x;rm"}),
-                "--session-id 's x;rm'",
+                "--session-segment sxrm",
             )
 
             # Test with inactive build loop
@@ -1758,7 +1759,7 @@ def main():
                 log_fail("Terse nudge (bl): recipe absent",
                          "does NOT contain 'verify via the multi-model panel'", out_terse_bl[:300])
 
-            if "/crew:cancel-build" in out_terse_bl and "Just wait" in out_terse_bl:
+            if "/crew:cancel-build" in out_terse_bl and "honor claimed work and human waits" in out_terse_bl:
                 log_pass("Terse nudge (bl): keeps the wait guard + exit command")
             else:
                 log_fail("Terse nudge (bl): keeps the wait guard + exit command",
@@ -1803,7 +1804,7 @@ def main():
             # Verbose: the full recipe renders on ANY fire (there is no
             # first-fire special case anymore).
             out_verbose_bl = run_script_verbose(persistent_mode, json.dumps({"directory": str(test_path)}))
-            if "verify via the multi-model panel" in out_verbose_bl:
+            if "Follow its BuildStep" in out_verbose_bl:
                 log_pass("Verbose nudge (bl): full recipe present on a later fire")
             else:
                 log_fail("Verbose nudge (bl): full recipe present on a later fire",
@@ -1812,19 +1813,19 @@ def main():
             # The recipe must route a resumed loop through the review verbs: a
             # deactivate with no recorded verdict is refused, so a recipe that
             # still said prep-then-deactivate would hand back a dead end.
-            if ("state begin-review bl" in out_verbose_bl
-                    and "state record-verdict bl" in out_verbose_bl):
-                log_pass("Verbose nudge (bl): recipe prescribes begin-review + record-verdict")
+            if ("Follow its BuildStep" in out_verbose_bl
+                    and "state record-verdict bl" not in out_verbose_bl):
+                log_pass("Verbose nudge (bl): issued BuildStep replaces manual review-verdict recipe")
             else:
-                log_fail("Verbose nudge (bl): recipe prescribes begin-review + record-verdict",
-                         "contains 'state begin-review bl' and 'state record-verdict bl'",
+                log_fail("Verbose nudge (bl): issued BuildStep replaces manual review-verdict recipe",
+                         "contains 'Follow its BuildStep', omits 'state record-verdict bl'",
                          out_verbose_bl[:600])
 
             # EXACTLY ONE step owns record-verdict (see the mt recipe's twin
             # check): a second prescribed call is refused from phase=done, which
             # left the flow uncompletable for an orchestrator following it
             # literally.
-            if out_verbose_bl.count("state record-verdict bl") == 1:
+            if out_verbose_bl.count("state record-verdict bl") == 0:
                 log_pass("Verbose nudge (bl): record-verdict prescribed exactly once")
             else:
                 log_fail("Verbose nudge (bl): record-verdict prescribed exactly once",
@@ -2493,34 +2494,20 @@ def main():
                 f.unlink()
 
             # =========================================================================
-            # CLI init over a CORRUPT state file: set aside as .corrupt, start fresh
+            # Unreadable current build evidence must survive generic admission.
             # =========================================================================
             corrupt_target = crew_dir / "build-state-corS.json"
             corrupt_target.write_text('{"active": true, "prompt": "broken", trunc')  # invalid JSON
             _, err, code = run_crew_state(
                 ["init", "bl", "--prompt", "fresh task", "--session-id", "corS"], test_path)
             aside = crew_dir / "build-state-corS.json.corrupt"
-            fresh_ok = False
-            if corrupt_target.exists():
-                try:
-                    with open(corrupt_target) as _f:
-                        _d = json.load(_f)
-                    fresh_ok = _d.get("active") is True and _d.get("task") == "fresh task"
-                except (OSError, json.JSONDecodeError):
-                    fresh_ok = False
-            # Assert the SUCCESS-path wording specifically: "set aside as <name>"
-            # plus the .corrupt filename, and NOT the "could not be set aside"
-            # failure phrasing (which also contains the substring "set aside").
-            err_l = err.lower()
-            note_ok = ("set aside as" in err_l
-                       and aside.name in err
-                       and "could not" not in err_l)
-            if code == 0 and aside.exists() and fresh_ok and note_ok:
-                log_pass("CLI init over corrupt file - set aside as .corrupt, fresh state written")
+            retained = corrupt_target.read_text() == '{"active": true, "prompt": "broken", trunc'
+            if code == 2 and retained and not aside.exists() and "unreadable build writer state" in err:
+                log_pass("CLI init refuses unreadable build evidence without replacement")
             else:
-                log_fail("CLI init over corrupt file - set aside as .corrupt, fresh state written",
-                         "exit 0, .corrupt exists, fresh active state, 'set aside as <name>' success note",
-                         f"code={code} aside={aside.exists()} fresh={fresh_ok} note_ok={note_ok} err={err[:120]}")
+                log_fail("CLI init refuses unreadable build evidence without replacement",
+                         "exit 2, original bytes retained, no backup or replacement",
+                         f"code={code} aside={aside.exists()} retained={retained} err={err[:120]}")
             for f in crew_dir.glob("*-state*.json*"):
                 f.unlink()
 
@@ -3867,10 +3854,10 @@ def main():
                 _saved = json.load(f)
             # Schema 3 unified both loops into one LoopState (task/loop/review
             # fields); older schema-1/2 files still load, with coalesced task.
-            if _saved.get("schema") == 4:
-                log_pass("save() stamps schema:4")
+            if _saved.get("schema") == SCHEMA_VERSION:
+                log_pass("save() stamps current schema")
             else:
-                log_fail("save() stamps schema:4", "3", str(_saved.get("schema")))
+                log_fail("save() stamps current schema", "3", str(_saved.get("schema")))
 
             # --- Atomicity: crash between temp-write and os.replace ---
             # A monkeypatched os.replace records the TEMP file's mode (proving
@@ -3967,7 +3954,7 @@ def main():
             else:
                 log_fail("adoption stamp: a second, different session no longer co-adopts (allows)", "{}", out_s2[:200])
 
-            # --- Corrupt ≠ missing: one-time block + .corrupt rename + next Stop allows ---
+            # --- Unreadable build evidence stays discoverable on repeated Stop ---
             for f in crew_dir.glob("*"):
                 if f.is_file():
                     f.unlink()
@@ -3975,22 +3962,22 @@ def main():
             corrupt_file.write_text('{"active": true, "prompt": "broken", trunc')  # invalid JSON
             out_corrupt = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
             payload_c = json.loads(out_corrupt)
-            if payload_c.get("decision") == "block" and "corrupt" in payload_c.get("reason", "").lower():
-                log_pass("corrupt state → one-time block with diagnostic (not silent allow)")
+            if payload_c.get("decision") != "block" and "Unreadable build writer state" in out_corrupt:
+                log_pass("corrupt build state → diagnostic allow retaining writer uncertainty")
             else:
-                log_fail("corrupt state → one-time block with diagnostic", "decision:block + corrupt reason", out_corrupt[:200])
+                log_fail("corrupt build state → diagnostic allow", "allow + unreadable writer diagnostic", out_corrupt[:200])
 
-            if (crew_dir / "build-state.json.corrupt").exists() and not corrupt_file.exists():
-                log_pass("corrupt state → file set aside as .corrupt")
+            if not (crew_dir / "build-state.json.corrupt").exists() and corrupt_file.exists():
+                log_pass("corrupt build state → original evidence retained")
             else:
-                log_fail("corrupt state → file set aside as .corrupt", ".corrupt exists, original gone",
+                log_fail("corrupt build state → original evidence retained", "original exists, no .corrupt backup",
                          f"corrupt_exists={(crew_dir / 'build-state.json.corrupt').exists()}, orig_exists={corrupt_file.exists()}")
 
             out_corrupt2 = run_script(persistent_mode, json.dumps({"directory": str(test_path)}))
-            if out_corrupt2 == "{}":
-                log_pass("corrupt state → second Stop allows (never loops forever)")
+            if json.loads(out_corrupt2).get("decision") != "block" and "Unreadable build writer state" in out_corrupt2:
+                log_pass("corrupt build state → repeated Stop retains diagnostic and evidence")
             else:
-                log_fail("corrupt state → second Stop allows", "{}", out_corrupt2[:200])
+                log_fail("corrupt build state → repeated Stop retains diagnostic", "allow + unreadable writer diagnostic", out_corrupt2[:200])
 
             # --- Schema: absent loads as v1 ---
             for f in crew_dir.glob("*"):
@@ -4347,11 +4334,11 @@ def main():
                 if (out_v1.get("decision") == "block"
                         and stamped
                         and models_module.parse_iso(stamped) is not None
-                        and after.get("schema") == 4):
+                        and after.get("schema") == SCHEMA_VERSION):
                     log_pass(f"{loop}: schema-1 state with no started_at is stamped on the first Stop fire")
                 else:
                     log_fail(f"{loop}: schema-1 state with no started_at is stamped on the first Stop fire",
-                             "block + parseable started_at + schema:4",
+                             "block + parseable started_at + current schema",
                              f"decision={out_v1.get('decision')}, started_at={stamped!r}, "
                              f"schema={after.get('schema')}")
 
@@ -4772,7 +4759,7 @@ def main():
             # work as a safety failure: the loop outran the bounds, so it routes
             # to the one legal step left instead of force-exiting. ---
             for loop, banner, deactivate_cmd in (
-                ("bl", "Build Loop", "state deactivate bl"),
+                ("bl", "Build Loop", "build-resume"),
                 ("mt", "Measure-Twice Loop", "measure-twice-resume"),
             ):
                 for bound, extra in (
@@ -7092,7 +7079,7 @@ def main():
                 # override verbosity rather than hide behind it.
                 for label, out in (("terse", run_script(persistent_mode, payload)),
                                    ("verbose", run_script_verbose(persistent_mode, payload))):
-                    routes_to_deactivate = (f"state deactivate {loop}" if loop == "bl" else "measure-twice-resume") in out
+                    routes_to_deactivate = ("build-next" if loop == "bl" else "measure-twice-resume") in out
                     prescribes_dead_verbs = (f"state begin-review {loop}" in out
                                              or f"state record-verdict {loop}" in out)
                     if routes_to_deactivate and not prescribes_dead_verbs:

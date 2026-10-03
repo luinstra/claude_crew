@@ -9,6 +9,7 @@ orchestrator markdown.
 from __future__ import annotations
 
 import dataclasses
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -128,6 +129,11 @@ class ProviderResult:
     continuation: ContinuationOutcome | None = None
     continuation_id: str | None = None
 
+    # In-process execution facts never alter the dispatch/review JSON contract.
+    exact_output: bytes | None = None
+    transport_status: str | None = None
+    report_authoritative: bool = True
+
     def to_dict(self) -> dict:
         """Return the seat's fields as a plain dict.
 
@@ -144,6 +150,9 @@ class ProviderResult:
         array-level serialization.
         """
         d = dataclasses.asdict(self)
+        d.pop("exact_output")
+        d.pop("transport_status")
+        d.pop("report_authoritative")
         for opt in (
             "repaired_output", "run_id", "target_sha256",
             "action_id", "attempt_id", "channel", "reported_model",
@@ -268,6 +277,13 @@ class ProviderResult:
 # Provider ABC
 # =============================================================================
 
+def transport_failure(returncode: int, error: str | None) -> str:
+    """Recognize process cancellation without guessing timeouts from prose."""
+    if returncode in {-2, -15, 130, 143} or re.search(r"\bcancell?ed\b", error or "", re.IGNORECASE):
+        return "cancelled"
+    return "failed"
+
+
 class Provider(ABC):
     """A registered seat resolved to external execution (an engine-driven CLI).
 
@@ -334,8 +350,17 @@ class Provider(ABC):
         timeout: int = 300,
         dispatch_options: dict | None = None,
         continuation: ProviderContinuation | None = None,
+        workspace: str | None = None,
+        build_report: bool = False,
     ) -> ProviderResult:
         """Run the provider against ``prompt`` and return a ProviderResult.
+
+        ``workspace`` pins subprocess execution for explicit workspace requests;
+        omitted callers retain their existing cwd policy.
+
+        ``build_report`` enables exact build-report recognition in write mode.
+        Valid report prose is not a transport diagnostic; actual process errors
+        and authentication banners remain failures. Ordinary dispatch omits it.
 
         ``continuation`` is an optional opaque exact-conversation request.  The
         default is disabled so review/debate and ordinary dispatch behavior do

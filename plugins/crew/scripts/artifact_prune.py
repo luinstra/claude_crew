@@ -17,6 +17,8 @@ root) and multiagent.cli (scripts on sys.path) import it as a top-level module.
 
 from __future__ import annotations
 
+import contextlib
+
 import json
 import os
 import re
@@ -25,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from state_discovery import is_active_value, is_loop_state_file
+from build_state import writer_fence
+from models import state_lock
 from multiagent.review_runs import (
     POINTER_NAME,
     RUN_JSON_NAME,
@@ -172,15 +176,27 @@ def live_run_keys(crew_dir: Path) -> set:
         try:
             data = json.loads(json_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            if json_file.name.startswith("build-state"):
+                keys.add((session_segment(json_file.stem.removeprefix("build-state-") if json_file.stem != "build-state" else ""), "*"))
             continue
         if not isinstance(data, dict):
+            if json_file.name.startswith("build-state"):
+                keys.add((session_segment(json_file.stem.removeprefix("build-state-") if json_file.stem != "build-state" else ""), "*"))
             continue
-        if not is_active_value(data.get("active", False)):
+        fenced = writer_fence(data)
+        if fenced:
+            if json_file.name.startswith("build-state"):
+                owner = json_file.stem.removeprefix("build-state-") if json_file.stem != "build-state" else ""
+                keys.add((session_segment(owner), "*"))
+            recorded_owner = data.get("session_id")
+            if isinstance(recorded_owner, str):
+                keys.add((session_segment(recorded_owner), "*"))
+        if not is_active_value(data.get("active", False)) and not fenced:
             continue
         run_id = data.get("run_id")
         if isinstance(run_id, str) and MINTED_RUN_DIR_RE.fullmatch(run_id):
             keys.add((session_segment(data.get("session_id") or ""), run_id))
-        journal = data.get("mt_workflow")
+        journal = data.get("bl_workflow") or data.get("mt_workflow")
         if not isinstance(journal, dict):
             continue
         pending = journal.get("pending_review_inputs")
@@ -373,7 +389,7 @@ def _review_runs_under(
                 continue
         except OSError:
             continue
-        if (segment, entry.name) in protected:
+        if (segment, entry.name) in protected or (segment, "*") in protected:
             continue
         if segment == "" and any(
             protected_segment == entry.name
@@ -593,3 +609,13 @@ def drop_dangling_pointer(session_dir: Path, removed_names: set) -> None:
                 (session_dir / name).unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+@contextlib.contextmanager
+def prune_guard(crew_dir: Path):
+    """Freeze pruning eligibility once while all loop owners and admission are locked."""
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(state_lock(crew_dir / "loop-admission"))
+        for state in sorted((p for p in crew_dir.glob("*.json") if is_loop_state_file(p.name)), key=str):
+            stack.enter_context(state_lock(state))
+        yield {item.path for item in collect_prunable(crew_dir, time.time(), with_sizes=False)}

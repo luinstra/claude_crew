@@ -691,7 +691,7 @@ class MeasureTests(unittest.TestCase):
             if claimed:
                 mt.claim_measure_action(step.ref, step.work_items[0].action_id)
             before = self.state()
-            self.assertEqual(before["schema"], 4)
+            self.assertEqual(before["schema"], models.SCHEMA_VERSION)
             payload = self.default_stop(continued=claimed)
             argv = self.stop_next_argv(payload)
             self.assertEqual(argv, [str(Path(mt.__file__).parents[2] / "crew"), "measure-twice-next",

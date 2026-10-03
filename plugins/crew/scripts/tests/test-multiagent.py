@@ -2565,8 +2565,9 @@ def test_registry():
 # =============================================================================
 
 def test_result_contract():
-    log_section("ProviderResult contract (Step 1.0 / 1.1)")
-    r = ProviderResult(name="sol", model="o3", ok=True, output="x", error=None, elapsed=1.5)
+    log_section("ProviderResult serialization contract")
+    r = ProviderResult(name="sol", model="o3", ok=True, output="x", error=None, elapsed=1.5,
+                       exact_output=b" x \r\n", transport_status="ok", report_authoritative=False)
     d = r.to_dict()
     check("to_dict has exactly the six fields (optional fields omitted when None)",
           set(d.keys()) == {"name", "model", "ok", "output", "error", "elapsed"},
@@ -2577,9 +2578,10 @@ def test_result_contract():
         "action_id", "attempt_id", "channel", "reported_model",
         "model_attribution", "continuation", "continuation_id",
     }
-    check("to_dict equals asdict MINUS the None optional fields",
-          d == {k: v for k, v in dataclasses.asdict(r).items() if k not in _OPTIONAL},
-          "equal (sans optional fields)", "differ")
+    check("to_dict omits in-process report/transport facts and None optional fields",
+          d == {k: v for k, v in dataclasses.asdict(r).items()
+                if k not in _OPTIONAL | {"exact_output", "transport_status", "report_authoritative"}},
+          "equal (sans internal and None optional fields)", "differ")
 
     # The run-identity stamps follow the SAME additive contract as
     # repaired_output: serialized only when set, coerced by from_dict, and the
@@ -7096,74 +7098,13 @@ def test_review_prep_never_clears_task_seat_file():
 
 
 def test_build_md_executor_fork_sentinels():
-    log_section("build.md executor fork sentinels")
-    raw = (SCRIPT_DIR.parent / "commands" / "build.md").read_text(encoding="utf-8")
-    norm = " ".join(raw.split())
-
-    pins = [
-        ("never-add rule", "NEVER `git add`/`git add -N` (edits stay unstaged for triage)"),
-        ("never-fallback rule", "**NEVER fall back to `crew:executor`**: substituting Claude for the model the user chose lies about what produced the diff."),
-        ("nonzero arm", "**Nonzero exit:**"),
-        ("exit-zero arm", "**Exit 0:** Read the envelope JSON at the path `dispatch` printed as its last stdout line (never construct the name), then:"),
-        ("guard arm", "**Any of `head_moved`/`staged_changed`/`branch_changed` true, REGARDLESS of `ok`:**"),
-        ("clean-failure arm", "**Else `envelope.ok` false** (no guard fired): clean failure, RETRYABLE."),
-        ("success arm", "**Else success:** the summary is `envelope.output`. Do step 3, continue to review."),
-        ("exit-status-first rule", "**Check the PROCESS EXIT STATUS first, before reading any envelope**"),
-    ]
-    offsets = {}
-    for label, phrase in pins:
-        normalized = " ".join(phrase.split())
-        offsets[label] = norm.find(normalized)
-        check(
-            f"build.md executor fork: {label} is pinned",
-            offsets[label] >= 0,
-            "normalized literal present",
-            phrase,
-        )
-
-    section_start = norm.find("## The executor step (shared)")
-    section_end = norm.find("## Step", section_start + 1) if section_start >= 0 else -1
-    check(
-        "build.md executor fork: executor section is bounded by the shared and next Step headings",
-        section_start >= 0 and section_end > section_start,
-        "valid normalized section bounds",
-        f"start={section_start} end={section_end}",
-    )
-    check(
-        "build.md executor fork: never-add rule is inside the executor section",
-        section_start <= offsets["never-add rule"] < section_end,
-        "never-add offset inside executor section",
-        str(offsets["never-add rule"]),
-    )
-
-    arms = [offsets[name] for name in (
-        "nonzero arm", "exit-zero arm", "guard arm", "clean-failure arm", "success arm",
-    )]
-    check(
-        "build.md executor fork: all five branch arms have normalized offsets",
-        all(offset >= 0 for offset in arms),
-        "five nonnegative offsets",
-        str(arms),
-    )
-    check(
-        "build.md executor fork: branch arms stay in frozen file order",
-        all(left < right for left, right in zip(arms, arms[1:])),
-        "strictly increasing normalized offsets",
-        str(arms),
-    )
-    check(
-        "build.md executor fork: exit-status-first rule precedes all five branch arms",
-        offsets["exit-status-first rule"] < arms[0],
-        "exit-status-first offset before first branch arm",
-        f"status={offsets['exit-status-first rule']} arms={arms}",
-    )
-    all_failed = "could not verify — all seats failed:"
-    check(
-        "build.md executor fork: synthesis all-failed report literal is present",
-        " ".join(all_failed.split()) in norm,
-        "normalized all-failed literal",
-        all_failed,
-    )
+    log_section("build transport execution boundaries")
+    text = (SCRIPT_DIR.parent / "commands" / "build.md").read_text(encoding="utf-8")
+    for marker in ("commands.execute", "commands.claim", "commands.next", "build-decide", "CREW_BUILD_STATUS: COMPLETED",
+                   "CREW_BUILD_STATUS: BLOCKED", "Unknown or changed HEAD/index/branch", "Do not clean, reset or waive guards"):
+        check(f"build transport names {marker}", marker in text, "current protocol boundary", marker)
+    check("build delegates guards, envelope interpretation and retries", "envelope.ok" not in text and "dispatch printed" not in text,
+          "Python policy", text[:200])
 
 
 def test_measure_twice_md_loop_sentinels():
@@ -7296,6 +7237,12 @@ def test_persist_seat_doc_sync():
 
     for rel in docs:
         text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
+        if rel == "commands/build.md":
+            check("build transport retains claim-authorized Tasks and concurrent batch work", "commands.claim" in text and "all" in text and "independent review" in text,
+                  "claim and overlap", "missing build transport")
+            check("build transport uses direct capture or exact host Write without a scribe", "commands.native_capture" in text and "--completion-observed" in text and "Do not launch a scribe" in text,
+                  "exact deterministic capture", "missing build capture")
+            continue
         if rel == "commands/measure-twice.md":
             check("measure-twice transport retains fresh claim-authorized Tasks and full batch overlap",
                   "fresh" in text and "commands.claim" in text and "entire independent review batch" in text,
@@ -7583,6 +7530,10 @@ def test_persist_seat_doc_sync():
         text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
         if rel in {"commands/review.md", "commands/measure-twice.md"}:
             continue
+        if rel == "commands/build.md":
+            check("build spawns Tasks by the issued canonical prompt reference", "Read <issued prompt_path> and perform exactly the issued action." in text,
+                  "issued reference", "missing build reference")
+            continue
         check(f"{rel} spawns Task seats BY REFERENCE: {REF_SPAWN!r}",
               REF_SPAWN in text, "present", "MISSING (drifted back to inline paste?)")
         # CONVERSE: no inline-paste spawn survives.
@@ -7624,71 +7575,11 @@ def test_persist_seat_doc_sync():
           panelist_line6.startswith("tools:") and "Write" not in panelist_line6,
           "tools line without Write", repr(panelist_line6))
 
-    # SCRIBE_CORE remains common to all three docs. Every review-bearing doc
-    # uses the same --verify gate.
-    SCRIBE_CORE = [
-        'subagent_type="crew:scribe"',
-        'Persist each SUCCESSFUL Task seat via a scribe (no terminal diff).',
-        'rm -f "<project-root>/.crew/reviews/<session_segment>/<run_id>/tmp-seat-<seat>.md"',
-        '<session_segment>/<run_id>/tmp-seat-<seat>-fallback.md',
-        'NONEMPTY PARTIAL file',
-        'Fallback: you persist the seat yourself',
-        "the scribe's return IS the persist-write completion",
-    ]
-    SCRIBE_VERIFY_GATE = [
-        "PIN-MAP: `--verify` exit 0 means the on-disk record landed `ok=true`: DONE. Exit 4 means it landed anything else (ok=false, missing or non-boolean ok, malformed JSON, unreadable read-back): FALLBACK.",
-        "PIN-EXIT2: An exit 2 carrying the `verify: seat file missing, fall back` diagnostic routes to the FALLBACK (the file never appeared); any OTHER exit 2, an existing-but-unreadable file included, is a REAL error: surface it loudly and stop.",
-        "PIN-FALLBACK: GATE THE FALLBACK TOO: fallback `--verify` exit 0 is DONE; exit 4 or ANY exit 2 is surfaced loudly, then the seat is persisted with `--failed --error` so it reaches `collect` labeled, never lost.",
-        "PIN-AUTHORITY: the `--verify` exit code is the ONLY landing authority, never the scribe's self-reported line.",
-    ]
-    for rel in docs:
-        text = (SCRIPT_DIR.parent / rel).read_text(encoding="utf-8")
-        if rel in {"commands/review.md", "commands/measure-twice.md"}:
-            continue
-        # Prose sentinels wrap across lines; collapse whitespace so a legit
-        # line break inside a pinned phrase does not read as a drift.
-        norm = " ".join(text.split())
-        for phrase in SCRIBE_CORE:
-            check(f"{rel} contains shared scribe sentinel: {phrase!r}",
-                  phrase in text or phrase in norm, "present", "MISSING")
-
-        for phrase in SCRIBE_VERIFY_GATE:
-            check(f"{rel} contains verify gate sentinel: {phrase!r}",
-                  phrase in text or phrase in norm, "present", "MISSING")
-        name = rel.split("/")[-1]
-        verify_lines = _fence_lines(name)
-        verify_persist = [
-            line for line in verify_lines
-            if "persist-seat" in line and "-f" in line.split()
-        ]
-        success_verify = [
-            line for line in verify_persist
-            if 'tmp-seat-<seat>.md"' in line
-            and "-fallback" not in line
-        ]
-        fallback_verify = [
-            line for line in verify_persist
-            if 'tmp-seat-<seat>-fallback.md"' in line
-        ]
-        check(f"{rel} success persist fence carries --verify",
-              len(success_verify) == 1 and " --verify -f " in success_verify[0],
-              "one --verify success fence", str(verify_persist))
-        check(f"{rel} fallback persist fence carries --verify",
-              len(fallback_verify) == 1 and " --verify -f " in fallback_verify[0],
-              "one --verify fallback fence", str(verify_persist))
-        check(f"{rel} has no legacy test-s fence",
-              not any("test -s" in line for line in verify_lines),
-              "no test-s fence", str(verify_lines))
-        check(f"{rel} has no legacy ok=true grep gate",
-              "grep -q '\"ok\": *true'" not in text,
-              "no grep gate", "legacy grep gate present")
-
-        # The never-choke sentinel and the scribe fallback heading stay DISTINCT
-        # (the fallback must not shadow the never-choke phrase the guard pins).
-        check(f"{rel} keeps the scribe fallback heading distinct from never-choke",
-              "Never choke — fall back" not in text
-              and "Fallback: you persist the seat yourself" in text,
-              "distinct fallback heading", "headings collided")
+    build_text = (SCRIPT_DIR.parent / "commands/build.md").read_text(encoding="utf-8")
+    check("build captures actual native completion through the shared helper", "commands.native_capture" in build_text and "--completion-observed" in build_text,
+          "attested completion capture", "missing native transport")
+    check("build host fallback preserves exact bytes without paid bookkeeping", "host Write" in build_text and "Preserve exact bytes" in build_text and "Do not launch a scribe" in build_text,
+          "exact unpaid fallback", "missing fallback")
 
 
 # =============================================================================
@@ -8534,8 +8425,9 @@ def test_dispatch_chain_failure_invariants():
             restore_project(old_env)
         check(
             "pre-billing tombstone failure aborts and preserves the prior record",
-            rc == 2 and not calls and after == prior and "locked" in err.getvalue(),
-            "exit 2, zero provider calls, same record",
+            rc == 2 and not calls and after == prior
+            and err.getvalue() == "error: could not prepare continuation chain 'build-executor': locked\n",
+            "exit 2, zero provider calls, same record, exact diagnostic once",
             f"rc={rc} calls={calls} after={after!r} stderr={err.getvalue()!r}",
         )
 
@@ -9944,6 +9836,7 @@ def test_dispatch_chain_gates_and_regression():
                 "model": None,
                 "timeout": 1800,
                 "dispatch_options": None,
+                "workspace": str(repo.resolve()),
             }
             golden_envelope = {
                 "seat": "sol",
@@ -9987,7 +9880,7 @@ def test_dispatch_chain_gates_and_regression():
                 "guard_warnings",
             ]
             check(
-                "unchained dispatch matches the pre-chain kwargs and envelope golden",
+                "unchained dispatch pins workspace and preserves the envelope golden",
                 rc == 0 and calls
                 and calls[0][1] == golden_kwargs
                 and set(calls[0][1]) == set(golden_kwargs)
@@ -9995,7 +9888,7 @@ def test_dispatch_chain_gates_and_regression():
                 and list(envelope) == exact_fields
                 and set(envelope) == set(exact_fields)
                 and out_path.read_bytes() == golden_bytes,
-                "no lock, identical complete kwargs, byte-identical 16-field envelope",
+                "no lock, explicit workspace, byte-identical 16-field envelope",
                 f"rc={rc} calls={calls} envelope={envelope} "
                 f"bytes={out_path.read_bytes()!r} golden={golden_bytes!r}",
             )
@@ -11328,28 +11221,12 @@ def _fence_lines(md_name):
 
 
 def test_build_md_executor_task_anchoring():
-    log_section("build.md static fence check (executor-task.txt -f/rm relative, no ${…})")
-    fence_lines = _fence_lines("build.md")
-    task_lines = [l for l in fence_lines if "executor-task.txt" in l]
-    check("build.md: an executed fence references executor-task.txt (non-vacuous)",
-          bool(task_lines), "at least one executor-task.txt fence", str(fence_lines))
-    # The ENGINE anchors its relative path args to crew_base, so the -f rides the
-    # quoted relative path; the shell rm gets no anchoring and takes the quoted
-    # <project-root> literal. A ${…} expansion is banned on both.
-    check("build.md: every executor-task.txt fence uses a quoted .crew/reviews/ path, no ${…}",
-          all(".crew/reviews/" in l and "${CLAUDE_PROJECT_DIR" not in l
-              for l in task_lines),
-          "quoted executor-task.txt fences, no expansion", str(task_lines))
-    rm_lines = [l for l in task_lines if l.split()[:2] == ["rm", "-f"]]
-    check("build.md: the executor-task.txt rm targets the quoted <project-root> literal",
-          bool(rm_lines)
-          and all('rm -f "<project-root>/.crew/reviews/' in l for l in rm_lines),
-          "<project-root>-anchored rm", str(rm_lines))
-    # Both halves of the lifecycle stay: the -f dispatch and the final rm.
-    check("build.md: the executor-task.txt lifecycle keeps its -f dispatch AND its rm",
-          any('-f ".crew/reviews/' in l and "executor-task.txt" in l for l in task_lines)
-          and bool(rm_lines),
-          "-f dispatch + rm present", str(task_lines))
+    log_section("build immutable issued prompt transport")
+    text = (SCRIPT_DIR.parent / "commands" / "build.md").read_text(encoding="utf-8")
+    check("build receives canonical issued prompt paths", "Read <issued prompt_path> and perform exactly the issued action." in text,
+          "reference transport", text[:200])
+    check("build retains action-specific receipts", "last envelope" in text and "Never reconstruct dispatch" in text,
+          "no shared session envelope", text[:200])
 
 
 def test_init_md_detection_fence_anchoring():
@@ -11409,10 +11286,10 @@ def test_command_fences_no_expansions():
     # The previously expansion-pinned recipes, re-pinned in their RELATIVE
     # form (double-quoted: the quotes keep a substituted id's chars inert).
     build_lines = _fence_lines("build.md")
-    init_bl = [l for l in build_lines if "state init bl" in l]
+    init_bl = [l for l in build_lines if 'crew" build -f' in l]
     check("build.md: state init bl uses the quoted relative -f spill + --consume",
           len(init_bl) == 1
-          and '-f ".crew/task-bl-<session-id>.txt"' in init_bl[0]
+          and "-f <request-spill>" in init_bl[0]
           and "--consume" in init_bl[0],
           "quoted relative -f + --consume", str(init_bl))
     check("build.md: no separate rm of the task-bl spill remains (--consume owns it)",
@@ -11424,44 +11301,9 @@ def test_command_fences_no_expansions():
     check("measure-twice uses a request-file spill and consumes it",
           len(starts) == 1 and "--session-id" in starts[0] and "--consume" in starts[0],
           "request spill with literal session", str(starts))
-    # The run-dir reconstructions keep the sanitized <session_segment> stem
-    # (never the raw <session-id>) and the relative .crew/reviews/ root.
-    for name in ("review.md", "build.md", "measure-twice.md"):
-        if name in {"review.md", "measure-twice.md"}:
-            continue
-        lines = _fence_lines(name)
-        persist = [l for l in lines if "persist-seat" in l and "-f" in l.split()]
-        # Two persist -f fences now: the success path reads the scribe's tmp-seat
-        # spill; the fallback reads a DISTINCT -fallback spill (a path the scribe
-        # never received, so a timed-out scribe's late write cannot clobber it).
-        success_p = [l for l in persist if 'tmp-seat-<seat>.md"' in l]
-        fallback_p = [l for l in persist if 'tmp-seat-<seat>-fallback.md"' in l]
-        check(f"{name}: success persist-seat -f reads the quoted relative RUN-SCOPED tmp-seat spill",
-              len(success_p) == 1
-              and '-f ".crew/reviews/<session_segment>/<run_id>/tmp-seat-<seat>.md"' in success_p[0]
-              and " --verify -f " in success_p[0],
-              "one quoted relative run-scoped tmp-seat -f", str(persist))
-        check(f"{name}: fallback persist-seat -f reads the DISTINCT quoted relative RUN-SCOPED tmp-seat-<seat>-fallback spill",
-              len(fallback_p) == 1
-              and '-f ".crew/reviews/<session_segment>/<run_id>/tmp-seat-<seat>-fallback.md"' in fallback_p[0]
-              and " --verify -f " in fallback_p[0],
-              "one quoted relative run-scoped tmp-seat-fallback -f", str(persist))
-        repair = [l for l in lines if "repair-seat" in l]
-        check(f"{name}: repair-seat uses the NAME form (engine derives the seat file; no --seat path)",
-              bool(repair) and all(
-                  "repair-seat <seat> --session-id" in l and "--run-id" in l
-                  and "--seat " not in l
-                  and '-f ".crew/reviews/<session_segment>/tmp-repair-<seat>.md"' in l
-                  for l in repair),
-              "positional repair-seat + quoted relative -f", str(repair))
-        coll = [l for l in lines if "collect" in l and "--group" in l]
-        check(f"{name}: grouped collect writes quoted relative run-dir -o/--full under <session_segment>",
-              bool(coll) and all(
-                  '-o ".crew/reviews/<session_segment>/' in l
-                  and '--full ".crew/reviews/<session_segment>/' in l
-                  and "reviews/<session-id>" not in l
-                  for l in coll),
-              "quoted relative -o/--full, session_segment stem", str(coll))
+    check("build transports issued owner/action identity instead of reconstructing run paths",
+          "build-next --session-segment" in "\n".join(build_lines)
+          and "persist-seat" not in "\n".join(build_lines), "issued lifetime argv", str(build_lines))
 
 
 def test_path_arg_anchoring():
@@ -15864,6 +15706,10 @@ def test_workplan_doc_sync():
     }
     for filename, keys in expected.items():
         raw = (PLUGIN_ROOT / "commands" / filename).read_text(encoding="utf-8")
+        if filename == "build.md":
+            check("build documents its strict request and owned capture contract", "BuildRef" in raw and "commands.capture" in raw and "raw_arguments" in raw,
+                  "build protocol", "missing build protocol")
+            continue
         if filename == "measure-twice.md":
             check("measure-twice documents the owned workflow ref and capture contract",
                   "MeasureRef" in raw and "commands.capture" in raw and "raw_arguments" in raw,
@@ -19358,63 +19204,30 @@ def test_build_executor_placeholder_session_id():
         check(
             "literal placeholder session id exits 2 before fresh resolve",
             rc == 2 and out.strip() == ""
-            and "unsubstituted placeholder" in err,
-            "exit 2, placeholder diagnostic, no stdout",
+            and "unsubstituted placeholder" in err
+            and "'<session-id>'" in err and "[Session ID: …]" in err,
+            "exit 2, offending placeholder and stamped-session guidance, no stdout",
             f"rc={rc} out={out!r} err={err!r}",
         )
 
 
 def test_build_md_continuation_wiring():
-    """The build recipe resolves once, stamps init, and conditionally chains."""
-    log_section("build.md continuation wiring")
+    """The thin build transport routes all policy through public Python verbs."""
+    log_section("build.md protocol transport")
     raw = (SCRIPT_DIR.parent / "commands" / "build.md").read_text(encoding="utf-8")
-    fences = _fence_lines("build.md")
-    resolver_index = next(
-        (i for i, line in enumerate(fences) if "build-executor" in line), -1
-    )
-    init_index = next(
-        (i for i, line in enumerate(fences) if "state init bl" in line), -1
-    )
-    check("build.md resolves executor before init",
-          resolver_index >= 0 and init_index >= 0 and resolver_index < init_index,
-          "build-executor fence before state init bl", str(fences))
-    check("build.md resolve fence passes the mandatory session id",
-          resolver_index >= 0 and "--session-id <session-id>" in fences[resolver_index],
-          "build-executor fence with --session-id <session-id>",
-          str(fences[resolver_index] if resolver_index >= 0 else fences))
-    init_lines = [line for line in fences if "state init bl" in line]
-    check("build.md passes resolved executor settings to init",
-          len(init_lines) == 1 and "--executor <executor>" in init_lines[0]
-          and "--resume-executor <true|false>" in init_lines[0],
-          "one init fence with both flags", str(init_lines))
-
-    chain_lines = [line for line in fences if "--chain build-executor" in line]
-    check("build.md has one canonical external chained dispatch fence",
-          len(chain_lines) == 1 and "dispatch" in chain_lines[0]
-          and "--seat <executor>" in chain_lines[0],
-          "one external dispatch chain fence", str(chain_lines))
-    check("build.md documents dropping the chain when resume_executor is false",
-          "resume_executor" in raw and "false" in raw and "omit" in raw.lower()
-          and "runs fresh" in raw,
-          "resume condition prose", raw[raw.find("--chain build-executor") - 100:raw.find("--chain build-executor") + 220])
-    check("build.md task path remains unchained",
-          len(chain_lines) == 1
-          and sum("--chain" in line for line in fences) == 1,
-          "only the external dispatch carries --chain", str(chain_lines))
-
-    resolve_heading = raw.index("## MANDATORY: Resolve the Executor")
-    activate_heading = raw.index("## MANDATORY: Activate the Loop")
-    trailing = raw[raw.rfind("First:"):]
-    check("build.md heading order is resolve before activate",
-          resolve_heading < activate_heading,
-          "Resolve heading before Activate heading", str((resolve_heading, activate_heading)))
-    check("build.md has no activate-then-resolve directive",
-          "after activation" not in raw.lower()
-          and trailing.lower().find("resolve") < trailing.lower().find("activation"),
-          "no after-activation directive; trailing reminder resolves first", trailing)
-    check("build.md preserves user-only executor flag ownership",
-          "pass `--executor <seat>` ONLY when the user named one" in raw,
-          "user-only --executor instruction", raw[raw.find("Executor option"):raw.find("Executor option") + 700])
+    from multiagent.cli import build_parser
+    for argv in (["build", "-f", "/tmp/request", "--session-id", "literal", "--consume"],
+                 ["build-resume", "--session-id", "literal"],
+                 ["build-next", "--session-segment", "literal", "--loop-instance-id", "owner"]):
+        parsed = build_parser().parse_args(argv)
+        check(f"build transport parses {argv[0]}", parsed.func is not None, "public parser handler", str(parsed))
+    check("build transport keeps task data in JSON", "raw_arguments" in raw and "--consume" in raw, "request spill", raw[:300])
+    check("build transport delegates selection and continuation", "build-executor" not in raw and "--chain" not in raw and "state init" not in raw,
+          "no parent execution policy", raw[:300])
+    check("build transport has completion and recovery contract", "--completion-observed" in raw and "build-recover" in raw and "CREW_BUILD_STATUS" in raw,
+          "actual completion and explicit recovery", raw[:300])
+    check("build transport issues no verdict policy", "record-verdict" not in raw and "review-prep" not in raw,
+          "engine-owned verdict", raw[:300])
 
 
 def test_workplan_contract_freeze():

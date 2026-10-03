@@ -61,22 +61,34 @@ section.
 
 ## Grounded starting point
 
-### Current handoff (2026-10-01)
+### Current handoff (2026-10-02)
 
-The current integration branch is `codex/multi-harness-engine`, with the
-Phase 1-3 engine work at `b39f647`. That work is pushed but has not been merged
-into `main`. Standalone review and council/debate use the Python workflow;
-measure-twice and build still use `review-prep` and own their loops in Markdown.
-The app gates listed in `operator-followups.md` remain owed.
+The current integration branch is `codex/multi-harness-engine`. Phase 4 is
+committed and pushed in `50aef3b`, with Crew 0.84.0 and marketplace 0.44.0 in
+`9d75917`; it has not been merged into `main`. Standalone review, council/debate,
+and measure-twice use Python-owned workflows. At that published baseline, build
+still uses `review-prep` and owns its loop in Markdown. The current uncommitted
+working tree implements Phase 5's engine-owned build.
 
-The next implementation is Phase 4, followed by Phase 5. Its implementation plan
-is saved alongside this roadmap as
-[phase-4-measure-twice-plan.md](phase-4-measure-twice-plan.md) and must be
-reviewed against the current integration tree. Publish the reviewed plan and
-roadmap together; this local planning update has not been committed or pushed.
-Phase 5 gets its plan only
-after Phase 4 proves the loop/review composition interface. This planning
-update does not implement either phase or close a host gate.
+Phase 4 completed with five approving reviewers, quorum met, and no blocking
+findings. The Claude Code CLI lifecycle gate, exact source epochs, regression
+results, and remaining evidence limits are recorded in
+[phase-4-measure-twice-evidence.md](phase-4-measure-twice-evidence.md). Its
+[implementation plan](phase-4-measure-twice-plan.md) remains the historical
+design record. This completion does not close unrelated app gates in
+`operator-followups.md` or the deferred Cursor work.
+
+The [Phase 5 plan](phase-5-build-plan.md) completed measure-twice against that
+published baseline with quorum met and minor implementation clarifications.
+Implementation ran through the configured Sol executor via Codex.
+Migration, legacy handling, upgrade guidance and special restart machinery are
+excluded by the operator. Phase 5 is implemented and verified in the uncommitted
+working tree; it has not been published or installed. Current interface, regression
+results, real Claude CLI gates, exact source epochs and evidence limits are in
+[build-protocol.md](build-protocol.md) and
+[phase-5-build-evidence.md](phase-5-build-evidence.md).
+The final planning synthesis is retained under
+`.crew/reviews/01a0f9e3-b687-7e63-b9e5-d1e8a07774b5/run-1887652ecf97/`.
 
 The older machine-local `chunk-c-measure-twicemd-shim-refactor-*` and
 `chunk-c-buildmd-shim-refactor-*` plans describe an earlier prose-reduction
@@ -100,20 +112,20 @@ provides most of the difficult lower-level behavior:
   result normalization, repair, and quorum inputs;
 - `scripts/multiagent/review_workflow.py` owns debate round persistence and
   transitions;
-- `scripts/multiagent/continuations.py` and the dispatch implementation in
-  `scripts/multiagent/cli.py` own guarded external executor continuation and
+- `scripts/multiagent/continuations.py` and the shared execution implementation in
+  `scripts/multiagent/execution.py` own guarded external executor continuation and
   workspace checks; and
-- `models.py` plus `crew-state.py` own the current build and measure-twice loop
-  state and guarded transitions.
+- `models.py` and `loop_state.py` own shared loop state and guarded transitions;
+  `multiagent/measure_twice.py` owns planning actions and
+  `multiagent/build_workflow.py` owns implementation/review cycling. Existing
+  `crew-state.py` mutation entrypoints respect workflow ownership.
 
-The remaining ownership problem is in measure-twice, build, and their lifecycle
-hooks. They still decide which operation happens next, carry planning or
-implementation prompts, perform review transport and repair, synthesize
-outcomes, and branch on verdicts. Standalone review and debate have migrated to
-the Python workflow. The loops must compose that implementation rather than
-retain another owner of review policy.
+Build now composes the shared review workflow and loop policy established by
+measure-twice. Its command and lifecycle-hook branches transport issued actions
+and lightweight projections. Python owns prompts, retries, bound human decisions
+and terminal outcomes.
 
-The migration therefore deepens the existing Python modules behind one small
+The extraction deepens the existing Python modules behind one small
 workflow interface. It does not replace working providers, routing, state,
 review persistence, or continuation machinery with parallel abstractions.
 
@@ -517,6 +529,12 @@ recorded baseline/migrated orchestration counts. This phase does not claim an
 OpenHands implementation or mechanically enforced access without host evidence.
 
 ### Phase 5 — Engine-owned build using existing executor routes
+
+Status: implemented and verified in the uncommitted working tree. The Claude
+Code CLI gate covers native executor and configured Sol via Codex, real reviews
+and revision, exact-ID continuation, human waits, concurrent reviewers, recovery,
+guards and terminal replay. Evidence limits and measured comparisons are recorded
+in [phase-5-build-evidence.md](phase-5-build-evidence.md). Cursor work remains deferred.
 
 #### Outcome
 

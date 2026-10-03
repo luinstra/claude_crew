@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import contextlib
+from build_state import writer_fence
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -15,7 +17,7 @@ import uuid
 from models import (LoopState, StateLockError, SCHEMA_VERSION, LOAD_OK, LOAD_MISSING, LOAD_FUTURE_SCHEMA,
     effective_count, loop_bound_reason,
     DEFAULT_DEADLINE_MINUTES, NO_DEADLINE, FORCE_EXIT_KEY, read_state_json,
-    update_state_json, utc_now_iso)
+    update_state_json, utc_now_iso, state_lock, atomic_write_json)
 from state_discovery import crew_base, find_session_state_file, find_adoptable_legacy, is_active_value
 from multiagent import config, review_runs, targets
 
@@ -136,8 +138,53 @@ def mutate(path: Path, operation: Callable[[dict[str, object]], dict[str, object
         raise LoopStateError(status, f"refusing to modify {path}: {status}")
     return data
 
+def admission_lock():
+    return state_lock(crew_base() / ".crew" / "loop-admission")
+
+
+@contextlib.contextmanager
+def admission_states(session_id: str):
+    directory = crew_base() / ".crew"
+    candidates = set()
+    for prefix in ("build-state", "measure-twice-state"):
+        candidates.add(directory / f"{prefix}{'-' + session_id if session_id else ''}.json")
+        legacy = find_adoptable_legacy(directory, prefix, session_id) if session_id else None
+        if legacy is not None:
+            candidates.add(legacy)
+    with contextlib.ExitStack() as stack:
+        for path in sorted(candidates, key=lambda p: str(p.absolute())):
+            stack.enter_context(state_lock(path))
+        yield {p: read_state_json(p) for p in candidates}
+
+
+def check_writer_fences(states: dict, *, continuing: Path | None = None) -> None:
+    for path, (data, status) in states.items():
+        if path.name.startswith("build-state") and status not in (LOAD_OK, LOAD_MISSING):
+            raise LoopStateError(status, f"cannot admit work over unreadable build writer state: {path}; retain evidence for inspection")
+        if data is None:
+            continue
+        fence = writer_fence(data)
+        if fence and path != continuing:
+            raise LoopStateError("outstanding_writer", fence)
+
+
+def check_admission(states: dict, *, replacing: Path | None = None, continuing: Path | None = None) -> None:
+    for path, (_data, status) in states.items():
+        if status not in (LOAD_OK, LOAD_MISSING):
+            raise LoopStateError(status, f"cannot admit work over unreadable state: {path}")
+    check_writer_fences(states, continuing=continuing)
+    for path, (data, _status) in states.items():
+        if data is None:
+            continue
+        if (replacing is None or path == replacing) and path.name.startswith("measure-twice-state") and (data.get(FORCE_EXIT_KEY) or data.get("exit_kind") == "force_exit"):
+            raise LoopStateError("active_request_conflict", f"safety-exited lifetime cannot be replaced by start: {path}")
+        if path != replacing and is_active_value(data.get("active")):
+            raise LoopStateError("active_request_conflict", f"another loop is active in this session: {path}")
+
+
 def initialize(task: str, session_id: str, *, journal: dict[str, object],
                previous: dict[str, object] | None = None) -> dict[str, object]:
+    from multiagent import continuations
     path = resolve("mt", session_id)
     deadline = config.deadline_minutes()
     deadline = DEFAULT_DEADLINE_MINUTES if deadline is None else deadline
@@ -145,31 +192,26 @@ def initialize(task: str, session_id: str, *, journal: dict[str, object],
         loop_instance_id=str(uuid.uuid4()), started_at=utc_now_iso(),
         deadline_minutes=deadline, no_deadline=deadline == NO_DEADLINE))
     fresh.update(schema=SCHEMA_VERSION, mt_workflow=journal)
-    def admit(data: dict[str, object]) -> dict[str, object]:
-        if (data != (previous or {}) or is_active_value(data.get("active"))
-                or data.get(FORCE_EXIT_KEY) or data.get("exit_kind") == "force_exit"):
-            raise LoopStateError("active_request_conflict", "existing lifetime changed or cannot be replaced by start")
-        directory = crew_base() / ".crew"
-        for prefix in ("build-state", "measure-twice-state"):
-            candidates = [directory / f"{prefix}{'-' + session_id if session_id else ''}.json"]
-            legacy = find_adoptable_legacy(directory, prefix, session_id) if session_id else None
-            if legacy is not None:
-                candidates.append(legacy)
-            for candidate in set(candidates):
-                if candidate == path:
-                    continue  # This state's admission is checked under its lock above.
-                other, status = read_state_json(candidate)
-                if status == LOAD_FUTURE_SCHEMA:
-                    raise LoopStateError(status, f"refusing newer-schema conflicting state {candidate}")
-                if status != LOAD_OK:
-                    continue
-                if (prefix == "measure-twice-state" and
-                        (other.get(FORCE_EXIT_KEY) or other.get("exit_kind") == "force_exit")):
-                    raise LoopStateError("active_request_conflict", f"safety-exited lifetime requires explicit restart: {candidate}")
-                if is_active_value(other.get("active")):
-                    raise LoopStateError("active_request_conflict", f"another loop is active in this session: {candidate}")
-        return fresh
-    return mutate(path, admit)
+    with admission_lock(), admission_states(session_id) as observed:
+        check_admission(observed)
+        replacing_chain = any(data and data.get("bl_workflow") is not None for data, _ in observed.values())
+    chain = continuations.continuation_lock(session_id, "build-executor") if replacing_chain else contextlib.nullcontext()
+    try:
+        with chain, admission_lock(), admission_states(session_id) as states:
+            check_admission(states)
+            if states != observed:
+                raise LoopStateError("active_request_conflict", "admission changed; retry the same request")
+            data, status = states[path]
+            if (data != previous and data != (previous or {}) and status != LOAD_MISSING
+                    or data and (is_active_value(data.get("active")) or data.get(FORCE_EXIT_KEY)
+                                 or data.get("exit_kind") == "force_exit")):
+                raise LoopStateError("active_request_conflict", "existing lifetime changed or cannot be replaced by start")
+            if replacing_chain:
+                continuations.invalidate(session_id, "build-executor")
+            atomic_write_json(path, fresh)
+    except continuations.ContinuationLockError as exc:
+        raise LoopStateError("continuation_busy", "Continuation chain is busy; retry after the owned writer finishes") from exc
+    return fresh
 
 
 def initialize_compatibility(path: Path, state: LoopState) -> dict[str, object]:
@@ -241,7 +283,8 @@ def apply_verdict(data: dict[str, object], evidence: ReviewEvidence, verdict: st
     completing = verdict == "APPROVED" or (verdict == "REVISE" and minor_only)
     overrode: list[tuple[str, str]] = []
     loop_owned = isinstance(evidence.source, LoopReviewSource)
-    begin_hint = ("Use measure-twice-next with the issued MeasureRef; repair or cancel the invalid binding."
+    next_command, owner_ref = ("build-next", "BuildRef") if loop == "bl" else ("measure-twice-next", "MeasureRef")
+    begin_hint = (f"Use {next_command} with the issued {owner_ref}; repair or cancel the invalid binding."
                   if loop_owned else
                   f"Run `crew review-prep`, then `crew state begin-review {loop} --session-id {session_id or '<id>'}`.")
     # is_active_value, never `is True` (see begin-review).
@@ -276,7 +319,8 @@ def apply_verdict(data: dict[str, object], evidence: ReviewEvidence, verdict: st
     target_sha256 = evidence.target_sha256
     expected = evidence.expected_seats
     usable = evidence.usable_seats
-    repanel = ("use an exact bound human retry decision through measure-twice-decide, or cancel"
+    decide_command = "build-decide" if loop == "bl" else "measure-twice-decide"
+    repanel = (f"use an exact bound human retry decision through {decide_command}, or cancel"
                if isinstance(evidence.source, LoopReviewSource) else
                "re-run `crew review-prep` + begin-review + the panel")
 

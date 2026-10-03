@@ -169,7 +169,7 @@ outstanding gates live in docs/operator-followups.md.
 ## Review-bearing command decisions (labels moved out of the command docs)
 
 The `review`/`build`/`measure-twice` markdown used to carry these bare labels
-inline. The historical rules remain in the legacy build command; workflow paths now issue their transport in Python; only the label
+inline. Current workflow paths issue their transport in Python; only the historical label
 gloss lives here.
 
 - **Decision-H** — persist EACH normalized Task seat through `crew persist-seat`
@@ -188,9 +188,9 @@ gloss lives here.
 
 ## T3a reference-spawn (build and measure-twice history)
 
-This section describes the current build `review-prep` transport and historical
-measure-twice behavior before its engine cutover. Workflow-owned review and mt
-no longer duplicate it in Markdown: Python
+This section records the former build/measure-twice `review-prep` transport.
+Current build and measure-twice compose owner-bound reviews through Python,
+which issues transport actions instead of duplicating policy in Markdown. Python
 issues the reviewer prompt, exact primary scribe ingress, distinct fallback,
 typed submission, formatter, and synthesis actions through `review_workflow`.
 
@@ -207,8 +207,8 @@ typed submission, formatter, and synthesis actions through `review_workflow`.
   path the orchestrator hands that returned text INLINE to a `crew:scribe`
   sub-agent (Write-only), which Writes it to the tmp-seat file inside its OWN
   transcript, so the persist-Write never renders back into orchestrator context.
-  The orchestrator keeps the landing authority. The legacy build recipe calls
-  `persist-seat --verify` and gates on its exit code for
+  The orchestrator kept the landing authority. The former build recipe called
+  `persist-seat --verify` and gated on its exit code for
   the landed record. The scribe's self-reported line is never the gate. On any
   scribe failure it falls back to
   Writing a DISTINCT `-fallback` path itself and persisting that, so a timed-out
@@ -263,8 +263,8 @@ unknown, uses parent-context formatter work and keeps every seat external.
 Codex-host all-external protocol compatibility is
 covered deterministically through the Python CLI in this phase, but the Codex
 plugin does not yet expose standalone `/crew:review`; its app-native adapter
-remains deferred. Build retains `review-prep`; measure-twice now composes this
-review seam through its own typed engine and explicit owner binding.
+remains deferred. Build and measure-twice compose this review seam through their
+typed engines and explicit owner bindings, without selecting outcomes by pointer.
 
 ## Cursor host: the native reviewer channel, and why it took a design pass
 

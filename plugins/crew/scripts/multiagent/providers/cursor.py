@@ -42,6 +42,7 @@ import sys
 import time
 from dataclasses import dataclass
 
+from build_state import report_status
 from multiagent.continuation_ids import valid_conversation_id
 from state_discovery import crew_base  # the ONE `.crew`/project-root resolver
 
@@ -50,8 +51,9 @@ from multiagent.providers import (
     Provider,
     ProviderContinuation,
     ProviderResult,
+    transport_failure,
 )
-from multiagent.providers._proc import TIMEOUT, run_reaped
+from multiagent.providers._proc import TIMEOUT, TIMEOUT_UNCONFIRMED, ReapedFailure, run_reaped
 
 # ANSI escape code pattern for stripping terminal colour sequences.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mGKHF]")
@@ -98,6 +100,15 @@ class _StreamClassification:
 
 
 _valid_resume_id = valid_conversation_id
+
+
+def _unique_stream_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    record: dict[str, object] = {}
+    for key, value in pairs:
+        if key in record:
+            raise ValueError("duplicate key in authoritative stream")
+        record[key] = value
+    return record
 
 
 def _reset_probe_cache_for_tests() -> None:
@@ -211,13 +222,14 @@ def _classify_stream(
     returncode: int,
     stdout: str,
     stderr: str,
+    valid_build_report: bool = False,
 ) -> _StreamClassification:
     """Apply one failure and output policy to every parsed Cursor stream."""
     output = _stream_text(stream)
     stderr_clean = _strip_ansi(stderr).strip()
     scan_text = output if stream.events else _strip_ansi(stdout)
     auth_marker = _auth_failure_marker(
-        scan_text + stderr_clean + stream.terminal_error
+        ("" if valid_build_report else scan_text) + stderr_clean + stream.terminal_error
     )
     if auth_marker is not None:
         return _StreamClassification(
@@ -326,7 +338,7 @@ class CursorProvider(Provider):
             probe = run_reaped(["agent", "--version"], timeout=10)
         except OSError:
             return False, "agent binary found but does not appear to be Cursor Agent"
-        if probe is TIMEOUT:
+        if probe is TIMEOUT or probe is TIMEOUT_UNCONFIRMED or isinstance(probe, ReapedFailure):
             return False, "agent binary found but does not appear to be Cursor Agent"
         _rc, probe_out, probe_err = probe
         combined = ((probe_out or "") + (probe_err or "")).strip()
@@ -356,7 +368,7 @@ class CursorProvider(Provider):
             return cached
         try:
             probe = run_reaped([path, "--help"], timeout=PROBE_TIMEOUT)
-            if probe is TIMEOUT:
+            if probe is TIMEOUT or probe is TIMEOUT_UNCONFIRMED or isinstance(probe, ReapedFailure):
                 print(
                     f"warning: agent --help probe timed out after {PROBE_TIMEOUT}s; "
                     "stream-json capture and continuation are disabled for this process",
@@ -412,7 +424,7 @@ class CursorProvider(Provider):
         assistant_deltas: list[str] = []
         events = 0
 
-        for line in (stdout or "").splitlines():
+        for line in (stdout or "").split("\n"):
             line = line.strip()
             if not line:
                 continue
@@ -484,6 +496,36 @@ class CursorProvider(Provider):
             events=events,
         )
 
+    def _exact_stream_output(
+        self, raw: bytes, *, structured: bool, expected_session_id: str | None = None
+    ) -> tuple[bytes, bool]:
+        # Permissive display parsing cannot certify a structured write response.
+        try:
+            text = raw.decode("utf-8")
+            lines = [line for line in text.split("\n") if line.strip()]
+            if not structured or not any(line.lstrip().startswith(("{", "[")) for line in lines):
+                return raw, expected_session_id is None
+            records = [json.loads(line, object_pairs_hook=_unique_stream_object) for line in lines]
+            if not records or any(not isinstance(record, dict) for record in records):
+                return raw, False
+            terminals = [record for record in records if record.get("type") == "result"]
+            ids = [record["session_id"] for record in records if "session_id" in record]
+            if (
+                len(terminals) != 1
+                or records[-1] is not terminals[0]
+                or any(not _valid_resume_id(value) or value != ids[0] for value in ids)
+                or expected_session_id is not None
+                and (not ids or ids[0] != expected_session_id)
+            ):
+                return raw, False
+            terminal = terminals[0]
+            if (terminal.get("subtype") != "success" or terminal.get("is_error") is not False
+                    or not isinstance(terminal.get("result"), str)):
+                return raw, False
+            return terminal["result"].encode("utf-8"), True
+        except (UnicodeError, ValueError):
+            return raw, False
+
     def run(
         self,
         prompt: str,
@@ -493,6 +535,8 @@ class CursorProvider(Provider):
         timeout: int = 300,
         dispatch_options: dict | None = None,
         continuation: ProviderContinuation | None = None,
+        workspace: str | None = None,
+        build_report: bool = False,
     ) -> ProviderResult:
         """Invoke Cursor Agent and return a normalized ProviderResult.
 
@@ -520,6 +564,8 @@ class CursorProvider(Provider):
         capability = "unsupported"
 
         # Every chained-path early exit must thread an outcome through this helper.
+        returncode = 0
+
         def make_continuation_result(
             *,
             ok: bool,
@@ -529,6 +575,9 @@ class CursorProvider(Provider):
             conversation_id: str | None = None,
             continuation_id: str | None = None,
             reported_model: str | None = None,
+            exact_output: bytes | None = None,
+            transport_status: str | None = None,
+            report_authoritative: bool = True,
         ) -> ProviderResult:
             values = {
                 "name": self.name,
@@ -538,6 +587,9 @@ class CursorProvider(Provider):
                 "error": error,
                 "elapsed": time.monotonic() - start,
                 "reported_model": reported_model,
+                "exact_output": exact_output if exact_output is not None else output.encode("utf-8"),
+                "transport_status": transport_status or ("ok" if ok else "timeout" if failure == "timeout" else transport_failure(returncode, error)),
+                "report_authoritative": report_authoritative,
             }
             if want_continuation:
                 values["continuation"] = ContinuationOutcome(
@@ -594,7 +646,7 @@ class CursorProvider(Provider):
         # A WORK seat edits CLAUDE_WORKING_DIRECTORY (the guard's tree); a
         # read-only review seat pins cwd + --workspace to crew_base() so a
         # divergent process cwd reviews the project, not whatever tree cwd is in.
-        cwd = (
+        cwd = workspace or (
             os.environ.get("CLAUDE_WORKING_DIRECTORY", os.getcwd())
             if sandbox == "workspace-write"
             else str(crew_base())
@@ -639,19 +691,41 @@ class CursorProvider(Provider):
         # teardown on timeout so a hung cursor agent can't orphan billable
         # grandchildren. OSError (launch failure) preserved as before.
         try:
-            result = run_reaped(cmd, timeout=timeout, cwd=cwd)
+            capture = {"capture_bytes": True} if sandbox == "workspace-write" else {}
+            result = run_reaped(cmd, timeout=timeout, cwd=cwd, **capture)
         except OSError as exc:
             return make_continuation_result(
-                ok=False, output="", error=f"Failed to launch agent: {exc}", failure="error"
+                ok=False, output="", error=f"Failed to launch agent: {exc}", failure="error",
+                transport_status="unavailable",
             )
-        if result is TIMEOUT:
+        if result is TIMEOUT or result is TIMEOUT_UNCONFIRMED:
             return make_continuation_result(
                 ok=False,
                 output="",
-                error=f"Cursor Agent timed out after {timeout}s",
+                error=f"Cursor Agent timed out after {timeout}s" + result.diagnostic_suffix,
                 failure="timeout",
+                transport_status=result.transport_status,
+            )
+        if isinstance(result, ReapedFailure):
+            raw = result.stdout if isinstance(result.stdout, bytes) else result.stdout.encode("utf-8")
+            exact, authoritative = self._exact_stream_output(raw, structured=stream_enabled, expected_session_id=resume_id)
+            return make_continuation_result(
+                ok=False, output="", error=result.error, failure="error",
+                exact_output=exact, report_authoritative=authoritative, transport_status=result.transport_status,
             )
         returncode, proc_stdout, proc_stderr = result
+        raw_stdout = proc_stdout if isinstance(proc_stdout, bytes) else proc_stdout.encode("utf-8")
+        exact, authoritative = self._exact_stream_output(raw_stdout, structured=stream_enabled, expected_session_id=resume_id)
+        valid_build_report = (
+            build_report
+            and sandbox == "workspace-write"
+            and returncode == 0
+            and authoritative
+            and report_status(exact) != "invalid_report"
+        )
+        if isinstance(proc_stdout, bytes):
+            proc_stdout = proc_stdout.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+            proc_stderr = proc_stderr.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
 
         if capable:
             stream = self._parse_stream(proc_stdout)
@@ -665,8 +739,13 @@ class CursorProvider(Provider):
                 returncode=returncode,
                 stdout=proc_stdout,
                 stderr=proc_stderr,
+                valid_build_report=valid_build_report,
             )
             if classification.error is not None:
+                invalid_write_report = (
+                    sandbox == "workspace-write" and returncode == 0
+                    and not authoritative and not classification.auth_failure
+                )
                 return make_continuation_result(
                     ok=False,
                     output=classification.output,
@@ -676,6 +755,9 @@ class CursorProvider(Provider):
                         None if classification.auth_failure else reported_id
                     ),
                     reported_model=stream.model,
+                    exact_output=exact if invalid_write_report else None,
+                    report_authoritative=not invalid_write_report,
+                    transport_status="ok" if invalid_write_report else None,
                 )
             output = classification.output
 
@@ -698,6 +780,8 @@ class CursorProvider(Provider):
                 conversation_id=reported_id,
                 continuation_id=persisted_id,
                 reported_model=stream.model,
+                exact_output=exact,
+                report_authoritative=authoritative,
             )
 
         if stream_enabled:
@@ -715,6 +799,7 @@ class CursorProvider(Provider):
                 returncode=returncode,
                 stdout=proc_stdout,
                 stderr=proc_stderr,
+                valid_build_report=valid_build_report,
             )
             if classification.error is not None:
                 return make_continuation_result(
@@ -730,10 +815,14 @@ class CursorProvider(Provider):
                 error=None,
                 continuation_id=None,
                 reported_model=parsed.model,
+                exact_output=exact,
+                report_authoritative=authoritative,
             )
 
         raw_output = _strip_ansi(proc_stdout)
-        combined_lower = (raw_output + proc_stderr).lower()
+        combined_lower = (
+            ("" if valid_build_report else raw_output) + proc_stderr
+        ).lower()
         auth_marker = _auth_failure_marker(combined_lower)
         if auth_marker is not None:
             return make_continuation_result(
@@ -762,6 +851,8 @@ class CursorProvider(Provider):
         return make_continuation_result(
             ok=True, output=raw_output, error=None,
             continuation_id=None,
+            exact_output=raw_stdout,
+            report_authoritative=authoritative,
         )
 
 

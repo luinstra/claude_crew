@@ -347,6 +347,23 @@ def work_item_to_dict(item: WorkItem) -> dict:
     return {field.name: getattr(item, field.name) for field in dataclasses.fields(WorkItem)}
 
 
+def issued_review_commands(ref: ReviewRef, item: WorkItem) -> dict[str, tuple[str, ...]]:
+    executable = str(Path(__file__).resolve().parents[2] / "crew")
+    flags = ("--session-segment", ref.session_segment, "--run-id", ref.run_id,
+             "--attempt-id", ref.attempt_id, "--target-sha256", ref.target_sha256, "--action-id", item.action_id)
+    if item.driver == "external":
+        return {"execute": (executable, "review-execute", *flags),
+                "recover": (executable, "review-recover", *flags, "--diagnostic-code", "external_process_lost")}
+    recovery_code = ("parent_synthesis_lost" if item.kind == "synthesis" else
+                     "parent_formatter_lost" if item.kind == "formatter" and item.driver == "parent" else
+                     "formatter_task_lost" if item.kind == "formatter" else "native_task_lost")
+    commands = {"claim": (executable, "review-claim", *flags), "capture": (executable, "review-capture", *flags),
+                "recover": (executable, "review-recover", *flags, "--diagnostic-code", recovery_code)}
+    if item.driver == "native" and item.role == "crew:reviewer":
+        commands.update(native_bind=(executable, "review-native-bind", *flags), native_capture=(executable, "review-native-capture", *flags))
+    return commands
+
+
 def parse_work_item(value: object) -> WorkItem:
     names = {field.name for field in dataclasses.fields(WorkItem)}
     if not isinstance(value, dict) or set(value) != names:
@@ -652,6 +669,12 @@ def _session(request: ReviewRequest | DebateRequest) -> str:
     return segment
 
 
+def _valid_owned_timeout(value: object, identity: Mapping) -> bool:
+    build = (identity.get("kind") == "loop_review" and
+             parse_loop_binding(identity.get("loop_binding")).loop == "bl")
+    return type(value) is int and value > 0 and (build or value <= 540)
+
+
 def _timeout(value: int | None, frozen: dict | None = None) -> tuple[int, int | None]:
     if value is not None and value <= 0:
         raise WorkflowError("invalid_timeout", "timeout must be a positive integer")
@@ -667,13 +690,14 @@ def _provider_timeout(
     provider_name: str,
     channel: str,
     timeout: int,
+    *, build: bool = False,
 ) -> int:
     """Resolve the one provider-specific standalone timeout floor."""
     if provider_name != "agy":
         return timeout
     provider = get_provider_for_channel(seat, channel)
     effective = math.ceil(provider.effective_timeout(timeout))
-    if effective > 540:
+    if effective > 540 and not build:
         raise WorkflowError(
             "provider_timeout_exceeds_budget",
             f"seat {seat!r} requires {effective}s but standalone provider budget is 540s",
@@ -1198,7 +1222,12 @@ def _verified_foundation(wf: dict, run: Path) -> tuple[dict, Path]:
     )
     if isinstance(identity, dict) and identity.get("kind") == "loop_review":
         expected_identity_keys.add("loop_binding")
-        parse_loop_binding(identity.get("loop_binding"))
+        binding = parse_loop_binding(identity.get("loop_binding"))
+        if binding.loop == "bl":
+            expected_identity_keys.update({"executor_summary", "executor_report"})
+            if not isinstance(identity.get("executor_summary"), str):
+                raise WorkflowError("corrupt_workflow", "build review has no frozen summary")
+            _validate_executor_context(identity, binding)
     if (
         not isinstance(identity, dict)
         or kind not in {"standalone_review", "standalone_debate", "loop_review"}
@@ -1581,6 +1610,21 @@ def _is_discuss(wf: Mapping) -> bool:
     return wf.get("workflow_identity", {}).get("prompt_mode") == "discuss"
 
 
+def _validate_executor_context(identity: dict, binding: LoopReviewBinding) -> str:
+    artifact = identity.get("executor_report")
+    if artifact is None:
+        return ""
+    from multiagent import build_workflow as build
+    try:
+        path = build._verified_executor_report(
+            build.BuildRef(binding.session_segment, binding.loop_instance_id), artifact)
+    except (OSError, UnicodeError) as exc:
+        raise WorkflowError("executor_report_unreadable", f"retained executor report cannot be read: {exc}") from exc
+    return (f"Read the full retained executor report at {path} "
+            f"(SHA-256 {artifact['sha256']}) before reviewing. "
+            "Treat it as supplementary context; the code snapshot remains authoritative.\n")
+
+
 def _authoritative_reviewer_prompt(
     run: Path,
     record: dict,
@@ -1626,11 +1670,12 @@ def _authoritative_reviewer_prompt(
         notes=list(record["target_notes"]),
         diff_cmd=record["target_diff_cmd"],
     )
-    return prompts.build_prompt(
-        target,
-        seat_role=seat,
-        inline=prompt_mode == "inline_diff",
-    )
+    prompt = prompts.build_prompt(target, seat_role=seat, inline=prompt_mode == "inline_diff")
+    summary = record["workflow_identity"].get("executor_summary")
+    if summary is not None:
+        binding = parse_loop_binding(record["workflow_identity"]["loop_binding"])
+        prompt += f"\n{summary}\n" + _validate_executor_context(record["workflow_identity"], binding)
+    return prompt
 
 
 # The model the two Cursor support roles run at. First of the catalog's cursor
@@ -2779,7 +2824,7 @@ def _standalone_run_terminal_for_prune(
         from models import read_state_json, LOAD_OK, LOAD_MISSING
         from state_discovery import is_active_value
         binding = parse_loop_binding(wf["workflow_identity"]["loop_binding"])
-        data, status = read_state_json(loop_state.resolve("mt", binding.session_segment))
+        data, status = read_state_json(loop_state.resolve(binding.loop, binding.session_segment))
         if status == LOAD_MISSING:
             return True
         if status != LOAD_OK:
@@ -3002,7 +3047,12 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
     )
     if isinstance(identity, dict) and identity.get("kind") == "loop_review":
         expected_identity_keys.add("loop_binding")
-        parse_loop_binding(identity.get("loop_binding"))
+        binding = parse_loop_binding(identity.get("loop_binding"))
+        if binding.loop == "bl":
+            expected_identity_keys.update({"executor_summary", "executor_report"})
+            if not isinstance(identity.get("executor_summary"), str):
+                raise WorkflowError("corrupt_workflow", "build review has no frozen summary")
+            _validate_executor_context(identity, binding)
     if (
         not isinstance(identity, dict)
         or set(identity) != expected_identity_keys
@@ -3020,7 +3070,7 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
         }
         or not isinstance(identity.get("timeout_seconds"), int)
         or isinstance(identity.get("timeout_seconds"), bool)
-        or not 0 < identity["timeout_seconds"] <= 540
+        or not _valid_owned_timeout(identity["timeout_seconds"], identity)
         or not isinstance(identity.get("prompt_metadata_sha256"), str)
         or SHA_RE.fullmatch(identity["prompt_metadata_sha256"]) is None
         or not isinstance(record.get("snapshot"), str)
@@ -3134,7 +3184,7 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
             if (
                 not isinstance(timeout_value, int)
                 or isinstance(timeout_value, bool)
-                or not 0 < timeout_value <= 540
+                or not _valid_owned_timeout(timeout_value, identity)
             ):
                 _corrupt_workflow(f"external timeout authority for {seat!r} is invalid")
     if (
@@ -4276,7 +4326,8 @@ def execute_external_review(ref: ReviewRef, action_id: str) -> ReviewStep:
         seat_name, model = action["seat"], action["model"]
         timeout, result_path = int(action["timeout_seconds"]), Path(action["result_path"])
         snapshot = dict(action)
-        policy = RoutePolicy.from_identity(wf["workflow_identity"])
+        identity = dict(wf["workflow_identity"])
+        policy = RoutePolicy.from_identity(identity)
     # CLI availability/timeout probes must not occupy either workflow lock.
     provider = _frozen_external_provider(
         snapshot, policy
@@ -4290,15 +4341,39 @@ def execute_external_review(ref: ReviewRef, action_id: str) -> ReviewStep:
             "provider_error",
             f"cannot resolve provider for seat {seat_name!r}: {exc}",
         ) from exc
-    if action.get("provider") == "agy":
+    build_binding = (parse_loop_binding(wf["workflow_identity"]["loop_binding"])
+                     if wf["workflow_identity"]["kind"] == "loop_review" else None)
+    build_owned = build_binding is not None and build_binding.loop == "bl"
+    current_timeout = timeout
+    if action.get("provider") == "agy" or build_owned:
         try:
-            current_timeout = math.ceil(provider.effective_timeout(timeout))
+            current_timeout = math.ceil(provider.effective_timeout(identity["timeout_seconds"])) if hasattr(provider, "effective_timeout") else identity["timeout_seconds"]
         except Exception as exc:
             raise WorkflowError(
                 "provider_error",
                 f"cannot resolve provider timeout for seat {seat_name!r}: {exc}",
             ) from exc
+    with _owned_workflow_lock(run, ref):
+        wf, run = _load_current_locked(ref, run)
+        action = _load_action(wf, action_id)
+        if action.get("status") in {"settled", "claimed"}:
+            return _advance_locked(wf, run)
+        if action != snapshot or wf["workflow_identity"] != identity:
+            raise WorkflowError("conflict", "external action or policy changed during provider probing", "conflict")
+        _admit_loop_work(wf, ref)
         if current_timeout != timeout:
+            if build_owned:
+                from multiagent import build_workflow as build
+                import loop_state
+                from models import atomic_write_json
+                owner = _owner_state(build_binding, ref, wf)
+                journal = build.journal_from_dict(owner["bl_workflow"])
+                owner_ref = build.BuildRef(build_binding.session_segment, build_binding.loop_instance_id)
+                build._park(owner, journal, owner_ref, "review_timeout_changed",
+                    f"Provider floor changed from frozen {timeout}s to {current_timeout}s; authorize fresh_review over current bytes")
+                owner["bl_workflow"] = build.journal_to_dict(journal)
+                atomic_write_json(loop_state.resolve("bl", build_binding.session_segment), owner)
+                raise WorkflowError("review_timeout_changed", "build owner is paused for a fresh review decision")
             if current_timeout <= 540:
                 guidance = (
                     "start a new standalone review with explicit "
@@ -4316,14 +4391,6 @@ def execute_external_review(ref: ReviewRef, action_id: str) -> ReviewStep:
                 f"froze {timeout}s; {guidance}",
                 "conflict",
             )
-    with _owned_workflow_lock(run, ref):
-        wf, run = _load_current_locked(ref, run)
-        action = _load_action(wf, action_id)
-        if action.get("status") in {"settled", "claimed"}:
-            return _advance_locked(wf, run)
-        if action != snapshot:
-            raise WorkflowError("conflict", "external action changed during provider probing", "conflict")
-        _admit_loop_work(wf, ref)
         prompt = Path(action["prompt_path"]).read_text(encoding="utf-8")
         action["status"] = "claimed"
         claim_id = hashlib.sha256(f"{action_id}:{time.time_ns()}".encode()).hexdigest()[:16]
@@ -4908,7 +4975,7 @@ def loop_binding_to_dict(binding: LoopReviewBinding) -> dict[str, object]:
 def parse_loop_binding(value: object) -> LoopReviewBinding:
     fields = {field.name for field in dataclasses.fields(LoopReviewBinding)}
     if (not isinstance(value, dict) or set(value) != fields
-            or value.get("loop") != "mt"
+            or value.get("loop") not in {"mt", "bl"}
             or not isinstance(value.get("session_segment"), str)
             or not SESSION_RE.fullmatch(value["session_segment"])
             or not isinstance(value.get("loop_instance_id"), str)
@@ -4940,8 +5007,8 @@ def _review_synthesis_prompt(wf: Mapping, panel_path: str, full_path: str,
         text += ("\nLoop judgment: APPROVED, REVISE or REJECT. APPROVED means minor_only=false; "
                  "capture with --verdict APPROVED and omit --minor-only. "
                  "--minor-only is only valid with REVISE (minor_only=true). "
-                 "REJECT requires minor_only=false "
-                 "and requests fresh replanning. Verify singleton BLOCKING findings against source, "
+                 "REJECT requires minor_only=false " +
+                 ("and requests structural reimplementation. Verify singleton BLOCKING findings against source, " if parse_loop_binding(wf["workflow_identity"]["loop_binding"]).loop == "bl" else "and requests fresh replanning. Verify singleton BLOCKING findings against source, ") +
                  "read every raw/unparsed review, and diagnose shared structural causes once. "
                  "Never defer a BLOCKING finding merely to finish. Count distinct BLOCKING causes "
                  "in the synthesis text as BLOCKING_CAUSES: <integer> for the rising-findings warning.\n")
@@ -4952,8 +5019,11 @@ def _owner_state(binding: LoopReviewBinding, ref: ReviewRef, wf: Mapping,
                  *, check_bounds: bool = True) -> dict[str, object]:
     import loop_state
     from state_discovery import is_active_value
-    data = loop_state.read(loop_state.resolve("mt", binding.session_segment))
-    journal = data.get("mt_workflow")
+    data = loop_state.read(loop_state.resolve(binding.loop, binding.session_segment))
+    journal = data.get(f"{binding.loop}_workflow")
+    if binding.loop == "bl":
+        from multiagent import build_workflow as build
+        build.journal_from_dict(journal)
     if (not is_active_value(data.get("active")) or data.get("loop_instance_id") != binding.loop_instance_id
             or review_runs.session_segment(data.get("session_id") or "") != binding.session_segment
             or data.get("phase") != "reviewing" or not isinstance(journal, dict)
@@ -4977,6 +5047,11 @@ def _owner_state(binding: LoopReviewBinding, ref: ReviewRef, wf: Mapping,
 
 def _loop_retry_authorization(data: Mapping, wf: Mapping, source_ref: ReviewRef) -> None:
     from multiagent import measure_twice as measure
+    binding = parse_loop_binding(wf["workflow_identity"]["loop_binding"])
+    if binding.loop == "bl":
+        from multiagent import build_workflow as build
+        build.validate_review_retry(data, wf, source_ref)
+        return
     journal = measure.journal_from_dict(data.get("mt_workflow"))
     authorization = journal.retry_authorization
     binding = parse_loop_binding(wf["workflow_identity"]["loop_binding"])
@@ -5009,7 +5084,7 @@ def _require_loop_retry_authorization(wf: Mapping, request: RetryRequest) -> Non
     binding = parse_loop_binding(wf["workflow_identity"]["loop_binding"])
     data = _owner_state(binding, request.ref, wf)
     _loop_retry_authorization(data, wf, request.ref)
-    decision = data["mt_workflow"]["retry_authorization"]["decision"]
+    decision = data[f"{binding.loop}_workflow"]["retry_authorization"]["decision"]
     if request.seats != (() if decision["kind"] == "retry_synthesis" else None):
         raise WorkflowError("retry_not_authorized", "retry selection differs from the bound decision")
 
@@ -5019,7 +5094,7 @@ def _admit_loop_work(wf: Mapping, ref: ReviewRef) -> None:
         return
     binding = parse_loop_binding(wf["workflow_identity"]["loop_binding"])
     data = _owner_state(binding, ref, wf)
-    journal = data["mt_workflow"]
+    journal = data[f"{binding.loop}_workflow"]
     if data.get("awaiting_input") or journal.get("question") is not None:
         raise WorkflowError("work_not_admitted", "an unanswered owner question prevents new review work")
     if _attempt_number(ref.attempt_id) > 1:
@@ -5053,7 +5128,7 @@ def _owned_workflow_lock(run: Path, ref: ReviewRef) -> Iterator[None]:
     from models import state_lock, StateLockError
     binding = parse_loop_binding(identity["loop_binding"])
     try:
-        with state_lock(loop_state.resolve("mt", binding.session_segment)):
+        with state_lock(loop_state.resolve(binding.loop, binding.session_segment)):
             with _workflow_lock(run):
                 wf = _workflow(run)
                 if wf["workflow_identity"] != identity:
@@ -5087,18 +5162,22 @@ class PreparedLoopReview:
 
 
 @_public_workflow_boundary
-def prepare_loop_review(request: ReviewRequest, binding: LoopReviewBinding) -> PreparedLoopReview:
+def prepare_loop_review(request: ReviewRequest, binding: LoopReviewBinding, *, executor_summary: str | None = None, executor_report: dict[str, str] | None = None) -> PreparedLoopReview:
     binding = parse_loop_binding(loop_binding_to_dict(binding))
     if _session(request) != binding.session_segment:
         raise WorkflowError("invalid_binding", "request and binding sessions differ")
     host = _host()
-    policy = _resolve_route_policy(request, host)
+    policy = RoutePolicy.resolve(host, ("cursor",)) if binding.loop == "bl" else _resolve_route_policy(request, host)
     roles = native_roles(policy)
     target = targets.resolve(request.target_input, base=request.base)
-    if target.kind != "plan":
-        raise WorkflowError("target_error", "loop reviews require a promoted plan")
+    if target.kind != ("code" if binding.loop == "bl" else "plan"):
+        raise WorkflowError("target_error", "loop review target kind differs from its owner")
     resolved = _resolve_seats(request, policy, default_panel=None, seats_over_panel=True)
-    timeout, _warning = _timeout(request.timeout_seconds, None)
+    if binding.loop == "bl":
+        timeout = request.timeout_seconds or config.default_timeout() or 600
+    else:
+        timeout, _warning = _timeout(request.timeout_seconds, None)
+    snapshot_name = review_runs.snapshot_name(target.kind)
     signatures = {name: {"kind": "task" if execution.native else "subprocess",
                           "model": _spent_model(name, spec, execution, roles),
                           **({} if execution.native else {"provider": seats.CHANNEL_TO_LEGACY_KIND[execution.channel]})}
@@ -5108,26 +5187,33 @@ def prepare_loop_review(request: ReviewRequest, binding: LoopReviewBinding) -> P
                 "force_external_channels": policy.identity_value(), "prompt_mode": "standard",
                 "timeout_seconds": timeout,
                 "provider_timeouts": {name: None if execution.native else _provider_timeout(
-                    name, seats.CHANNEL_TO_LEGACY_KIND[execution.channel], execution.channel, timeout)
+                    name, seats.CHANNEL_TO_LEGACY_KIND[execution.channel], execution.channel, timeout,
+                    **({"build": True} if binding.loop == "bl" else {}))
                     for name, _spec, execution in resolved},
                 "prompt_metadata_sha256": _target_prompt_metadata_sha256(
-                    target.notes, target.diff_cmd, "target.md", target.descriptor),
+                    target.notes, target.diff_cmd, snapshot_name, target.descriptor),
                 "loop_binding": loop_binding_to_dict(binding)}
+    if binding.loop == "bl":
+        if not isinstance(executor_summary, str):
+            raise WorkflowError("invalid_checkpoint", "build reviews require frozen executor summary context")
+        identity["executor_summary"] = executor_summary
+        identity["executor_report"] = executor_report
+        _validate_executor_context(identity, binding)
     run_id, digest = review_runs.mint_identity(target_sha256=sha, target_spec=target.replay_spec,
         target_base="", seat_signatures=signatures, workflow_identity=identity)
     ref = ReviewRef(binding.session_segment, run_id, "attempt-0001", sha)
     record = {"run_id": run_id, "identity_digest": digest, "target_sha256": sha,
         "target_spec": target.replay_spec, "target_base": "", "target_descriptor": target.descriptor,
-        "snapshot": "target.md", "target_notes": list(target.notes), "target_diff_cmd": target.diff_cmd,
+        "snapshot": snapshot_name, "target_notes": list(target.notes), "target_diff_cmd": target.diff_cmd,
         "subprocess_seats": [name for name, _spec, execution in resolved if not execution.native],
         "task_seats": [name for name, _spec, execution in resolved if execution.native],
         "task_seat_models": {name: signatures[name]["model"] for name, _spec, execution in resolved if execution.native},
         "seat_signatures": signatures, "host": host,
         "seat_channels": {name: execution.channel for name, _spec, execution in resolved},
         "workflow_identity": identity, "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat()}
-    target_data = {"kind": target.kind, "scope": target.scope, "base": "", "state": "clean",
+    target_data = {"kind": target.kind, "scope": target.scope, "base": "", "state": "dirty" if target.kind == "code" else "clean",
         "descriptor": target.descriptor, "sha256": sha,
-        "display": f"RESOLVED TARGET: kind=plan scope={target.scope} base= state=clean"}
+        "display": f"RESOLVED TARGET: kind={target.kind} scope={target.scope} base= state={'dirty' if target.kind == 'code' else 'clean'}"}
     return PreparedLoopReview(ref, record, target_data, target.content)
 
 
@@ -5145,8 +5231,8 @@ def _start_loop_review_under_owner_lock(prepared: PreparedLoopReview) -> ReviewS
         raise WorkflowError("invalid_checkpoint", "prepared review bytes or owner differ")
     import loop_state
     from state_discovery import is_active_value
-    data = loop_state.read(loop_state.resolve("mt", binding.session_segment))
-    journal = data.get("mt_workflow")
+    data = loop_state.read(loop_state.resolve(binding.loop, binding.session_segment))
+    journal = data.get(f"{binding.loop}_workflow")
     if (not is_active_value(data.get("active")) or data.get("loop_instance_id") != binding.loop_instance_id
             or not isinstance(journal, dict) or journal.get("review_generation") != binding.review_generation
             or journal.get("pending_review_inputs") != prepared.to_dict() or loop_state.bound_reason(data)):
@@ -5159,7 +5245,7 @@ def _start_loop_review_under_owner_lock(prepared: PreparedLoopReview) -> ReviewS
                 raise WorkflowError("conflict", "prepared review identity differs", "conflict")
             return _advance_locked(wf, run)
         review_runs.write_run_json_once(run, record)
-        _write_run_text(run, run / "target.md", prepared.content, "loop target snapshot")
+        _write_run_text(run, run / record["snapshot"], prepared.content, "loop target snapshot")
         identity = record["workflow_identity"]
         policy = RoutePolicy.from_identity(identity)
         actions = [_reviewer_action(run, ref, ordinal=ordinal, seat=name,
@@ -5167,7 +5253,7 @@ def _start_loop_review_under_owner_lock(prepared: PreparedLoopReview) -> ReviewS
             driver=ActionDriver.NATIVE if signature["kind"] == "task" else ActionDriver.EXTERNAL,
             provider=seats.CHANNEL_TO_LEGACY_KIND[record["seat_channels"][name]], policy=policy,
             timeout_seconds=identity["provider_timeouts"][name], prompt_mode="standard",
-            prompt=_authoritative_reviewer_prompt(run, record, run / "target.md", name))
+            prompt=_authoritative_reviewer_prompt(run, record, run / record["snapshot"], name))
             for ordinal, (name, signature) in enumerate(record["seat_signatures"].items(), 1)]
         wf = {"schema": SCHEMA, "workflow_identity": identity, "ref": review_ref_to_dict(ref),
               "target": prepared.target, "roster": list(record["seat_signatures"]),
@@ -5223,7 +5309,7 @@ def start_loop_review(prepared: PreparedLoopReview) -> ReviewStep:
     from models import state_lock
     review_runs.verify_run_record(prepared.record, expected_run_id=prepared.ref.run_id, source=Path("pending_review_inputs"))
     binding = parse_loop_binding(prepared.record.get("workflow_identity", {}).get("loop_binding"))
-    with state_lock(loop_state.resolve("mt", binding.session_segment)):
+    with state_lock(loop_state.resolve(binding.loop, binding.session_segment)):
         return _start_loop_review_under_owner_lock(prepared)
 
 
@@ -5236,5 +5322,5 @@ def read_loop_review_evidence(ref: ReviewRef) -> "ReviewEvidence":
     if peek["workflow_identity"]["kind"] != "loop_review":
         raise WorkflowError("invalid_binding", "expected loop-owned evidence")
     binding = parse_loop_binding(peek["workflow_identity"]["loop_binding"])
-    with state_lock(loop_state.resolve("mt", binding.session_segment)):
+    with state_lock(loop_state.resolve(binding.loop, binding.session_segment)):
         return _read_loop_review_evidence_under_owner_lock(ref)

@@ -67,6 +67,7 @@ import time
 
 from multiagent import (
     channels,
+    execution,
     config,
     continuations,
     findings,
@@ -89,13 +90,15 @@ from multiagent.providers import (
     stamp_attribution,
 )
 import artifact_prune
+from build_state import writer_fence
 from state_discovery import (  # the ONE `.crew` root resolver (state layer shares it)
     anchor_path,
     crew_base,
     cwd_reanchored,
     find_session_state_file,
+    is_loop_state_file,
 )
-from models import LOAD_MISSING, LOAD_OK, LoopState
+from models import LOAD_MISSING, LOAD_OK, LoopState, StateLockError, read_state_json
 # One-time stderr notes for panel/availability resolution (mirrors config.py's
 # memoized-warn posture; keyed so each distinct note fires at most once/process).
 _warned: set[str] = set()
@@ -1180,178 +1183,7 @@ _UNBORN = "<unborn>"
 _DETACHED = "<detached HEAD>"
 
 
-def _git_head(repo_dir: str) -> str | None:
-    """TRI-STATE HEAD probe in ``repo_dir`` (BLOCKING-2):
-
-    * a real **sha** — a born repo (incl. detached HEAD: ``rev-parse HEAD``
-      resolves the checked-out commit);
-    * the sentinel ``"<unborn>"`` — a valid work tree with zero commits
-      (``rev-parse HEAD`` fails BUT ``rev-parse --is-inside-work-tree`` succeeds);
-    * ``None`` — not-a-repo / git error (neither succeeds).
-    """
-    try:
-        proc = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo_dir, capture_output=True, text=True,
-        )
-    except OSError:
-        return None
-    if proc.returncode == 0:
-        sha = (proc.stdout or "").strip()
-        return sha or None
-    # rev-parse HEAD failed — distinguish an unborn repo from a non-repo.
-    try:
-        inside = subprocess.run(
-            ["git", "rev-parse", "--is-inside-work-tree"],
-            cwd=repo_dir, capture_output=True, text=True,
-        )
-    except OSError:
-        return None
-    if inside.returncode == 0 and (inside.stdout or "").strip() == "true":
-        return _UNBORN
-    return None
-
-
-def _git_staged(repo_dir: str) -> str | None:
-    """Index-tree-hash snapshot in ``repo_dir`` (BLOCKING-2) — the index's
-    CONTENT, not a clean/dirty boolean:
-
-    ``git write-tree`` serializes the current index to a tree object and prints
-    the tree SHA WITHOUT touching the index, HEAD, refs, or the working tree, so
-    it is safe for a guard. Returns the tree SHA string on success (exit 0), or
-    ``None`` on failure / not-a-repo / git error.
-
-    Comparing the before/after tree SHA catches BOTH ``clean -> staged`` AND an
-    already-staged index that the seat stages MORE into (``staged -> more
-    staged``, where a clean/dirty boolean would read ``True -> True`` and miss
-    it). Dispatch explicitly runs on dirty trees, so the already-staged case is
-    real.
-    """
-    try:
-        proc = subprocess.run(
-            ["git", "write-tree"],
-            cwd=repo_dir, capture_output=True, text=True,
-        )
-    except OSError:
-        return None
-    if proc.returncode != 0:
-        return None
-    tree = (proc.stdout or "").strip()
-    return tree or None
-
-
-def _git_branch(repo_dir: str) -> str | None:
-    """TRI-STATE branch probe in ``repo_dir`` (mirrors ``_git_head``'s structure):
-
-    * the **branch name** — ``git symbolic-ref --quiet --short HEAD`` succeeds
-      (HEAD points symbolically at refs/heads/<branch>; also true in an unborn
-      repo before the first commit);
-    * the sentinel ``"<detached HEAD>"`` — symbolic-ref FAILS but the repo is a
-      valid work tree with a DETACHED HEAD (``rev-parse --is-inside-work-tree``
-      succeeds). An IMPOSSIBLE refname (the space) so no real branch can equal
-      it; distinct from any branch name and from ``None`` so a
-      ``git checkout <sha>`` (main -> detached) fires ``branch_changed=true``
-      instead of being silently masked to false;
-    * ``None`` — not-a-repo / git error (neither succeeds).
-
-    ``symbolic-ref`` (NOT ``rev-parse --abbrev-ref HEAD``) is load-bearing: on a
-    detached HEAD it exits nonzero (so we fall through to the work-tree probe),
-    whereas ``rev-parse --abbrev-ref`` returns the literal string ``"HEAD"``
-    which would defeat null-safety AND blur detached vs. a branch named HEAD.
-    """
-    try:
-        proc = subprocess.run(
-            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
-            cwd=repo_dir, capture_output=True, text=True,
-        )
-    except OSError:
-        return None
-    if proc.returncode == 0:
-        name = (proc.stdout or "").strip()
-        if name:
-            return name
-        # symbolic-ref succeeded but printed nothing — fall through to probe.
-    # symbolic-ref failed — distinguish a detached HEAD from a non-repo.
-    try:
-        inside = subprocess.run(
-            ["git", "rev-parse", "--is-inside-work-tree"],
-            cwd=repo_dir, capture_output=True, text=True,
-        )
-    except OSError:
-        return None
-    if inside.returncode == 0 and (inside.stdout or "").strip() == "true":
-        return _DETACHED
-    return None
-
-
-def _dispatch_guard_warnings(
-    head_moved: bool,
-    head_before: str | None,
-    head_after: str | None,
-    staged_changed: bool,
-    branch_changed: bool,
-    branch_before: str | None,
-    branch_after: str | None,
-) -> list[str]:
-    """Build the HEAD/staged/branch guard WARNING lines (fixed HEAD->staged->branch
-    order). Shared by the success and the failure human-mode paths so a seat that
-    FAILED after committing or leaving edits still surfaces the guards, not just the
-    error. Text is byte-identical across both paths."""
-    lines: list[str] = []
-    if head_moved:
-        if head_before == _UNBORN:
-            lines.append(
-                f"WARNING: the dispatched seat moved HEAD {head_before} -> "
-                f"{head_after} (it made the repo's FIRST commit against "
-                f"instruction; undo with: git update-ref -d HEAD)"
-            )
-        else:
-            lines.append(
-                f"WARNING: the dispatched seat moved HEAD {head_before} -> "
-                f"{head_after} (it committed against instruction; undo with: "
-                f"git reset --soft HEAD@{{1}})"
-            )
-    # ALWAYS surface a staged change when staged_changed fires: a safety guard must
-    # never silently drop a real staged violation. The earlier `not head_moved`
-    # suppression was too coarse: a seat that COMMITS and then STAGES additional
-    # changes has REAL staged content with head_moved=true, and suppressing the
-    # staged line would hide it (the HEAD remedy `git reset --soft HEAD@{1}` leaves
-    # those extra staged changes behind). Over-warning is safe for a guard;
-    # under-warning is not. To stay non-misleading in BOTH cases, a pure commit
-    # (where the index is clean vs the NEW HEAD and `git reset` would be a no-op) AND
-    # a real independent stage, the line is DESCRIPTIVE: it reports that the index
-    # content changed and points at `git status` to inspect, rather than asserting
-    # `git reset` is THE fix (which would be a false no-op promise on a pure commit).
-    # The JSON envelope's staged_changed stays computed faithfully.
-    if staged_changed:
-        lines.append(
-            "WARNING: staged/index content changed since before the run — "
-            "inspect with `git status`; unstage any unintended changes with "
-            "`git reset`"
-        )
-    if branch_changed:
-        # Pick the recovery target for branch_before. When dispatch STARTED on a
-        # detached HEAD, branch_before is the (impossible-refname) sentinel: `git
-        # checkout <sentinel>` is nonsense; the way back to the original detached
-        # state is `git checkout --detach <head_before>` (the ORIGINAL commit sha). A
-        # real branch name uses a plain `git checkout`. Null-guard head_before: if
-        # the original HEAD probe returned None (a detached HEAD whose _git_head
-        # errored while _git_branch succeeded, extremely unlikely but unguarded),
-        # fall back to a safe generic hint rather than emitting the literal
-        # `--detach None`.
-        if branch_before == _DETACHED:
-            recover = (
-                f"git checkout --detach {head_before}"
-                if head_before is not None
-                else "re-detach to your original commit"
-            )
-        else:
-            recover = f"git checkout {branch_before}"
-        lines.append(
-            f"WARNING: the dispatched seat changed branch {branch_before} -> "
-            f"{branch_after} against instruction (return with: {recover})"
-        )
-    return lines
+from multiagent.execution import _git_head, _git_staged, _git_branch, _dispatch_guard_warnings
 
 
 def _dispatch_option_fields(kind_opts: dict) -> list[tuple[str, str, str, str]]:
@@ -1586,452 +1418,71 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         )
         workspace = continuations.canonical_workspace(repo_dir)
 
-    lock_cm = (
-        continuations.continuation_lock(
-            sid, chain,
-            timeout=continuations.DEFAULT_CHAIN_LOCK_TIMEOUT_SECONDS,
-        )
-        if chain_requested
-        else contextlib.nullcontext()
-    )
-
-    lock_acquiring = chain_requested
     try:
-        with lock_cm:
-            lock_acquiring = False
-            # Capture git BEFORE-state (all in repo_dir).
-            head_before = _git_head(repo_dir)
-            staged_before = _git_staged(repo_dir)
-            branch_before = _git_branch(repo_dir)
-
-            mem_record = None
-            expected = None
-            binding_dims = ()
-            continuation = None
-            if chain_requested:
-                mem_record = continuations.load_record(sid, chain)
-                pre_snapshot_buildable = (
-                    head_before is not None
-                    and staged_before is not None
-                    and branch_before is not None
-                    and bool(model_identity)
-                )
-                if not pre_snapshot_buildable:
-                    print(
-                        "error: cannot establish a buildable pre-run workspace "
-                        "snapshot for --chain",
-                        file=sys.stderr,
-                    )
-                    return 2
-                expected = continuations.ContinuationBinding(
-                    chain=chain,
-                    loop_instance_id=pre_loop_instance_id,
-                    seat=seat,
-                    provider=kind,
-                    model=model_identity,
-                    workspace=workspace,
-                    head=head_before,
-                    branch=branch_before,
-                    index_tree=staged_before,
-                ).normalized()
-                if mem_record is not None:
-                    binding_dims = continuations.binding_mismatches(
-                        mem_record, expected,
-                    )
-                if (
-                    provider.supports_continuation
-                    and mem_record is not None
-                    and not binding_dims
-                    and continuations.valid_conversation_id(
-                        mem_record.conversation_id,
-                    )
-                ):
-                    continuation = ProviderContinuation(
-                        conversation_id=mem_record.conversation_id,
-                    )
-                elif provider.supports_continuation:
-                    continuation = ProviderContinuation()
-
-            # (e) Availability — unavailable-seat skip (mirrors cmd_run EXACTLY): build a
-            # SKIPPED ok=false envelope, the seat NEVER runs (after==before, all guards
-            # false), write + print the path, exit 0 under --json. DISTINCT from the
-            # exit-2 pre-run rejections in (b).
-            # Check availability, then perform the optional pre-run tombstone.
-            avail, diag = provider.is_available()
-            if not avail:
-                result = ProviderResult(
-                    name=seat, model=None, ok=False, output="",
-                    error=f"skipped: {diag}", elapsed=0.0,
-                )
-                head_after, staged_after, branch_after = (
-                    head_before, staged_before, branch_before,
-                )
-            else:
-                if chain_requested:
-                    try:
-                        continuations.invalidate(sid, chain)
-                    except Exception as exc:
-                        print(
-                            f"error: could not prepare continuation chain "
-                            f"{chain!r}: {exc}",
-                            file=sys.stderr,
-                        )
-                        return 2
-                # (f) Run the seat in workspace-write. Model precedence mirrors cmd_run.
-                # This is the ONLY run() call site that passes dispatch_options (the
-                # read-only review/debate/probe paths never do).
-                timeout = _resolve_dispatch_timeout(args.timeout)
-                extra = {"continuation": continuation} if chain_requested else {}
-                result = provider.run(
-                    prompt, sandbox="workspace-write", model=args.model,
-                    timeout=timeout,
-                    dispatch_options=dispatch_opts or None,
-                    **extra,
-                )
-                # Capture git AFTER-state (all in repo_dir).
-                head_after = _git_head(repo_dir)
-                staged_after = _git_staged(repo_dir)
-                branch_after = _git_branch(repo_dir)
-
-            # Compute the three guards NULL-SAFE (typed booleans, never null)
-            # on the internal tri-state values.
-            head_moved = (
-                head_before is not None and head_after is not None
-                and head_before != head_after
-            )
-            staged_changed = (
-                staged_before is not None and staged_after is not None
-                and staged_before != staged_after
-            )
-            branch_changed = (
-                branch_before is not None and branch_after is not None
-                and branch_before != branch_after
-            )
-
-            # Build the guard WARNING lines ONCE (single source), so the --json envelope
-            # carries the SAME recovery strings the human path prints. The seam that reads
-            # the envelope (build.md) relays these verbatim on a guard violation, rather
-            # than re-deriving prose from the booleans. Empty list when no guard fired.
-            guard_warnings = _dispatch_guard_warnings(
-                head_moved, head_before, head_after,
-                staged_changed, branch_changed, branch_before, branch_after,
-            )
-
-            chain_status = None
-            chain_reset_reason = None
-            chain_resumed = False
-            if chain_requested:
-                post_snapshot_buildable = (
-                    head_after is not None
-                    and staged_after is not None
-                    and branch_after is not None
-                )
-                post_state_path = find_session_state_file(
-                    crew_base() / ".crew", "build-state", sid,
-                )
-                post_state, post_state_status = (
-                    LoopState.load_with_status(post_state_path)
-                    if post_state_path is not None
-                    else (LoopState(), LOAD_MISSING)
-                )
-                state_ok = (
-                    post_snapshot_buildable
-                    and post_state_status == LOAD_OK
-                    and post_state.active is True
-                    and post_state.phase == "drafting"
-                    and post_state.loop_instance_id == pre_loop_instance_id
-                    and post_state.session_id == sid
-                )
-                guard = {
-                    "head_moved": head_moved,
-                    "staged_changed": staged_changed,
-                    "branch_changed": branch_changed,
-                    "post_run_state_mismatch": not state_ok,
-                    "binding_mismatches": binding_dims,
-                }
-                if provider.supports_continuation:
-                    outcome = result.continuation
-                else:
-                    outcome = ContinuationOutcome(
-                        capability="unsupported",
-                        phase="fresh",
-                        failure="error" if not result.ok else "none",
-                    )
-                chain_status, action = continuations.classify_continuation(
-                    mem_record, guard, avail, outcome,
-                )
-                chain_resumed = chain_status == "resumed"
-                if (
-                    mem_record is not None
-                    and binding_dims
-                    and action in (
-                        continuations.CHAIN_ACTION_CLEAR,
-                        continuations.CHAIN_ACTION_PERSIST,
-                    )
-                ):
-                    # A prior chain existed whose binding no longer matches, so
-                    # the old conversation was abandoned whether this run
-                    # cleared it or replaced it with a freshly captured id.
-                    chain_reset_reason = ", ".join(binding_dims)
-                elif action == continuations.CHAIN_ACTION_CLEAR and mem_record is not None:
-                    if chain_status == "unsupported":
-                        chain_reset_reason = "capability:unsupported"
-                    else:
-                        chain_reset_reason = chain_status
-
-                try:
-                    if action == continuations.CHAIN_ACTION_PERSIST:
-                        # Persisting the pre-run expected binding is correct only because a guard-clean
-                        # run guarantees pre == post for head, branch, and index (a non-clean run
-                        # classifies to CLEAR and never reaches PERSIST or UPDATE). A future edit that
-                        # loosens the guard must revisit this: expected would no longer match the
-                        # post-run tree.
-                        # PERSIST uses the classifier-validated outcome ID as the
-                        # sole source of the persisted conversation identity.
-                        new_record = continuations.new_record(
-                            binding=expected,
-                            conversation_id=result.continuation.conversation_id,
-                        )
-                        continuations.save_record(sid, chain, new_record)
-                    elif action == continuations.CHAIN_ACTION_UPDATE:
-                        new_record = continuations.new_record(
-                            binding=expected,
-                            conversation_id=mem_record.conversation_id,
-                            created_at=mem_record.created_at,
-                            updated_at=datetime.datetime.now(
-                                datetime.timezone.utc,
-                            ).isoformat(),
-                        )
-                        continuations.save_record(sid, chain, new_record)
-                    # CHAIN_ACTION_CLEAR is a deliberate no-op because the pre-run tombstone
-                    # already ran. CHAIN_ACTION_KEEP is also a deliberate no-op: unavailable
-                    # runs never tombstone, and a fresh no-record path has nothing to restore.
-                except Exception as exc:
-                    print(f"note: chain store write failed: {exc}", file=sys.stderr)
-                    chain_status = "store_failed"
-                    chain_resumed = False
-                    chain_reset_reason = "chain store write failed"
-                    with contextlib.suppress(Exception):
-                        continuations.invalidate(sid, chain)
-
-            envelope = {
-                "seat": seat,
-                "model": result.model,
-                "ok": result.ok,
-                "output": result.output,
-                "error": result.error,
-                "elapsed": result.elapsed,
-                # head_before/after: a commit sha, the "<unborn>" sentinel, or null.
-                "head_before": head_before,
-                "head_after": head_after,
-                "head_moved": head_moved,
-                # staged_before/after: the index tree hash (git write-tree) or null —
-                # NOT a bool; its CHANGE (incl. already-staged -> more-staged) drives
-                # staged_changed.
-                "staged_before": staged_before,
-                "staged_after": staged_after,
-                "staged_changed": staged_changed,
-                # branch_before/after: a branch name, the "<detached HEAD>" sentinel, or null.
-                "branch_before": branch_before,
-                "branch_after": branch_after,
-                "branch_changed": branch_changed,
-                # The formatted recovery warnings for whichever guards fired (empty list
-                # when none did), from the SAME helper the human path renders.
-                "guard_warnings": guard_warnings,
-            }
-            if chain_requested:
-                envelope["continuation"] = {
-                    "chain": chain,
-                    "status": chain_status,
-                    "resumed": chain_resumed,
-                    "reset_reason": chain_reset_reason,
-                }
-
-            if args.json:
-                _emit(json.dumps(envelope, ensure_ascii=False), args.out)
-                # collect-style: announce the resolved envelope path as the LAST clean
-                # stdout line so dispatch.md reads it back without constructing the name.
-                if args.out:
-                    print(args.out)
-                return 0
-
-            # Human output keeps warning order and adds the chain status last.
-            if not result.ok:
-                err = result.error or "unknown error"
-                # When -o is set, still WRITE the envelope file on failure so the caller
-                # has a file to read regardless of ok. Human mode WRITES the envelope but
-                # does NOT print the path (unlike the JSON path, which writes AND prints).
-                # The diagnostic still goes to stderr and the exit stays 1.
-                if args.out:
-                    _emit(json.dumps(envelope, ensure_ascii=False), args.out)
-                print(err, file=sys.stderr)
-                # A seat that FAILED may still have left edits and/or committed them, so the
-                # guard warnings matter MOST here: surface them (stderr) instead of dropping
-                # them at the early failure return.
-                for warning in guard_warnings:
-                    print(warning, file=sys.stderr)
-                if chain_requested:
-                    print(f"continuation: {chain_status}", file=sys.stderr)
-                return 1
-            header = f"dispatch: {seat}" + (f" ({result.model})" if result.model else "")
-            lines = [header, "", result.output] + guard_warnings
-            if chain_requested:
-                lines.append(f"continuation: {chain_status}")
-            _emit("\n".join(lines), args.out)
-            if args.out:
-                print(args.out)
-            return 0
-    except continuations.ContinuationLockError as exc:
-        if not lock_acquiring:
-            raise
-        print(
-            f"error: could not acquire continuation lock for {chain!r}: {exc}",
-            file=sys.stderr,
-        )
+        envelope = execution.execute_write(execution.WriteRequest(
+            seat, prompt, args.model, _resolve_dispatch_timeout(args.timeout), dispatch_opts,
+            repo_dir, sid, chain, pre_loop_instance_id), provider=provider,
+            observers=(_git_head, _git_staged, _git_branch), warning_builder=_dispatch_guard_warnings)
+    except execution.ExecutionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
-    except (continuations.ContinuationError, OSError) as exc:
-        if not lock_acquiring:
-            raise
-        print(
-            f"error: could not prepare continuation lock for {chain!r}: {exc}",
-            file=sys.stderr,
-        )
-        return 2
+    result = ProviderResult(name=seat, model=envelope["model"], ok=envelope["ok"],
+        output=envelope["output"], error=envelope["error"], elapsed=envelope["elapsed"])
+    guard_warnings = envelope["guard_warnings"]
+    chain_status = envelope.get("continuation", {}).get("status")
+    if args.json:
+        _emit(json.dumps(envelope, ensure_ascii=False), args.out)
+        # collect-style: announce the resolved envelope path as the LAST clean
+        # stdout line so dispatch.md reads it back without constructing the name.
+        if args.out:
+            print(args.out)
+        return 0
+
+    # Human output keeps warning order and adds the chain status last.
+    if not result.ok:
+        err = result.error or "unknown error"
+        # When -o is set, still WRITE the envelope file on failure so the caller
+        # has a file to read regardless of ok. Human mode WRITES the envelope but
+        # does NOT print the path (unlike the JSON path, which writes AND prints).
+        # The diagnostic still goes to stderr and the exit stays 1.
+        if args.out:
+            _emit(json.dumps(envelope, ensure_ascii=False), args.out)
+        print(err, file=sys.stderr)
+        # A seat that FAILED may still have left edits and/or committed them, so the
+        # guard warnings matter MOST here: surface them (stderr) instead of dropping
+        # them at the early failure return.
+        for warning in guard_warnings:
+            print(warning, file=sys.stderr)
+        if chain_requested:
+            print(f"continuation: {chain_status}", file=sys.stderr)
+        return 1
+    header = f"dispatch: {seat}" + (f" ({result.model})" if result.model else "")
+    lines = [header, "", result.output] + guard_warnings
+    if chain_requested:
+        lines.append(f"continuation: {chain_status}")
+    _emit("\n".join(lines), args.out)
+    if args.out:
+        print(args.out)
+    return 0
+
 
 
 def cmd_build_executor(args: argparse.Namespace) -> int:
-    """Resolve /crew:build's implement-step executor and PRINT a JSON contract;
-    it runs NOTHING (mirrors review-prep's resolve + validate + emit shape).
-
-    On a fresh resolve, precedence is ``--executor`` flag >
-    ``config.build_executor()`` (``[build].executor``, per-repo > global) > the
-    builtin ``crew:executor`` sentinel. An active, valid build loop with a
-    non-empty matching executor stamp is authoritative as ``source: "state"``
-    above that fresh chain, so a resumed loop cannot drift its executor. An
-    unreadable or mismatched active state file exits 2 rather than silently
-    resolving fresh. A stale active loop in the same session therefore causes a
-    first resolve to read ``source: "state"`` and ignore a new ``--executor``;
-    cancel the prior loop before starting a genuinely different build. The
-    resolved value is either the sentinel (the native Task path build.md runs as
-    today) OR a catalog seat whose resolved execution is engine-runnable and
-    write-capable; anything else exits 2 naming the reason, never a silent
-    fallback.
-    """
+    """Resolve the executor without executing model work."""
     sid = _resolve_session_id(args.session_id)
     if "<" in sid or ">" in sid:
         print(
-            f"error: session id looks like an unsubstituted placeholder "
-            f"({sid!r}); pass your actual session id (the "
-            "[Session ID: …] value), not the literal template",
+            f"error: session id looks like an unsubstituted placeholder ({sid!r}); "
+            "pass your actual session id (the [Session ID: …] value), not the literal template",
             file=sys.stderr,
         )
         return 2
-    path = find_session_state_file(crew_base() / ".crew", "build-state", sid)
-    state, status = (
-        LoopState.load_with_status(path)
-        if path is not None
-        else (LoopState(), LOAD_MISSING)
-    )
-    if status not in (LOAD_OK, LOAD_MISSING):
-        print(
-            f"error: build executor cannot resolve over an unreadable build "
-            f"state ({status}): {path}",
-            file=sys.stderr,
-        )
+    try:
+        selection = execution.resolve_executor(sid, args.executor)
+    except execution.ExecutionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
-
-    # 1. Resolve + track the source for the JSON. An active stamped loop is
-    # authoritative; inactive and legacy unstamped loops use the fresh chain.
-    if status == LOAD_OK and state.active is True and state.executor.strip():
-        if state.session_id != sid:
-            # This guard is intentionally stricter than find_adoptable_legacy's adoption rule, fail-safe for an unreachable stamped-legacy case.
-            stamped_session = state.session_id or "<empty>"
-            print(
-                f"error: build state session mismatch in {path}: the loop's "
-                f"stamped session id {stamped_session!r} does not match "
-                f"requested session id {sid!r}",
-                file=sys.stderr,
-            )
-            return 2
-        executor = state.executor
-        source = "state"
-        resume_executor = (
-            state.resume_executor
-            if isinstance(state.resume_executor, bool)
-            else config.build_resume_executor()
-        )
-    else:
-        if args.executor is not None:
-            executor = args.executor
-            source = "flag"
-        else:
-            configured = config.build_executor()
-            if configured is not None:
-                executor, source = configured, "config"
-            else:
-                executor, source = "crew:executor", "builtin"
-        resume_executor = config.build_resume_executor()
-
-    # 2. Validate. The sentinel bypasses the seat checks: it IS the Task path,
-    #    which the engine never runs and which no registry knows.
-    host = channels.current_host()
-    # The sentinel executor IS the Task path, so it keeps the Task-recipe
-    # native channel; a real seat overwrites it below.
-    channel = channels.task_native_channel(host)
-    if executor != "crew:executor":
-        spec = seats.seat_spec(executor)
-        if spec is None:
-            print(
-                f"error: build executor {executor!r} is not an engine-runnable registered "
-                f"seat (a Task seat like opus/sonnet is orchestrator-owned and "
-                f"unrunnable by the engine; a group token like cursor names no "
-                f"single seat); registered seats: "
-                f"{', '.join(known_seat_names())}",
-                file=sys.stderr,
-            )
-            return 2
-        resolved = channels.resolve_seat(spec, declared_native=channel)
-        if resolved is None:
-            print(
-                f"error: executor seat '{executor}' resolves to no eligible "
-                f"execution channel",
-                file=sys.stderr,
-            )
-            return 2
-        if resolved.native or not resolved.engine_runnable:
-            print(
-                f"error: build executor {executor!r} is not an engine-runnable registered "
-                f"seat (a Task seat like opus/sonnet is orchestrator-owned and "
-                f"unrunnable by the engine; a group token like cursor names no "
-                f"single seat); registered seats: "
-                f"{', '.join(known_seat_names())}",
-                file=sys.stderr,
-            )
-            return 2
-        if not resolved.supports_workspace_write:
-            print(
-                f"error: build executor {executor!r} is read-only (does not "
-                f"support workspace-write); the build seam dispatches it in write "
-                f"mode, so it cannot implement the task",
-                file=sys.stderr,
-            )
-            return 2
-        channel = resolved.channel
-
-    # 3. Retries: None (unset/invalid) falls to the safe default 0.
-    retries = config.build_executor_retries() or 0
-    # 4. One-line JSON to stdout (stdout carries ONLY the payload, like the other
-    #    machine-parsed commands), exit 0.
-    print(json.dumps(
-        {
-            "executor": executor,
-            "retries": retries,
-            "resume_executor": resume_executor,
-            "source": source,
-            "channel": channel,
-        },
-        ensure_ascii=False,
-    ))
+    print(json.dumps(dataclasses.asdict(selection), ensure_ascii=False))
     return 0
 
 
@@ -4899,25 +4350,40 @@ def cmd_swab(args: argparse.Namespace) -> int:
     # `.crew` path derives from crew_base now), so swab enumerates exactly where
     # they wrote even when CLAUDE_PROJECT_DIR != cwd.
     crew_dir = crew_base() / ".crew"
+    for path in crew_dir.glob("*.json"):
+        if is_loop_state_file(path.name):
+            data, _ = read_state_json(path)
+            fence = writer_fence(data) if data is not None else "Unreadable build writer state; retain evidence for inspection" if path.name.startswith("build-state") else None
+            if fence:
+                print(f"keeping {path.name}: {fence}", file=sys.stderr)
     items = artifact_prune.collect_prunable(crew_dir, time.time())
 
     if args.yes:
         removed: list = []
         failed: list = []
         removed_run_names: dict = {}
-        for item in items:
-            try:
-                if item.kind == "probe":
-                    item.path.unlink()
-                else:
-                    shutil.rmtree(str(item.path))
-            except OSError as exc:
-                print(f"error removing {item.path}: {exc}", file=sys.stderr)
-                failed.append(item)
-                continue
-            removed.append(item)
-            if item.kind == "review-run":
-                removed_run_names.setdefault(item.session_dir, set()).add(item.name)
+        try:
+            with artifact_prune.prune_guard(crew_dir) as admitted:
+                for item in items:
+                    if item.path not in admitted:
+                        continue
+                    try:
+                        if item.kind == "probe":
+                            item.path.unlink()
+                        else:
+                            shutil.rmtree(str(item.path))
+                    except (OSError, StateLockError) as exc:
+                        note = "locked, retry" if isinstance(exc, StateLockError) else "error removing"
+                        print(f"{note} {item.path}: {exc}", file=sys.stderr)
+                        failed.append(item)
+                        continue
+                    removed.append(item)
+                    if item.kind == "review-run":
+                        removed_run_names.setdefault(item.session_dir, set()).add(item.name)
+        except (OSError, StateLockError) as exc:
+            note = "locked, retry" if isinstance(exc, StateLockError) else "error removing"
+            print(f"{note} swab: {exc}", file=sys.stderr)
+            failed.extend(item for item in items if item not in removed and item not in failed)
         # A removed run may have been the one a session's pointer named; drop it in
         # the same pass so launch-time derivation never resolves a missing dir.
         for session_dir, names in removed_run_names.items():
@@ -5068,12 +4534,109 @@ def cmd_measure_protocol(args: argparse.Namespace) -> int:
         return 2
 
 
+def cmd_build_protocol(args: argparse.Namespace) -> int:
+    from multiagent import build_workflow as build
+    import loop_state
+    verb = args.build_command
+    try:
+        if verb == "build":
+            spill = Path(anchor_path(args.file))
+            value = json.loads(spill.read_text(encoding="utf-8"))
+            if (not isinstance(value, dict) or set(value) != {"schema", "raw_arguments"}
+                    or type(value["schema"]) is not int or value["schema"] != 1):
+                raise review_workflow.WorkflowError("invalid_request", "build request requires exactly schema=1 and raw_arguments")
+            step = build.start_build(build.BuildRequest(value["raw_arguments"], args.session_id))
+            if args.consume and step.ref is not None:
+                if spill.resolve().is_relative_to((crew_base() / ".crew" / "requests").resolve()):
+                    spill.unlink()
+                else:
+                    print("note: --consume only removes request spills under .crew/requests", file=sys.stderr)
+        elif verb == "build-resume":
+            step = build.resume_build(args.session_id)
+        else:
+            ref = build.parse_build_ref({"schema": 1, "session_segment": args.session_segment, "loop_instance_id": args.loop_instance_id})
+            if verb == "build-next":
+                step = build.next_build(ref)
+            elif verb == "build-claim":
+                print(json.dumps(build.claim_build_action(ref, args.action_id), ensure_ascii=False))
+                return 0
+            elif verb == "build-execute":
+                step = build.execute_build_action(ref, args.action_id)
+            elif verb == "build-submit":
+                result = build.parse_build_result(json.loads(Path(anchor_path(args.file)).read_text(encoding="utf-8")))
+                if result.ref != ref or result.action_id != args.action_id:
+                    raise review_workflow.WorkflowError("invalid_result", "submission owner/action differs from command")
+                step = build.submit_build_action(result)
+            elif verb == "build-capture":
+                step = build.capture_build_file(ref, args.action_id, Path(anchor_path(args.return_file)),
+                    status=args.status, diagnostic=args.diagnostic)
+            elif verb == "build-native-bind":
+                print(json.dumps(build.bind_build_native(ref, args.action_id, args.handle, args.output_file)))
+                return 0
+            elif verb == "build-native-capture":
+                step = build.capture_build_native(ref, args.action_id, args.handle, args.output_file, completion_observed=args.completion_observed)
+            elif verb == "build-recover":
+                step = build.recover_build_action(ref, args.action_id, args.confirmation)
+            elif verb == "build-cancel":
+                step = build.cancel_build(ref, args.reason)
+            else:
+                answer = Path(anchor_path(args.answer_file)).read_text(encoding="utf-8") if args.answer_file else None
+                step = build.decide_build(build.BuildDecision(ref, args.question_id, args.kind, args.confirmation,
+                    args.workspace_sha256, args.completed_action, answer))
+        print(json.dumps(build.step_to_dict(step), ensure_ascii=False))
+        return 0
+    except StateLockError as exc:
+        print(json.dumps({"schema": 1, "code": "build_error", "message":
+            f"State lock is busy; retry the same command after the other operation releases it: {exc}"}, ensure_ascii=False))
+        return 2
+    except (review_workflow.WorkflowError, loop_state.LoopStateError, execution.ExecutionError, OSError, ValueError, TypeError) as exc:
+        print(json.dumps({"schema": 1, "code": getattr(exc, "code", "build_error"), "message": str(exc)}, ensure_ascii=False))
+        return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multiagent",
         description="Multi-model review engine (host-resolved external seats).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
+    start_build = sub.add_parser("build", help="start or continue an engine-owned build")
+    start_build.add_argument("-f", "--file", required=True)
+    start_build.add_argument("--session-id", required=True)
+    start_build.add_argument("--consume", action="store_true")
+    start_build.set_defaults(func=cmd_build_protocol, build_command="build")
+    resume_build = sub.add_parser("build-resume", help="discover this session's retained build lifetime")
+    resume_build.add_argument("--session-id", required=True)
+    resume_build.set_defaults(func=cmd_build_protocol, build_command="build-resume")
+    for verb in ("build-next", "build-claim", "build-execute", "build-submit", "build-capture", "build-native-bind",
+                 "build-native-capture", "build-recover", "build-decide", "build-cancel"):
+        command = sub.add_parser(verb)
+        command.add_argument("--session-segment", required=True)
+        command.add_argument("--loop-instance-id", required=True)
+        if verb in {"build-claim", "build-execute", "build-submit", "build-capture", "build-native-bind", "build-native-capture", "build-recover"}:
+            command.add_argument("--action-id", required=True)
+        if verb == "build-submit":
+            command.add_argument("-f", "--file", required=True)
+        if verb == "build-capture":
+            command.add_argument("--return-file", required=True)
+            command.add_argument("--status", choices=("ok", "failed", "timeout", "cancelled"), default="ok")
+            command.add_argument("--diagnostic")
+        if verb in {"build-native-bind", "build-native-capture"}:
+            command.add_argument("--handle", required=True)
+            command.add_argument("--output-file", required=True)
+        if verb == "build-native-capture":
+            command.add_argument("--completion-observed", action="store_true")
+        if verb in {"build-recover", "build-decide"}:
+            command.add_argument("--confirmation")
+        if verb == "build-decide":
+            command.add_argument("--question-id", required=True)
+            command.add_argument("--kind", required=True)
+            command.add_argument("--workspace-sha256")
+            command.add_argument("--completed-action")
+            command.add_argument("--answer-file")
+        if verb == "build-cancel":
+            command.add_argument("--reason", default="operator cancelled")
+        command.set_defaults(func=cmd_build_protocol, build_command=verb)
 
     review = sub.add_parser(
         "review", help="Start or resume the engine-owned standalone review workflow.",

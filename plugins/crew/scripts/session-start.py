@@ -17,6 +17,7 @@ stale probe captures.
 # The systemMessage fallback is Claude-shaped and inert on Cursor by design; stderr remains the carrier there.
 import json
 import os
+import shlex
 import sys
 
 if sys.version_info < (3, 11):
@@ -38,8 +39,11 @@ import io
 from pathlib import Path
 
 import artifact_prune
-from loop_projection import project_measure
+from build_state import writer_fence
+from loop_projection import project_measure, project_build
+from multiagent.review_runs import session_segment
 from models import (
+    LOAD_MISSING,
     SessionStartInput,
     SessionStartResult,
     coalesce_task,
@@ -58,6 +62,8 @@ from models import (
     DEFAULT_MAX_STOP_FIRES,
     LOAD_FUTURE_SCHEMA,
     LOAD_OK,
+    state_lock,
+    StateLockError,
 )
 from state_discovery import crew_base, is_loop_state_file, is_active_state_file, is_active_value
 from host_detect import detect_host
@@ -124,6 +130,22 @@ def _capture_cursor_env(root: Path, payload: object) -> None:
 
 
 def cleanup_stale_files(directory: Path) -> None:
+    if not directory.is_dir():
+        return
+    # A new lifetime may already have opened an orphan state lock before its
+    # first JSON write. Serialize project cleanup with admission so removing
+    # that lock cannot split new owners across two lock inodes. Shared home
+    # artifacts are outside the project workflow admission namespace.
+    guard = (state_lock(directory / "loop-admission")
+             if directory.name == ".crew" else contextlib.nullcontext())
+    try:
+        with guard:
+            _cleanup_stale_files_locked(directory)
+    except StateLockError:
+        print("[crew] cleanup deferred: loop admission is busy", file=sys.stderr)
+
+
+def _cleanup_stale_files_locked(directory: Path) -> None:
     """Remove stale state files, preserving active sessions.
 
     - Inactive state files older than 1 day: delete
@@ -196,7 +218,14 @@ def cleanup_stale_files(directory: Path) -> None:
         try:
             if is_loop_state_file(json_file.name):
                 age = now - json_file.stat().st_mtime
-                _, status = read_state_json(json_file)
+                data, status = read_state_json(json_file)
+                if json_file.name.startswith("build-state") and data is None and status != LOAD_MISSING:
+                    print(f"[crew] keeping {json_file.name}: unreadable build writer state; retain evidence for inspection", file=sys.stderr)
+                    continue
+                fence = writer_fence(data) if isinstance(data, dict) else None
+                if fence:
+                    print(f"[crew] keeping {json_file.name}: {fence}", file=sys.stderr)
+                    continue
                 if status == LOAD_FUTURE_SCHEMA:
                     # Refuse to touch a newer-schema file, the same contract every
                     # other mutating path honors: deleting is the most destructive
@@ -212,15 +241,23 @@ def cleanup_stale_files(directory: Path) -> None:
                             f"not sweeping it.",
                             file=sys.stderr,
                         )
-                elif is_active_state_file(json_file):
-                    # Active but very old (>7 days) — force-deactivate and delete
-                    if age > MAX_AGE_SECONDS:
-                        json_file.unlink()
                 else:
-                    # Inactive (incl. corrupt/unreadable): delete if older than 1 day
-                    if age > STALE_INACTIVE_SECONDS:
-                        json_file.unlink()
-        except (OSError, AttributeError, KeyError, ValueError):
+                    limit = MAX_AGE_SECONDS if is_active_value((data or {}).get("active")) else STALE_INACTIVE_SECONDS
+                    if age <= limit:
+                        continue
+                    with state_lock(json_file):
+                        current, current_status = read_state_json(json_file)
+                        if current_status in (LOAD_MISSING, LOAD_FUTURE_SCHEMA):
+                            continue
+                        if json_file.name.startswith("build-state") and current is None:
+                            continue
+                        if current is not None and writer_fence(current):
+                            continue
+                        current_limit = (MAX_AGE_SECONDS if is_active_value((current or {}).get("active"))
+                                         else STALE_INACTIVE_SECONDS)
+                        if time.time() - json_file.stat().st_mtime > current_limit:
+                            json_file.unlink()
+        except (OSError, AttributeError, KeyError, ValueError, StateLockError):
             pass  # Skip files that can't be processed
 
     # Clean up non-state files
@@ -229,6 +266,9 @@ def cleanup_stale_files(directory: Path) -> None:
             try:
                 age = now - json_file.stat().st_mtime
                 if age > MAX_AGE_SECONDS:
+                    if json_file.name.endswith(".json.lock"):
+                        if json_file.with_name(json_file.name[:-5]).exists():
+                            continue
                     json_file.unlink()
             except (OSError, AttributeError, KeyError, ValueError):
                 pass
@@ -429,36 +469,10 @@ def loop_budget_line(data: dict) -> str:
 
 
 def loop_next_step(data: dict, ongoing: str, loop: str, *, session_id: str = "") -> str:
-    """What the restored loop's NEXT move is, which depends on its phase.
-
-    From `done` a completing verdict (APPROVED, or REVISE --minor-only) is
-    already on record and both review verbs refuse, so the only move left is
-    `deactivate`: telling that loop to keep working toward panel approval strands
-    it, since the Stop hook goes on blocking while every verb it was pointed at
-    says no. Phase is read defensively (a garbage value falls back to the ongoing
-    guidance, never raises).
-
-    `loop` is the caller's alias (`bl`/`mt`), which `deactivate` requires: a bare
-    `crew state deactivate` just errors on the missing positional, so the one step
-    the guidance names has to be the runnable command.
-    """
+    """Render the retained loop's passive projection and exact owner next argv."""
     if loop == "mt":
         return project_measure(data, session_id=session_id).render()
-    if (data.get("phase") or "drafting") == "done":
-        note = override_completion_note(data.get("last_verdict_overrides"))
-        if note:
-            # A forced completion is NOT a clean sign-off: say what it was
-            # recorded over, so the banner never launders a --force into approval.
-            return (
-                f"This completion was {note}: the verdict is recorded and the "
-                f"only step left is `crew state deactivate {loop}`, then summarize."
-            )
-        return (
-            "The panel signed off on this (APPROVED, or REVISE with nothing "
-            "blocking): the verdict is recorded and the only step left is "
-            f"`crew state deactivate {loop}`, then summarize."
-        )
-    return ongoing
+    return project_build(data, session_id=session_id).render()
 
 
 def orphan_loop_line(label: str, loop: str, file_session: str, task: str, age_days: int) -> str:
@@ -521,6 +535,9 @@ def build_session_status(
                 data, load_status = read_state_json(json_file)
                 if load_status != LOAD_OK or data is None:
                     continue
+                fence = writer_fence(data)
+                if fence:
+                    messages.append(f"[Build writer recovery: owner {data.get('session_id')}] {fence}")
                 if not is_active_value(data.get("active", False)):
                     continue
 
@@ -546,9 +563,11 @@ def build_session_status(
                         )
                     else:
                         other_session_loops.append(
-                            orphan_loop_line(
-                                "Build loop", "bl", file_session, prompt[:60],
-                                get_file_age_days(json_file))
+                            (f"- Build loop (owner {file_session}): {prompt[:60]}\n  Cancel only with operator authorization: "
+                             + shlex.join((str(Path(__file__).resolve().parent.parent / "crew"), "build-cancel",
+                                "--session-segment", session_segment(file_session), "--loop-instance-id", str(data["loop_instance_id"]))))
+                            if data.get("bl_workflow") is not None else orphan_loop_line(
+                                "Build loop", "bl", file_session, prompt[:60], get_file_age_days(json_file))
                         )
                 elif json_file.name.startswith("measure-twice-state"):
                     task = coalesce_task(data)

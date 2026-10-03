@@ -18,15 +18,16 @@ This directory contains the Python backend for crew's persistence features. Hook
 ```
 scripts/
 ├── crew-state.py        # CLI for loop state management (reached via `crew state …`)
-├── models.py            # Dataclasses, schema-4 state and shared safety predicate
+├── models.py            # Dataclasses, schema-5 state and shared safety predicate
 ├── loop_state.py        # Loop transactions and common verdict guard
-├── loop_projection.py   # Lightweight mt lifecycle text; no engine imports
+├── loop_projection.py   # Lightweight mt/build lifecycle text; no engine imports
+├── build_state.py       # Passive build records, writer validation and recovery text
 ├── persistent-mode.py   # Stop hook: enforces continuation
 ├── session-start.py     # SessionStart hook: restores state
 ├── cursor-env-capture.py # In-process capture helper called by session-start.py: records Cursor hook env names, the safe-value allowlist, and probe metadata
 ├── host_detect.py       # Stdlib host detector for the hook entry points
 ├── artifact_prune.py    # ENUMERATE-only stale-artifact finder (single source shared by `crew swab` + the session-start reporter); never deletes
-├── tests/               # Unit tests (test-measure-twice.py, test-review-workflow.py, test-hooks.py, test-multiagent.py, fixtures/)
+├── tests/               # Unit tests (test-build-workflow.py, test-measure-twice.py, test-review-workflow.py, test-hooks.py, test-multiagent.py, fixtures/)
 └── multiagent/          # Multi-model review and council engine (see below)
 ```
 
@@ -36,7 +37,8 @@ The engine powers `/crew:review`, `/crew:debate`, and the review steps of
 `/crew:build` and `/crew:measure-twice`. Standalone review is owned by
 `review_workflow.py`; its Markdown is only a host transport for issued actions.
 Measure-twice composes the shared review workflow through `measure_twice.py`.
-Build still uses `review-prep`. Both paths resolve each catalog
+Build composes it through `build_workflow.py`; execution and executor resolution
+are shared with dispatch in `execution.py`. All workflows resolve each catalog
 seat against the current host: Claude seats are native Task seats on a Claude
 host and external `claude` CLI seats elsewhere; codex and agy rows are always
 external provider seats. Cursor rows are external everywhere EXCEPT standalone
@@ -164,7 +166,9 @@ launched so nested crew calls re-detect their host.
 
 ```
 multiagent/
-├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher); subcommands: review | debate | review-next | review-claim | review-execute | review-submit | review-recover | review-retry | run | dispatch | build-executor | render (incl. --stage-all) | seats | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | wait (incl. --signal) | signal | doctor | probe | scaffold-config | swab
+├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher); subcommands: review | debate | review-next | review-claim | review-execute | review-submit | review-recover | review-retry | run | dispatch | build | build-resume | build-next | build-claim | build-execute | build-submit | build-capture | build-decide | build-cancel | build-recover | build-executor | render (incl. --stage-all) | seats | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | wait (incl. --signal) | signal | doctor | probe | scaffold-config | swab
+├── build_workflow.py    # build actions, receipts, executor/review decisions and owner binding
+├── execution.py         # write execution and guards with a per-call canonical workspace
 ├── measure_twice.py     # planning decisions, requirements, promotion, human questions and loop binding
 ├── workflow_transport.py # deterministic capture and injected notification-driven native runner
 ├── review_workflow.py   # shared review authority: exact schema transport, snapshot, lock/advance transaction, attempt history, repair, retry, and synthesis readiness
@@ -405,8 +409,7 @@ Key contracts (do NOT regress):
 ### Presets & config precedence
 
 - **Panel selection** — build accepts `--panel full|lite|solo|cursor|quick` / `--seats <subset>`
-  and passes them to `crew review-prep`. Measure-twice resolves these flags in
-  its loop-owned review workflow. Review and review-prep keep the
+  and resolves them in its owner-bound review workflow, as measure-twice does. Review and review-prep keep the
   options independent: `--seats` replaces only the external subprocess subset,
   while `--panel` supplies native task seats when explicit seats name none.
   `review_workflow` uses the same shared resolver. The Python engine OWNS the resolution (`seats.merged_panels()`
@@ -468,8 +471,8 @@ Key contracts (do NOT regress):
   with that kind's rows of the catalog (`seats.group_tokens()` supplies the expansion members).
 - `render --stage --session-id <id>` stages a seat prompt to the FLAT
   `.crew/reviews/<session-id>/prompt-<seat-role>.txt`, pointer or no pointer:
-  only the Python run owners (`review-prep` for build and `review_workflow` for
-  standalone review) may write a run dir's frozen prompt files (session resolved in Python — arg →
+  only the Python run owners (`review_workflow` for standalone and loop-owned reviews,
+  or the independent `review-prep` utility) may write a run dir's frozen prompt files (session resolved in Python — arg →
   `CLAUDE_SESSION_ID` env — so the command carries no `${…}` expansion).
 - **Plugin-root `crew` dispatcher (canonical invocation).** Commands invoke the
   engine via the bare `"${CLAUDE_PLUGIN_ROOT}/crew" <sub> …` dispatcher (a thin
@@ -486,8 +489,8 @@ Key contracts (do NOT regress):
   `prompt-<role>.txt` each in the FLAT session dir (never a run dir; see the
   `--stage` bullet) — and prints a JSON `{role: path}` map. The
   review-bearing commands (`review`/`build`/`measure-twice`) NO LONGER call it:
-  Build’s `review-prep` stages every Task-seat prompt itself against the run's frozen
-  snapshot (`task_prompt_paths` in its JSON), because a separate render would
+  Their shared review workflow stages native prompts against the run's frozen
+  snapshot and issues the exact paths in work items, because a separate render would
   re-resolve the LIVE target and reopen the drift window the snapshot closes.
   Each role gets its own
   "acting as the **<role>** seat" label; the special role `seat` maps to
@@ -523,13 +526,14 @@ Key contracts (do NOT regress):
   launch's failure): this is the clear that keeps `wait`'s existence barrier honest. Task-seat files
   remain in place because `wait` refuses Task seats; the next `persist-seat` overwrites a stale file.
 
-### Legacy build subprocess fan-out
+### Workflow review fan-out and independent run utility
 
-- **Per-seat fan-out (visibility).** Build fans subprocess seats
-  out ONE `crew run <seat>` call PER seat — each a separate, visible, killable
-  shell. Standalone review and migrated measure-twice are workflow-only: it issues one external `WorkItem`
-  per seat and the thin host adapter invokes `review-execute` once per item; it
-  never enters an ad-hoc fan-out.
+Build, measure-twice and standalone review issue one external WorkItem per seat.
+The host invokes its exact `review-execute` command, launching independent items
+before waiting. Owner-bound loops settle by their issued ReviewRef and accepted
+receipts; they do not select outcomes by pointer. The separate `crew run` utility
+retains the following per-seat behavior for its own callers:
+
 - The orchestrator then iterates `pending_subprocess_seats`, running each via `run <seat> --session-id
   <id> --run-id <run_id> --json` — `run` DERIVES `-f` (`prompt-seat.txt`) and `-o` (`<seat>.json`) from
   the run dir (explicit `--run-id` > the session pointer > the flat session dir; resolved ONCE at
@@ -548,10 +552,10 @@ Key contracts (do NOT regress):
   all-failed abort to handle). Run-scoped misuse exits 2 with nothing written; the markdown-templated
   calls never hit those paths.
 
-### Legacy build Task-seat dispatch & persist
+### Shared low-level Task-seat persistence
 
-- (`review-prep` resolves BOTH seat kinds but EXECUTES neither — the Claude Task seats stay
-  orchestrator-DISPATCHED; build spawns each PENDING Task seat over its prep-staged prompt
+- (`review-prep` resolves BOTH seat kinds but EXECUTES neither — manual Claude Task seats stay
+  orchestrator-DISPATCHED; a caller spawns each PENDING Task seat over its prep-staged prompt
   (`task_prompt_paths[seat]`) with `model = task_seat_models[seat]`, so it is no longer the
   opaque echo the commands ignored.)
 - After the fan-out, the orchestrator persists EACH normalized Task seat (opus/sonnet/fable) via `crew
@@ -561,16 +565,13 @@ Key contracts (do NOT regress):
   preserve-valid write, so the command markdown no longer hand-assembles the `<seat>.json` with the
   Write tool. Without `--run-id` while the session pointer exists, `persist-seat` exits 2 naming the
   fix (completion-time attribution by mutable pointer is the TOCTOU bug this closes).
-  On the SUCCESS path a `crew:scribe` sub-agent does the tmp-seat `Write` (so the persist-Write does
-  not render into orchestrator context). In build.md, the
-  orchestrator's landing gate is the `persist-seat --verify` exit code against the on-disk
-  record: exit 0 is done; on the success path, exit 4 routes to the FALLBACK, the fixed
-  missing-file exit 2 also routes to the FALLBACK, and any other exit 2 is a hard stop.
-  The build recipe uses `persist-seat --verify`; the scribe's self-reported line is not the landing
-  authority, and a fallback uses a DISTINCT `tmp-seat-<seat>-fallback.md` path so a timed-out
-  scribe's late write to the original tmp cannot clobber the fallback bytes.
+  `persist-seat --verify` checks the on-disk record: exit 0 is verified, exit 4 means
+  invalid content, and missing-file exit 2 is distinguished from other misuse.
+  Workflow-owned build reviews use issued ReviewRef actions and shared exact-byte
+  capture instead. Their success authority is the accepted workflow receipt;
+  direct native capture and host Write add no bookkeeping scribe.
 
-### Legacy build repair & collect (shared low-level commands)
+### Shared low-level repair & collect
 
 - Each Task seat lands as a `<seat>.json` too, so the WHOLE panel (subprocess AND Task seats) flows
   through ONE `collect`. It then collapses the per-seat files into ONE GROUPED markdown digest with
@@ -598,12 +599,12 @@ Key contracts (do NOT regress):
     manifest names from `run.json`; usable = the success-only `result_valid` tier; NOT MET adds
     "an APPROVED verdict is not backed by quorum from this panel", a capability-NEUTRAL statement
     of fact, since this rubric is SHARED with standalone `/crew:review`, which has no override verb;
-    build uses `--force`; migrated mt uses an exact bound human decision). Build markdown and the shared Python verdict guard HONOR this header at
-    synthesis time: a NOT MET digest must not certify an APPROVED (nor a
-    REVISE-minor-only completion) without the user's explicit `--force`. The header is ADVISORY (a
-    digest reader's summary); the common `loop_state.apply_verdict` guard recounts usable seats against the identity frozen in loop state, and that
-    count is what decides (a below-quorum completion is exit 3, clearable with `--force`, not a hard
-    refusal). Non-skipped VERDICTS rows carry `[runtime-reported: <model>]` or,
+    build and measure-twice use exact bound human decisions). Both loop engines
+    park completion on disclosed advisories. The shared `loop_state.apply_verdict`
+    guard recounts usable seats against the frozen identity; only a current
+    question-bound kind `force` decision with confirmation `force` can override
+    an advisory. Retained overrides appear in terminal/replay output.
+    Non-skipped VERDICTS rows carry `[runtime-reported: <model>]` or,
     when any result in the digest has a runtime report, including failed or
     skipped results, `[requested-only]`, keyed
     on the derived `model_attribution`; otherwise they have no suffix. Control
@@ -940,9 +941,13 @@ successful reviewers. `loop_state.apply_verdict` is the common build/mt guard.
 `loop_projection.py` is a leaf lifecycle renderer imported below hook version
 guards: no provider, review-engine or advisor dispatch. Hooks retain their
 termination-before-parking, bounded waits and counters. mt nudges contain only
-engine resume/next, including done finalization; build recipes remain intact.
-The mt projection renders after persisted Stop counter updates, in default and
-verbose modes. Build keeps its original body selection.
+engine resume/next, including done finalization. Build uses the corresponding
+project_build projection and issued BuildStep. Both projections render after
+persisted Stop counter updates, in default and verbose modes.
+`build_state.py` shares the build journal/action record shapes and the writer
+claim validation with the engine. Hooks, admission and artifact cleanup use its
+passive fence projection, including uncertain-record protection, without loading
+build/review/execution policy. The engine retains full journal policy validation.
 Active bound/pending refs protect runs in artifact_prune. Terminal lifetime plan
 artifacts are reported for attended cleanup and never automatically deleted.
 
@@ -960,136 +965,45 @@ confirmed recovery, preserving successful reviewers.
 The mandatory real Claude Code Stop/lifecycle cases and remaining limits are
 recorded in [Phase 4 evidence](../docs/phase-4-measure-twice-evidence.md).
 
-## crew-state CLI (build and legacy compatibility)
+## crew-state CLI (shared low-level state)
 
 Loop state management ships in `crew-state.py` but the commands invoke it through
 the plugin-root dispatcher as `crew state <sub> …` (one allowlist rule covering
 both engine and state; see the `crew state …` bullet above for WHY). The bare
-`crew-state.py` path still runs standalone during transition.
+`crew-state.py` path also runs standalone. Current build/measure-twice lifetimes
+use their workflow commands; these mutation entrypoints cannot bypass journal
+ownership, and initialization shares the project admission lock.
 
 All subcommands accept `--session-id SESSION_ID` for session-scoped state files.
 If omitted, falls back to `CLAUDE_SESSION_ID` env var, then legacy unsuffixed filenames.
 
 ```bash
-# Show loop state
+# Read-only inspection remains available through the shared state CLI.
 crew state show bl --session-id abc123
-crew state show mt
-
-# Check if active (exit code 0=active, 1=inactive)
+crew state show mt --session-id abc123
 crew state is-active bl --session-id abc123
-
-# Initialize a loop — inline text …
-crew state init bl --prompt "Fix the auth bug" --session-id abc123
-crew state init mt --task "Add user profiles" --auto-plan --session-id abc123
-
-# … OR spill the raw task to a UTF-8 file and pass -f, keeping $ARGUMENTS (which
-# may contain $(…)/backticks/quotes) OFF the shell line. -f maps to the loop's
-# text field and is mutually exclusive with --prompt/--task; a missing/unreadable
-# (incl. non-UTF-8) file exits nonzero with NO state file created. The loop
-# build command Writes the spill file and initializes with
-# --consume, which deletes it after a SUCCESSFUL init (a failed init leaves it
-# for retry; --consume without -f exits 2; the session-start orphan-cleanup
-# patterns do NOT cover these task files). A RELATIVE -f resolves against the
-# project root (crew_base, the shared anchor_path rule), never the shell cwd,
-# so the recipe carries a plain .crew/... path with NO ${…} expansion (an
-# expansion on the line defeats permission allowlisting). An absolute -f passes
-# through unchanged.
-crew state init bl -f .crew/task-bl-abc123.txt --session-id abc123 --consume
-
-# The loop's wall clock: --deadline-minutes (1..1440; the flag REJECTS 0, the
-# agent invokes init) > [tuning].deadline_minutes (per-repo, then global; 0 here
-# is the operator's no-deadline opt-out) > the built-in 240. With the clock off
-# the stop-fires cap still bounds the loop. `init` REFUSES (exit 1) when the
-# state file it would replace records a force-exit (the Stop hook's bound tripped),
-# because a fresh loop zeroes stop_fires and restarts the clock: that IS the way
-# around a safety limit, so it takes an explicit --force.
-crew state init bl --prompt "Fix the auth bug" --deadline-minutes 90 --session-id abc123
-
-# Check if this session has conflicts (other sessions ignored)
 crew state check-conflicts --session-id abc123
 
-# These setters/begin-review/record-verdict REFUSE migrated mt. Its typed engine
-# owns the plan path and accepted review binding. Build and legacy remain compatible.
-# Set a field. ONLY the loop's AGENT_SETTABLE allowlist (plan_file, for both
-# loops). Any other field exits 2 and writes nothing: the hook owns the bounds,
-# and the verdict/run-identity fields belong to the review verbs.
-# FIELD-LEVEL: it edits the ONE key in the on-disk dict and writes the rest back
-# verbatim (unknown keys included). A whole-state save would let an allowlisted
-# write also restore this process's stale `stop_fires`/`parked_fires` snapshot,
-# reverting a bump the Stop hook landed in between: the counter-reset hole the
-# allowlist exists to close, reopened through a field the agent IS allowed to set.
-# A RELATIVE plan_file value is anchored to the project root at write time (the
-# stored path is absolute), so every later reader resolves the same file.
-crew state set mt plan_file .crew/plans/auth-system.md --session-id abc123
+# Write a schema-1 request spill, then start the engine-owned build.
+crew build -f .crew/requests/build-abc123.json --session-id abc123 --consume
+crew build-resume --session-id abc123
 
-# Pause the loop while waiting on the HUMAN (the Stop hook's third wait state,
-# alongside harness-parked). Run it before yielding to the user with the loop
-# active and nothing in flight (an ok=false executor stop, an exit-3 --force
-# advisory, an AskUserQuestion): the hook then ALLOWS the stop (no stop_fire)
-# under the same max_parked_fires cap instead of nudging every turn-end. FIELD-
-# LEVEL like `set`, but NOT an AGENT_SETTABLE field (it bounds nothing, so it is
-# a dedicated verb). Auto-cleared by begin-review / record-verdict / the past-cap
-# nudge; `--clear` clears it explicitly. A no-op success on an inactive / missing
-# / corrupt / newer-schema loop (nothing written; honors refuse-to-touch).
-crew state await bl --session-id abc123
-crew state await bl --clear --session-id abc123
-
-# Begin a review: run it right after `crew review-prep`, BEFORE any seat runs.
-# It reads the prepped run's OWN run.json (never the pointer: seat results are
-# stamped from that record, so the gate must judge against the same authority)
-# and freezes the run id, target sha/spec/base, and the seat roster (from
-# `seat_signatures`, the roster INSIDE the hashed identity) into loop state, then
-# stamps phase=reviewing and prints `phase=reviewing run=<id> seats=<N>`.
-# Legal from `drafting` AND from `reviewing` (a re-prep after a compaction
-# re-arms the freeze rather than hitting an error the orchestrator would route
-# around); strictness lives at record-verdict, where a stale identity could
-# actually certify the wrong bytes. Refuses (exit 2) with no pointer, an
-# unverifiable/spec-less run record, or an empty roster.
-crew state begin-review bl --session-id abc123
-
-# Record the panel's verdict against the frozen identity. Legal ONLY from
-# `reviewing`, and the results are resolved EXCLUSIVELY from state
-# (`.crew/reviews/<sid>/<state.run_id>`): a pointer or flat-dir fallback would
-# let a re-prep decide which results a verdict is made of.
-# Every verdict but FAILED needs >= 1 usable seat (an all-failed panel recorded
-# as REVISE would look like progress and reset the failure counter).
-# COMPLETING verdicts (APPROVED, or REVISE --minor-only) additionally face
-# quorum (len(expected)//2+1 usable), pointer divergence, and a target re-hash
-# (drift). These plus the zero-usable check are ADVISORY, not hard refusals: a
-# trip COLLECTS every tripped condition into one combined diagnostic and exits 3
-# (distinct from the exit-2 hard errors), recording nothing. `--force` records
-# anyway and stamps the tripped names in `last_verdict_overrides` for the audit
-# trail; it exists for a HUMAN's explicit call, never an agent's convenience. The
-# HARD checks (loop inactive, wrong phase, no/invalid run identity, FAILED over a
-# usable panel, no frozen target spec) stay exit 2 and are never forced. A
-# degraded panel may always demand more work; a completing verdict leaves
-# phase=done, which is what deactivate requires.
-# REVISE/REJECT advance revision_round (the one place it moves) and return the
-# loop to `drafting`. FAILED is legal ONLY with zero usable seats; the second
-# consecutive one deactivates the loop terminally IN the same transaction
-# (exit_kind=review_failed), never via a follow-up call.
-crew state record-verdict bl APPROVED --session-id abc123
-crew state record-verdict bl REVISE --minor-only --session-id abc123
-crew state record-verdict mt FAILED --session-id abc123
-
-# Deactivate — pass the SAME --session-id init used, so deactivate targets the
-# exact session-scoped file (init and deactivate/cancel of one loop MUST resolve
-# to the same file; cmd_deactivate additionally reuses the Stop hook's
-# find_session_state_file so an adopted legacy file is also turned off).
-# GATED: a live loop is turned off either after a completing verdict (phase=done,
-# stamped exit_kind=approved) or with an explicit --cancel (stamped cancelled);
-# anything else exits 2 naming both, with the bytes untouched. --cancel is legal
-# from ANY phase (an escape hatch a phase check could veto is not one), and
-# deactivating an already-off loop is a no-op success.
-crew state deactivate bl --session-id abc123            # after record-verdict APPROVED
-crew state deactivate bl --cancel --reason "User cancelled" --session-id abc123
-
-# On a loop that is already off (a FORCE-EXITED file, a terminally FAILED panel)
-# the `--reason` lands in `deactivate_reason`, not `reason`: `reason` there is the
-# exit that ended the loop, and `init` quotes a tripped bound back when it refuses
-# to restart. The exit_kind of such a loop is likewise left as its first terminal
-# writer stamped it.
+# Use the exact BuildRef, action IDs and argv returned by the engine.
+crew build-next --session-segment <issued-segment> --loop-instance-id <issued-lifetime>
+crew build-cancel --session-segment <issued-segment> --loop-instance-id <issued-lifetime> --reason "User cancelled"
 ```
+
+`build-claim`, `build-execute`, `build-capture`, `build-decide` and `build-recover`
+operate only on issued owner/action/question identities. Native claims launch only
+with authorization `spawn`; a guard refusal returns the actual `needs_input` step.
+A matched `waiting` start consumes its request; an unadmitted lock-busy start
+returns `ref: null` and retains the request for retry. No lifetime was issued.
+[Build protocol](../docs/build-protocol.md) and
+[measure-twice protocol](../docs/measure-twice-protocol.md) define request and return
+shapes. Current journals refuse low-level setters, review-verdict writes and
+replacement initialization. Generic initialization also refuses any outstanding
+or unreadable build writer evidence through shared admission safeguards.
+
 
 **Session ID resolution order:**
 1. `--session-id` CLI argument (highest priority)
@@ -1101,28 +1015,23 @@ crew state deactivate bl --cancel --reason "User cancelled" --session-id abc123
 - `measure-twice-state-{session_id}.json`
 
 **Schema version + refuse-to-touch.** Every write stamps
-`"schema": SCHEMA_VERSION` (currently 4; 2 added hook-owned termination
-fields, 3 unified LoopState, 4 adds optional `mt_workflow`);
-an ABSENT `schema` loads as 1, and schema-1/2/3 files keep working: the load
-coalesces the legacy `prompt`/`task_description` into `task` (coalesce_task),
-and the hook stamps a missing `started_at` on first fire so an adopted old
-loop is still bounded). Reads classify a file via `read_state_json` /
-`load_with_status` into `LOAD_OK` / `LOAD_MISSING` / `LOAD_CORRUPT` /
-`LOAD_FUTURE_SCHEMA`. Every MUTATING path — the Stop hook AND the crew-state CLI
-(`init` / `set` / `deactivate`) honors the SAME contract:
-- **Newer schema** (`schema > SCHEMA_VERSION`): REFUSE to touch. The hook allows
-  stop with a loud diagnostic; the CLI exits nonzero, bytes untouched — a
-  downgrade must never clobber a live newer-format loop.
-- **Corrupt** (unparseable / non-object JSON): the Stop hook and `init` set the
-  file aside as `<name>.corrupt` (a one-time diagnostic; `init` then starts fresh
-  state), while `set` / `deactivate` refuse (nonzero) rather than
-  silently overwrite. These set-aside artifacts are swept by `session-start`
-  cleanup, which is SCOPED to crew's own backup names via exact-plus-hyphen globs:
-  `build-state.json.corrupt` / `build-state-*.json.corrupt` and
-  `measure-twice-state.json.corrupt` / `measure-twice-state-*.json.corrupt` (the
-  legacy exact name and the session-scoped `-<id>` form only) — so neither an
-  unrelated `*.corrupt` file nor a prefix-collision like
-  `build-stateEVIL.json.corrupt` is ever deleted.
+`"schema": SCHEMA_VERSION` (currently 5; 2 added hook-owned termination fields,
+3 unified LoopState, 4 added optional `mt_workflow`, 5 added optional `bl_workflow`).
+Reads classify state through `read_state_json` / `load_with_status` as `LOAD_OK`,
+`LOAD_MISSING`, `LOAD_CORRUPT` or `LOAD_FUTURE_SCHEMA`.
+
+- **Newer schema:** hooks allow Stop with a diagnostic and retain bytes; mutators
+  refuse to touch it.
+- **Unreadable build state:** Stop retains the original state and evidence with a
+  diagnostic. Admission refuses replacement because a writer may still be live.
+  Cleanup retains that uncertainty regardless of age.
+- **Unreadable measure-twice state:** the existing set-aside behavior remains;
+  setters and deactivate refuse unreadable data. Cleanup recognizes only Crew's
+  exact/hyphenated backup names, preserving unrelated files and prefix collisions.
+- **Cleanup:** current bytes, status, mtime, active age threshold and passive writer
+  fence are rechecked under the owner lock. Swab takes one locked eligibility scan
+  per removal batch; lock failures enter its failed list and partial removals still
+  receive pointer cleanup.
 
 **One serialized read-modify-write (`models.update_state_json`).** The Stop hook
 and the crew-state CLI are two PROCESSES writing one file, so `atomic_write_json`
@@ -1259,20 +1168,19 @@ rules are load-bearing; each one is a bug that already happened.
    else), it writes that ONE key field-level so an allowlisted write can't carry
    back a stale snapshot of the counters, `--deadline-minutes` is validated to
    1..1440 at `init` (the no-deadline opt-out is config-only, the flag is
-   agent-invoked), and `init`
-   refuses to start a fresh loop over a force-exited
-   one without `--force`. A safety limit the agent can rewrite is not a safety
+   agent-invoked). Current workflow decisions cannot extend expired bounds;
+   replacing an inactive lifetime remains subject to writer admission guards. A safety limit the agent can rewrite is not a safety
    limit: a live loop, cornered by a cap it kept hitting merely for WAITING, reset
    its own counter 30 times and made the force-exit unreachable. `active` is
    refused for the same reason: setting it false is an unaudited back door around
-   the panel-approval gate that `deactivate` exists to be.
+   the engine-owned completion gate.
 
    **This is reliability hardening, NOT a security boundary. Do not document it
    as one.** The agent has `Write`/`Edit` on `.crew/*-state-*.json` and can edit
    any field the CLI refuses. What the allowlist buys is that no *sanctioned,
    convenient, plausibly-innocent* path resets a bound: the counter-reset livelock
    happened through the CLI, in good faith, one `set` at a time. Every remaining
-   route is now a conspicuous act (hand-editing state, or `init --force`), and the
+   bypass is a conspicuous hand edit, and the
    hook reads all four counters defensively (`effective_count`) so a garbage value
    falls back to a real bound instead of raising into the fail-open handler and
    silently disabling enforcement for that fire. `started_at` is read the same way
@@ -1292,12 +1200,13 @@ rules are load-bearing; each one is a bug that already happened.
      non-empty — the session is on work it launched, and the harness re-invokes it
      when that work completes.
    - **`awaiting_input`:** the loop is blocked on the HUMAN (an `ok=false`
-     executor stop the human resolves, an exit-3 `--force` advisory, an
+     executor stop the human resolves, a bound completion-advisory question, an
      `AskUserQuestion`) with NOTHING in flight, so `is_parked` is false. Without
      this the hook blocked every such turn-end and the agent was dragged back turn
-     after turn (the nudge livelock). The orchestrator sets it with `crew state
-     await <loop>`; the review verbs (`begin-review` / `record-verdict`) and the
-     past-cap nudge clear it, so a resumed loop re-arms. It is NOT in
+     after turn (the nudge livelock). Build and measure-twice engines persist this
+     flag when issuing a question and clear it as the accepted decision resumes
+     work. A replaced review generation clears its obsolete retry authorization
+     and pause state together. The hook can also clear a past-cap wait. It is NOT in
      `AGENT_SETTABLE` (it bounds nothing — the cap below defeats a stuck one — so
      it gets a dedicated verb, not a widened allowlist).
 
@@ -1455,6 +1364,7 @@ old delete path also retired the three data-loss bugs the review-run sweep carri
 
 ```bash
 # Run all tests (Python 3.11+, with subprocess PATH resolving that interpreter)
+python3 plugins/crew/scripts/tests/test-build-workflow.py
 python3 plugins/crew/scripts/tests/test-measure-twice.py
 python tests/test-hooks.py
 
@@ -1487,3 +1397,6 @@ Tests cover:
 ## Related Guides
 
 - [Project Root](../../../.claude/CLAUDE.md) - Adding hooks, overall architecture
+
+Engine-owned build contracts and current human decisions: [build-protocol](../docs/build-protocol.md).
+Outstanding or unreadable build writers retain their state, locks and evidence at every age.

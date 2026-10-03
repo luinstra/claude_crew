@@ -26,7 +26,7 @@ verified tag are expectations, not guarantees.
 
 - The stop-block outcome is POSITIVE: three consecutive genuine stop attempts against an armed measure-twice loop each coerced continuation, with the crew Stop nudge injected verbatim as a hook_prompt, stop_fires advancing 0 to 3 on the armed state file, and the hook stamping the harness session id into the legacy unsuffixed state it adopted (verified: probe 2026-08-12 S1/P3, codex 0.147.0)
 - Applied scope, per the recorded decision rule: loops are supported in this host as-is; no one-shot-only restriction ships (verified: probe 2026-08-12 S1/P3, codex 0.147.0)
-- Quorum degradation is the engine's standard behavior in every host: record-verdict recounts usable seats and exits 3, with no host-specific override (inferred: engine behavior, not host-specific)
+- Quorum degradation is the engine's standard behavior in every host: the shared guard recounts usable seats; current loop engines park completion advisories on a bound human decision, with no host-specific override (inferred: engine behavior, not host-specific)
 
 ## Seat execution
 
@@ -38,8 +38,10 @@ Codex package contains the shared `commands/review.md` source, its migrated
 command skills do not register standalone `/crew:review`, so the Codex plugin
 does not expose that invocation yet; a first-class Codex adapter remains
 deferred (verified: installed 0.74.1 package inventory and Phase 1 deterministic
-workflow tests, 2026-08-20). Build retains `review-prep`. Measure-twice uses the
-engine-owned workflow; production planning admission currently requires Claude.
+workflow tests, 2026-08-20). Build uses its engine-owned protocol with existing
+external write routes; the native `crew:executor` sentinel refuses unsupported
+hosts. Measure-twice production planning admission currently requires Claude.
+These source contracts do not establish a Codex app-native build lifecycle gate.
 
 - Panel prep is host-truthful: review-prep under this host emits host codex, classifies opus as an external claude-channel subprocess seat, and stamps seat_channels with real provenance (verified: probe 2026-08-12 S1/P5, codex 0.147.0)
 - The claude CLI resolves on PATH but is NOT authenticated inside the Codex sandbox: claude -p answers "Not logged in", so external claude seats fail closed with truthful envelopes, ok false, channel claude, real run identity stamps (verified: probe 2026-08-12 S1/P5, codex 0.147.0)

@@ -2,12 +2,14 @@
 """Crew state management CLI for build and measure-twice persistence."""
 
 import argparse
+import contextlib
 import json
 import os
 import re
 import sys
 import uuid
 import loop_state
+from build_state import writer_fence
 from dataclasses import asdict
 from pathlib import Path
 
@@ -101,7 +103,11 @@ def _mutate_state(cls, path: Path, mutate) -> dict:
     FAILED write, not a silent unlocked one.
     """
     try:
-        data, status = update_state_json(path, mutate, default=asdict(cls()))
+        def owned_mutation(data: dict) -> dict:
+            if data.get("bl_workflow") is not None:
+                _refuse("engine-owned build state requires its issued build protocol action")
+            return mutate(data)
+        data, status = update_state_json(path, owned_mutation, default=asdict(cls()))
     except StateLockError as exc:
         print(
             f"Error: could not lock {path.name} ({exc}). Another writer is holding "
@@ -282,6 +288,8 @@ def cmd_show(args):
     path = _resolve_loop_path(args.loop, session_id)
     canonical = LOOP_ALIASES[args.loop]
     state = LoopState.load(path)
+    data, status = read_state_json(path)
+    fence = writer_fence(data) if isinstance(data, dict) else None
 
     verbose = getattr(args, "verbose", False)
     if verbose:
@@ -289,13 +297,16 @@ def cmd_show(args):
         # written outside it (completed_at, reason, force_exit), and `init`
         # refuses to restart a force-exited loop based on exactly those. A
         # refusal the supported inspection command cannot explain is a trap.
-        data, status = read_state_json(path)
         if status == LOAD_OK and isinstance(data, dict):
             print(json.dumps(data, indent=2))
         else:
             print(json.dumps(asdict(state), indent=2))
+        if fence:
+            print(fence, file=sys.stderr)
     else:
         print(_compact_show(state, canonical))
+        if fence:
+            print(fence)
 
 
 def cmd_is_active(args):
@@ -569,6 +580,29 @@ def _same_file(a: Path, b: Path) -> bool:
 
 
 def cmd_init(args):
+    session_id = resolve_session_id(args)
+
+    def check_writers(states: dict) -> None:
+        loop_state.check_writer_fences(states)
+        for data, _status in states.values():
+            if data is not None and data.get("bl_workflow") is not None:
+                _refuse("Workflow-owned build state requires the issued build protocol")
+
+    with loop_state.admission_lock(), loop_state.admission_states(session_id) as states:
+        check_writers(states)
+    chain = (continuations.continuation_lock(session_id, "build-executor")
+             if LOOP_ALIASES[args.loop] == "bl" else contextlib.nullcontext())
+    try:
+        with chain, loop_state.admission_lock():
+            with loop_state.admission_states(session_id) as states:
+                check_writers(states)
+            return _cmd_init(args)
+    except continuations.ContinuationLockError as exc:
+        print(f"Error: could not clear the prior build-executor continuation: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _cmd_init(args):
     """Initialize a loop with default state."""
     # Validated BEFORE any state work: --consume names a file to delete, so
     # without -f there is nothing it could mean and silence would hide the typo.
@@ -702,8 +736,7 @@ def cmd_init(args):
         # build-executor conversation before activating this replacement so no
         # dispatch can carry the old loop's provider ID into the new loop.
         try:
-            with continuations.continuation_lock(session_id, "build-executor"):
-                continuations.invalidate(session_id, "build-executor")
+            continuations.invalidate(session_id, "build-executor")
         except (continuations.ContinuationError, OSError) as exc:
             print(
                 f"Error: could not clear the prior build-executor continuation: {exc}",

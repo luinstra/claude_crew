@@ -46,10 +46,11 @@ import re
 import shutil
 import time
 
+from build_state import report_status
 from state_discovery import crew_base  # the ONE `.crew`/project-root resolver
 
-from . import Provider, ProviderContinuation, ProviderResult
-from ._proc import TIMEOUT, run_reaped
+from . import Provider, ProviderContinuation, ProviderResult, transport_failure
+from ._proc import TIMEOUT, TIMEOUT_UNCONFIRMED, ReapedFailure, run_reaped
 
 
 # Conservative cap well under macOS ARG_MAX (~1 MB) to leave headroom for the
@@ -232,6 +233,8 @@ class AgyProvider(Provider):
         timeout: int = 300,
         dispatch_options: dict | None = None,
         continuation: ProviderContinuation | None = None,
+        workspace: str | None = None,
+        build_report: bool = False,
     ) -> ProviderResult:
         # dispatch_options: accepted for Provider-ABC parity and IGNORED: agy
         # declares no dispatch options (a configured [dispatch.agy] key already
@@ -285,7 +288,7 @@ class AgyProvider(Provider):
         # the guard inspects. A READ-ONLY review seat pins to crew_base() (the
         # project root the run dir + snapshot anchor to) so a divergent process
         # cwd cannot make the seat inspect the wrong repo.
-        run_cwd = (
+        run_cwd = workspace or (
             (os.environ.get("CLAUDE_WORKING_DIRECTORY") or os.getcwd())
             if sandbox == "workspace-write"
             else str(crew_base())
@@ -294,17 +297,30 @@ class AgyProvider(Provider):
         # Shared reaped runner: start_new_session + SIGTERM→SIGKILL killpg
         # teardown on timeout. stdin is DEVNULL (input_text=None) — byte-identical
         # to agy's prior Popen(stdin=DEVNULL) invocation.
-        result = run_reaped(argv, timeout=wall_clock, cwd=run_cwd)
-        if result is TIMEOUT:
+        capture = {"capture_bytes": True} if sandbox == "workspace-write" else {}
+        result = run_reaped(argv, timeout=wall_clock, cwd=run_cwd, **capture)
+        if result is TIMEOUT or result is TIMEOUT_UNCONFIRMED:
             return ProviderResult(
                 name=self.name,
                 model=resolved_model,
                 ok=False,
                 output="",
-                error=f"agy timed out after {wall_clock:.0f}s (wall clock)",
+                error=f"agy timed out after {wall_clock:.0f}s (wall clock)" + result.diagnostic_suffix,
                 elapsed=time.monotonic() - start,
+                transport_status=result.transport_status,
+            )
+        if isinstance(result, ReapedFailure):
+            return ProviderResult(
+                name=self.name, model=resolved_model, ok=False, output="",
+                error=result.error, elapsed=time.monotonic() - start,
+                exact_output=result.stdout if isinstance(result.stdout, bytes) else result.stdout.encode("utf-8"),
+                transport_status=result.transport_status,
             )
         returncode, stdout, stderr = result
+        exact_output = stdout if isinstance(stdout, bytes) else stdout.encode("utf-8")
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+            stderr = stderr.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
 
         elapsed = time.monotonic() - start
         cleaned = strip_ansi(stdout or "").strip()
@@ -319,10 +335,20 @@ class AgyProvider(Provider):
                 output="",
                 error="agy returned no output" + (f": {err}" if err else ""),
                 elapsed=elapsed,
+                transport_status=transport_failure(returncode, err),
             )
 
-        # Auth/error output (even at exit 0) -> failure (BLOCKING #2).
-        auth_err = detect_auth_or_error(cleaned)
+        # Exact build reports are response evidence, not heuristic transport
+        # diagnostics. Stderr and genuine banners still indicate failed auth.
+        valid_report = (
+            build_report
+            and sandbox == "workspace-write"
+            and returncode == 0
+            and report_status(exact_output) != "invalid_report"
+        )
+        auth_err = detect_auth_or_error(
+            strip_ansi(stderr or "").strip() if valid_report else cleaned
+        )
         if auth_err is not None:
             return ProviderResult(
                 name=self.name,
@@ -331,6 +357,7 @@ class AgyProvider(Provider):
                 output="",
                 error=auth_err,
                 elapsed=elapsed,
+                transport_status=transport_failure(returncode, auth_err),
             )
 
         # Nonzero exit with real output -> still a failure, capture diagnostic.
@@ -343,6 +370,7 @@ class AgyProvider(Provider):
                 output="",
                 error=err or f"agy exited with status {returncode}",
                 elapsed=elapsed,
+                transport_status=transport_failure(returncode, err),
             )
 
         return ProviderResult(
@@ -352,4 +380,6 @@ class AgyProvider(Provider):
             output=cleaned,
             error=None,
             elapsed=elapsed,
+            exact_output=exact_output,
+            transport_status="ok",
         )

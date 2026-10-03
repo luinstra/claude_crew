@@ -320,5 +320,5 @@ On `terminal`, branch only on the returned status:
   present the returned `panel_path`; do not invent or request synthesis.
 
 The same presentation rules apply after compaction or an identical-start
-resume. Build retains `review-prep`. Measure-twice composes the loop-owned review
-workflow through its own engine adapter; it does not use this standalone adapter.
+resume. Build and measure-twice compose owner-bound reviews through their engine
+adapters; their reviews do not use this standalone adapter or its pointer.

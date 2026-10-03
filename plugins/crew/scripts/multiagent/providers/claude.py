@@ -16,7 +16,7 @@ from multiagent import channels
 from state_discovery import crew_base
 
 from . import Provider, ProviderContinuation, ProviderResult
-from ._proc import TIMEOUT, run_reaped
+from ._proc import TIMEOUT, TIMEOUT_UNCONFIRMED, ReapedFailure, run_reaped
 
 
 # Scrub harness and session identity names, plus the crew override, while
@@ -94,6 +94,8 @@ class ClaudeProvider(Provider):
         timeout: int = 300,
         dispatch_options: dict | None = None,
         continuation: ProviderContinuation | None = None,
+        workspace: str | None = None,
+        build_report: bool = False,
     ) -> ProviderResult:
         """Run one read-only Claude turn and normalize its result."""
         del dispatch_options, continuation
@@ -126,7 +128,7 @@ class ClaudeProvider(Provider):
                 argv,
                 input_text=prompt,
                 timeout=timeout,
-                cwd=str(crew_base()),
+                cwd=workspace or str(crew_base()),
                 env=_child_env(),
             )
         except OSError as exc:
@@ -139,16 +141,24 @@ class ClaudeProvider(Provider):
                 elapsed=time.monotonic() - start,
             )
 
-        if result is TIMEOUT:
+        if result is TIMEOUT or result is TIMEOUT_UNCONFIRMED:
             return ProviderResult(
                 name=self.name,
                 model=chosen_model,
                 ok=False,
                 output="",
-                error=f"claude timed out after {timeout}s",
+                error=f"claude timed out after {timeout}s" + result.diagnostic_suffix,
                 elapsed=time.monotonic() - start,
+                transport_status=result.transport_status,
             )
 
+        if isinstance(result, ReapedFailure):
+            return ProviderResult(
+                name=self.name, model=chosen_model, ok=False, output="",
+                error=result.error, elapsed=time.monotonic() - start,
+                exact_output=result.stdout if isinstance(result.stdout, bytes) else result.stdout.encode("utf-8"),
+                transport_status=result.transport_status,
+            )
         returncode, stdout, stderr = result
         output = strip_ansi(stdout or "").strip()
         if returncode != 0:

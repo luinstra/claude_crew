@@ -90,6 +90,7 @@ git commit -m "ci: update workflow permissions"
 | Command | Purpose |
 |---------|---------|
 | `/plugin` | Install plugin from current directory (run from `plugins/crew/` or `plugins/sk/`) |
+| `python plugins/crew/scripts/tests/test-build-workflow.py` | Run build workflow contract tests |
 | `python plugins/crew/scripts/tests/test-hooks.py` | Run hook unit tests |
 | `python plugins/crew/scripts/tests/test-review-workflow.py` | Run standalone review workflow contract tests |
 | `python plugins/crew/scripts/tests/test-multiagent.py` | Run the multi-model engine + dispatcher tests |
@@ -212,37 +213,29 @@ advertising an sk skill for days after sk deleted it).
 
 ## State Machine
 
-The crew plugin uses Python scripts to manage persistence:
+Python owns the build and measure-twice workflows. LoopState schema 5 carries
+optional `bl_workflow` and `mt_workflow` journals; hosts transport issued work.
 
 ```
-User starts loop → crew state init → JSON state file created (phase: drafting)
+Request spill → build / measure-twice → owner and frozen selection checkpointed
     ↓
-Claude works → session continues
+next → work_batch / waiting / needs_input / terminal
     ↓
-Claude tries to stop → Stop hook reads state → blocks if loop active
+Claim or execute issued action → capture exact return → immutable receipt
     ↓
-Panel prepped → crew state begin-review → run identity frozen (phase: reviewing)
-    ↓
-Panel verdict → crew state record-verdict → a COMPLETING verdict (APPROVED, or
-                                            REVISE --minor-only) leaves phase: done
-                                            (a REVISE with [BLOCKING] issues,
-                                            REJECT, and a lone FAILED return it to
-                                            drafting; a SECOND consecutive FAILED
-                                            deactivates the loop terminally in the
-                                            same transaction, exit_kind: review_failed)
-    ↓
-Loop complete → crew state deactivate → JSON kept with active: false
+Owner-bound review → Python applies verdict and issues revision or terminal step
 ```
 
-`deactivate` is GATED: it turns a live loop off only from `phase: done` (either
-completing verdict on record, stamped `exit_kind: approved`) or with an explicit
-`--cancel` (stamped `cancelled`), so an unreviewed finish cannot pass for an
-approved one.
+Completing verdicts (`APPROVED` or `REVISE --minor-only`) deactivate in place.
+Completion advisories require an exact bound human decision; retained overrides
+appear in terminal replay. A second consecutive failed review is terminal.
+Cancellation and hook-owned bounds end authority while an outstanding writer
+remains fenced until actual completion or explicit operator quiescence confirmation.
+Hooks project state and update their own counters; they do not run workflow engines.
 
-State files are **session-scoped** and are **not deleted** on deactivate — the
-loop is turned off in place by flipping `active: false` (plus a `completed_at`
-timestamp), so the record survives for inspection. `session-start` cleanup later
-sweeps inactive files older than a day.
+State files stay available for inspection. Session-start cleanup rechecks current
+status, active age policy and mtime under the owner lock. It retains outstanding
+writers and unreadable build evidence; generic admission refuses their replacement.
 
 **Orphan Cleanup (report-only for dirs and probe captures).** `session-start`
 still auto-cleans the ephemeral bookkeeping classes (stale state files, context

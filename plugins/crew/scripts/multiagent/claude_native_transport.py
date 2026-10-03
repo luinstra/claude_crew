@@ -1,6 +1,7 @@
 """Opt-in capture of an observed Claude Code native completion, without recopying."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -11,9 +12,10 @@ from typing import TypeVar
 
 from multiagent import channels, measure_twice as measure, review_workflow as review
 from multiagent import workflow_transport as transport
+from multiagent import build_workflow as build
 
 T = TypeVar("T")
-Ref = measure.MeasureRef | review.ReviewRef
+Ref = measure.MeasureRef | review.ReviewRef | build.BuildRef
 SUPPORTED_VERSION = "2.1.287"
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 
@@ -41,6 +43,24 @@ def launch_prompt(prompt: Path) -> str:
 def _with_context(launch: NativeLaunch, operation: Callable[[NativeContext], T]) -> T:
     if channels.current_host() != "claude":
         raise review.WorkflowError("unsupported_native_capture", "direct artifact capture requires Claude Code")
+    if isinstance(launch.ref, build.BuildRef):
+        def owned_build(_data: dict, journal: build.BuildJournal) -> T:
+            if journal.executor.role != "crew:executor":
+                raise review.WorkflowError("unsupported_native_capture", "capture requires the issued native executor")
+            root = build._root(launch.ref)
+            accepted = any(r.action_id == launch.action_id for r in journal.accepted_actions)
+            action = journal.action
+            claimed = action is not None and action.action_id == launch.action_id and action.status == "claimed"
+            if not accepted and not claimed:
+                raise review.WorkflowError("invalid_action", "native return has no owned claim or accepted receipt")
+            if claimed and action.handle is not None and action.handle != launch.handle:
+                raise review.WorkflowError("conflict", "native handle differs from its bound writer")
+            prompt = root / "prompts" / f"{launch.action_id}.txt"
+            result = operation(NativeContext(build._safe(root / "native-transport" / "anchor", launch.ref).parent, prompt, claimed, accepted))
+            if claimed and action.handle is None:
+                journal.action = dataclasses.replace(action, handle=launch.handle)
+            return result
+        return build._transaction(launch.ref, owned_build)
     if isinstance(launch.ref, review.ReviewRef):
         run = review._guard_review_path(session_segment=launch.ref.session_segment, run_id=launch.ref.run_id, create=False)
         with review._owned_workflow_lock(run, launch.ref):
@@ -111,7 +131,8 @@ def _paths(launch: NativeLaunch, context: NativeContext) -> tuple[Path, Path, by
             raise review.WorkflowError("invalid_native_binding", "native launch receipt has no bound source")
         retained = Path(binding["source_file"])
     source = _source_path(launch, retained=retained)
-    reference = (measure.ref_to_dict(launch.ref) if isinstance(launch.ref, measure.MeasureRef)
+    reference = (build.ref_to_dict(launch.ref) if isinstance(launch.ref, build.BuildRef) else
+                 measure.ref_to_dict(launch.ref) if isinstance(launch.ref, measure.MeasureRef)
                  else review.review_ref_to_dict(launch.ref))
     body = measure._canonical({"schema": 1, "ref": reference, "action_id": launch.action_id,
         "handle": launch.handle, "output_file": str(launch.output_file), "source_file": str(source), "prompt_path": str(context.prompt),
@@ -142,7 +163,7 @@ def read_completed_return(launch: NativeLaunch, prompt: Path, *, completion_obse
         raw = _source_path(launch).read_bytes()
         if len(raw) > MAX_ARTIFACT_BYTES or not raw.endswith(b"\n"):
             raise review.WorkflowError("unsupported_native_artifact", "native JSONL artifact is oversized or incompletely framed")
-        records = [json.loads(line) for line in raw.decode("utf-8").splitlines()]
+        records = [json.loads(line) for line in raw.decode("utf-8").split("\n")[:-1]]
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise review.WorkflowError("unsupported_native_artifact", f"native artifact is not readable complete UTF-8 JSONL: {exc}") from exc
     if not records or not all(isinstance(record, dict) for record in records):
@@ -178,7 +199,7 @@ def read_completed_return(launch: NativeLaunch, prompt: Path, *, completion_obse
 
 
 def capture_native_return(launch: NativeLaunch, *, completion_observed: bool,
-                          status: str = "ok", diagnostic: str | None = None) -> measure.MeasureStep | review.ReviewStep:
+                          status: str = "ok", diagnostic: str | None = None) -> measure.MeasureStep | review.ReviewStep | build.BuildStep:
     if completion_observed is not True:
         raise review.WorkflowError("completion_not_observed", "actual owned completion must be observed before capture")
     def capture(context: NativeContext) -> bytes:
@@ -195,6 +216,8 @@ def capture_native_return(launch: NativeLaunch, *, completion_observed: bool,
         transport.write_bytes(returned, content)
         return content
     content = _with_context(launch, capture)
+    if isinstance(launch.ref, build.BuildRef):
+        return transport.capture_build_return(launch.ref, launch.action_id, content, status=status, diagnostic=diagnostic)
     if isinstance(launch.ref, review.ReviewRef):
         return transport.capture_review_return(launch.ref, launch.action_id, content, status=status, diagnostic=diagnostic)
     return transport.capture_measure_return(launch.ref, launch.action_id, content, status=status, diagnostic=diagnostic)

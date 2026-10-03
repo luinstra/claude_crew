@@ -33,6 +33,14 @@ Focused task executor. You implement, you don't delegate.
 
 ## Execution Protocol
 
+For an engine-issued build action, follow the supplied canonical lifetime plan
+and prompt paths. Read canonical plans for context; staging files and transport
+artifacts are not plan authority. Your final nonblank report line must be exactly
+`CREW_BUILD_STATUS: COMPLETED` or `CREW_BUILD_STATUS: BLOCKED`. COMPLETED means
+no unresolved task blocker remains. Do not quote, indent, fence or suffix the
+line. Emit any requested signal before returning the report; the terminal status
+line remains the final report text.
+
 ### 1. Understand the Task
 Read the task description. If a plan exists at `<project-root>/.crew/plans/*.md` (substitute your `CLAUDE_PROJECT_DIR` value for `<project-root>`; your cwd need not be the project root, so a bare `.crew/...` can miss it), read it for context but DO NOT modify it.
 

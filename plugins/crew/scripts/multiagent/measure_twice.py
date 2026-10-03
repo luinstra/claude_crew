@@ -245,24 +245,7 @@ def issued_commands(item: MeasureWorkItem) -> dict[str, str]:
     from multiagent.workflow_transport import render_argv
     executable = str(Path(__file__).resolve().parents[2] / "crew")
     if item.review_ref:
-        ref = item.review_ref
-        flags = ("--session-segment", ref.session_segment, "--run-id", ref.run_id,
-                 "--attempt-id", ref.attempt_id, "--target-sha256", ref.target_sha256,
-                 "--action-id", item.action_id)
-        if item.driver == "external":
-            return {"execute": render_argv((executable, "review-execute", *flags)),
-                    "recover": render_argv((executable, "review-recover", *flags,
-                                            "--diagnostic-code", "external_process_lost"))}
-        recovery_code = ("parent_synthesis_lost" if item.kind == "synthesis" else
-                         "parent_formatter_lost" if item.kind == "formatter" and item.driver == "parent" else
-                         "formatter_task_lost" if item.kind == "formatter" else "native_task_lost")
-        commands = {"claim": render_argv((executable, "review-claim", *flags)),
-                "capture": render_argv((executable, "review-capture", *flags)),
-                "recover": render_argv((executable, "review-recover", *flags, "--diagnostic-code", recovery_code))}
-        if item.driver == "native" and item.role == "crew:reviewer":
-            commands.update(native_bind=render_argv((executable, "review-native-bind", *flags)),
-                            native_capture=render_argv((executable, "review-native-capture", *flags)))
-        return commands
+        return {name: render_argv(argv) for name, argv in review.issued_review_commands(item.review_ref, item.review_item).items()}
     flags = ("--session-segment", item.owner.session_segment, "--loop-instance-id", item.owner.loop_instance_id,
              "--action-id", item.action_id)
     return {"claim": render_argv((executable, "measure-twice-claim", *flags)),
@@ -692,13 +675,19 @@ def _namespace(ref: MeasureRef, journal: MeasureJournal) -> Path:
 
 def _safe_path(path: Path, root: Path) -> Path:
     absolute = Path(path.absolute())
-    base = Path(root.absolute())
-    if not absolute.is_relative_to(base):
+    base = root.resolve()
+    workspace = loop_state.crew_base().resolve()
+    resolved = absolute.resolve()
+    if ".." in absolute.parts or not resolved.is_relative_to(base):
         raise review.WorkflowError("unsafe_plan_path", "issued path escapes its lifetime namespace")
     for parent in (absolute, *absolute.parents):
+        if parent.resolve() == workspace:
+            break
         if parent.is_symlink():
             raise review.WorkflowError("unsafe_plan_path", f"symlink in issued path: {parent}")
-    return absolute
+    else:
+        raise review.WorkflowError("unsafe_plan_path", "issued path has no workspace ancestor")
+    return resolved
 
 
 def _guard_storage(session: str) -> None:

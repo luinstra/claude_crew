@@ -24,12 +24,12 @@ is warned about and dropped from the panel, never rerouted). Phase 1 also covers
 protocol compatibility deterministically through the Python CLI, but the Codex
 plugin does not yet expose standalone `/crew:review`; its app-native adapter
 remains deferred.
-Measure-twice now uses the engine-owned planning protocol; build retains its
-existing `review-prep` interface.
+Measure-twice and build use engine-owned protocols. Build retains its native
+Claude executor and configured external write routes.
 
 - **Claude Code** is the full experience: 8 agents, Stop-enforced persistence loops, and sk stack detection.
 - **Codex** is supported; see [`plugins/crew/docs/codex-host.md`](plugins/crew/docs/codex-host.md).
-- **Cursor** is supported: commands import, hooks deliver, and the one-shot flows review and dispatch run end to end. Debate has the same engine support and a native panelist role, but its Cursor live gate is still owed, so treat it as unvalidated on this host. Persistence loops are enabled, with two caveats: stop-coercion is unverified on this host, so a loop's Stop-hook enforcement is best-effort there, and the hooks only emit Cursor-shaped output when the host is bound (export `CREW_HOST=cursor` in the shell that launches Cursor: crew's commands now detect this host on their own, but a hook process inherits the launch shell, where the markers that make that possible are absent). Standalone `/crew:review` routes cursor-channel seats through native Cursor subagents: a cursor seat spawns natively only when its catalog row carries a `native_model`, an unpinned seat is warned about and dropped before the run identity freezes, and the shipped pin (`composer-2.5-fast`) is badge-verified in the app; every other subagent-dependent command (`/crew:analyze`, `/crew:code-search`, `/crew:execute`, `/crew:deepinit`, and build's executor step) still runs under documented-unsupported silent substitution, where a Cursor-native agent answers in the role instead of the named crew agent. See [`plugins/crew/docs/cursor-host.md`](plugins/crew/docs/cursor-host.md).
+- **Cursor** is supported: commands import, hooks deliver, and the one-shot flows review and dispatch run end to end. Debate has the same engine support and a native panelist role, but its Cursor live gate is still owed, so treat it as unvalidated on this host. Persistence loops are enabled, with two caveats: stop-coercion is unverified on this host, so a loop's Stop-hook enforcement is best-effort there, and the hooks only emit Cursor-shaped output when the host is bound (export `CREW_HOST=cursor` in the shell that launches Cursor: crew's commands now detect this host on their own, but a hook process inherits the launch shell, where the markers that make that possible are absent). Standalone `/crew:review` routes cursor-channel seats through native Cursor subagents: a cursor seat spawns natively only when its catalog row carries a `native_model`, an unpinned seat is warned about and dropped before the run identity freezes, and the shipped pin (`composer-2.5-fast`) is badge-verified in the app; every other subagent-dependent command (`/crew:analyze`, `/crew:code-search`, `/crew:execute`, `/crew:deepinit`) still runs under documented-unsupported silent substitution, where a Cursor-native agent answers in the role instead of the named crew agent. See [`plugins/crew/docs/cursor-host.md`](plugins/crew/docs/cursor-host.md).
 
 Measure-twice production advisor admission currently exists only for the Claude
 host. The workflow itself is host-neutral; other planning hosts are unsupported.
@@ -44,8 +44,8 @@ The intended path for real work, in order:
 
 1. **Frame and discuss the problem** in plain conversation. No commands yet, just get the shape of it right.
 2. **`/crew:debate "question"`** at a decision point you're unsure about. A multi-model council argues it out and hands back where the seats agree, where they don't, and a recommendation.
-3. **`/crew:measure-twice "task"`** to loop on the *plan document*, revising until the loop completes (normally a review panel's completing verdict, or a human `--force` over an advisory — see the panel section below).
-4. **`/crew:build "task"`** to loop on *executing* that plan, persisting until the loop completes (same completing-verdict-or-`--force` rule).
+3. **`/crew:measure-twice "task"`** to loop on the *plan document*, revising until the loop completes (normally a review panel's completing verdict, or a bound human `measure-twice-decide` kind `force` decision over an advisory — see the panel section below).
+4. **`/crew:build "task"`** to loop on *executing* that plan, persisting until the loop completes (completion advisories require a bound human `build-decide force` decision).
 
 Steps 2 and 3 are cheap next to step 4. A decision settled in a debate costs one round; the same decision re-litigated mid-build costs a rewrite.
 
@@ -97,8 +97,8 @@ To avoid permission prompts for loop state management, add this to your Claude C
 This allows the plugin-root `crew` dispatcher to run without confirmation. A
 single `*/crew *` rule covers BOTH the review/debate engine (crew review, crew
 debate, crew render, crew run, crew seats) AND loop state management
-(`crew state …`, used by `/crew:build`, `/crew:measure-twice`, and their cancel
-commands). A project-relative variant proven in live use is
+(`crew state …` for inspection and the `build-*` / `measure-twice-*`
+workflow commands for execution and cancellation). A project-relative variant proven in live use is
 `Bash(plugins/crew/crew:*)`, which matches the dispatcher invoked by its
 repo-relative path.
 
@@ -127,7 +127,7 @@ repo-relative path.
 | `/crew:dispatch "[--seat <name>] <task>"` | Delegate a WORK task to ONE non-Claude seat (default `luna`) in write mode — it edits the working tree and leaves changes UNCOMMITTED + UNSTAGED for you to review (keep / revert / pipe into `/crew:review`) |
 | `/crew:build "task"` | Start a persistence loop: persists toward completion, also ending on a completing verdict, your cancel, or a safety bound |
 | `/crew:cancel-build` | Exit an active build loop early |
-| `/crew:measure-twice "task"` | Start a self-refining plan loop — generates plan, reviews, revises toward loop completion (a panel's completing verdict, or a human `--force`) |
+| `/crew:measure-twice "task"` | Start a self-refining plan loop — generates plan, reviews, revises toward loop completion (a panel's completing verdict, or a bound human decision) |
 | `/crew:cancel-measure-twice` | Exit an active measure-twice loop early |
 
 `/crew:review` uses a fixed target grammar rather than guessing from arbitrary
@@ -240,9 +240,9 @@ Certification is quorum-gated, though: the grouped digest opens with a
 panel), and a `NOT MET` panel cannot certify an `APPROVED`; standalone review
 surfaces the shortfall and relaunches pending reviewer seats only after an
 explicit retry request. In the `/crew:build`
-and `/crew:measure-twice` loops a human may still authorize completion over a
-`NOT MET` panel with `--force`, which is recorded as an explicit override for the
-audit trail.
+and `/crew:measure-twice` loops a human may authorize completion over a
+`NOT MET` panel through its exact bound decision. Build uses `build-decide` with
+kind `force` and confirmation `force`; the override is retained for audit.
 
 **Why some seats are opt-in.** The codex-channel seats already cover the GPT lineage, so the
 GPT cursor seat stays off the default; the GLM and Grok cursor seats draw on
@@ -317,7 +317,7 @@ run/probe seat wall clock. Dispatch precedence is
 `/crew:build`'s implement step normally runs the `crew:executor` Task agent
 (Claude); `[build].executor` can instead route each round through a write-capable
 subprocess seat (e.g. `luna`), and `[build].executor_retries` (0..2, default
-0) caps how many times a FAILED external-executor round is retried. `[build].resume_executor`
+0) caps automatic retries of terminated, guard-clean external failures/timeouts. `[build].resume_executor`
 (bool, default `true`) lets a supporting external executor REUSE its provider
 conversation across rounds; set `false` to opt out and run each round fresh; only
 codex and cursor resume, agy and any unsupported binary always start fresh
@@ -512,7 +512,7 @@ Specialized agents for different tasks. Use via `Task(subagent_type="crew:agent-
 | **reviewer** | Panel seat for `/crew:review` (read-only by convention — has `Bash` for git inspection, not sandbox-enforced; spawned at `model: opus` / `model: sonnet`) | (driven by `/crew:review`) |
 | **panelist** | Discuss-mode council seat issued by the debate workflow (Claude host; the Cursor host issues crew-panelist) | (driven by `/crew:debate`) |
 | **formatter** | Reformats one review seat's raw output into the structured FINDINGS schema (faithful transform, read-only, `model: haiku`) for the per-seat repair fallback | (driven by the review/build/measure-twice repair step) |
-| **scribe** | Lands one native review seat's text at an engine-issued ingress path so the Write does not render in the terminal (verbatim transcribe, `Write`-only, `model: haiku`) | (driven by workflow return transport and the legacy build persist step) |
+| **scribe** | Lands one native review seat's text at an engine-issued ingress path so the Write does not render in the terminal (verbatim transcribe, `Write`-only, `model: haiku`) | (driven by standalone/measure-twice return fallback; build uses direct capture or host Write) |
 
 ### Quick Reference
 
@@ -569,7 +569,7 @@ that natively.
 
 To exit early: `/crew:cancel-build` or `/crew:cancel-measure-twice`
 
-A build loop normally ends on a completing verdict from the multi-model review panel (`APPROVED`, or `REVISE` with only `[MINOR]` issues; a human may `--force` completion over an advisory), and it ends terminally on a second consecutive `FAILED` verdict (`review_failed`). Three other things can end a turn:
+A build loop normally ends on a completing verdict from the multi-model review panel (`APPROVED`, or `REVISE` with only `[MINOR]` issues; a human may authorize the issued `build-decide` kind `force` decision with confirmation `force` over an advisory), and it ends terminally on a second consecutive `FAILED` verdict (`review_failed`). Three other things can end a turn:
 
 - **Cancelling** (`/crew:cancel-build`).
 - **A hook-owned safety limit** (a stop-fire cap or the wall-clock deadline), which force-exits the loop and asks for a status report instead of an approval.
@@ -707,7 +707,8 @@ inactive files after a day.
 
 **Build loop won't stop**
 - Run `/crew:cancel-build`
-- Or delete the session's `<project-root>/.crew/build-state-<session-id>.json`
+- Keep writer state and evidence in place. Inspect the issued recovery command;
+  confirm actual quiescence before `build-recover` clears an uncertain writer.
 
 **Measure-twice loop won't stop**
 - Run `/crew:cancel-measure-twice`
@@ -733,3 +734,15 @@ rm -rf "<project-root>/.crew"
 ```
 
 The `.crew/` directory contains project-specific state (build loop, context snapshots, plans). Remove it from any projects where you used the plugin.
+
+Build now uses [the Python-owned protocol](plugins/crew/docs/build-protocol.md):
+`build-next` issues implementation, fresh review and revision work, with immutable
+receipts and bound human decisions. Terminal report markers distinguish completed
+work from blockers. Native HEAD/index/branch changes park before review, as external
+ones do. Force authorizes only a disclosed verdict advisory and cannot waive writer
+guards or uncertain termination. Cancelled writers remain fenced until actual
+completion or explicit operator quiescence confirmation; cleanup retains evidence.
+Independent builds need separate workspaces. Real CLI resume evidence applies to
+its recorded ID/version/source epoch; another harness session is a different owner.
+See [Phase 5 evidence](plugins/crew/docs/phase-5-build-evidence.md) for verification
+limits. Cursor native build and its lifecycle gate remain deferred.

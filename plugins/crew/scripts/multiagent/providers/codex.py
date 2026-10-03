@@ -30,6 +30,7 @@ import os
 import shutil
 import tempfile
 import time
+from pathlib import Path
 
 from multiagent.continuation_ids import valid_conversation_id
 from state_discovery import crew_base  # the ONE `.crew`/project-root resolver
@@ -39,8 +40,9 @@ from . import (
     Provider,
     ProviderContinuation,
     ProviderResult,
+    transport_failure,
 )
-from ._proc import TIMEOUT, run_reaped
+from ._proc import TIMEOUT, TIMEOUT_UNCONFIRMED, ReapedFailure, run_reaped
 
 # Re-pinned in code because --ignore-user-config drops the config's own value;
 # the seat's [seats.<name>].reasoning_effort overrides it through the catalog.
@@ -132,7 +134,7 @@ class CodexProvider(Provider):
             # `codex exec --help` must advertise --json (the JSONL event stream we
             # parse for the exact thread id).
             help_res = run_reaped([path, "exec", "--help"], timeout=PROBE_TIMEOUT)
-            if help_res is TIMEOUT:
+            if help_res is TIMEOUT or help_res is TIMEOUT_UNCONFIRMED or isinstance(help_res, ReapedFailure):
                 return False
             rc, out, err = help_res
             if rc != 0 or "--json" not in ((out or "") + (err or "")):
@@ -142,7 +144,7 @@ class CodexProvider(Provider):
             resume_res = run_reaped(
                 [path, "exec", "resume", "--help"], timeout=PROBE_TIMEOUT
             )
-            if resume_res is TIMEOUT:
+            if resume_res is TIMEOUT or resume_res is TIMEOUT_UNCONFIRMED or isinstance(resume_res, ReapedFailure):
                 return False
             return resume_res[0] == 0
         except OSError:
@@ -181,6 +183,8 @@ class CodexProvider(Provider):
         timeout: int = 300,
         dispatch_options: dict | None = None,
         continuation: ProviderContinuation | None = None,
+        workspace: str | None = None,
+        build_report: bool = False,
     ) -> ProviderResult:
         start = time.monotonic()
 
@@ -285,7 +289,7 @@ class CodexProvider(Provider):
         # the dispatch guard inspects. A READ-ONLY review seat pins to
         # crew_base() (the project root the run dir + snapshot anchor to), so a
         # divergent process cwd cannot make the seat inspect the wrong repo.
-        run_cwd = (
+        run_cwd = workspace or (
             (os.environ.get("CLAUDE_WORKING_DIRECTORY") or os.getcwd())
             if sandbox == "workspace-write"
             else str(crew_base())
@@ -299,6 +303,8 @@ class CodexProvider(Provider):
             failure: str = "none",
             conversation_id: str | None = None,
             continuation_id: str | None = None,
+            exact_output: bytes | None = None,
+            transport_status: str | None = None,
         ) -> ProviderResult:
             values = {
                 "name": self.name,
@@ -307,6 +313,8 @@ class CodexProvider(Provider):
                 "output": output,
                 "error": error,
                 "elapsed": time.monotonic() - start,
+                "exact_output": exact_output,
+                "transport_status": transport_status or ("ok" if ok else "failed"),
             }
             if want_continuation:
                 values["continuation"] = ContinuationOutcome(
@@ -322,15 +330,30 @@ class CodexProvider(Provider):
             # Shared reaped runner: start_new_session + SIGTERM→SIGKILL
             # killpg teardown on timeout so a hung codex can't orphan billable
             # grandchildren. Prompt via stdin (input_text), cwd preserved.
-            result = run_reaped(argv, input_text=prompt, timeout=timeout, cwd=run_cwd)
-            if result is TIMEOUT:
+            capture = {"capture_bytes": True} if sandbox == "workspace-write" else {}
+            result = run_reaped(argv, input_text=prompt, timeout=timeout, cwd=run_cwd, **capture)
+            if result is TIMEOUT or result is TIMEOUT_UNCONFIRMED:
                 return make_result(
                     ok=False,
                     output="",
-                    error=f"codex timed out after {timeout}s",
+                    error=f"codex timed out after {timeout}s" + result.diagnostic_suffix,
                     failure="timeout",
+                    transport_status=result.transport_status,
+                )
+            if isinstance(result, ReapedFailure):
+                try:
+                    exact_output = Path(out_path).read_bytes()
+                except OSError:
+                    exact_output = result.stdout if isinstance(result.stdout, bytes) else result.stdout.encode("utf-8")
+                return make_result(
+                    ok=False, output="", error=result.error, failure="error",
+                    exact_output=exact_output, transport_status=result.transport_status,
                 )
             returncode, proc_stdout, proc_stderr = result
+            raw_stdout = proc_stdout if isinstance(proc_stdout, bytes) else proc_stdout.encode("utf-8")
+            if isinstance(proc_stdout, bytes):
+                proc_stdout = proc_stdout.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+                proc_stderr = proc_stderr.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
             captured_id = self._first_thread_id(proc_stdout) if capable else None
 
             if returncode != 0:
@@ -343,21 +366,25 @@ class CodexProvider(Provider):
                     output="",
                     error=err or f"codex exited with status {returncode}",
                     failure="error",
+                    transport_status=transport_failure(returncode, err),
                     conversation_id=captured_id,
                 )
 
             # Read the clean final message from the -o file.
             output = ""
+            exact_output = b""
             try:
-                with open(out_path, "r", encoding="utf-8", errors="replace") as f:
-                    output = f.read().strip()
+                exact_output = Path(out_path).read_bytes()
+                output = exact_output.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n").strip()
             except OSError:
                 if not capable:
                     output = (proc_stdout or "").strip()
+                    exact_output = raw_stdout
 
             if not output and not capable:
                 # Fall back to stdout, else report empty as a failure.
                 output = (proc_stdout or "").strip()
+                exact_output = raw_stdout
             if not output:
                 return make_result(
                     ok=False,
@@ -378,6 +405,7 @@ class CodexProvider(Provider):
                 failure=failure,
                 conversation_id=captured_id,
                 continuation_id=persisted_id,
+                exact_output=exact_output,
             )
         finally:
             try:

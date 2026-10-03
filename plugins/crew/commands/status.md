@@ -5,7 +5,8 @@ allowed-tools: Bash
 
 ## Current Crew Status
 
-Check the state of active loops by running these commands. Pass `--session-id`
+Inspect retained loop state, including inactive owners with outstanding writers.
+Pass `--session-id`
 (the `[Session ID: …]` value injected this session, as a literal, NOT a
 `${CLAUDE_SESSION_ID}` shell expansion) so show reports THIS session's loop
 rather than a legacy or other-session state file:
@@ -40,10 +41,16 @@ default, so report the default in that case.
 
 **Build Loop:**
 - Status: [Active/Inactive]
+- Report `bl_workflow.stage`, issued action, review generation/reference and any
+  bound human question. Always include a writer fence, even when inactive.
+  Verbose show retains JSON on stdout and emits the fence/recovery diagnostic on
+  stderr: preserve both. Display its exact `build-recover` argv and explain that
+  `--confirmation not_running` requires the operator to confirm actual quiescence;
+  status never runs recovery or clears a fence. Uncertain journals retain evidence.
 - If active: `stop_fires`/`max_stop_fires`, elapsed vs `deadline_minutes` (or "none", per the marker rule above), `phase`, `revision_round`, `last_verdict`, Task: "..."
 - If inactive: the terminal `exit_kind` (`approved`/`cancelled`/`review_failed`/`force_exit`) and, when set, `consecutive_review_failures`, so a terminally FAILED loop is not shown as a plain clean finish. An inactive loop may instead have an EMPTY `exit_kind` (a legacy or never-reviewed state): render it plainly, without implying a terminal outcome it lacks
 
-For migrated measure-twice also report `mt_workflow.stage`, `action_ordinal`,
+For engine-owned measure-twice also report `mt_workflow.stage`, `action_ordinal`,
 `review_generation`, the bound `review_ref`, claimed action, and bound human
 question. These are durable progress facts; status does not claim, reconcile,
 or invoke `measure-twice-next` merely to inspect them.

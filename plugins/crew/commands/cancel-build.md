@@ -1,37 +1,25 @@
 ---
-description: Cancel active Build Loop
+description: Cancel the session's engine-owned build
 allowed-tools: Bash
 ---
 
-[BUILD LOOP CANCELLED]
-
-The user has requested early exit from the build loop.
-
-## MANDATORY ACTION
-
-Execute this command to fully cancel the build loop. Pass `--session-id` (the
-`[Session ID: …]` value injected this session, as a literal — NOT a
-`${CLAUDE_SESSION_ID}` shell expansion) so cancel deactivates the exact
-session-scoped state file the loop was init'd with; otherwise the scoped file
-stays active and keeps blocking Stop:
+The user requested early exit. Discover this session's retained owner without
+launching paid work. Resume may reconcile receipts, apply bounds, park a question
+or issue an action; do not launch it:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/crew" state deactivate bl --cancel --reason "User cancelled via /crew:cancel-build" --session-id <session-id>
+"${CLAUDE_PLUGIN_ROOT}/crew" build-resume --session-id <literal-session-id>
 ```
 
-`--cancel` is required and is the point of this command: it ends the loop WITHOUT
-a panel verdict, which is exactly what the user asked for, and records the exit as
-a cancellation rather than an approval. Without it, a loop that no panel signed off
-on is refused. It is legal from any phase (an escape hatch a phase check could
-veto would not be one).
+Use its exact BuildRef:
 
-## After Running
+```bash
+"${CLAUDE_PLUGIN_ROOT}/crew" build-cancel --session-segment <issued-segment> --loop-instance-id <issued-lifetime> --reason "User cancelled via /crew:cancel-build"
+```
 
-The build loop is now cancelled. The persistent mode hook will no longer force continuation.
-
-**You are free to:**
-- Stop working
-- Summarize what was accomplished (if anything)
-- Start a new task
-
-To start a new loop later: `/crew:build "task description"`
+Cancel is allowed after bounds and without a verdict. Summarize the terminal
+outcome. Request cancellation only for the returned owned_handle if the host exposes
+an API; report unavailable/failed cancellation honestly. Actual completion or an
+explicit operator not_running confirmation is required to clear the writer fence.
+Do not infer quiescence, run recovery automatically, clean edits or adopt another
+session. A late return may be retained but cannot advance this cancelled lifetime.

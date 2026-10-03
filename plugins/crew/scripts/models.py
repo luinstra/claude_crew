@@ -291,9 +291,8 @@ class SessionStartResult:
 # the hook-owned bounds that motivated the historical schema-2 bump.  Only the
 # continuation-aware reader consults them, and an empty loop_instance_id is
 # explicitly non-reusable.
-SCHEMA_VERSION = 4
-# Schema 4 adds the optional engine-owned measure-twice journal. Schema-3
-# installs refuse these files; build's recipe and continuation fields are unchanged.
+# 4 added optional mt_workflow; 5 added optional bl_workflow journals.
+SCHEMA_VERSION = 5
 
 # Termination bounds, both hook-owned. They are deliberately generous: a bound
 # that trips during legitimate work teaches the agent to route around it, which
@@ -609,6 +608,7 @@ def update_state_json(path: Path, mutate, default: Optional[dict] = None):
         if data is None:
             data = dict(default) if default else {}
         updated = mutate(data)
+        updated["schema"] = SCHEMA_VERSION
         atomic_write_json(path, updated)
         return updated, status
 
@@ -724,6 +724,7 @@ class LoopState:
     # resume_executor values the recipe resolved for this loop.
     loop_instance_id: str = ""
     mt_workflow: dict[str, object] | None = None
+    bl_workflow: dict[str, object] | None = None
     executor: str = ""
     resume_executor: bool | None = None
 
@@ -779,6 +780,7 @@ class LoopState:
                 else ""
             ),
             mt_workflow=data.get("mt_workflow"),
+            bl_workflow=data.get("bl_workflow"),
             executor=(
                 data.get("executor")
                 if isinstance(data.get("executor"), str)

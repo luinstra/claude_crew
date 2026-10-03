@@ -8,11 +8,19 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import TYPE_CHECKING, Iterable, Protocol
+
+if TYPE_CHECKING:
+    from multiagent.build_workflow import BuildRef, BuildStep, BuildWorkItem
 
 from multiagent import measure_twice as measure, review_workflow as review
 
 logger = logging.getLogger(__name__)
+
+
+def capture_build_return(ref: BuildRef, action_id: str, content: bytes, *, status: str = "ok", diagnostic: str | None = None) -> BuildStep:
+    from multiagent import build_workflow as build
+    return build.capture_build_return(ref, action_id, content, status=status, diagnostic=diagnostic)
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +39,7 @@ class Completion:
 
 
 class NativeRuntime(Protocol):
-    def launch(self, item: measure.MeasureWorkItem) -> str: ...
+    def launch(self, item: measure.MeasureWorkItem | BuildWorkItem) -> str: ...
     def completions(self, handles: tuple[str, ...]) -> Iterable[Completion]: ...
 
 
@@ -273,3 +281,61 @@ def run_measure_batch(step: measure.MeasureStep, runtime: NativeRuntime) -> meas
             logger.warning("Native cancellation API unavailable; %s owned handles may still return", len(handles))
         raise
     return measure.next_measure_twice(step.ref)
+
+
+def run_build_batch(step: BuildStep, runtime: NativeRuntime) -> BuildStep:
+    from multiagent import build_workflow as build
+    if step.type != review.StepType.WORK_BATCH:
+        return step
+    handles: dict[str, BuildWorkItem] = {}
+    try:
+        for item in step.work_items:
+            if item.owner != step.ref or item.driver == "external":
+                raise review.WorkflowError("invalid_runtime", "native runtime requires owned non-external issued items")
+            if item.review_item:
+                def validate_owner(data: dict, journal: build.BuildJournal) -> None:
+                    build._admit(data, journal)
+                    if journal.review_ref != item.review_ref:
+                        raise review.WorkflowError("invalid_runtime", "review claim belongs to another build reference")
+                build._transaction(step.ref, validate_owner)
+                claim = review.claim_review_action(review.ClaimRequest(item.review_ref, item.action_id))
+                admitted = claim.authorization in {"spawn", "perform"}
+                authoritative = build._review_item(step.ref, claim.ref, claim.work_item) if admitted else item
+                if admitted and authoritative != item:
+                    raise review.WorkflowError("invalid_runtime", "batch differs from the authoritative review claim")
+            else:
+                claim = build.claim_build_action(step.ref, item.action_id)
+                admitted = claim["authorization"] == "spawn"
+                if admitted and claim["work_item"] != dataclasses.asdict(item):
+                    raise review.WorkflowError("invalid_runtime", "batch differs from the issued executor claim")
+                authoritative = item
+            if admitted:
+                handle = runtime.launch(authoritative)
+                if not isinstance(handle, str) or not handle or handle in handles:
+                    raise review.WorkflowError("invalid_runtime", "runtime returned an invalid or duplicate handle")
+                handles[handle] = authoritative
+                if not item.review_item:
+                    def bind(_data: dict, journal: build.BuildJournal) -> None:
+                        if journal.outstanding_writer != item.action_id:
+                            raise review.WorkflowError("invalid_runtime", "writer claim changed during launch")
+                        journal.action = dataclasses.replace(journal.action, handle=handle)
+                    build._transaction(step.ref, bind)
+        for completion in runtime.completions(tuple(handles)):
+            item = handles.pop(completion.handle, None)
+            if item is None:
+                raise review.WorkflowError("invalid_runtime", "completion handle was not issued")
+            if item.review_item:
+                capture_review_return(item.review_ref, item.action_id, completion.content, status=completion.status,
+                    judgment=completion.judgment, diagnostic=completion.diagnostic)
+            else:
+                capture_build_return(step.ref, item.action_id, completion.content, status=completion.status, diagnostic=completion.diagnostic)
+    except BaseException:
+        cancel = getattr(runtime, "cancel", None)
+        for handle in handles:
+            try:
+                if not callable(cancel) or not cancel(handle):
+                    logger.warning("Native cancellation unavailable for owned handle %s; writer recovery remains explicit", handle)
+            except Exception as exc:
+                logger.warning("Owned handle cancellation failed for %s: %s", handle, exc)
+        raise
+    return build.next_build(step.ref)

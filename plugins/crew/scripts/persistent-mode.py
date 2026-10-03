@@ -29,7 +29,7 @@ from dataclasses import asdict
 from pathlib import Path
 from collections.abc import Callable
 
-from loop_projection import project_measure
+from loop_projection import project_measure, project_build
 from models import (
     StopInput,
     HookResult,
@@ -126,6 +126,13 @@ def _handle_load_status(loop_file: Path, status: str):
     """Handle non-OK load statuses. Returns True if the hook emitted output
     and should return; False to continue with the loaded (OK) state."""
     if status == LOAD_CORRUPT:
+        if loop_file.name.startswith("build-state"):
+            _emit_allow_diagnostic(
+                f"[crew] Unreadable build writer state `{loop_file.name}`; "
+                "state and evidence remain in place. Writing work may still be "
+                "outstanding; confirm actual quiescence before repairing the state."
+            )
+            return True
         # Set the corrupt file aside so the next Stop allows (one-time block).
         corrupt_path = loop_file.with_name(loop_file.name + ".corrupt")
         try:
@@ -504,30 +511,8 @@ def main():
                     banner="Build Loop",
                     task_text=truncate(loop_state.task, 120),
                     detail_lines=[],
-                    recipe=f"""
-Continue working. When complete, verify via the multi-model panel
-(/crew:build Step 2):
-1. "${{CLAUDE_PLUGIN_ROOT}}/crew" review-prep working-tree{session_flag}
-2. "${{CLAUDE_PLUGIN_ROOT}}/crew" state begin-review bl{session_flag} (freeze the run identity BEFORE any seat runs; leave the tree alone until the verdict is recorded)
-3. Fan out the PENDING seats from the prep JSON (a resumed run relaunches only those), wait for every seat, collect the FULL roster, synthesize
-4. Choose the verdict the digest supports. If its quorum header reads NOT MET, a COMPLETING verdict (APPROVED, or REVISE --minor-only) needs the user's explicit --force at step 5: quorum gates sign-off only. Where the usable seats found real blocking issues, choose a plain REVISE (or REJECT); otherwise relaunch the pending seats (same --run-id) or surface the shortfall, then re-collect and choose from the new digest
-5. Record that ONE chosen verdict: "${{CLAUDE_PLUGIN_ROOT}}/crew" state record-verdict bl <APPROVED|REVISE [--minor-only]|REJECT|FAILED>{session_flag} (the ONE place any verdict is recorded, whichever branch chose it; FAILED only when no seat returned anything usable). A completing verdict may exit 3 (a completion advisory tripped: short quorum, a drifted tree): it recorded NOTHING. Do NOT add --force yourself. Surface the advisory to the user, say what --force would do, and WAIT; re-run with --force ONLY on the user's explicit say-so (it is the human's authorization, never yours to originate)
-6. If that verdict completed the loop (APPROVED, or REVISE --minor-only), it printed phase=done: deactivate the loop and summarize
-7. If REVISE with [BLOCKING] issues, fix and re-verify from step 1
-
-When re-delegating the implement/revision step, route it through the CONFIGURED
-executor (re-resolve via `crew build-executor{session_flag}` / the shared executor-step block in
-/crew:build), NOT a bare `Task(crew:executor)`: substituting Claude for the seat the
-user configured defeats the never-silently-fall-back guarantee.
-
-If you are WAITING on seats that are still running, just wait. Do NOT re-run
-the panel and do NOT clear seat files that already landed.
-
-To exit early: `/crew:cancel-build`""",
-                    done_body=_done_body(
-                        "bl", session_flag,
-                        "Then summarize what was accomplished.",
-                        "/crew:cancel-build", loop_state),
+                    recipe="",
+                    project_body=lambda state: project_build(vars(state), session_id=session_id).render(),
                     cancel_cmd="/crew:cancel-build",
                 )
                 return

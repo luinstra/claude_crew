@@ -3,8 +3,9 @@
 This is the source implementation contract. The required Claude Code CLI
 lifecycle cases and their limits are recorded in
 [Phase 4 evidence](phase-4-measure-twice-evidence.md).
-Build retains its production `review-prep` recipe, executor routes, continuation
-policy and current-run pointer. Standalone review/debate keep their own pointers.
+Build uses [its engine-owned protocol](build-protocol.md) and existing executor
+routes. Both loops compose owner-bound reviews; standalone review/debate keep
+their own pointers.
 
 ## Claude Code native result boundary
 
@@ -141,7 +142,8 @@ that lifetime or adopts legacy state. WorkItems include literal command strings
 with quoted argv, frozen roles/models/routes, prompt and ingress paths. Hosts
 must not select paths, re-resolve pins or advance from a review-local response.
 
-LoopState schema 4 adds optional `mt_workflow`. This journal stores progress and
+LoopState schema 5 carries optional `mt_workflow` (added in schema 4) and
+`bl_workflow` (added in schema 5). The planning journal stores progress and
 receipts, not duplicate budgets. Preparation checkpoints the full roster,
 routes, target bytes and identity before run filesystem creation. Loop review
 identity adds `kind=loop_review` plus session/loop/lifetime/generation binding.
@@ -151,8 +153,8 @@ kind. Retry receipts reconcile a durable new attempt before loop advancement.
 
 Locks always order loop state before review run. Provider/model work is outside
 locks. Transactions preserve unrelated hook counters and unknown state keys.
-`state set`, `begin-review` and `record-verdict` refuse migrated mt, preventing a
-second certification path; legacy/build compatibility remains. Lock failures
+`state set`, `begin-review` and `record-verdict` refuse current engine-owned
+build and measure-twice journals, preventing a second certification path. Lock failures
 are typed errors with no partial state. On platforms without `fcntl`, existing
 state locking degrades with a diagnostic; concurrent-write guarantees are not
 claimed there.

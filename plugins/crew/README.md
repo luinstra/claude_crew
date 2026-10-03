@@ -17,7 +17,8 @@ only requested.
 Codex-host all-external protocol compatibility is covered
 deterministically through the Python CLI, but the Codex plugin does not yet
 expose standalone `/crew:review`; its app-native adapter remains deferred.
-Measure-twice now uses the engine-owned planning protocol. Build retains `review-prep`.
+Measure-twice and build use engine-owned protocols. Build preserves native Claude
+execution and configured external write routes through issued actions.
 
 - **8 specialized agents** — advisor, executor, reader, document-writer, reviewer, panelist, formatter, scribe
 - **Cursor role adapters** in `agents-cursor/`: reviewer, panelist, formatter, scribe.
@@ -43,7 +44,12 @@ See the [project README](../../README.md) and [user guide](../../docs/CLAUDE.md)
 
 See [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) for the development guide, [`scripts/CLAUDE.md`](./scripts/CLAUDE.md) for the state machine internals, and [`docs/engine-notes.md`](./docs/engine-notes.md) for the rationale/history behind the engine contracts.
 
-Measure-twice request grammar, schema-4 upgrade limits and supported host facts:
+Measure-twice request grammar and supported host facts:
 [protocol](docs/measure-twice-protocol.md). Real Claude Code CLI lifecycle cases,
 including automatic Stop continuation and exact direct capture, have
 [recorded evidence and limits](docs/phase-4-measure-twice-evidence.md).
+
+Build uses the [engine-owned protocol](docs/build-protocol.md) with native Claude
+execution, configured external write routes, explicit writer recovery and bound
+human decisions. [Phase 5 evidence](docs/phase-5-build-evidence.md) records the
+verified source/host epochs and their limits. Cursor native build remains deferred.
