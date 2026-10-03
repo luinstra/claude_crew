@@ -7,13 +7,14 @@
 > here: the related gate is marked "engine complete, app gate pending" in
 > `multi-harness-engine-roadmap.md` until the item is done.
 
-**Scheduling, 2026-09-03.** The Cursor items here (F2.1 through F2.5, F3.1, and
-F3.2) are DEFERRED to the end of the roadmap queue, after Phase 8A, and the
-roadmap says to stop and check with the operator before starting that section.
-Do not run them as part of ordinary phase work and do not treat them as blocking
-a phase gate; "Deferred: Cursor work" in `multi-harness-engine-roadmap.md`
-carries the reason. F3.0 is the exception: it is a Claude gate, it is not
-deferred, and it stays owed.
+**Scheduling, 2026-10-03.** Codex adapter completion and its parent-owned gates
+come first, followed by OpenHands. OpenHands replaces the remaining Cursor expansion in
+the active roadmap. Cursor items F2.1 through F2.5, F3.1, and F3.2 are retained
+as historical evidence gaps, outside roadmap completion. Do not run them without
+a new operator request. This supersedes their 2026-09-03 deferral until after
+Phase 8A; "Deferred: Cursor work" in `multi-harness-engine-roadmap.md` retains
+the original scope. Shipped Cursor behavior keeps regression coverage. F3.0 is
+the exception: it is a Claude gate, it is not deferred, and it stays owed.
 
 Conventions for every item: run it from `<repo root>` and copy the prompt text
 verbatim. Results that land under `.crew/reviews/` need no paste; report the run
@@ -382,3 +383,20 @@ status should be `quorum_not_met`. Report that run id and terminal status too.
 Run this alongside F2.1 (`readonly: true` enforcement) and F2.5 (native
 cancellation) without waiting on either item; those remain the open app-side
 items the gate runs alongside.
+
+## Codex adapter source handoff
+
+### F7.0 Native and installed discovery gates
+
+The isolated source adapter passed its six affected suites and the parent-owned
+[live native gates](phase-7-codex-evidence.md): review/debate, staging/promotion,
+build and fresh revision, explicit resume, capture replay, and cancellation
+fencing. Native access remains advisory and native executor rounds remain fresh.
+
+Closed 2026-10-03: a separate installed test package exposed all eight
+`skills-codex/` entries and both hooks through Codex app-server. Hook commands
+expanded `${CLAUDE_PLUGIN_ROOT}` to that installed cache. SessionStart restored
+the engine-owned build; Stop injected the owner-next instruction, the agent
+re-entered, cancelled the unclaimed test build, and Stop then allowed completion.
+See [installed gate evidence](phase-7-codex-evidence.md). The existing Crew
+installation was untouched; the temporary package was removed after the gate.

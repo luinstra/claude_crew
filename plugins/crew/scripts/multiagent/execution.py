@@ -103,7 +103,11 @@ def resolve_executor(session_id: str, explicit: str | None = None) -> ExecutorSe
             else "builtin"
         )
         resume = config.build_resume_executor()
-    channel = channels.task_native_channel(channels.current_host())
+    host = channels.current_host()
+    channel = (channels.native_channel(host) if executor == "crew:executor" and host == "codex"
+               else channels.task_native_channel(host))
+    if executor == "crew:executor" and host == "codex":
+        resume = False
     if executor != "crew:executor":
         spec = seats.seat_spec(executor)
         resolved = (

@@ -1,5 +1,12 @@
 # Phase 5 build evidence
 
+Publication update, 2026-10-03: committed and pushed as `179b815`, followed by
+the required version bump `6b16ba3` (Crew 0.85.0; marketplace 0.45.0). Not merged
+into `main` or installed. The records below describe their original source
+epochs; references to an uncommitted tree are historical. OpenHands is now the
+next planned phase in [the roadmap](multi-harness-engine-roadmap.md), with no
+OpenHands implementation or verification claimed by this evidence.
+
 Recorded 2026-10-02. Phase 5 is implemented in the uncommitted working tree on
 `codex/multi-harness-engine`, based on `9d75917`. Commands, hooks and the build
 engine are cut over together. The installed root orchestrator remains Crew

@@ -257,14 +257,17 @@ and submits Python-issued HostResult files. Target intent, seat selection,
 prompts, claims, repair admission, barrier, quorum, and terminal status do not
 belong in Markdown or shared roles.
 
-The command adapter is exposed for Claude and Cursor. Both may use a native
-reviewer channel now (see the Cursor section below); a host with none, codex and
-unknown, uses parent-context formatter work and keeps every seat external.
-Codex-host all-external protocol compatibility is
-covered deterministically through the Python CLI in this phase, but the Codex
-plugin does not yet expose standalone `/crew:review`; its app-native adapter
-remains deferred. Build and measure-twice compose this review seam through their
-typed engines and explicit owner bindings, without selecting outcomes by pointer.
+The shared commands serve Claude and Cursor; Codex source skills reuse those
+recipes with one collaboration transport supplement. Codex-channel review seats
+are native at their frozen model/effort; the unknown host keeps every seat
+external. Codex formatter/synthesis work stays parent-context. Native roles
+inherit permissions, so access is advisory and model attribution requested-only.
+Live native gates passed on 2026-10-03; the installed discovery gate and
+automatic hook re-entry also passed in a separate test package. See
+[codex-host.md](codex-host.md). Build and measure-twice compose this review seam
+through typed engines and explicit owner bindings, without selecting outcomes
+by pointer. Named external executors retain the Task-native selection seam;
+Codex's built-in executor uses a separate native admission and fresh rounds.
 
 ## Cursor host: the native reviewer channel, and why it took a design pass
 
@@ -320,7 +323,7 @@ a table field too, not a default inside the accessor: a name left in the method
 is a name a new host inherits by saying nothing, which is how a Cursor row would
 have silently answered with the Claude reviewer's name. It is a dict and an
 accessor, not a registry: hosts are added by adding a row, and a host with no
-row (codex, unknown) drives no native work, which is exactly what
+row (unknown) drives no native work, which is exactly what
 `native_roles` returning `None` already meant.
 
 **The drop rule is one predicate, and minting is fail-closed.** "This seat has
@@ -525,8 +528,8 @@ first, then start a fresh review.
 The stage machine lives in measure_twice.py because interview identity, advisor
 promotion, review generation and human decisions must survive host re-entry.
 Advisor admission belongs in HostRoles metadata so the workflow does not become
-a Claude-specific state machine. Only Claude's existing advisor/inherit route
-is admitted in production; no Cursor, Codex or OpenHands planner is added.
+a Claude-specific state machine. Claude and Codex admit the advisor/inherit route;
+Cursor and OpenHands planning remain deferred.
 
 Loop-bound review identity, accepted-action evidence and loop-before-review lock
 order keep mutable standalone/build pointers from selecting a plan's verdict.

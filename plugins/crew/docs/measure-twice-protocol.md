@@ -169,11 +169,12 @@ accepted-outcome digest derived from verified accepted action bytes and judgment
 certify loop evidence. The guard preserves strict majority, all-failed symmetry,
 target drift checks, revision counts, advisory collection and forced audit stamps.
 
-Advisor actions are fresh, with no build executor continuation. Only the static
-Claude host-role metadata currently admits production planning (`crew:advisor`,
-`inherit`, advisory access). Codex, Cursor and unknown hosts fail with
+Advisor actions are fresh, with no build executor continuation. Static Claude and
+Codex host-role metadata admit planning (`crew:advisor`, `inherit`, advisory
+access). Codex uses the shared role prompt and owned host-written capture through
+the [Codex transport](codex-transport.md). Cursor and unknown hosts fail with
 `unsupported_planning_host` before new activation. The stage machine is
-host-neutral; this does not add other production planning routes.
+host-neutral.
 
 Each action writes its own staging plan. Successful capture seals those bytes,
 checkpoints promotion, then writes an immutable canonical `plan-N.md` in the
@@ -230,9 +231,12 @@ metadata only. Parent synthesis provides its judgment using `--verdict` and
 `--minor-only`; reviewers/formatters never supply a synthesis judgment.
 
 The injected `NativeRuntime` consumes frozen work: `launch`, notification-driven
-`completions`, optional `cancel`. Its runner launches the whole independent
-native batch before consuming notifications, captures returned bytes directly
-and asks for zero scribes. It does not register hosts, change route admission or
+`completions`, optional `cancel`. Its runner launches independent native work in waves, captures returned bytes
+directly and asks for zero scribes. Codex-native batches, including a single action, require an explicit
+`max_concurrency` based on currently available host slots. Each wave consumes
+completion notifications before another starts; incomplete waves return with
+their owned handles and leave later seats unclaimed. Other hosts retain the
+whole-batch default unless the caller supplies a limit. It does not register hosts, change route admission or
 execute external reviewers through a native route. Production external actions
 keep `review-execute`, launched before native waits by the command adapter.
 

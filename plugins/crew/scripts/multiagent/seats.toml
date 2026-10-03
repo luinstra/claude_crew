@@ -7,8 +7,8 @@
 #
 # Seat keys:
 #   via               the execution channel, as a one-element list: codex / cursor
-#                     / agy run an external CLI; claude seats are native Task
-#                     voices on a Claude host and use the claude CLI elsewhere.
+#                     / agy / claude. Review seats can be native on their own
+#                     host; other channels and forced-external seats use a CLI.
 #   provider          accepted as the legacy spelling of `via` for user config.
 #   model             the model string that the channel accepts (`codex exec
 #                     --model`, `agent --model`, `agy --model`); for a `claude`
@@ -22,7 +22,8 @@
 #                     registered but only runs when named (--seats <name>). WHY
 #                     each one is opt-in (premium cost bucket, redundancy) lives
 #                     in docs/engine-notes.md.
-#   reasoning_effort  codex only. Unset means the provider's own default.
+#   reasoning_effort  codex only. Unset uses the native host default or the
+#                     external provider default, depending on the route.
 #   print_timeout     agy only. Unset means the provider's own default.
 #
 # No shipped seat rides the agy channel: declare one ([seats.<name>] with

@@ -3,7 +3,8 @@
 Status: implementation plan. Baseline: Phase 4 `50aef3b`, published `9d75917` (Crew 0.84.0;
 marketplace 0.44.0). Authority: `plugins/crew/docs/multi-harness-engine-roadmap.md`, Phase 5;
 the orchestrator refreshed its stale handoff. Installed Crew 0.83.1's advisor-assisted compatibility
-recipe prepared this plan; Codex production planning is unsupported and the orchestrator owns the live loop.
+recipe prepared this plan; Codex production planning was unsupported at that phase; the orchestrator owned the live loop.
+Phase 7 now admits the native Codex advisor; see [current host contract](codex-host.md).
 
 ## Outcome and limits
 

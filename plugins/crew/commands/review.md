@@ -6,6 +6,10 @@ allowed-tools: Bash, Task, Read, Write
 
 # Standalone review transport
 
+Codex source skills use [the collaboration supplement](../docs/codex-transport.md)
+for native launch, capture and plugin-path resolution. The shared workflow recipe
+below remains authoritative; its Task and scribe mechanics apply to their hosts.
+
 Python owns target resolution, the frozen roster, prompts, claims, repair,
 quorum, retry, and synthesis readiness. This file only transports issued work.
 Never infer a seat, action, path, result shape, or next transition.

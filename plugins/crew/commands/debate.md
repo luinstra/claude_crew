@@ -6,6 +6,10 @@ allowed-tools: Bash, Task, Read, Glob, Write
 
 # Debate transport
 
+Codex source skills use [the collaboration supplement](../docs/codex-transport.md)
+for native launch, capture and plugin-path resolution. The shared workflow recipe
+below remains authoritative; its Task and scribe mechanics apply to their hosts.
+
 The question is the frozen target. Python owns question freeze, the roster,
 panelist prompts, claims, quorum, and synthesis readiness. This file only
 transports issued work and never infers a seat, action, path, result shape, or

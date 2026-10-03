@@ -3,8 +3,9 @@
 This package resolves the catalog's seats per host. Claude seats (the catalog's
 ``via = [\"claude\"]`` rows: opus, sonnet, plus opt-in fable) are driven by native
 Task dispatch inside Claude Code on a Claude host, and by ``ClaudeProvider``
-through the claude CLI where no native Claude channel exists. Codex, cursor, and
-agy seats use their external provider adapters.
+through the claude CLI where no native Claude channel exists. Codex and Cursor
+review seats can use their host-native routes; other channels and forced-external
+seats use external provider adapters.
 
 Both execution paths resolve to ONE normalized result shape: the six-field core
 of ``ProviderResult`` (name, model, ok, output, error, elapsed), with optional

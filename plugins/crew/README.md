@@ -1,6 +1,6 @@
 # crew
 
-Persistence, specialized agents, and workflow commands for Claude Code.
+Persistence, specialized agents, and workflow commands for Claude Code and Codex.
 
 ## What's In Here
 
@@ -14,14 +14,18 @@ app's subagent surface must offer the exact native variant, and an unoffered
 slug is usually refused at spawn and settles failed, with no CLI fallback. The
 run record also reports whether the answering model was runtime-reported or
 only requested.
-Codex-host all-external protocol compatibility is covered
-deterministically through the Python CLI, but the Codex plugin does not yet
-expose standalone `/crew:review`; its app-native adapter remains deferred.
-Measure-twice and build use engine-owned protocols. Build preserves native Claude
-execution and configured external write routes through issued actions.
+Codex has a source adapter and four workflow skills and four cancel/context helpers over the shared
+protocols. Native review spends frozen model/effort with advisory inherited
+access; explicit host-written capture retains the final reply without a scribe.
+Live native gates passed on 2026-10-03; the installed discovery gate and
+automatic hook re-entry also passed in a separate test package. See [codex-host.md](docs/codex-host.md).
+Measure-twice and build admit native Codex advisor/built-in executor roles.
+Native executor rounds are fresh; configured external write routes and their
+exact-conversation continuation stay unchanged.
 
 - **8 specialized agents** — advisor, executor, reader, document-writer, reviewer, panelist, formatter, scribe
 - **Cursor role adapters** in `agents-cursor/`: reviewer, panelist, formatter, scribe.
+- **Codex skills** in `skills-codex/`: four workflows plus four cancel/context helpers.
 - **Slash commands** — planning, execution, search, build/measure-twice loops
 - **2 lifecycle hooks** — SessionStart context restoration, Stop persistence enforcement
 - **Python state machine** — session-scoped JSON state files in `.crew/`

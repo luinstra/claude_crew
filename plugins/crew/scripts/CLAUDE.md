@@ -27,7 +27,7 @@ scripts/
 ├── cursor-env-capture.py # In-process capture helper called by session-start.py: records Cursor hook env names, the safe-value allowlist, and probe metadata
 ├── host_detect.py       # Stdlib host detector for the hook entry points
 ├── artifact_prune.py    # ENUMERATE-only stale-artifact finder (single source shared by `crew swab` + the session-start reporter); never deletes
-├── tests/               # Unit tests (test-build-workflow.py, test-measure-twice.py, test-review-workflow.py, test-hooks.py, test-multiagent.py, fixtures/)
+├── tests/               # Unit tests (test-codex-native.py, test-build-workflow.py, test-measure-twice.py, test-review-workflow.py, test-hooks.py, test-multiagent.py, fixtures/)
 └── multiagent/          # Multi-model review and council engine (see below)
 ```
 
@@ -40,8 +40,10 @@ Measure-twice composes the shared review workflow through `measure_twice.py`.
 Build composes it through `build_workflow.py`; execution and executor resolution
 are shared with dispatch in `execution.py`. All workflows resolve each catalog
 seat against the current host: Claude seats are native Task seats on a Claude
-host and external `claude` CLI seats elsewhere; codex and agy rows are always
-external provider seats. Cursor rows are external everywhere EXCEPT standalone
+host and external `claude` CLI seats elsewhere; agy rows remain external. Codex
+rows are native on a Codex host through the per-seat review seam, and external
+elsewhere; Task prep and named build executors retain their existing external
+split. Cursor rows are external everywhere EXCEPT standalone
 review on a Cursor host, where `review_workflow` issues them natively; the
 `review-prep` paths keep them external. A missing external CLI produces a named
 skipped result.
@@ -60,8 +62,9 @@ the field and the one-time app badge check, then is DROPPED before the freeze.
 `seats.NATIVE_UNRESOLVED_MODELS`. Two Cursor seats at one native pin drop the
 later seat in resolution order. The role names, support-role model, and each
 host's channel come from the one `_HOST_ROLES` table beside `_reviewer_action`;
-a host with no row (codex, unknown) drives no native work and gets parent-context
-formatter/synthesis. The drop is one shared predicate (`has_no_route_here`, a
+Codex has a native reviewer/panelist/advisor row but uses parent-context
+formatter/synthesis and host-written capture, with no scribe. An unknown host
+drives no native work and uses parent-context formatter/synthesis. The drop is one shared predicate (`has_no_route_here`, a
 routing POLICY, not a claim that the channel's CLI is absent): roster resolution
 drops on it and drift reconstruction refuses on it, so a seat with no native pin
 cannot read as "this host has no native channel" at one site and "unrunnable" at
@@ -152,7 +155,7 @@ The debate workflow shares every route decision, mints no formatter, requires
 a null synthesis judgment, and renders the advisory NOT MET line.
 
 Host selection is explicit when needed: `CREW_HOST=claude` selects the native
-Claude Task channel, `CREW_HOST=codex` selects the Codex-host external fallback,
+Claude Task channel, `CREW_HOST=codex` selects the Codex collaboration adapter,
 and `CREW_HOST=cursor` selects the Cursor host (native cursor-channel seats for
 standalone review, external for everything else). With no override,
 detection falls through the shipped marker tables in a DELIBERATE order,
@@ -166,10 +169,11 @@ launched so nested crew calls re-detect their host.
 
 ```
 multiagent/
-├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher); subcommands: review | debate | review-next | review-claim | review-execute | review-submit | review-recover | review-retry | run | dispatch | build | build-resume | build-next | build-claim | build-execute | build-submit | build-capture | build-decide | build-cancel | build-recover | build-executor | render (incl. --stage-all) | seats | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | wait (incl. --signal) | signal | doctor | probe | scaffold-config | swab
+├── cli.py               # argparse entry (reached via the bare `../crew` dispatcher); subcommands: review | debate | review-next | review-claim | review-execute | review-submit | review-recover | review-retry | run | dispatch | build | build-resume | build-next | build-claim | build-execute | build-submit | build-capture | build-native-bind | build-native-capture | review-native-bind | measure-twice-native-bind | build-decide | build-cancel | build-recover | build-executor | render (incl. --stage-all) | seats | collect (incl. --group/--full/--report-unparsed) | repair-seat | review-prep | persist-seat | wait (incl. --signal) | signal | doctor | probe | scaffold-config | swab
 ├── build_workflow.py    # build actions, receipts, executor/review decisions and owner binding
 ├── execution.py         # write execution and guards with a per-call canonical workspace
 ├── measure_twice.py     # planning decisions, requirements, promotion, human questions and loop binding
+├── codex_native_transport.py # frozen native launch metadata, handle binding and prompt integrity
 ├── workflow_transport.py # deterministic capture and injected notification-driven native runner
 ├── review_workflow.py   # shared review authority: exact schema transport, snapshot, lock/advance transaction, attempt history, repair, retry, and synthesis readiness
 ├── prompts.py           # THE single prompt builder: build_prompt(target,*,seat_role,mode,prior_round,inline) — review + discuss; council()
@@ -227,8 +231,8 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   sentinel OR a catalog seat whose resolved execution is engine-runnable and
   supports workspace-write; a native-only seat, group token, unknown,
   unresolved, or read-only seat exits 2 naming the reason. Runs NOTHING.
-  The builtin sentinel keeps the ``channel`` key present with JSON ``null`` when
-  no external channel is resolved.
+  The builtin sentinel emits ``channel: claude`` on Claude and ``channel: codex``
+  on Codex. Codex built-in execution sets ``resume_executor: false``.
 - `render` — build/stage a seat prompt; `--stage-all` collapses N stages into one call.
 - `seats`: resolve/print the subprocess seats for a panel.
 - `collect` — fold per-seat `<seat>.json` into a digest; `--group`/`--full`/`--report-unparsed`.
@@ -926,7 +930,7 @@ The normative public types, request-file grammar, exact document detection,
 question identities and CLI examples are in
 [measure-twice-protocol.md](../docs/measure-twice-protocol.md). Python owns all mt
 decisions; Markdown transports four MeasureStep responses. Advisor admission is
-static HostRoles metadata (Claude advisor/inherit/advisory access), not a
+static HostRoles metadata (Claude and Codex advisor/inherit/advisory access), not a
 host-specific stage machine. Unsupported advisor hosts refuse before activation.
 
 One optional `LoopState.mt_workflow` journal stores progress, actions and receipts;
@@ -1364,6 +1368,7 @@ old delete path also retired the three data-loss bugs the review-run sweep carri
 
 ```bash
 # Run all tests (Python 3.11+, with subprocess PATH resolving that interpreter)
+python3 plugins/crew/scripts/tests/test-codex-native.py
 python3 plugins/crew/scripts/tests/test-build-workflow.py
 python3 plugins/crew/scripts/tests/test-measure-twice.py
 python tests/test-hooks.py
@@ -1400,3 +1405,14 @@ Tests cover:
 
 Engine-owned build contracts and current human decisions: [build-protocol](../docs/build-protocol.md).
 Outstanding or unreadable build writers retain their state, locks and evidence at every age.
+
+Codex source skills resolve the plugin root from their own physical location and
+read [the shared transport guide](../docs/codex-transport.md). Generated metadata
+spends frozen reviewer model/effort through the actual collaboration API with
+fresh history. Explicit host-written capture requires bound actual handles and
+observed final messages; no machine-readable Codex return artifact or per-role
+tool enforcement is claimed. Built-in native executor rounds are fresh. Named
+external executors and their exact-conversation continuation remain unchanged.
+The source tests include `tests/test-codex-native.py`. Live native gates passed on
+2026-10-03; the installed discovery gate and automatic hook re-entry also passed
+in a separate test package. See [retained evidence](../docs/phase-7-codex-evidence.md).

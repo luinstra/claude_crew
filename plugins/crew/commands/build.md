@@ -6,6 +6,10 @@ allowed-tools: Bash, Task, Read, Write, AskUserQuestion
 
 # Build
 
+Codex source skills use [the collaboration supplement](../docs/codex-transport.md)
+for native launch, capture and plugin-path resolution. The shared workflow recipe
+below remains authoritative; its Task and output-file mechanics apply to their hosts.
+
 Python owns selection, implementation/review cycles, retries, human decisions and
 completion. Transport only issued BuildStep actions; do not implement in the
 parent, select another executor, infer a stage from files or record verdicts yourself.

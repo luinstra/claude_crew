@@ -20,19 +20,23 @@ Standalone `/crew:review` is backed by one Python-owned workflow protocol in
 Claude Code and Cursor. Both may use native reviewer Tasks: Claude for its
 Claude voice seats, Cursor for cursor-channel seats whose `native_model` is
 set (the shipped composer seat uses `composer-2.5-fast`; a seat without one
-is warned about and dropped from the panel, never rerouted). Phase 1 also covers Codex-host all-external
-protocol compatibility deterministically through the Python CLI, but the Codex
-plugin does not yet expose standalone `/crew:review`; its app-native adapter
-remains deferred.
+is warned about and dropped from the panel, never rerouted). Codex now has a
+source adapter and four workflow skills and four cancel/context helpers over the same protocols.
+Native Codex review uses frozen model/effort and advisory inherited access;
+returns use explicit host-written capture. Live native gates passed on 2026-10-03;
+the installed discovery gate and automatic hook re-entry also passed in a separate test package. See the
+[Codex host contract](plugins/crew/docs/codex-host.md).
 Measure-twice and build use engine-owned protocols. Build retains its native
-Claude executor and configured external write routes.
+Claude executor, adds a fresh-round Codex built-in executor, and preserves
+configured external write routes.
 
 - **Claude Code** is the full experience: 8 agents, Stop-enforced persistence loops, and sk stack detection.
 - **Codex** is supported; see [`plugins/crew/docs/codex-host.md`](plugins/crew/docs/codex-host.md).
 - **Cursor** is supported: commands import, hooks deliver, and the one-shot flows review and dispatch run end to end. Debate has the same engine support and a native panelist role, but its Cursor live gate is still owed, so treat it as unvalidated on this host. Persistence loops are enabled, with two caveats: stop-coercion is unverified on this host, so a loop's Stop-hook enforcement is best-effort there, and the hooks only emit Cursor-shaped output when the host is bound (export `CREW_HOST=cursor` in the shell that launches Cursor: crew's commands now detect this host on their own, but a hook process inherits the launch shell, where the markers that make that possible are absent). Standalone `/crew:review` routes cursor-channel seats through native Cursor subagents: a cursor seat spawns natively only when its catalog row carries a `native_model`, an unpinned seat is warned about and dropped before the run identity freezes, and the shipped pin (`composer-2.5-fast`) is badge-verified in the app; every other subagent-dependent command (`/crew:analyze`, `/crew:code-search`, `/crew:execute`, `/crew:deepinit`) still runs under documented-unsupported silent substitution, where a Cursor-native agent answers in the role instead of the named crew agent. See [`plugins/crew/docs/cursor-host.md`](plugins/crew/docs/cursor-host.md).
 
-Measure-twice production advisor admission currently exists only for the Claude
-host. The workflow itself is host-neutral; other planning hosts are unsupported.
+Measure-twice production advisor admission exists for Claude and Codex; other
+planning hosts remain unsupported. Codex source verification does not establish
+an installed or automatic-resume gate.
 The Phase 4 Claude Code CLI lifecycle cases, including automatic Stop
 continuation and exact direct native capture, are recorded with their limits in the
 [request protocol](plugins/crew/docs/measure-twice-protocol.md) and
@@ -314,8 +318,9 @@ run/probe seat wall clock. Dispatch precedence is
 > 1800). If you previously raised `[tuning].timeout` above 1800 specifically to
 > give dispatch WORK more time, set `[dispatch].timeout` instead, because raising
 > `[tuning].timeout` no longer affects dispatch.
-`/crew:build`'s implement step normally runs the `crew:executor` Task agent
-(Claude); `[build].executor` can instead route each round through a write-capable
+`/crew:build`'s implement step normally runs the native `crew:executor`: a
+Claude Task on Claude Code or a fresh Codex agent on Codex. Codex native rounds
+always start fresh; `[build].executor` can instead route each round through a write-capable
 subprocess seat (e.g. `luna`), and `[build].executor_retries` (0..2, default
 0) caps automatic retries of terminated, guard-clean external failures/timeouts. `[build].resume_executor`
 (bool, default `true`) lets a supporting external executor REUSE its provider

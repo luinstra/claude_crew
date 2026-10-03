@@ -47,6 +47,25 @@ class CancellableRuntime(NativeRuntime, Protocol):
     def cancel(self, handle: str) -> bool: ...
 
 
+def native_action_channel(ref: review.ReviewRef | measure.MeasureRef | BuildRef, action_id: str) -> str | None:
+    """Resolve transport from the retained owner; never re-route from live host env."""
+    from multiagent import build_workflow as build
+    if isinstance(ref, build.BuildRef):
+        return build._transaction(ref, lambda _data, journal: journal.executor.host)
+    if isinstance(ref, measure.MeasureRef):
+        return measure._transaction(ref, lambda _data, journal: journal.advisor_channel)
+    run = review._guard_review_path(session_segment=ref.session_segment, run_id=ref.run_id, create=False)
+    with review._owned_workflow_lock(run, ref):
+        wf, _ = review._load_current_locked(ref, run)
+        return review._load_action(wf, action_id).get("channel")
+
+
+def require_capture_flags(channel: str | None, handle: str | None, completion_observed: bool,
+                          launch_refused: bool) -> None:
+    if channel != "codex" and (handle is not None or completion_observed or launch_refused):
+        raise review.WorkflowError("unsupported_native_capture", "Codex capture flags require an owned Codex action")
+
+
 def render_argv(argv: Iterable[str]) -> str:
     return " ".join(review.quote_argv(word) for word in argv)
 
@@ -64,7 +83,9 @@ def write_bytes(path: Path, content: bytes) -> None:
 
 def capture_review_return(ref: review.ReviewRef, action_id: str, content: bytes, *,
                           status: str = "ok", judgment: SynthesisJudgment | None = None,
-                          diagnostic: str | None = None, capture_path: str | None = None) -> review.ReviewStep:
+                          diagnostic: str | None = None, capture_path: str | None = None,
+                          handle: str | None = None, completion_observed: bool = False,
+                          launch_refused: bool = False) -> review.ReviewStep:
     run = review._guard_review_path(session_segment=ref.session_segment, run_id=ref.run_id, create=False)
     with review._owned_workflow_lock(run, ref):
         wf, run = review._load_current_locked(ref, run)
@@ -73,6 +94,13 @@ def capture_review_return(ref: review.ReviewRef, action_id: str, content: bytes,
             raise review.WorkflowError("stale_ref", "capture belongs to another attempt", "stale_ref")
         if action["driver"] == "external" or action["submission_path"] is None:
             raise review.WorkflowError("invalid_action", "capture requires an issued non-external action")
+        require_capture_flags(action["channel"], handle, completion_observed, launch_refused)
+        if action["driver"] == "native" and action["channel"] == "codex":
+            from multiagent.codex_native_transport import require_capture
+            root = review._prepare_run_descendant(run, run / "attempts" / ref.attempt_id
+                / "native-transport" / "anchor", "native capture", create_parents=True).parent
+            require_capture(root, action_id, handle, completion_observed, status=status, diagnostic=diagnostic,
+                            launch_refused=launch_refused, ref=ref)
         issued_paths = review._issued_artifact_paths(action)
         path_value = capture_path or (action["return_transport"]["fallback"]["ingress_path"]
             if action["kind"] == "reviewer" else action["ingress_path"])
@@ -128,12 +156,19 @@ def capture_review_return(ref: review.ReviewRef, action_id: str, content: bytes,
 
 def capture_measure_return(ref: measure.MeasureRef, action_id: str, content: bytes, *,
                            status: str = "ok", diagnostic: str | None = None,
-                           capture_path: str | None = None) -> measure.MeasureStep:
+                           capture_path: str | None = None, handle: str | None = None,
+                           completion_observed: bool = False, launch_refused: bool = False) -> measure.MeasureStep:
     if diagnostic is not None and not isinstance(diagnostic, str):
         raise review.WorkflowError("invalid_submission", "advisor capture diagnostic must be text or null")
     result_holder: list[measure.MeasureResult] = []
     def prepare(data: dict[str, object], journal: measure.MeasureJournal) -> None:
         root = measure._namespace(ref, journal)
+        require_capture_flags(journal.advisor_channel, handle, completion_observed, launch_refused)
+        if journal.advisor_channel == "codex":
+            from multiagent.codex_native_transport import require_capture
+            require_capture(measure._safe_path(root / "native-transport", root), action_id,
+                            handle, completion_observed, status=status, diagnostic=diagnostic,
+                            launch_refused=launch_refused, ref=ref)
         primary = str(root / "ingress" / f"{action_id}.txt")
         fallback = str(root / "host-return" / f"{action_id}.txt")
         if capture_path is not None and capture_path not in {primary, fallback}:
@@ -227,7 +262,52 @@ def capture_measure_return(ref: measure.MeasureRef, action_id: str, content: byt
     return step
 
 
-def run_measure_batch(step: measure.MeasureStep, runtime: NativeRuntime) -> measure.MeasureStep:
+def _wave_limit(work_items: tuple, max_concurrency: int | None) -> int:
+    if max_concurrency is not None:
+        if type(max_concurrency) is not int or max_concurrency < 1:
+            raise review.WorkflowError("invalid_runtime", "native concurrency must be a positive integer")
+        return max_concurrency
+    if any(
+        item.driver == "native" and item.channel == "codex" for item in work_items
+    ):
+        raise review.WorkflowError(
+            "native_capacity_required",
+            "Codex batches require the host's currently available child-agent capacity",
+        )
+    return max(1, len(work_items))
+
+
+def run_measure_batch(
+    step: measure.MeasureStep, runtime: NativeRuntime, *, max_concurrency: int | None = None,
+) -> measure.MeasureStep:
+    if step.type != review.StepType.WORK_BATCH or step.ref is None or step.in_flight:
+        return step
+    limit = _wave_limit(step.work_items, max_concurrency)
+    result = step
+    for offset in range(0, len(step.work_items), limit):
+        wave = dataclasses.replace(step, work_items=step.work_items[offset:offset + limit])
+        result = _run_measure_wave(wave, runtime)
+        if result.in_flight or result.type != review.StepType.WORK_BATCH:
+            return result
+    return result
+
+
+def run_build_batch(
+    step: BuildStep, runtime: NativeRuntime, *, max_concurrency: int | None = None,
+) -> BuildStep:
+    if step.type != review.StepType.WORK_BATCH or step.in_flight:
+        return step
+    limit = _wave_limit(step.work_items, max_concurrency)
+    result = step
+    for offset in range(0, len(step.work_items), limit):
+        wave = dataclasses.replace(step, work_items=step.work_items[offset:offset + limit])
+        result = _run_build_wave(wave, runtime)
+        if result.in_flight or result.type != review.StepType.WORK_BATCH:
+            return result
+    return result
+
+
+def _run_measure_wave(step: measure.MeasureStep, runtime: NativeRuntime) -> measure.MeasureStep:
     if step.type != review.StepType.WORK_BATCH or step.ref is None:
         return step
     handles: dict[str, measure.MeasureWorkItem] = {}
@@ -257,17 +337,23 @@ def run_measure_batch(step: measure.MeasureStep, runtime: NativeRuntime) -> meas
                 if handle in handles:
                     raise review.WorkflowError("invalid_runtime", "runtime returned a duplicate handle")
                 handles[handle] = authoritative
-        # Every independent item has launched before the first notification is awaited.
+                if authoritative.channel == "codex" and authoritative.driver == "native":
+                    from multiagent.codex_native_transport import NativeLaunch, bind_native_launch
+                    bind_native_launch(NativeLaunch(authoritative.review_ref or step.ref, authoritative.action_id, handle))
+        # Every item in this capacity-bounded wave launches before awaiting notification.
         for completion in runtime.completions(tuple(handles)):
             item = handles.pop(completion.handle, None)
             if item is None:
                 raise review.WorkflowError("invalid_runtime", "completion handle was not issued")
             if item.review_item:
                 capture_review_return(item.review_ref, item.action_id, completion.content, status=completion.status,
-                                      judgment=completion.judgment, diagnostic=completion.diagnostic)
+                                      judgment=completion.judgment, diagnostic=completion.diagnostic,
+                                      handle=completion.handle if item.channel == "codex" else None,
+                    completion_observed=item.channel == "codex")
             else:
                 capture_measure_return(step.ref, item.action_id, completion.content, status=completion.status,
-                                       diagnostic=completion.diagnostic)
+                                       diagnostic=completion.diagnostic, handle=completion.handle if item.channel == "codex" else None,
+                                       completion_observed=item.channel == "codex")
     except BaseException:
         cancel = getattr(runtime, "cancel", None)
         if handles and callable(cancel):
@@ -283,7 +369,7 @@ def run_measure_batch(step: measure.MeasureStep, runtime: NativeRuntime) -> meas
     return measure.next_measure_twice(step.ref)
 
 
-def run_build_batch(step: BuildStep, runtime: NativeRuntime) -> BuildStep:
+def _run_build_wave(step: BuildStep, runtime: NativeRuntime) -> BuildStep:
     from multiagent import build_workflow as build
     if step.type != review.StepType.WORK_BATCH:
         return step
@@ -314,6 +400,9 @@ def run_build_batch(step: BuildStep, runtime: NativeRuntime) -> BuildStep:
                 if not isinstance(handle, str) or not handle or handle in handles:
                     raise review.WorkflowError("invalid_runtime", "runtime returned an invalid or duplicate handle")
                 handles[handle] = authoritative
+                if authoritative.channel == "codex" and authoritative.driver == "native":
+                    from multiagent.codex_native_transport import NativeLaunch, bind_native_launch
+                    bind_native_launch(NativeLaunch(authoritative.review_ref or step.ref, authoritative.action_id, handle))
                 if not item.review_item:
                     def bind(_data: dict, journal: build.BuildJournal) -> None:
                         if journal.outstanding_writer != item.action_id:
@@ -326,9 +415,13 @@ def run_build_batch(step: BuildStep, runtime: NativeRuntime) -> BuildStep:
                 raise review.WorkflowError("invalid_runtime", "completion handle was not issued")
             if item.review_item:
                 capture_review_return(item.review_ref, item.action_id, completion.content, status=completion.status,
-                    judgment=completion.judgment, diagnostic=completion.diagnostic)
+                    judgment=completion.judgment, diagnostic=completion.diagnostic,
+                    handle=completion.handle if item.channel == "codex" else None,
+                    completion_observed=item.channel == "codex")
             else:
-                capture_build_return(step.ref, item.action_id, completion.content, status=completion.status, diagnostic=completion.diagnostic)
+                build.capture_build_return(step.ref, item.action_id, completion.content, status=completion.status,
+                    diagnostic=completion.diagnostic, handle=completion.handle if item.channel == "codex" else None,
+                    completion_observed=item.channel == "codex")
     except BaseException:
         cancel = getattr(runtime, "cancel", None)
         for handle in handles:

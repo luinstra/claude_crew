@@ -193,7 +193,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         os.environ["CLAUDE_PROJECT_DIR"] = self.tmp.name
-        os.environ["CREW_HOST"] = "codex"
+        os.environ["CREW_HOST"] = "unknown"
         self.plan = self.root / ".crew" / "plans" / "one.md"
         self.plan.parent.mkdir(parents=True)
         self.plan.write_text("# original plan\n", encoding="utf-8")
@@ -254,7 +254,7 @@ class ReviewWorkflowTest(unittest.TestCase):
     def _terminal_run(self, status: str, session: str):
         """Create one canonical terminal standalone run and remove its pointer."""
         if status == "all_failed":
-            os.environ["CREW_HOST"] = "codex"
+            os.environ["CREW_HOST"] = "unknown"
             with mock.patch.object(
                 review_workflow,
                 "get_provider_for_channel",
@@ -266,7 +266,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                     start.work_items[0].action_id,
                 )
         elif status == "quorum_not_met":
-            os.environ["CREW_HOST"] = "codex"
+            os.environ["CREW_HOST"] = "unknown"
 
             def provider(name: str, _channel: str):
                 return _Provider(ok=name == "sol", name=name)
@@ -1128,7 +1128,7 @@ class ReviewWorkflowTest(unittest.TestCase):
         )
         for label, seat, relative, directory_link in cases:
             with self.subTest(path=label):
-                os.environ["CREW_HOST"] = "claude" if seat == "opus" else "codex"
+                os.environ["CREW_HOST"] = "claude" if seat == "opus" else "unknown"
                 provider = _Provider(name="sol")
                 planted = False
                 original_write = review_workflow._write_run_text
@@ -1163,7 +1163,7 @@ class ReviewWorkflowTest(unittest.TestCase):
 
         for label, output in (("formatter", "RAW"), ("synthesis", VALID_REVIEW)):
             with self.subTest(path=f"{label}-ingress"):
-                os.environ["CREW_HOST"] = "codex"
+                os.environ["CREW_HOST"] = "unknown"
                 provider = _Provider(output=output, name="sol")
                 with mock.patch.object(
                     review_workflow,
@@ -1693,7 +1693,7 @@ class ReviewWorkflowTest(unittest.TestCase):
                 self.assertEqual(failure.exception.code, "corrupt_workflow")
                 self.assertEqual(outside.read_bytes(), before)
 
-        os.environ["CREW_HOST"] = "codex"
+        os.environ["CREW_HOST"] = "unknown"
         formatter_mutations = {
             "source": lambda action: action.update(
                 source_action_id="attempt-0001:reviewer:0002"
@@ -1790,7 +1790,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             review_workflow.next_review(native.ref)
         self.assertEqual(scribe_failure.exception.code, "corrupt_workflow")
 
-        os.environ["CREW_HOST"] = "codex"
+        os.environ["CREW_HOST"] = "unknown"
         with mock.patch.object(
             review_workflow,
             "get_provider_for_channel",
@@ -1949,7 +1949,7 @@ class ReviewWorkflowTest(unittest.TestCase):
             "session": step.ref.session_segment,
             "target_sha": step.ref.target_sha256,
             "signatures": record["seat_signatures"],
-            "host": "codex",
+            "host": "unknown",
             "force_external_channels": [],
             "prompt_mode": wf["workflow_identity"]["prompt_mode"],
             "prompt_metadata_sha256": wf["workflow_identity"][
@@ -3163,7 +3163,7 @@ print(json.dumps(results))
         self.assertNotIn("content admissibility", text)
         self.assertNotIn("resubmit it once", text)
 
-    def test_codex_is_all_external_with_parent_followups(self) -> None:
+    def test_codex_claude_seat_is_external_with_parent_followups(self) -> None:
         original = review_workflow.get_provider_for_channel
         review_workflow.get_provider_for_channel = lambda name, channel: _Provider(output="RAW", name=name)
         try:
@@ -3424,7 +3424,7 @@ print(json.dumps(results))
                     "get_provider_for_channel",
                     side_effect=lambda name, channel: _Provider(output="RAW", name=name),
                 ):
-                    step = self._start(seats="sol", session=f"formatter-role-{host}")
+                    step = self._start(seats="sol", session=f"formatter-role-{host}", force_external=("codex",))
                     formatter_step = review_workflow.execute_external_review(
                         step.ref, step.work_items[0].action_id,
                     )
@@ -3540,7 +3540,7 @@ print(json.dumps(results))
         self.assertTrue(any(item.kind == "synthesis" for item in after.work_items))
 
     def test_a_reroute_mark_needs_a_host_that_could_mint_one(self) -> None:
-        # A codex host mints its formatter parent-context and has no native
+        # An unknown host mints its formatter parent-context and has no native
         # formatter to lose, so a reroute mark there describes nothing.
         with mock.patch.object(
             review_workflow,
@@ -6021,7 +6021,7 @@ print(json.dumps(results))
         self.assertTrue(synthesis_submission.is_file())
 
     def test_formatter_failure_continues_and_synthesis_failure_is_terminal(self) -> None:
-        os.environ["CREW_HOST"] = "codex"
+        os.environ["CREW_HOST"] = "unknown"
         provider = _Provider(output="RAW", name="sol")
         with mock.patch.object(
             review_workflow,
@@ -6594,7 +6594,7 @@ class DebateWorkflowTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         os.environ["CLAUDE_PROJECT_DIR"] = self.tmp.name
-        os.environ["CREW_HOST"] = "codex"
+        os.environ["CREW_HOST"] = "unknown"
         self.plan = self.root / ".crew" / "plans" / "one.md"
         self.plan.parent.mkdir(parents=True)
         self.plan.write_text("# original plan\n", encoding="utf-8")
@@ -6726,7 +6726,7 @@ class DebateWorkflowTest(unittest.TestCase):
         return status, json.loads(output.getvalue()), errors.getvalue()
 
     def test_debate_identity_is_question_scoped_and_never_shares_a_review_run(self) -> None:
-        os.environ["CREW_HOST"] = "codex"
+        os.environ["CREW_HOST"] = "unknown"
         first = self._start(timeout=None, session="identity")
         second = self._start(timeout=None, session="identity")
         self.assertEqual(first.ref, second.ref)

@@ -2060,9 +2060,9 @@ def test_host_detection():
         check("native_channel maps the hosts with an in-session channel",
               channels.native_channel("claude") == "claude"
               and channels.native_channel("cursor") == "cursor"
-              and channels.native_channel("codex") is None
+              and channels.native_channel("codex") == "codex"
               and channels.native_channel("unknown") is None,
-              "claude / cursor / None / None",
+              "claude / cursor / codex / None",
               repr([channels.native_channel(host)
                     for host in ("claude", "cursor", "codex", "unknown")]))
         check("task_native_channel maps Claude only",
@@ -3992,10 +3992,10 @@ def test_production_invocation_and_fanout():
               and payload.get("type") == "work_batch",
               "schema-1 work_batch", f"rc={proc.returncode} out={proc.stdout[:200]}")
         work = payload.get("work_items", [])
-        check("standalone work_batch exposes each external seat",
+        check("standalone work_batch exposes native Codex and external Agy seats",
               [item.get("seat") for item in work] == ["sol", AGY_SEAT]
-              and all(item.get("driver") == "external" for item in work),
-              f"sol,{AGY_SEAT} external actions", str(work))
+              and [item.get("driver") for item in work] == ["native", "external"],
+              f"sol native, {AGY_SEAT} external", str(work))
 
         # The host adapter places all supplied options before a literal `--`
         # and carries the target as one final argv item. This is executable
@@ -4031,7 +4031,7 @@ def test_production_invocation_and_fanout():
               and all_payload.get("type") == "work_batch"
               and all_payload.get("resolved_target", {}).get("scope") == hostile_rel
               and [item.get("seat") for item in all_work] == ["sol", AGY_SEAT]
-              and all(item.get("driver") == "external" for item in all_work),
+              and [item.get("driver") for item in all_work] == ["native", "external"],
               f"hostile target path plus independent codex,{AGY_SEAT} seat selection",
               f"rc={all_options.returncode} payload={all_payload}")
 
@@ -15358,10 +15358,11 @@ def test_routing_parameter_neutrality():
                   repr(override["seat_channels"]))
 
             sentinel = json.loads(captured[host]["build_sentinel"].stdout)
+            expected_native = host if host in {"claude", "codex"} else None
             check(f"the default build executor keeps its channel on host={host}",
                   sentinel["executor"] == "crew:executor"
-                  and sentinel["channel"] == ("claude" if native_here else None),
-                  f'executor=crew:executor channel={"claude" if native_here else None}',
+                  and sentinel["channel"] == expected_native,
+                  f'executor=crew:executor channel={expected_native}',
                   repr(sentinel))
 
             listing = captured[host]["seats"].stdout.split()
@@ -15739,20 +15740,21 @@ def test_workplan_doc_sync():
         "plugin README": PLUGIN_ROOT / "README.md",
         "engine notes": PLUGIN_ROOT / "docs" / "engine-notes.md",
     }
-    check("codex-host.md distinguishes deterministic protocol evidence from app exposure",
+    check("codex-host.md distinguishes source adapter evidence from installed exposure",
           "deterministic source-level tests" in codex_host
-          and "not an app-native command workflow" in codex_host
-          and "migrated command skills do not register standalone `/crew:review`" in codex_host
-          and "first-class Codex adapter remains deferred" in codex_host,
-          "source-level evidence, no registered command, adapter deferred",
+          and "host-written capture" in codex_host
+          and "separate installed package" in codex_host
+          and "automatic re-entry" in codex_host,
+          "source and separate installed gate evidence",
           "Codex exposure boundary missing")
     for label, path in coupled_docs.items():
         raw = " ".join(path.read_text(encoding="utf-8").split())
-        check(f"{label} does not claim a shipped Codex standalone review adapter",
-              "Codex-host all-external protocol compatibility" in raw
-              and "Codex plugin does not yet expose standalone `/crew:review`" in raw
-              and "app-native adapter remains deferred" in raw,
-              "CLI compatibility plus deferred app-native adapter",
+        check(f"{label} records both passed native and separate installed gates",
+              "codex-host.md" in raw
+              and "installed discovery gate" in raw
+              and "Live native gates passed" in raw
+              and "automatic hook re-entry also passed in a separate test package" in raw,
+              "passed native and isolated installed gates",
               "Codex exposure boundary missing")
 
 
@@ -19407,12 +19409,13 @@ def test_build_executor_contract_freeze():
             rc, out, err = run_fresh()
         off_claude = json.loads(out) if out.strip() else {}
         check(
-            "builtin source on Codex host emits an explicit JSON null channel",
+            "builtin source on Codex host selects a fresh native executor",
             rc == 0
             and off_claude.get("executor") == "crew:executor"
             and "channel" in off_claude
-            and off_claude["channel"] is None,
-            "exit 0, executor=crew:executor, channel key present with null",
+            and off_claude["channel"] == "codex"
+            and off_claude["resume_executor"] is False,
+            "exit 0, executor=crew:executor, channel=codex, resume_executor=false",
             f"rc={rc} payload={off_claude} stderr={err!r}",
         )
     finally:

@@ -6,6 +6,10 @@ allowed-tools: Bash, Read, Write, Task, AskUserQuestion
 
 # Measure twice
 
+Codex source skills use [the collaboration supplement](../docs/codex-transport.md)
+for native launch, capture and plugin-path resolution. The shared workflow recipe
+below remains authoritative; its Task and scribe mechanics apply to their hosts.
+
 Python owns the workflow. Transport only the issued `MeasureStep`; never infer a
 stage from files or drive the loop from a review-local response.
 

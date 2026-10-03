@@ -30,18 +30,49 @@ verified tag are expectations, not guarantees.
 
 ## Seat execution
 
-Phase 1 covers the Python-owned standalone review engine and Codex-host
-all-external protocol compatibility with deterministic source-level tests. The
-`crew review-*` CLI operations can be exercised directly as compatibility
-evidence, but that is not an app-native command workflow. Although the installed
-Codex package contains the shared `commands/review.md` source, its migrated
-command skills do not register standalone `/crew:review`, so the Codex plugin
-does not expose that invocation yet; a first-class Codex adapter remains
-deferred (verified: installed 0.74.1 package inventory and Phase 1 deterministic
-workflow tests, 2026-08-20). Build uses its engine-owned protocol with existing
-external write routes; the native `crew:executor` sentinel refuses unsupported
-hosts. Measure-twice production planning admission currently requires Claude.
-These source contracts do not establish a Codex app-native build lifecycle gate.
+The source adapter now admits codex-channel reviewers and panelists through the
+per-seat native seam. The Codex manifest declares `./skills-codex/`; these skills
+stay outside Claude and Cursor default discovery to avoid command-name collisions.
+Cancel and context helpers are retained alongside the four workflow entries.
+Discoverable source skills in `skills-codex/review`,
+`skills-codex/debate`, `skills-codex/measure-twice`, and `skills-codex/build` reuse shared command
+recipes and [Codex transport](codex-transport.md). Native advisor admission uses
+HostRoles and canonical role prompts. The built-in `crew:executor` can run
+natively; configured named executors such as Sol remain external. The low-level
+Task prep/runner split remains unchanged (verified: deterministic source-level
+tests in `test-codex-native.py`, 2026-10-03).
+
+Generated spawn metadata uses the actual collaboration API, `fork_turns="none"`,
+and frozen reviewer model/effort. An unset reviewer effort freezes `xhigh`, matching the external Codex CLI.
+Advisor and built-in executor effort remains inherited when omitted. Roles live in the message, not a spawn role
+parameter. Model attribution stays requested-only. Native access is advisory:
+these agents inherit the parent's sandbox and tools. Exact unsupported model
+refusal settles failed without substitution or CLI fallback (verified: synthetic
+source tests; live requested pins and inherited access exercised in the
+[2026-10-03 gate](phase-7-codex-evidence.md)).
+
+The collaboration surface provides actual handles and final replies, but no
+machine-readable result file. Returns use explicit host-written capture of the
+exact final text, followed by the existing capture CLI and immutable receipts.
+This is not deterministic extraction from a host artifact and uses no scribe or
+transcript parser. Capture requires the bound handle and an explicit observation
+of its final reply; a positively observed pre-launch refusal has its own
+`--launch-refused` path (verified: synthetic owner/handle/capture tests).
+
+Native executor rounds are fresh; external exact-conversation continuation is
+unchanged. Cancellation ends engine authority before requesting interruption.
+`interrupt_agent` reports the previous status, not quiescence. Uncertain writers
+remain fenced until actual completion or explicit operator confirmation
+(verified: synthetic cancellation and late-callback tests).
+
+The parent completed disposable native review/debate, plan promotion, build,
+fresh revision, explicit resume, duplicate/wrong-handle capture, and cancellation
+fencing gates on 2026-10-03. See [retained evidence and limits](phase-7-codex-evidence.md).
+A separate installed package exposed all eight skills and both hooks. SessionStart
+restored an engine-owned build, and Stop triggered automatic re-entry before
+allowing completion after cancellation (verified: 2026-10-03 installed gate in
+phase-7-codex-evidence.md). The user's existing Crew installation was untouched.
+Historical installed probes below remain historical.
 
 - Panel prep is host-truthful: review-prep under this host emits host codex, classifies opus as an external claude-channel subprocess seat, and stamps seat_channels with real provenance (verified: probe 2026-08-12 S1/P5, codex 0.147.0)
 - The claude CLI resolves on PATH but is NOT authenticated inside the Codex sandbox: claude -p answers "Not logged in", so external claude seats fail closed with truthful envelopes, ok false, channel claude, real run identity stamps (verified: probe 2026-08-12 S1/P5, codex 0.147.0)
@@ -58,8 +89,12 @@ These source contracts do not establish a Codex app-native build lifecycle gate.
 
 ## Measure-twice source cutover
 
-The source planning engine now uses typed state/review binding. Codex has no
-admitted production advisor route: new planning returns
-`unsupported_planning_host` before activation. Historical legacy Stop probes
-above do not prove the Phase 4 installed-Claude gate. See
-[protocol](measure-twice-protocol.md) and [Claude CLI gate evidence](phase-4-measure-twice-evidence.md).
+The source planning engine uses typed state/review binding and admits the Codex
+advisor through HostRoles. The advisor writes only its issued staging plan;
+Python seals and promotes those bytes before native panel review (verified:
+synthetic plan staging/promotion, duplicate, wrong-handle and late-owner tests).
+Explicit `measure-twice-resume` replays the engine journal. Live planning and explicit resume passed on 2026-10-03. Installed skill discovery and engine-owned build Stop re-entry passed the
+separate current gate; planning uses the same lifecycle hooks. This does not
+claim a second installed end-to-end planning run. See the
+[protocol](measure-twice-protocol.md), [transport](codex-transport.md), and
+[Claude CLI gate evidence](phase-4-measure-twice-evidence.md).

@@ -35,6 +35,7 @@ from multiagent.providers import (
 
 SCHEMA = 1
 HOSTS = frozenset({"claude", "cursor", "codex", "unknown"})
+CODEX_NATIVE_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
 ACTION_RE = re.compile(r"^attempt-[0-9]{4}:(reviewer|formatter|synthesis):[0-9]{4}$")
 ATTEMPT_RE = re.compile(r"^attempt-[0-9]{4}$")
 RUN_RE = re.compile(r"^run-[0-9a-f]{12}$")
@@ -174,6 +175,8 @@ class WorkItem:
     timeout_seconds: int | None
     return_transport: dict | None
     host_result_template: dict | None
+    native_transport: dict | None = None
+    commands: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,24 +350,33 @@ def work_item_to_dict(item: WorkItem) -> dict:
     return {field.name: getattr(item, field.name) for field in dataclasses.fields(WorkItem)}
 
 
-def issued_review_commands(ref: ReviewRef, item: WorkItem) -> dict[str, tuple[str, ...]]:
+def issued_review_commands(ref: ReviewRef, item: WorkItem, *, loop_owned: bool = False) -> dict[str, tuple[str, ...]]:
     executable = str(Path(__file__).resolve().parents[2] / "crew")
     flags = ("--session-segment", ref.session_segment, "--run-id", ref.run_id,
              "--attempt-id", ref.attempt_id, "--target-sha256", ref.target_sha256, "--action-id", item.action_id)
+    next_command = (executable, "review-next", *flags[:-2])
     if item.driver == "external":
         return {"execute": (executable, "review-execute", *flags),
+                **({} if loop_owned else {"next": next_command}),
                 "recover": (executable, "review-recover", *flags, "--diagnostic-code", "external_process_lost")}
     recovery_code = ("parent_synthesis_lost" if item.kind == "synthesis" else
                      "parent_formatter_lost" if item.kind == "formatter" and item.driver == "parent" else
                      "formatter_task_lost" if item.kind == "formatter" else "native_task_lost")
     commands = {"claim": (executable, "review-claim", *flags), "capture": (executable, "review-capture", *flags),
+                **({} if loop_owned else {"next": next_command}),
                 "recover": (executable, "review-recover", *flags, "--diagnostic-code", recovery_code)}
-    if item.driver == "native" and item.role == "crew:reviewer":
+    if item.native_transport:
+        commands["native_bind"] = (executable, "review-native-bind", *flags)
+    elif item.driver == "native" and item.role == "crew:reviewer":
         commands.update(native_bind=(executable, "review-native-bind", *flags), native_capture=(executable, "review-native-capture", *flags))
     return commands
 
 
 def parse_work_item(value: object) -> WorkItem:
+    if isinstance(value, dict) and "native_transport" not in value:
+        value = {**value, "native_transport": None}
+    if isinstance(value, dict) and "commands" not in value:
+        value = {**value, "commands": None}
     names = {field.name for field in dataclasses.fields(WorkItem)}
     if not isinstance(value, dict) or set(value) != names:
         raise WorkflowError("invalid_step", "WorkItem must contain exactly the schema-1 fields")
@@ -1024,6 +1036,9 @@ def _resolve_seats(
                     else "plugins/crew/docs/engine-notes.md"
                 )
                 reason = (
+                    f"which requires an explicit {pin_field}; set [seats.{name}].{pin_field} "
+                    "before starting a native Codex panel (see plugins/crew/docs/codex-host.md)"
+                ) if policy.host == "codex" else (
                     f"which this host spawns in-session only at {pin_field} "
                     "verified once against the app's subagent badge, and "
                     f"[seats.{name}] sets none (add {pin_field} after the badge "
@@ -1040,8 +1055,19 @@ def _resolve_seats(
                 file=sys.stderr,
             )
             continue
+        if (resolved.native and policy.host == "codex"
+                and spec.reasoning_effort is not None
+                and spec.reasoning_effort not in CODEX_NATIVE_EFFORTS):
+            raise WorkflowError(
+                "unsupported_native_effort",
+                f"seat {name!r} requests unsupported Codex native reasoning effort "
+                f"{spec.reasoning_effort!r}; correct its configuration before retrying",
+            )
         if any(existing[0] == name for existing in answer):
             raise WorkflowError("duplicate_seat", f"duplicate review seat {name!r}")
+        if resolved.native and policy.host == "codex" and spec.reasoning_effort is None:
+            from multiagent.providers.codex import DEFAULT_REASONING_EFFORT
+            spec = dataclasses.replace(spec, reasoning_effort=DEFAULT_REASONING_EFFORT)
         answer.append((name, spec, resolved))
     roles = native_roles(policy)
     if roles is not None and roles.single_seat_per_native_pin:
@@ -1088,6 +1114,12 @@ def _spent_model(
             "unresolved_native_role",
             f"seat {name!r} resolved in-session with no {pin_field} to spend; "
             "refusing to freeze it",
+        )
+    if roles is not None and roles.channel == "codex" and pin == "inherit":
+        raise WorkflowError(
+            "unsupported_native_model",
+            f"seat {name!r} requires an explicit Codex review model; "
+            "inherit is reserved for advisor and executor roles",
         )
     return pin
 
@@ -1702,10 +1734,10 @@ class HostRoles:
     """The role names and support-role models one host can drive in-session."""
 
     channel: str
-    scribe_role: str
-    scribe_model: str
-    formatter_role: str
-    formatter_model: str
+    scribe_role: str | None
+    scribe_model: str | None
+    formatter_role: str | None
+    formatter_model: str | None
     reviewer_role_name: str
     panelist_role_name: str
     native_pin_field: str
@@ -1731,6 +1763,14 @@ class HostRoles:
 
 
 _HOST_ROLES: dict[str, HostRoles] = {
+    "codex": HostRoles(
+        channel="codex", scribe_role=None, scribe_model=None,
+        formatter_role=None, formatter_model=None,
+        reviewer_role_name="crew:reviewer", panelist_role_name="crew:panelist",
+        native_pin_field="model", single_seat_per_native_pin=False,
+        reviewer_access=ACCESS_ADVISORY, formatter_access=ACCESS_ADVISORY,
+        advisor_role="crew:advisor", advisor_model="inherit",
+    ),
     "claude": HostRoles(
         channel="claude",
         advisor_role="crew:advisor",
@@ -1999,6 +2039,7 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
             roles.seat_role_name(prompt_mode) if roles is not None else None,
             kind="reviewer", seat=seat, model=model, host=policy.host,
         )
+    if native and policy.host != "codex":
         _require_native_role(
             roles.scribe_role if roles is not None else None,
             # The SCRIBE's own model: the transport is what would fail to spawn,
@@ -2018,13 +2059,16 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
     result_path = root / "results" / f"{ordinal:04d}.json"
     submission_path = root / "submissions" / f"{digest}.json"
     descendants = [(prompt_path, f"reviewer action {action_id} prompt")]
-    if native:
+    if native and policy.host != "codex":
         descendants.extend((
             (transport_prompt, f"reviewer action {action_id} scribe prompt"),
             (primary_ingress, f"reviewer action {action_id} scribe ingress"),
             (fallback_ingress, f"reviewer action {action_id} fallback ingress"),
             (submission_path, f"reviewer action {action_id} submission"),
         ))
+    elif native:
+        descendants.extend(((fallback_ingress, f"reviewer action {action_id} host ingress"),
+                            (submission_path, f"reviewer action {action_id} submission")))
     else:
         descendants.append((result_path, f"reviewer action {action_id} result"))
     for descendant, label in descendants:
@@ -2035,7 +2079,7 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
             create_parents=True,
         )
     _write_run_text(run, prompt_path, prompt, f"reviewer action {action_id} prompt")
-    if native:
+    if native and policy.host != "codex":
         _write_run_text(
             run,
             transport_prompt,
@@ -2055,7 +2099,10 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
         "result_path": None if native else str(result_path),
         "submission_path": str(submission_path) if native else None,
         "timeout_seconds": None if native else timeout_seconds,
-        "return_transport": {
+        "return_transport": ({
+            "primary": {"kind": "host_write", "ingress_path": str(fallback_ingress)},
+            "fallback": {"kind": "host_write", "ingress_path": str(fallback_ingress)},
+        } if policy.host == "codex" else {
             # Reached only when the mint above found a role, which it cannot do
             # without a role table, so there is no roleless case to guard here.
             "primary": {"kind": "scribe",
@@ -2065,7 +2112,7 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
                         "data_marker": "{{REVIEWER_RETURN_DATA}}",
                         "ingress_path": str(primary_ingress)},
             "fallback": {"kind": "host_write", "ingress_path": str(fallback_ingress)},
-        } if native else None,
+        }) if native else None,
         "status": "ready", "ok": None, "diagnostic": None, "claim_id": None,
         "accepted_path": None, "accepted_sha256": None,
         "submission_sha256": None,
@@ -2084,7 +2131,7 @@ def _formatter_route(roles: HostRoles | None) -> dict:
     lost. Minting, rerouting, and validation all read this one table, so a
     rerouted action cannot end up describing a route no mint could produce.
     """
-    if roles is None:
+    if roles is None or roles.formatter_role is None:
         return {
             "driver": ActionDriver.PARENT, "role": None, "model": None,
             "channel": None, "access": ACCESS_PARENT,
@@ -2100,7 +2147,7 @@ def _reroute_lost_formatter(action: dict) -> bool:
     """Send a formatter whose native spawn was lost back out to the parent.
 
     A repair step must never be the one thing that makes the host a hard
-    dependency. Every roster on a host with a role row mints a native formatter,
+    dependency. Hosts admitting native formatters mint one for every roster,
     including one whose seats all run external and need nothing from the host,
     and a support model the host will not spawn would then cost that seat its
     repair for no reason of its own. The parent-context route is the one codex
@@ -2133,12 +2180,8 @@ def _formatter_action(wf: dict, run: Path, source: dict, result: ProviderResult)
     ordinal = int(source["ordinal"])
     policy = RoutePolicy.from_identity(wf["workflow_identity"])
     roles = native_roles(policy)
-    if roles is not None:
-        # Same refusal point as the reviewer mint: no paths prepared yet.
-        # DEFENSIVE SYMMETRY, not a live path: `formatter_role` is non-optional
-        # on every shipped row, so this cannot fire today. It is here so a host
-        # row added with no formatter refuses instead of minting an action with
-        # nothing to spawn, which is what the reviewer mint beside it does.
+    if roles is not None and roles.formatter_role is not None:
+        # Validate an admitted formatter before preparing any paths.
         _require_native_role(
             roles.formatter_role, kind="formatter", seat=source["seat"],
             model=roles.formatter_model, host=policy.host,
@@ -2717,13 +2760,22 @@ def _host_result_template(ref: ReviewRef, action: dict) -> dict | None:
     }
 
 
-def _work_item(action: dict, ref: ReviewRef) -> WorkItem:
-    return WorkItem(action["action_id"], str(action["kind"]), str(action["driver"]),
+def _work_item(action: dict, ref: ReviewRef, *, loop_owned: bool = False) -> WorkItem:
+    native_transport = None
+    if action["driver"] == "native" and action["channel"] == "codex":
+        from multiagent.codex_native_transport import launch_metadata
+        run = _guard_review_path(session_segment=ref.session_segment, run_id=ref.run_id, create=False)
+        signature = review_runs.read_run_json(run)["seat_signatures"][action["seat"]]
+        native_transport = launch_metadata(ref, action["action_id"], action["role"],
+            action["model"], signature["reasoning_effort"], action["prompt_path"],
+            action["return_transport"]["primary"]["ingress_path"])
+    item = WorkItem(action["action_id"], str(action["kind"]), str(action["driver"]),
                     action.get("seat"), action.get("role"), action.get("model"),
                     action.get("channel"), action["access"], action["prompt_path"],
                     action.get("ingress_path"), action.get("result_path"),
                     action.get("submission_path"), action.get("timeout_seconds"),
-                    action.get("return_transport"), _host_result_template(ref, action))
+                    action.get("return_transport"), _host_result_template(ref, action), native_transport)
+    return dataclasses.replace(item, commands={name: list(argv) for name, argv in issued_review_commands(ref, item, loop_owned=loop_owned).items()})
 
 
 def _derive_step(wf: dict, run: Path) -> ReviewStep:
@@ -2736,7 +2788,7 @@ def _derive_step(wf: dict, run: Path) -> ReviewStep:
     if ready:
         return ReviewStep(
             StepType.WORK_BATCH,
-            work_items=tuple(_work_item(action, ref) for action in ready),
+            work_items=tuple(_work_item(action, ref, loop_owned=wf["workflow_identity"]["kind"] == "loop_review") for action in ready),
             in_flight=tuple(claimed),
             **common,
         )
@@ -3158,6 +3210,12 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
         expected_signature_keys = {"kind", "model"} | (
             {"provider"} if signature["kind"] == "subprocess" else set()
         )
+        if signature["kind"] == "task" and identity["host"] == "codex":
+            expected_signature_keys.add("reasoning_effort")
+            if (signature.get("reasoning_effort") is not None
+                    and (not isinstance(signature["reasoning_effort"], str)
+                         or signature["reasoning_effort"] not in CODEX_NATIVE_EFFORTS)):
+                _corrupt_workflow(f"seat signature effort for {seat!r} is invalid")
         if (
             set(signature) != expected_signature_keys
             or not isinstance(signature.get("model"), str)
@@ -3311,7 +3369,11 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
                 primary_ingress = root / "ingress" / "scribe" / f"{digest}.md"
                 fallback_ingress = root / "ingress" / "host-write" / f"{digest}.md"
                 transport_prompt = root / "transport" / f"scribe-{ordinal:04d}.txt"
-                if (
+                if identity["host"] == "codex":
+                    expected = {"kind": "host_write", "ingress_path": str(fallback_ingress)}
+                    if transport != {"primary": expected, "fallback": expected}:
+                        _corrupt_workflow(f"native reviewer action {action_id!r} has invalid host transport")
+                elif (
                     not isinstance(transport, dict)
                     or set(transport) != {"primary", "fallback"}
                     or not isinstance(transport.get("primary"), dict)
@@ -3329,10 +3391,11 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
                     or transport["fallback"].get("kind") != "host_write"
                 ):
                     _corrupt_workflow(f"native reviewer action {action_id!r} has invalid transport")
-                _validate_issued_path(run, transport["primary"]["prompt_template_path"], transport_prompt,
-                                      f"reviewer action {action_id} scribe prompt", required_file=True)
-                _validate_issued_path(run, transport["primary"]["ingress_path"], primary_ingress,
-                                      f"reviewer action {action_id} scribe ingress")
+                if identity["host"] != "codex":
+                    _validate_issued_path(run, transport["primary"]["prompt_template_path"], transport_prompt,
+                                          f"reviewer action {action_id} scribe prompt", required_file=True)
+                    _validate_issued_path(run, transport["primary"]["ingress_path"], primary_ingress,
+                                          f"reviewer action {action_id} scribe ingress")
                 _validate_issued_path(run, transport["fallback"]["ingress_path"], fallback_ingress,
                                       f"reviewer action {action_id} fallback ingress")
                 expected_transport_prompts[action_id] = transport_prompt
@@ -3476,7 +3539,7 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
                 expected,
                 f"reviewer action {action_id} prompt",
             )
-            if action["driver"] == ActionDriver.NATIVE:
+            if action["driver"] == ActionDriver.NATIVE and identity["host"] != "codex":
                 ingress = action["return_transport"]["primary"]["ingress_path"]
                 _read_authoritative_prompt(
                     expected_transport_prompts[action_id],
@@ -3815,6 +3878,8 @@ def _start_run(
         }
         if not execution.native:
             signatures[name]["provider"] = seats.CHANNEL_TO_LEGACY_KIND[execution.channel]
+        elif policy.host == "codex":
+            signatures[name]["reasoning_effort"] = spec.reasoning_effort
     target_sha = review_runs.sha256_text(target.content)
     if (
         not isinstance(target.notes, list)
@@ -4135,7 +4200,9 @@ def next_review(ref: ReviewRef) -> ReviewStep:
     with _workflow_lock(run):
         wf, run = _load_current_locked(ref, run)
         if wf["workflow_identity"]["kind"] == "loop_review":
-            raise WorkflowError("loop_owned_review", "use measure-twice-next for a loop review")
+            binding = parse_loop_binding(wf["workflow_identity"]["loop_binding"])
+            verb = "build-next" if binding.loop == "bl" else "measure-twice-next"
+            raise WorkflowError("loop_owned_review", f"use {verb} for this loop review")
         closed = _round_closed(_derive_step(wf, run))
         if not closed:
             return _advance_locked(wf, run)
@@ -4179,7 +4246,7 @@ def claim_review_action(request: ClaimRequest) -> ClaimResponse:
                 else "settled"
             )
         return ClaimResponse(request.ref, authorization, action_status,
-                             _work_item(action, request.ref) if claimed_now else None)
+                             _work_item(action, request.ref, loop_owned=wf["workflow_identity"]["kind"] == "loop_review") if claimed_now else None)
 
 
 def _frozen_external_provider(action: dict, policy: RoutePolicy):
@@ -4676,6 +4743,8 @@ def submit_review(request: SubmissionRequest) -> ReviewStep:
                 "typed HostResult does not match the issued submission file",
             )
         capture_receipt = run / "attempts" / result.ref.attempt_id / "transport-receipts" / f"{_hash_action(result.action_id)}.json"
+        if action["driver"] == "native" and action["channel"] == "codex" and not capture_receipt.exists():
+            raise WorkflowError("invalid_submission", "Codex native returns require owned host-written capture")
         if capture_receipt.exists():
             try:
                 capture_receipt = _prepare_run_descendant(run, capture_receipt, "capture receipt",
@@ -5180,6 +5249,7 @@ def prepare_loop_review(request: ReviewRequest, binding: LoopReviewBinding, *, e
     snapshot_name = review_runs.snapshot_name(target.kind)
     signatures = {name: {"kind": "task" if execution.native else "subprocess",
                           "model": _spent_model(name, spec, execution, roles),
+                          **({"reasoning_effort": spec.reasoning_effort} if execution.native and host == "codex" else {}),
                           **({} if execution.native else {"provider": seats.CHANNEL_TO_LEGACY_KIND[execution.channel]})}
                   for name, spec, execution in resolved}
     sha = review_runs.sha256_text(target.content)

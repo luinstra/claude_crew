@@ -145,7 +145,7 @@ def current_host() -> str:
 # `native_channel_for` returns None without one, so a row added here alone
 # declares nothing native rather than failing at mint. A test pins the two key
 # sets equal on top of that, so a half-added host is named rather than silent.
-_NATIVE_CHANNELS: dict[str, str] = {"claude": "claude", "cursor": "cursor"}
+_NATIVE_CHANNELS: dict[str, str] = {"claude": "claude", "cursor": "cursor", "codex": "codex"}
 
 
 def native_channel_hosts() -> frozenset[str]:

@@ -853,7 +853,7 @@ class MeasureTests(unittest.TestCase):
         self.assertEqual(mt.start_measure_twice(self.request).ref, step.ref)
 
     def test_unsupported_planning_routes_do_not_activate(self) -> None:
-        for host in ("cursor", "codex", "unknown"):
+        for host in ("cursor", "unknown"):
             with mock.patch.dict(os.environ, {"CREW_HOST": host}), self.subTest(host=host), self.assertRaises(rw.WorkflowError) as caught:
                 self.start()
             self.assertEqual(caught.exception.code, "unsupported_planning_host")

@@ -3,7 +3,7 @@
 > **Type:** Claude Code Plugin Marketplace
 > **Plugins:** `crew` (agents, commands, persistence), `sk` (tech-stack skills)
 > **Python:** 3.11+, everywhere, one floor. The engine needs it for stdlib
-> `tomllib`; crew's Claude and Cursor manifests each register two lifecycle
+> `tomllib`; crew's Claude, Cursor and Codex manifests each register two lifecycle
 > entries, while `cursor-env-capture.py` is an in-process helper called by
 > `session-start.py`, not a hook entry. The same Python floor holds everywhere
 > so there is only ever one number to remember. Every entry point enforces it with
@@ -65,7 +65,7 @@ Use scopes to indicate what changed:
 
 The workflow is smart about what it bumps:
 - **Marketplace version:** Only if `.claude-plugin/marketplace.json`, a substantive `.cursor-plugin/marketplace.json`, `README.md`, or `docs/` changed
-- **Plugin versions:** Only plugins with actual file changes, including a substantive `plugins/crew/.cursor-plugin/plugin.json` change, get bumped
+- **Plugin versions:** Only plugins with actual file changes, including substantive `plugins/crew/.cursor-plugin/plugin.json` or `plugins/crew/.codex-plugin/plugin.json` changes, get bumped
 
 ### Examples
 
@@ -90,6 +90,7 @@ git commit -m "ci: update workflow permissions"
 | Command | Purpose |
 |---------|---------|
 | `/plugin` | Install plugin from current directory (run from `plugins/crew/` or `plugins/sk/`) |
+| `python plugins/crew/scripts/tests/test-codex-native.py` | Run Codex transport and host-isolation tests |
 | `python plugins/crew/scripts/tests/test-build-workflow.py` | Run build workflow contract tests |
 | `python plugins/crew/scripts/tests/test-hooks.py` | Run hook unit tests |
 | `python plugins/crew/scripts/tests/test-review-workflow.py` | Run standalone review workflow contract tests |
@@ -119,6 +120,8 @@ plugins/
 │   ├── hooks/hooks.json            ← Lifecycle integration
 │   ├── hooks/cursor-hooks.json     ← Cursor lifecycle integration
 │   ├── .cursor-plugin/plugin.json  ← Cursor plugin manifest
+│   ├── .codex-plugin/plugin.json   ← Codex plugin manifest
+│   ├── skills-codex/               ← Codex workflow and context adapters
 │   └── scripts/                    ← Python state machine
 └── sk/                             ← Tech-stack plugin
     ├── hooks/hooks.json            ← Lifecycle integration

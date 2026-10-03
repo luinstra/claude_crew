@@ -2,8 +2,9 @@
 
 Python owns implementation, revision, review, retry and completion. Commands and
 hooks transport issued actions. The state is schema 5 with `bl_workflow` version 1;
-reading state never upgrades it. Native Claude `crew:executor` and external write
-routes retain their existing selection precedence. Native requested model attribution
+reading state never upgrades it. Native Claude and Codex `crew:executor` roles
+and external write routes retain their selection precedence. Codex native rounds
+are fresh with `resume_executor=false`. Native requested model attribution
 is inherit; no runtime model observation is invented. Cursor build review seats
 remain external. Cursor native execution/lifecycle support is deferred.
 
@@ -54,7 +55,8 @@ display normalization. Codex uses its final-message file; Agy uses stdout; Curso
 uses its final response or plain stdout. Ordinary dispatch output and serialized
 envelopes keep their existing format. Host Write capture uses `--return-file` for
 `build-capture` and `--returned-file` (or `-f`) for `review-capture`, including
-parent synthesis.
+parent synthesis. Codex native capture additionally requires the bound actual
+`--handle` and `--completion-observed`; see [Codex transport](codex-transport.md).
 
 The final nonblank LF-delimited executor report line is exactly
 `CREW_BUILD_STATUS: COMPLETED` or `CREW_BUILD_STATUS: BLOCKED`. For comparison only,

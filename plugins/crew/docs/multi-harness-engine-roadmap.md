@@ -15,7 +15,7 @@
 ## Desired outcome
 
 Motley Crew provides the same core review, council/debate, measure-twice, and
-build workflows inside Claude Code, Cursor, and Codex. Python owns the workflow;
+build workflows inside Claude Code, OpenHands, and Codex. Python owns the workflow;
 each harness is a thin adapter that asks what to do next, performs the requested
 host operation, and returns the result.
 
@@ -23,7 +23,7 @@ At completion:
 
 - workflow decisions, prompts, routing, persistence, validation, retries, and
   terminal outcomes have one Python source of truth;
-- Claude Code, Cursor, and Codex drive the same workflow interface rather than
+- Claude Code, OpenHands, and Codex drive the same workflow interface rather than
   carrying separate copies of each workflow;
 - existing seat and panel configuration works across harnesses through the
   existing `via` channel model;
@@ -32,9 +32,10 @@ At completion:
 - Claude behavior remains working throughout the migration;
 - Cursor gained in-app review subagents as the first new host target, verified
   live in the app; its debate seats ship on the same seam but are not yet
-  exercised there, and its remaining work is deferred (see "Deferred: Cursor
-  work");
-- Codex receives a first-class adapter once the workflow design is proven;
+  exercised there. Shipped Cursor behavior keeps regression coverage; remaining
+  Cursor expansion is outside this roadmap (see "Deferred: Cursor work");
+- Codex receives the next adapter over the existing protocols, followed by
+  OpenHands native SDK agents and deterministic orchestration;
 - review seats remain fresh, executor continuation remains executor-only, and
   current frozen-target, quorum, failure-isolation, route, and loop-state
   invariants remain enforced; and
@@ -43,7 +44,7 @@ At completion:
 
 The generic user-facing identifiers `crew`, `/crew`, and `.crew` do not need to
 change merely for branding. Repository and product naming are separate from the
-workflow migration and must not delay the Cursor milestone.
+workflow migration and must not delay the Codex or OpenHands milestone.
 
 This roadmap covers the four core workflows and the support paths they call.
 Other Task-oriented commands such as `analyze`, `code-search`, `execute`, and
@@ -53,22 +54,24 @@ migration.
 
 ## Queue order
 
-Phases run 1, 2, 3, 4, 5, 7, 8A. Phase 6 and the other remaining Cursor-native
-work are deferred to the end and collected under "Deferred: Cursor work"; STOP
-before starting that section and check with the operator. 8B (rebrand) is the
-operator's call and is not scheduled here. The reason for the reorder is in that
-section.
+Phases 1–5 are implemented on the integration branch. The remaining queue is
+**7 (Codex), 6 (OpenHands), 8A (cleanup)**. The operator's 2026-10-03 pivot
+replaces the planned Cursor expansion with OpenHands. Phase 6 keeps its number
+but now names the OpenHands adapter; its old Cursor scope is retained only as
+historical backlog below. The operator subsequently scheduled Codex first;
+phase numbers remain stable while execution order is 7 then 6. 8B (rebrand) is the
+operator's call and is not scheduled here.
 
 ## Grounded starting point
 
-### Current handoff (2026-10-02)
+### Current handoff (2026-10-03)
 
-The current integration branch is `codex/multi-harness-engine`. Phase 4 is
-committed and pushed in `50aef3b`, with Crew 0.84.0 and marketplace 0.44.0 in
-`9d75917`; it has not been merged into `main`. Standalone review, council/debate,
-and measure-twice use Python-owned workflows. At that published baseline, build
-still uses `review-prep` and owns its loop in Markdown. The current uncommitted
-working tree implements Phase 5's engine-owned build.
+The source integration branch is `codex/multi-harness-engine`; this Codex task
+works in a separate worktree on `codex/native-integration`, based on `6b16ba3`. Phase 5 is
+committed and pushed in `179b815`, with Crew 0.85.0 and marketplace 0.45.0 in
+`6b16ba3`. It has not been merged into `main` or installed. Standalone review,
+council/debate, measure-twice, and build now use Python-owned workflows. Phase 4
+remains recorded in `50aef3b`, published with its version bump in `9d75917`.
 
 Phase 4 completed with five approving reviewers, quorum met, and no blocking
 findings. The Claude Code CLI lifecycle gate, exact source epochs, regression
@@ -82,13 +85,19 @@ The [Phase 5 plan](phase-5-build-plan.md) completed measure-twice against that
 published baseline with quorum met and minor implementation clarifications.
 Implementation ran through the configured Sol executor via Codex.
 Migration, legacy handling, upgrade guidance and special restart machinery are
-excluded by the operator. Phase 5 is implemented and verified in the uncommitted
-working tree; it has not been published or installed. Current interface, regression
+excluded by the operator. Phase 5 is implemented, verified, and pushed; the
+installed plugin has not been refreshed. Current interface, regression
 results, real Claude CLI gates, exact source epochs and evidence limits are in
 [build-protocol.md](build-protocol.md) and
 [phase-5-build-evidence.md](phase-5-build-evidence.md).
 The final planning synthesis is retained under
 `.crew/reviews/01a0f9e3-b687-7e63-b9e5-d1e8a07774b5/run-1887652ecf97/`.
+
+Next is the [Phase 7 Codex plan](phase-7-codex-plan.md). Its source adapter
+is implemented in the isolated dirty worktree; the [live native gates](phase-7-codex-evidence.md)
+passed. Implementation review closed minor-only without overrides. The follow-up fixes,
+installed skill discovery and automatic hook re-entry gate are now complete. The [Phase 6 OpenHands plan](phase-6-openhands-plan.md)
+follows Codex and remains a planning pivot, not an implemented adapter or a passed gate.
 
 The older machine-local `chunk-c-measure-twicemd-shim-refactor-*` and
 `chunk-c-buildmd-shim-refactor-*` plans describe an earlier prose-reduction
@@ -189,9 +198,10 @@ only the minimal adapter seam the current phase exercises.
 The existing provider-specific native-channel mapping is the shipped Claude
 and Cursor implementation, not a requirement for every future harness. A future
 runtime that admits several model providers must not need a separate workflow
-or silently reroute existing seats. OpenHands integration and any general
-capability registry are deferred; a deterministic adapter using direct result
-capture is sufficient to test the new loop seam without claiming host support.
+or silently reroute existing seats. Phase 6 exercises this distinction with an
+OpenHands adapter and direct result capture. A general capability registry
+remains out of scope; earlier deterministic adapter fixtures do not establish
+OpenHands support.
 
 Move argument parsing and quoting, artifact hashing, result-envelope
 construction, and mechanical persistence into code wherever the host can
@@ -226,7 +236,10 @@ The existing configuration model remains the routing foundation:
 This gives the desired Cursor behavior without a second configuration system:
 inside Cursor, Cursor-channel seats can use Cursor-native subagents while
 Claude-channel seats continue to use the existing Claude CLI provider. The same
-panel configuration remains meaningful in Claude and, later, Codex.
+panel configuration remains meaningful in Claude and, later, OpenHands and Codex.
+OpenHands needs an explicit native runtime selection independent of the seat's
+model provider. Phase 6 will define the smallest such extension without changing
+the meaning of existing `via` values or automatically rerouting existing seats.
 
 The current one-channel-per-seat rule is sufficient for the first-class Cursor
 workflow. Ordered multi-channel fallback stays deferred until a concrete use
@@ -252,7 +265,8 @@ role either. `docs/engine-notes.md` carries the reasoning.
 | Workflow recipes embedded in hooks | Move into Python in the owning loop phase |
 | Claude agent definitions | Retain only as thin native-role adapters where needed |
 | Cursor agent surface | DONE for review and debate: `agents-cursor/` ships four thin roles (reviewer, panelist, scribe, formatter). Review is app-verified, debate is not yet. Advisor and executor roles are deferred |
-| Codex skills and native roles | Add against the proven interface, ahead of the deferred Cursor work |
+| OpenHands SDK agents | Add after Codex through a deterministic adapter; native roles may use different model providers |
+| Codex skills and native roles | Source adapter and live native gates complete; installed discovery remains separate |
 
 The deletion test governs the result: if the workflow module disappeared,
 workflow complexity should reappear across every harness. Deleting a harness
@@ -291,10 +305,9 @@ exception is sanctioned:
 - An OPERATOR-ONLY arm, one needing a GUI, an account action, or a push, never
   blocks engine work. It moves to `docs/operator-followups.md` and stays owed
   there. This is the existing policy in that file, stated here so the two agree.
-- A SCOPE arm with an explicit entry in "Deferred: Cursor work" is rescheduled
-  to the end of the queue. A WHOLE phase may be deferred the same way, which is
-  why the queue runs 7 before 6; a deferred phase does not gate the phases that
-  follow it in number.
+- A SCOPE arm explicitly excluded by the operator does not gate later phases.
+  The former Cursor arms are retained in "Deferred: Cursor work" as historical
+  backlog following the OpenHands pivot; they no longer gate roadmap completion.
 
 For every phase:
 
@@ -530,7 +543,8 @@ OpenHands implementation or mechanically enforced access without host evidence.
 
 ### Phase 5 — Engine-owned build using existing executor routes
 
-Status: implemented and verified in the uncommitted working tree. The Claude
+Status: implemented, verified, committed in `179b815`, and pushed with the
+`6b16ba3` version bump (Crew 0.85.0; marketplace 0.45.0). Not installed. The Claude
 Code CLI gate covers native executor and configured Sol via Codex, real reviews
 and revision, exact-ID continuation, human waits, concurrent reviewers, recovery,
 guards and terminal replay. Evidence limits and measured comparisons are recorded
@@ -565,43 +579,75 @@ remain enforced, executor continuation works where configured, reviewers remain
 fresh, and no host driver owns build policy. The Cursor arm of this gate is
 deferred: see "Deferred: Cursor work".
 
-### Phase 6 — Cursor-native executor and proven lifecycle improvements
-
-DEFERRED to the end of the queue, as deferred item 4. Its scope and exit gate
-live in "Deferred: Cursor work" at the end of this document, where one bullet
-changed: the read-only Cursor advisor it used to inherit from Phase 4 is now
-deferred item 1 and must land first. The number is kept so existing references
-stay valid.
-
 ### Phase 7 — First-class Codex adapter
+
+Status: source adapter implemented in the isolated worktree based on `6b16ba3`;
+unstaged and uncommitted. Synthetic suites and [real native gates](phase-7-codex-evidence.md)
+passed. Initial review findings are fixed; final panel approval is pending. Installed discovery and new automatic
+hook re-entry remain separate, unverified follow-ups; active plugins were not changed.
 
 #### Outcome
 
-Codex becomes the next first-class workflow harness. The interface it reuses was
-proven by Claude, and by the Cursor review seats verified live in the app. The
-Cursor debate seats ship on that same interface but have not been exercised
-there, so they are not offered as evidence.
+Codex runs the existing four Python-owned protocols before OpenHands. Claude's
+proven interface and Cursor's live review evidence inform the seam; unrun Cursor
+debate behavior is not offered as evidence.
 
 #### Scope
 
-- Add thin Codex skill, native-role, result-return, cancellation, and lifecycle
-  adapters.
-- Reuse the same Python workflows, role prompts, `via` configuration, and
-  deterministic fixtures.
-- Support explicit resume everywhere and automatic resume only where the Codex
-  app's real lifecycle mechanics prove it.
-- Enable native read and write routes only at their verified access tiers;
-  existing external providers remain available without nested CLI substitution.
-- Default to independently planned and merged read-only, persistent-loop, and
-  native-write Codex slices. Each slice has its own installed gate, preserves
-  Claude and Cursor, and leaves one production workflow owner.
+- Follow [phase-7-codex-plan.md](phase-7-codex-plan.md), the discoverable source
+  skills and [Codex transport](codex-transport.md).
+- Use canonical role prompts and frozen native reviewer model/effort, with fresh
+  contexts and advisory inherited access. Preserve force-external and named
+  external build selection; configured Sol stays external.
+- Capture the actual final reply through explicit host-written return and the
+  existing capture CLI, without a scribe or speculative transcript parser.
+- Bind actual collaboration handles. An interrupt reports previous status and
+  cannot release an uncertain writer fence.
+- Support explicit journal resume. Native executor rounds are fresh; external
+  exact-conversation continuation remains unchanged. Automatic re-entry and
+  installed discovery claims require observed host evidence.
 
 #### Exit gate
 
-Codex completes review, council/debate, measure-twice, and build through the
-shared engine at its honestly verified native/external and lifecycle tiers. The
-Claude regression gates remain green, and no Cursor behavior already shipped
-regresses.
+The parent runs bounded disposable review/debate, plan promotion, build/review/
+revision, explicit resume and cancellation gates with exact actions, models,
+handles and captures retained. No paid or recursive gates run inside the
+implementation executor. Record the installed discovery gate separately; source
+skills alone do not prove app exposure. Preserve Claude, Cursor and external
+regression coverage. OpenHands follows this gate, rather than being a prerequisite.
+
+### Phase 6 — OpenHands native agents through the shared engine
+
+#### Outcome
+
+OpenHands follows the Codex adapter as a first-class workflow harness. Reviewers,
+panelists, advisors, and executors are native OpenHands SDK agents with explicitly selected
+models. Crew's Python engine drives their work and retains workflow authority.
+
+#### Scope
+
+- Follow [phase-6-openhands-plan.md](phase-6-openhands-plan.md): prove the runtime
+  seam, then read-only workflows, persistent planning, and native-write build.
+- Use a deterministic driver to launch concurrent independent reviewers and
+  capture their returns directly; no model is needed for bookkeeping.
+- Preserve seat/model/route identity, fresh reviewers, executor-only
+  continuation, existing engine guards, and bound human decisions.
+- Isolate optional SDK dependencies from Crew's stdlib-only core. Verify access,
+  cancellation, result capture, and resume against a pinned SDK version.
+- Preserve shipped Claude, Cursor, and external-provider behavior. Existing CLI
+  providers remain available, but do not count as native OpenHands evidence.
+
+#### Exit gate
+
+All four workflows complete through the shared engine with native OpenHands
+roles, including a concurrent multi-model panel and a disposable write/review/
+revision build. Route identity, enforced access, cancellation quiescence,
+explicit resume, and direct result capture have recorded evidence. Automatic
+lifecycle claims require a separate observed gate. No second workflow owner or
+bookkeeping agent is introduced.
+
+The former Phase 6 Cursor-native executor scope is historical backlog under
+"Deferred: Cursor work" and is not a prerequisite.
 
 ### Phase 8 — Cleanup, rebrand, and release
 
@@ -621,9 +667,9 @@ migrated workflow and an evidence-backed support statement.
 - Retain generic `crew` identifiers unless changing one provides a concrete
   product benefit.
 - Refresh and validate the current installed copy in every harness whose
-  validation is runnable at the time: Claude and Codex in 8A, plus any Cursor
-  check that needs no GUI. The Cursor marketplace-refresh validation is F2.4 and
-  is deferred past 8A, so 8A neither requires nor waits on it.
+  validation is runnable at the time: Claude, OpenHands, and Codex in 8A, plus
+  shipped Cursor regression checks that need no GUI. Cursor marketplace-refresh
+  validation (F2.4) is historical backlog outside the active roadmap.
 - Document the execution and lifecycle behavior actually demonstrated in each
   harness.
 - Publish the release notes.
@@ -639,9 +685,9 @@ Every path removed is proven unused; no superseded workflow implementation
 remains for any workflow already migrated; command Markdown, skills, hooks, and
 host adapters carry no workflow prompts or flow decisions; and the installed
 artifacts match the validated source on the harnesses whose installed validation
-is runnable under Phase 8A's scope. The deferred Cursor refresh stays owed at
-F2.4. 8A does not wait on the deferred Cursor work or on any naming change, and it is the last
-scheduled phase before the stop boundary.
+is runnable under Phase 8A's scope. The unrun Cursor refresh is recorded at F2.4
+as historical backlog. 8A does not wait on Cursor expansion or any naming change,
+and it is the last scheduled phase before the stop boundary.
 
 #### Exit gate for 8B (rebrand and release)
 
@@ -653,24 +699,23 @@ this roadmap.
 
 All four workflows use the same Python engine in every harness the roadmap
 claims to support, at the tiers each harness has actually demonstrated; F3.0 has
-run; and 8B has shipped. This gate is reached only after the deferred Cursor
-work is completed, or formally dropped.
-
-Formally dropping it is not a silent omission: it means editing "Desired
-outcome" and "Overall completion criteria" in the same change, so the roadmap
-stops claiming a harness it no longer intends to support. Until that edit
-happens, those sections stand and the deferred work is owed.
+run; and 8B has shipped. The 2026-10-03 pivot formally removes unfinished Cursor
+expansion from this gate: "Desired outcome" and "Overall completion criteria"
+now name OpenHands in its place. Shipped Cursor behavior retains regression
+coverage and its existing, limited support statement.
 
 ## Deferred: Cursor work
 
-Everything in this section is queued AFTER Phase 8A. **Stop before starting it
-and check with the operator.**
+**Historical backlog, outside the active roadmap as of 2026-10-03.** OpenHands
+replaces this future expansion. These items are not scheduled or owed for this
+roadmap's completion. **Do not start them without a new operator request.**
 
 The recovered scheduling decision is dated 2026-09-03. It deferred remaining
 Cursor-specific work while shared-engine work continued. The historical draft
 motivated that choice with operator-reported model-access uncertainty; this
 roadmap does not assert that report as a current provider fact. The scheduling
-choice is retained, and changing it requires an explicit rescheduling decision.
+choice was superseded by the operator's 2026-10-03 OpenHands pivot. The details
+below preserve the earlier scope and evidence gaps rather than promise delivery.
 
 Existing Cursor review and debate seats, the four `agents-cursor/` role adapters,
 host detection, and hook output shapes remain shipped. Review is app-verified;
@@ -710,7 +755,7 @@ Order depends on the machine. Where an external write-capable executor CLI is
 installed and verified, this item can pass on its own. If that route is absent
 when the gate runs, item 4 lands first and supplies the route this arm verifies.
 
-### Deferred item 4: Phase 6, the Cursor-native executor
+### Deferred item 4: former Phase 6, the Cursor-native executor
 
 #### Outcome
 
@@ -758,10 +803,13 @@ The roadmap intentionally provides useful stopping points:
    Python-owned, proven on Claude.
 3. **After Phase 5:** all four workflows are Python-owned, proven on Claude,
    with every host-neutral decision inside the engine.
-4. **After Phase 7:** Claude and Codex share all core workflows.
-5. **After Phase 8A:** one production implementation of each workflow. The
-   outstanding host work is then the deferred Cursor section plus F3.0, the
-   Claude gate on the installed plugin, which is owed and not deferred.
+4. **After Phase 7:** Claude and Codex share the core protocols at their observed
+   host tiers; installed/native gates must be recorded before claiming this increment.
+5. **After Phase 6:** Claude, Codex and OpenHands share all core workflows, with
+   native OpenHands roles and deterministic orchestration.
+6. **After Phase 8A:** one production implementation of each workflow. F3.0, the
+   Claude gate on the installed plugin, remains owed if not already completed.
+   Cursor expansion is historical backlog outside this roadmap.
 
 These are completed increments, not partially installed future designs.
 
@@ -775,7 +823,8 @@ The roadmap is complete when:
    same narrow interface;
 4. existing configuration, especially seats, panels, and `via`, drives all
    three harnesses;
-5. Claude Code, Cursor, and Codex can each complete all four workflows;
+5. Claude Code, OpenHands, and Codex can each complete all four workflows, while
+   shipped Cursor behavior retains its regression coverage;
 6. native versus external execution and automatic versus explicit resume are
    honest capability differences, not separate workflow implementations;
 7. routing precedence, frozen targets, strict-majority quorum, failure

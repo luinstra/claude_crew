@@ -4476,6 +4476,17 @@ def cmd_measure_protocol(args: argparse.Namespace) -> int:
                 path.unlink()
             value = measure.step_to_dict(step)
         elif command in {"review-native-bind", "review-native-capture"}:
+            if transport.native_action_channel(_review_ref_from_args(args), args.action_id) == "codex":
+                if command.endswith("-capture"):
+                    raise review_workflow.WorkflowError("unsupported_native_capture", "Codex uses review-capture with its observed final reply")
+                from multiagent import codex_native_transport as codex_native
+                if args.output_file is not None:
+                    raise review_workflow.WorkflowError("unsupported_native_capture", "Codex exposes no output file")
+                value = codex_native.bind_native_launch(codex_native.NativeLaunch(_review_ref_from_args(args), args.action_id, args.handle))
+                print(json.dumps(value, ensure_ascii=False))
+                return 0
+            if args.output_file is None:
+                raise review_workflow.WorkflowError("invalid_native_binding", f"Claude {'binding' if command.endswith('-bind') else 'capture'} requires its observed output file")
             launch = native.NativeLaunch(_review_ref_from_args(args), args.action_id, args.handle, Path(args.output_file))
             value = (native.bind_native_launch(launch) if command.endswith("-bind") else
                      review_workflow.review_step_to_dict(native.capture_native_return(launch,
@@ -4485,7 +4496,8 @@ def cmd_measure_protocol(args: argparse.Namespace) -> int:
             judgment = transport.SynthesisJudgment(args.verdict, args.minor_only) if args.verdict else None
             value = review_workflow.review_step_to_dict(transport.capture_review_return(
                 _review_ref_from_args(args), args.action_id, content, status=args.status,
-                judgment=judgment, diagnostic=args.diagnostic, capture_path=args.returned_file))
+                judgment=judgment, diagnostic=args.diagnostic, capture_path=args.returned_file,
+                handle=args.handle, completion_observed=args.completion_observed, launch_refused=args.launch_refused))
         else:
             ref = measure.parse_measure_ref({"schema": 1, "session_segment": args.session_segment,
                                             "loop_instance_id": args.loop_instance_id})
@@ -4501,8 +4513,20 @@ def cmd_measure_protocol(args: argparse.Namespace) -> int:
             elif command == "measure-twice-capture":
                 content = Path(args.returned_file).read_bytes() if args.returned_file else b""
                 value = measure.step_to_dict(transport.capture_measure_return(ref, args.action_id, content,
-                    status=args.status, diagnostic=args.diagnostic, capture_path=args.returned_file))
+                    status=args.status, diagnostic=args.diagnostic, capture_path=args.returned_file,
+                    handle=args.handle, completion_observed=args.completion_observed, launch_refused=args.launch_refused))
             elif command in {"measure-twice-native-bind", "measure-twice-native-capture"}:
+                if transport.native_action_channel(ref, args.action_id) == "codex":
+                    if command.endswith("-capture"):
+                        raise review_workflow.WorkflowError("unsupported_native_capture", "Codex uses measure-twice-capture with its observed final reply")
+                    from multiagent import codex_native_transport as codex_native
+                    if args.output_file is not None:
+                        raise review_workflow.WorkflowError("unsupported_native_capture", "Codex exposes no output file")
+                    value = codex_native.bind_native_launch(codex_native.NativeLaunch(ref, args.action_id, args.handle))
+                    print(json.dumps(value, ensure_ascii=False))
+                    return 0
+                if args.output_file is None:
+                    raise review_workflow.WorkflowError("invalid_native_binding", f"Claude {'binding' if command.endswith('-bind') else 'capture'} requires its observed output file")
                 launch = native.NativeLaunch(ref, args.action_id, args.handle, Path(args.output_file))
                 value = (native.bind_native_launch(launch) if command.endswith("-bind") else
                          measure.step_to_dict(native.capture_native_return(launch,
@@ -4569,7 +4593,8 @@ def cmd_build_protocol(args: argparse.Namespace) -> int:
                 step = build.submit_build_action(result)
             elif verb == "build-capture":
                 step = build.capture_build_file(ref, args.action_id, Path(anchor_path(args.return_file)),
-                    status=args.status, diagnostic=args.diagnostic)
+                    status=args.status, diagnostic=args.diagnostic,
+                    handle=args.handle, completion_observed=args.completion_observed, launch_refused=args.launch_refused)
             elif verb == "build-native-bind":
                 print(json.dumps(build.bind_build_native(ref, args.action_id, args.handle, args.output_file)))
                 return 0
@@ -4621,9 +4646,12 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--return-file", required=True)
             command.add_argument("--status", choices=("ok", "failed", "timeout", "cancelled"), default="ok")
             command.add_argument("--diagnostic")
+            command.add_argument("--handle")
+            command.add_argument("--completion-observed", action="store_true")
+            command.add_argument("--launch-refused", action="store_true")
         if verb in {"build-native-bind", "build-native-capture"}:
             command.add_argument("--handle", required=True)
-            command.add_argument("--output-file", required=True)
+            command.add_argument("--output-file", required=verb == "build-native-capture")
         if verb == "build-native-capture":
             command.add_argument("--completion-observed", action="store_true")
         if verb in {"build-recover", "build-decide"}:
@@ -4791,7 +4819,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     def add_native_capture(parser: argparse.ArgumentParser, command: str) -> None:
         parser.add_argument("--handle", required=True)
-        parser.add_argument("--output-file", required=True)
+        parser.add_argument("--output-file", required=command.endswith("-capture"))
         if command.endswith("-capture"):
             parser.add_argument("--completion-observed", action="store_true")
             parser.add_argument("--status", choices=("ok", "failed", "timeout", "cancelled"), default="ok")
@@ -4828,6 +4856,9 @@ def build_parser() -> argparse.ArgumentParser:
             measure_parser.add_argument("-f", "--returned-file", type=anchor_path)
             measure_parser.add_argument("--status", choices=("ok", "failed", "timeout", "cancelled"), default="ok")
             measure_parser.add_argument("--diagnostic")
+            measure_parser.add_argument("--handle")
+            measure_parser.add_argument("--completion-observed", action="store_true")
+            measure_parser.add_argument("--launch-refused", action="store_true")
 
     capture = sub.add_parser("review-capture", help="hash and submit an issued native return directly")
     add_review_ref(capture)
@@ -4835,6 +4866,9 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("-f", "--returned-file", type=anchor_path)
     capture.add_argument("--status", choices=("ok", "failed", "timeout", "cancelled"), default="ok")
     capture.add_argument("--diagnostic")
+    capture.add_argument("--handle")
+    capture.add_argument("--completion-observed", action="store_true")
+    capture.add_argument("--launch-refused", action="store_true")
     capture.add_argument("--verdict", choices=("APPROVED", "REVISE", "REJECT"))
     capture.add_argument("--minor-only", action="store_true")
     capture.set_defaults(func=cmd_measure_protocol, measure_command="review-capture")

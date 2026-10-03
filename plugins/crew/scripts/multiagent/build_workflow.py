@@ -161,6 +161,7 @@ class BuildWorkItem:
     commands: dict[str, tuple[str, ...]]
     review_ref: review.ReviewRef | None = None
     review_item: review.WorkItem | None = None
+    native_transport: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -503,8 +504,9 @@ def journal_from_dict(value: object) -> BuildJournal:
         frozen.role == "crew:executor"
         and (
             frozen.executor != "crew:executor"
-            or frozen.host != "claude"
-            or frozen.channel != "claude"
+            or frozen.host not in {"claude", "codex"}
+            or frozen.channel != frozen.host
+            or (frozen.host == "codex" and frozen.resume_executor)
             or any(
                 v is not None for v in (frozen.provider, frozen.model, frozen.reasoning)
             )
@@ -720,20 +722,20 @@ def _park(
 def _freeze_executor(selection: execution.ExecutorSelection) -> FrozenExecutor:
     host = channels.current_host()
     if selection.executor == "crew:executor":
-        if host != "claude" or selection.channel != "claude":
+        if host not in {"claude", "codex"} or selection.channel != host:
             raise review.WorkflowError(
                 "route_unavailable",
-                "crew:executor requires the actual Claude executor role",
+                "crew:executor requires an admitted Claude or Codex native executor route",
             )
         return FrozenExecutor(
             selection.executor,
             host,
-            "claude",
+            host,
             None,
             None,
             None,
             "crew:executor",
-            selection.resume_executor,
+            selection.resume_executor if host == "claude" else False,
         )
     spec = seats.seat_spec(selection.executor)
     return FrozenExecutor(
@@ -981,7 +983,7 @@ def _item(ref: BuildRef, journal: BuildJournal) -> BuildWorkItem:
         "recover": recovery_argv(ref, action.action_id),
     }
     if not external:
-        for name in ("bind", "capture"):
+        for name in (("bind",) if frozen.host == "codex" else ("bind", "capture")):
             commands[f"native_{name}"] = (
                 *_owner_argv(ref, f"build-native-{name}"),
                 "--action-id",
@@ -994,6 +996,12 @@ def _item(ref: BuildRef, journal: BuildJournal) -> BuildWorkItem:
             "--return-file",
             str(_root(ref) / "host-return" / f"{action.action_id}.txt"),
         )
+    native_transport = None
+    if not external and frozen.host == "codex":
+        from multiagent.codex_native_transport import launch_metadata
+        native_transport = launch_metadata(ref, action.action_id, frozen.role,
+            frozen.model, frozen.reasoning, action.prompt_path,
+            str(_root(ref) / "host-return" / f"{action.action_id}.txt"))
     return BuildWorkItem(
         ref,
         action.action_id,
@@ -1008,6 +1016,7 @@ def _item(ref: BuildRef, journal: BuildJournal) -> BuildWorkItem:
         journal.policy.timeout_seconds if external else None,
         journal.policy.timeout_seconds + 60 if external else None,
         commands,
+        native_transport=native_transport,
     )
 
 
@@ -1313,6 +1322,7 @@ def _review_item(
         commands,
         review_ref,
         item,
+        item.native_transport,
     )
 
 
@@ -2137,23 +2147,38 @@ def capture_build_return(
     *,
     status: str = "ok",
     diagnostic: str | None = None,
+    handle: str | None = None,
+    completion_observed: bool = False,
+    launch_refused: bool = False,
 ) -> BuildStep:
-    def native_only(_data: dict, journal: BuildJournal) -> None:
+    after = execution.observe_workspace(str(crew_base().resolve()))
+
+    def retain_native(data: dict, journal: BuildJournal) -> BuildResult:
+        from multiagent.workflow_transport import require_capture_flags
+        require_capture_flags(journal.executor.host, handle, completion_observed, launch_refused)
         if journal.executor.role != "crew:executor":
             raise review.WorkflowError(
                 "invalid_action",
                 "host capture cannot settle an external provider action",
             )
+        if journal.executor.host == "codex":
+            from multiagent.codex_native_transport import require_capture
 
-    _transaction(ref, native_only)
-    result = _retain_completion(
-        ref,
-        action_id,
-        content,
-        status=status,
-        after=execution.observe_workspace(str(crew_base().resolve())),
-        diagnostic=diagnostic,
-    )
+            if launch_refused and journal.action and journal.action.handle is not None:
+                raise review.WorkflowError(
+                    "invalid_native_binding", "bound writer cannot be reported as unlaunched"
+                )
+            require_capture(
+                _safe(_root(ref) / "native-transport" / "anchor", ref).parent,
+                action_id, handle, completion_observed, status=status,
+                diagnostic=diagnostic, launch_refused=launch_refused, ref=ref,
+            )
+        return _retain_completion_locked(
+            data, journal, ref, action_id, content,
+            status=status, after=after, diagnostic=diagnostic,
+        )
+
+    result = _transaction(ref, retain_native)
     return submit_build_action(result)
 
 
@@ -2164,6 +2189,9 @@ def capture_build_file(
     *,
     status: str = "ok",
     diagnostic: str | None = None,
+    handle: str | None = None,
+    completion_observed: bool = False,
+    launch_refused: bool = False,
 ) -> BuildStep:
     """Read only the current native action's issued host-return artifact."""
 
@@ -2190,15 +2218,24 @@ def capture_build_file(
 
     content = _transaction(ref, read)
     return capture_build_return(
-        ref, action_id, content, status=status, diagnostic=diagnostic
+        ref, action_id, content, status=status, diagnostic=diagnostic,
+        handle=handle, completion_observed=completion_observed, launch_refused=launch_refused,
     )
 
 
 def bind_build_native(
-    ref: BuildRef, action_id: str, handle: str, output_file: str
+    ref: BuildRef, action_id: str, handle: str, output_file: str | None = None
 ) -> dict[str, object]:
+    from multiagent.workflow_transport import native_action_channel
+    if native_action_channel(ref, action_id) == "codex":
+        from multiagent.codex_native_transport import NativeLaunch, bind_native_launch
+        if output_file is not None:
+            raise review.WorkflowError("unsupported_native_capture", "Codex exposes no output file")
+        return bind_native_launch(NativeLaunch(ref, action_id, handle))
     from multiagent.claude_native_transport import NativeLaunch, bind_native_launch
 
+    if output_file is None:
+        raise review.WorkflowError("invalid_native_binding", "Claude binding requires its observed output file")
     return bind_native_launch(NativeLaunch(ref, action_id, handle, Path(output_file)))
 
 
@@ -2211,6 +2248,9 @@ def capture_build_native(
     completion_observed: bool,
 ) -> BuildStep:
     from multiagent.claude_native_transport import NativeLaunch, capture_native_return
+    from multiagent.workflow_transport import native_action_channel
+    if native_action_channel(ref, action_id) == "codex":
+        raise review.WorkflowError("unsupported_native_capture", "Codex uses build-capture with its observed final reply")
 
     return capture_native_return(
         NativeLaunch(ref, action_id, handle, Path(output_file)),

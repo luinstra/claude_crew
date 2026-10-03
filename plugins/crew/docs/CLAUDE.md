@@ -90,7 +90,7 @@ For `[seats.<name>]`, `via = ["<channel>"]` is the current execution key and mus
 For tasks requiring multi-model panel verification before completion:
 
 1. Start with `/crew:build "your task description"`
-2. Python issues implementation and revision actions through the native Claude executor or the configured external write route
+2. Python issues implementation and revision actions through the native Claude/Codex executor or the configured external write route
 3. A fresh multi-model panel verifies the completed executor report. Python applies the verdict and issues the next `work_batch`, `waiting`, `needs_input` or `terminal` step; completion advisories require the exact bound human decision
 4. Use `/crew:cancel-build` to exit early if needed
 

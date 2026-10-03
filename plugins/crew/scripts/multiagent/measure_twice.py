@@ -233,26 +233,40 @@ def parse_measure_result(value: object) -> MeasureResult:
     return result
 
 
-def work_to_dict(item: MeasureWorkItem) -> dict[str, object]:
+def work_to_dict(item: MeasureWorkItem, *, transport: bool = False) -> dict[str, object]:
     value = dataclasses.asdict(item)
     value["owner"] = ref_to_dict(item.owner)
     value["review_ref"] = review.review_ref_to_dict(item.review_ref) if item.review_ref else None
     value["review_item"] = review.work_item_to_dict(item.review_item) if item.review_item else None
+    if transport and item.review_item and item.review_item.native_transport:
+        value["native_transport"] = item.review_item.native_transport
+    elif transport and item.kind == "advisor" and item.channel == "codex":
+        from multiagent.codex_native_transport import launch_metadata
+        value["native_transport"] = launch_metadata(item.owner, item.action_id, item.role,
+            item.model, None, item.prompt_path, item.returned_path)
     return value
+
+
+def issued_argv(item: MeasureWorkItem) -> dict[str, tuple[str, ...]]:
+    executable = str(Path(__file__).resolve().parents[2] / "crew")
+    owner = ("--session-segment", item.owner.session_segment, "--loop-instance-id", item.owner.loop_instance_id)
+    if item.review_ref:
+        commands = review.issued_review_commands(item.review_ref, item.review_item)
+    else:
+        flags = (*owner, "--action-id", item.action_id)
+        commands = {"claim": (executable, "measure-twice-claim", *flags),
+                "capture": (executable, "measure-twice-capture", *flags),
+                "native_bind": (executable, "measure-twice-native-bind", *flags),
+                "recover": (executable, "measure-twice-recover", *flags)}
+        if item.channel != "codex":
+            commands["native_capture"] = (executable, "measure-twice-native-capture", *flags)
+    commands["next"] = (executable, "measure-twice-next", *owner)
+    return commands
 
 
 def issued_commands(item: MeasureWorkItem) -> dict[str, str]:
     from multiagent.workflow_transport import render_argv
-    executable = str(Path(__file__).resolve().parents[2] / "crew")
-    if item.review_ref:
-        return {name: render_argv(argv) for name, argv in review.issued_review_commands(item.review_ref, item.review_item).items()}
-    flags = ("--session-segment", item.owner.session_segment, "--loop-instance-id", item.owner.loop_instance_id,
-             "--action-id", item.action_id)
-    return {"claim": render_argv((executable, "measure-twice-claim", *flags)),
-            "capture": render_argv((executable, "measure-twice-capture", *flags)),
-            "native_bind": render_argv((executable, "measure-twice-native-bind", *flags)),
-            "native_capture": render_argv((executable, "measure-twice-native-capture", *flags)),
-            "recover": render_argv((executable, "measure-twice-recover", *flags))}
+    return {name: render_argv(argv) for name, argv in issued_argv(item).items()}
 
 
 def step_to_dict(step: MeasureStep) -> dict[str, object]:
@@ -264,7 +278,8 @@ def step_to_dict(step: MeasureStep) -> dict[str, object]:
     if step.question:
         value["question"] = dataclasses.asdict(step.question)
     if step.work_items:
-        value["work_items"] = [{**work_to_dict(item), "commands": issued_commands(item)} for item in step.work_items]
+        value["work_items"] = [{**work_to_dict(item, transport=True), "commands": issued_commands(item),
+            "commands_argv": {name: list(argv) for name, argv in issued_argv(item).items()}} for item in step.work_items]
     if step.in_flight:
         value["in_flight"] = list(step.in_flight)
     if step.outcome:
@@ -317,15 +332,22 @@ def _question(value: object) -> MeasureQuestion | None:
 
 
 def parse_measure_work(value: object) -> MeasureWorkItem:
+    metadata = None
+    if isinstance(value, dict) and "native_transport" in value:
+        metadata = value["native_transport"]
+        value = {key: part for key, part in value.items() if key != "native_transport"}
     fields = _exact(value, MeasureWorkItem)
     if (any(not isinstance(fields[key], str) for key in ("action_id", "kind", "driver", "access", "prompt_path"))
             or any(fields[key] is not None and not isinstance(fields[key], str)
                    for key in ("role", "model", "channel", "staging_path", "submission_path", "returned_path"))
             or (fields["return_transport"] is not None and not isinstance(fields["return_transport"], dict))):
         raise review.WorkflowError("invalid_journal", "measure work item fields are invalid")
-    return MeasureWorkItem(**{**fields, "owner": parse_measure_ref(fields["owner"]),
+    item = MeasureWorkItem(**{**fields, "owner": parse_measure_ref(fields["owner"]),
         "review_ref": review.parse_review_ref(fields["review_ref"]) if fields["review_ref"] is not None else None,
         "review_item": review.parse_work_item(fields["review_item"]) if fields["review_item"] is not None else None})
+    if metadata is not None and metadata != work_to_dict(item, transport=True).get("native_transport"):
+        raise review.WorkflowError("invalid_journal", "native transport differs from the issued action")
+    return item
 
 
 def journal_from_dict(value: object) -> MeasureJournal:
@@ -939,7 +961,7 @@ def claim_measure_action(ref: MeasureRef, action_id: str) -> dict[str, object]:
         _verify_advisor_route(journal)
         action.status = "claimed"
         data["awaiting_input"] = False
-        return {"authorization": "spawn", "action_status": "claimed", "work_item": work_to_dict(action.item)}
+        return {"authorization": "spawn", "action_status": "claimed", "work_item": work_to_dict(action.item, transport=True)}
     return _transaction(ref, claim)
 
 
@@ -979,6 +1001,8 @@ def submit_measure_action(request: MeasureSubmission) -> MeasureStep:
             raise review.WorkflowError("invalid_submission", "advisor action is not actively claimed")
         root = _namespace(result.ref, journal)
         transport_receipt = _safe_path(root / "transport-receipts" / f"{result.action_id}.json", root)
+        if journal.advisor_channel == "codex" and not transport_receipt.exists():
+            raise review.WorkflowError("invalid_submission", "Codex advisor returns require owned host-written capture")
         if transport_receipt.exists():
             try:
                 record = json.loads(transport_receipt.read_bytes())
