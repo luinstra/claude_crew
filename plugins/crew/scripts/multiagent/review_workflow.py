@@ -34,7 +34,7 @@ from multiagent.providers import (
 )
 
 SCHEMA = 1
-HOSTS = frozenset({"claude", "cursor", "codex", "unknown"})
+HOSTS = frozenset({"claude", "cursor", "codex", "openhands", "unknown"})
 CODEX_NATIVE_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
 ACTION_RE = re.compile(r"^attempt-[0-9]{4}:(reviewer|formatter|synthesis):[0-9]{4}$")
 ATTEMPT_RE = re.compile(r"^attempt-[0-9]{4}$")
@@ -1019,6 +1019,9 @@ def _resolve_seats(
         )
         if resolved is None:
             continue
+        if resolved.native and policy.host == "openhands":
+            if not isinstance(spec.model, str) or "/" not in spec.model or any(c.isspace() for c in spec.model):
+                raise WorkflowError("unsupported_native_model", "OpenHands seats require an explicit provider/model SDK ID")
         if has_no_route_here(resolved, policy):
             # Warn and drop before the freeze, so quorum counts what runs.
             at_model = (
@@ -1763,6 +1766,13 @@ class HostRoles:
 
 
 _HOST_ROLES: dict[str, HostRoles] = {
+    "openhands": HostRoles(
+        channel="openhands", scribe_role=None, scribe_model=None,
+        formatter_role=None, formatter_model=None,
+        reviewer_role_name="crew:reviewer", panelist_role_name="crew:panelist",
+        native_pin_field="model", single_seat_per_native_pin=False,
+        reviewer_access=ACCESS_ENFORCED, formatter_access=ACCESS_ENFORCED,
+    ),
     "codex": HostRoles(
         channel="codex", scribe_role=None, scribe_model=None,
         formatter_role=None, formatter_model=None,
@@ -1875,7 +1885,8 @@ class RoutePolicy:
         split that called a forced channel native would be a third view of the
         one routing fact the rest of this module keeps in a single place.
         """
-        channel = channels.task_native_channel(self.host)
+        channel = (channels.native_channel(self.host) if self.host == "openhands"
+                   else channels.task_native_channel(self.host))
         if channel is None or channel in self.force_external:
             return None
         return channel
@@ -1910,6 +1921,9 @@ def native_roles(policy: RoutePolicy) -> HostRoles | None:
     roles = _HOST_ROLES.get(policy.host)
     if roles is None or roles.channel in policy.force_external:
         return None
+    if policy.host == "openhands":
+        return dataclasses.replace(roles, advisor_role="crew:advisor",
+                                   advisor_model=config.openhands_role_model("advisor"))
     return roles
 
 
@@ -2039,7 +2053,7 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
             roles.seat_role_name(prompt_mode) if roles is not None else None,
             kind="reviewer", seat=seat, model=model, host=policy.host,
         )
-    if native and policy.host != "codex":
+    if native and policy.host not in {"codex", "openhands"}:
         _require_native_role(
             roles.scribe_role if roles is not None else None,
             # The SCRIBE's own model: the transport is what would fail to spawn,
@@ -2059,7 +2073,7 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
     result_path = root / "results" / f"{ordinal:04d}.json"
     submission_path = root / "submissions" / f"{digest}.json"
     descendants = [(prompt_path, f"reviewer action {action_id} prompt")]
-    if native and policy.host != "codex":
+    if native and policy.host not in {"codex", "openhands"}:
         descendants.extend((
             (transport_prompt, f"reviewer action {action_id} scribe prompt"),
             (primary_ingress, f"reviewer action {action_id} scribe ingress"),
@@ -2079,7 +2093,7 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
             create_parents=True,
         )
     _write_run_text(run, prompt_path, prompt, f"reviewer action {action_id} prompt")
-    if native and policy.host != "codex":
+    if native and policy.host not in {"codex", "openhands"}:
         _write_run_text(
             run,
             transport_prompt,
@@ -2102,7 +2116,7 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
         "return_transport": ({
             "primary": {"kind": "host_write", "ingress_path": str(fallback_ingress)},
             "fallback": {"kind": "host_write", "ingress_path": str(fallback_ingress)},
-        } if policy.host == "codex" else {
+        } if policy.host in {"codex", "openhands"} else {
             # Reached only when the mint above found a role, which it cannot do
             # without a role table, so there is no roleless case to guard here.
             "primary": {"kind": "scribe",
@@ -3369,7 +3383,7 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
                 primary_ingress = root / "ingress" / "scribe" / f"{digest}.md"
                 fallback_ingress = root / "ingress" / "host-write" / f"{digest}.md"
                 transport_prompt = root / "transport" / f"scribe-{ordinal:04d}.txt"
-                if identity["host"] == "codex":
+                if identity["host"] in {"codex", "openhands"}:
                     expected = {"kind": "host_write", "ingress_path": str(fallback_ingress)}
                     if transport != {"primary": expected, "fallback": expected}:
                         _corrupt_workflow(f"native reviewer action {action_id!r} has invalid host transport")
@@ -3391,7 +3405,7 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
                     or transport["fallback"].get("kind") != "host_write"
                 ):
                     _corrupt_workflow(f"native reviewer action {action_id!r} has invalid transport")
-                if identity["host"] != "codex":
+                if identity["host"] not in {"codex", "openhands"}:
                     _validate_issued_path(run, transport["primary"]["prompt_template_path"], transport_prompt,
                                           f"reviewer action {action_id} scribe prompt", required_file=True)
                     _validate_issued_path(run, transport["primary"]["ingress_path"], primary_ingress,
@@ -3539,7 +3553,7 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
                 expected,
                 f"reviewer action {action_id} prompt",
             )
-            if action["driver"] == ActionDriver.NATIVE and identity["host"] != "codex":
+            if action["driver"] == ActionDriver.NATIVE and identity["host"] not in {"codex", "openhands"}:
                 ingress = action["return_transport"]["primary"]["ingress_path"]
                 _read_authoritative_prompt(
                     expected_transport_prompts[action_id],
@@ -4743,8 +4757,8 @@ def submit_review(request: SubmissionRequest) -> ReviewStep:
                 "typed HostResult does not match the issued submission file",
             )
         capture_receipt = run / "attempts" / result.ref.attempt_id / "transport-receipts" / f"{_hash_action(result.action_id)}.json"
-        if action["driver"] == "native" and action["channel"] == "codex" and not capture_receipt.exists():
-            raise WorkflowError("invalid_submission", "Codex native returns require owned host-written capture")
+        if action["driver"] == "native" and action["channel"] in {"codex", "openhands"} and not capture_receipt.exists():
+            raise WorkflowError("invalid_submission", "Direct native returns require owned host-written capture")
         if capture_receipt.exists():
             try:
                 capture_receipt = _prepare_run_descendant(run, capture_receipt, "capture receipt",

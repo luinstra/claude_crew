@@ -4504,12 +4504,14 @@ print(json.dumps(results))
         def source(module: str) -> str:
             return (providers_dir / f"{module}.py").read_text(encoding="utf-8")
 
-        # Every channel needs an explicit row: a missing one would quietly take
+        # Every external channel needs an explicit row: a missing one would quietly take
         # the advisory fallback instead of being noticed here.
         self.assertEqual(
             set(review_workflow._CHANNEL_ACCESS),
-            set(seats.CHANNEL_TO_LEGACY_KIND),
+            set(seats.CHANNEL_TO_LEGACY_KIND) - {"openhands"},
         )
+        # OpenHands has no external provider; its native capability tier is in HostRoles.
+        self.assertEqual(review_workflow._HOST_ROLES["openhands"].reviewer_access, review_workflow.ACCESS_ENFORCED)
         # codex refuses the write in its sandbox; cursor's plan mode applies no
         # edits; the claude CLI is held by plan mode plus a tool allowlist.
         self.assertIn('sandbox: str = "read-only"', source("codex"))

@@ -258,7 +258,7 @@ def issued_argv(item: MeasureWorkItem) -> dict[str, tuple[str, ...]]:
                 "capture": (executable, "measure-twice-capture", *flags),
                 "native_bind": (executable, "measure-twice-native-bind", *flags),
                 "recover": (executable, "measure-twice-recover", *flags)}
-        if item.channel != "codex":
+        if item.channel not in {"codex", "openhands"}:
             commands["native_capture"] = (executable, "measure-twice-native-capture", *flags)
     commands["next"] = (executable, "measure-twice-next", *owner)
     return commands
@@ -1001,7 +1001,7 @@ def submit_measure_action(request: MeasureSubmission) -> MeasureStep:
             raise review.WorkflowError("invalid_submission", "advisor action is not actively claimed")
         root = _namespace(result.ref, journal)
         transport_receipt = _safe_path(root / "transport-receipts" / f"{result.action_id}.json", root)
-        if journal.advisor_channel == "codex" and not transport_receipt.exists():
+        if journal.advisor_channel in {"codex", "openhands"} and not transport_receipt.exists():
             raise review.WorkflowError("invalid_submission", "Codex advisor returns require owned host-written capture")
         if transport_receipt.exists():
             try:

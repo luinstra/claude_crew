@@ -845,3 +845,19 @@ def panels() -> dict[str, list[str]] | None:
     if repo:
         merged.update(repo)  # per-repo wins per NAME
     return merged or None
+
+
+def openhands_role_model(role: str) -> str | None:
+    """Explicit SDK model pin for an OpenHands advisor or builtin executor."""
+    if role not in {"advisor", "executor"}:
+        raise ValueError("unknown OpenHands role")
+    key = f"{role}_model"
+    for layer, data in raw_layers():
+        table = data.get("openhands", {})
+        value = table.get(key) if isinstance(table, dict) else None
+        if value is None:
+            continue
+        if isinstance(value, str) and "/" in value and not any(c.isspace() for c in value):
+            return value
+        _warn_once(f"openhands:{key}:{layer}", f"[openhands].{key} requires an explicit provider/model SDK ID")
+    return None

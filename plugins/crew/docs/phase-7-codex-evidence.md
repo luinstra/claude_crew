@@ -261,3 +261,20 @@ contract checks then passed. No runtime routing failure remained. Both new
 Python files pass Ruff; all 14 changed Python files parse with Python 3.11 grammar,
 and `git diff --check` passes. The deliverable branch is `codex/native-integration`;
 the primary checkout remains on its existing integration branch.
+
+## Reloaded release smoke, 2026-10-03
+
+At the operator's request, installed the committed Crew 0.86.0 from isolated
+branch `codex/native-integration` (`3b98e45`) as the real `crew@claude-crew` plugin.
+Codex reported it installed and enabled with all eight Codex skills.
+
+A fresh disposable Codex thread `01a1048c-ca83-7d81-ac9c-4522bfb1068d` ran the
+installed SessionStart and Stop hooks from the 0.86.0 cache. It emitted
+`GATE_FIRST`, received the blocking Stop hook, cancelled its own unclaimed build,
+and emitted `GATE_REENTERED` without a second user turn. The final Stop completed;
+the build was cancelled with `writer_fence=null`. The exact hook sequence was
+`sessionStart/completed`, `stop/blocked`, `stop/completed`.
+
+This was a bounded installed lifecycle smoke, not another full native panel.
+The original checkout and other active workflow state were untouched. Evidence
+is retained locally under `.crew/codex-reloaded-gate-20261003/`.

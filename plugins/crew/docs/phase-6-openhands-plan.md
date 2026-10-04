@@ -1,10 +1,12 @@
 # Phase 6: OpenHands native agent adapter
 
-Status: draft plan, 2026-10-03. Scheduled after the Codex adapter and its parent-owned
-gates. No OpenHands implementation or live gate has run.
-Baseline: Phase 5 `179b815`, published as `6b16ba3` on
-`codex/multi-harness-engine` (Crew 0.85.0; marketplace 0.45.0). This branch has
-not been merged into `main` or installed. Build on that engine, not older main.
+Status: initial file-tool adapter implemented and verified offline, 2026-10-03.
+Codex 0.86.0 is installed and its reloaded-plugin smoke passed.
+Baseline: `3b98e45` on `codex/native-integration` (Crew 0.86.0; marketplace 0.46.0).
+The optional SDK 1.51.0 runtime, engine bridge, command entry point and tests are
+in `plugins/crew/adapters/openhands`. See [evidence](phase-6-openhands-evidence.md).
+Live provider verification, sandboxed command tools and cross-action executor
+continuation remain open. This increment does not claim full Phase 6 completion.
 
 ## Outcome and boundary
 
@@ -25,7 +27,7 @@ Claude/Cursor behavior. Add only the explicit runtime selection needed to pair
 an OpenHands agent with a model. Do not reinterpret existing `via` values, infer
 native routing from a provider name, silently substitute models, or change global
 defaults. A CLI-only seat cannot become an SDK seat until a supported model and
-authentication route are explicitly configured. Prove the mapping before edits.
+authentication route are explicitly configured. Validate the mapping before launch.
 
 Migration, legacy formats, upgrade guidance, special restart machinery, a general
 runtime registry, remaining Cursor expansion, and rebranding are out of scope.
@@ -109,3 +111,35 @@ model mix is descriptive evidence, not a speedup claim. Completion means all fou
 workflows work through one engine with native OpenHands roles and no regression
 to shipped routes. Codex is the preceding roadmap increment, per the operator's
 updated sequencing; phase numbers are retained.
+
+## Seam findings to carry into implementation
+
+SDK 1.51.0 can run concurrent native conversations and expose exact finish text.
+Its interrupt acknowledgement does not prove tool quiescence: the offline probe
+observed a write after the conversation stopped. Preserve writer fences until
+owned tools and descendants actually settle. Ambient plugin discovery also needs
+isolation; explicit `tools=[]` alone cannot establish a production read-only
+boundary when user/project plugins can add hooks and MCP tools.
+
+Keep SDK configuration and persistence in a dedicated adapter process using
+`OH_PERSISTENCE_DIR` set before imports. Offline implementation and regression
+work can proceed while credentials are pending; live model-route verification
+remains a release/admission gate, not a reason to stop implementation.
+
+## Current implementation and next increments
+
+- Explicit `openhands` host/channel and provider-qualified model pins; current
+  seats, defaults, external providers and Codex routes remain intact.
+- Concurrent native SDK conversations, shared role instructions, exact finish
+  capture, independent failures, multi-round debate, advisor staging and a
+  file-writing executor all pass through the existing Crew engine.
+- Read-only and staging-only tools, no ambient plugins/skills, confined executor
+  file writes, immutable action receipts, settled-result replay and cancellation
+  that joins active writes are implemented. Unknown execution is never relaunched.
+- A dedicated runner consumes explicit SDK routes and returns engine JSON. Human
+  waits and explicit resume retain the existing engine policy.
+- The first executor uses fresh conversations for each authorized action. The
+  next execution slice needs a sandbox/process boundary for command tools and
+  proof of safe executor-only continuation before either is advertised.
+- The bounded live multi-model gate awaits operator-selected SDK models/auth.
+  Existing CLI credentials are not reused or translated implicitly.

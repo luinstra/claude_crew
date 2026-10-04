@@ -114,7 +114,7 @@ def _detect_host(env: Mapping[str, str]) -> str:
 
     Empty-valued markers are treated as absent.
     """
-    known_hosts = ("claude", "codex", "cursor")
+    known_hosts = ("claude", "codex", "cursor", "openhands")
     override = env.get("CREW_HOST", "")
     if override:
         normalized = override.casefold()
@@ -122,7 +122,7 @@ def _detect_host(env: Mapping[str, str]) -> str:
             return normalized
         _warn_once(
             "invalid-crew-host",
-            f"crew: CREW_HOST={override!r} is not a known host (claude, codex, cursor); "
+            f"crew: CREW_HOST={override!r} is not a known host (claude, codex, cursor, openhands); "
             "treating the host as unknown (no native channel)",
         )
         return "unknown"
@@ -145,7 +145,7 @@ def current_host() -> str:
 # `native_channel_for` returns None without one, so a row added here alone
 # declares nothing native rather than failing at mint. A test pins the two key
 # sets equal on top of that, so a half-added host is named rather than silent.
-_NATIVE_CHANNELS: dict[str, str] = {"claude": "claude", "cursor": "cursor", "codex": "codex"}
+_NATIVE_CHANNELS: dict[str, str] = {"claude": "claude", "cursor": "cursor", "codex": "codex", "openhands": "openhands"}
 
 
 def native_channel_hosts() -> frozenset[str]:

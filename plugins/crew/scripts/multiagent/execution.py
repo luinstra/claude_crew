@@ -104,9 +104,9 @@ def resolve_executor(session_id: str, explicit: str | None = None) -> ExecutorSe
         )
         resume = config.build_resume_executor()
     host = channels.current_host()
-    channel = (channels.native_channel(host) if executor == "crew:executor" and host == "codex"
+    channel = (channels.native_channel(host) if executor == "crew:executor" and host in {"codex", "openhands"}
                else channels.task_native_channel(host))
-    if executor == "crew:executor" and host == "codex":
+    if executor == "crew:executor" and host in {"codex", "openhands"}:
         resume = False
     if executor != "crew:executor":
         spec = seats.seat_spec(executor)

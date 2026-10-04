@@ -62,8 +62,8 @@ def native_action_channel(ref: review.ReviewRef | measure.MeasureRef | BuildRef,
 
 def require_capture_flags(channel: str | None, handle: str | None, completion_observed: bool,
                           launch_refused: bool) -> None:
-    if channel != "codex" and (handle is not None or completion_observed or launch_refused):
-        raise review.WorkflowError("unsupported_native_capture", "Codex capture flags require an owned Codex action")
+    if channel not in {"codex", "openhands"} and (handle is not None or completion_observed or launch_refused):
+        raise review.WorkflowError("unsupported_native_capture", "Native capture flags require an owned direct-capture action")
 
 
 def render_argv(argv: Iterable[str]) -> str:
@@ -95,8 +95,8 @@ def capture_review_return(ref: review.ReviewRef, action_id: str, content: bytes,
         if action["driver"] == "external" or action["submission_path"] is None:
             raise review.WorkflowError("invalid_action", "capture requires an issued non-external action")
         require_capture_flags(action["channel"], handle, completion_observed, launch_refused)
-        if action["driver"] == "native" and action["channel"] == "codex":
-            from multiagent.codex_native_transport import require_capture
+        if action["driver"] == "native" and action["channel"] in {"codex", "openhands"}:
+            from multiagent.native_binding import require_capture
             root = review._prepare_run_descendant(run, run / "attempts" / ref.attempt_id
                 / "native-transport" / "anchor", "native capture", create_parents=True).parent
             require_capture(root, action_id, handle, completion_observed, status=status, diagnostic=diagnostic,
@@ -164,8 +164,8 @@ def capture_measure_return(ref: measure.MeasureRef, action_id: str, content: byt
     def prepare(data: dict[str, object], journal: measure.MeasureJournal) -> None:
         root = measure._namespace(ref, journal)
         require_capture_flags(journal.advisor_channel, handle, completion_observed, launch_refused)
-        if journal.advisor_channel == "codex":
-            from multiagent.codex_native_transport import require_capture
+        if journal.advisor_channel in {"codex", "openhands"}:
+            from multiagent.native_binding import require_capture
             require_capture(measure._safe_path(root / "native-transport", root), action_id,
                             handle, completion_observed, status=status, diagnostic=diagnostic,
                             launch_refused=launch_refused, ref=ref)
