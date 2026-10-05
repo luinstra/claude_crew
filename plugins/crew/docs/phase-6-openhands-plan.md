@@ -1,145 +1,109 @@
-# Phase 6: OpenHands native agent adapter
+# Phase 6: Crew inside OpenHands Agent Canvas
 
-Status: initial file-tool adapter implemented and verified offline, 2026-10-03.
-Codex 0.86.0 is installed and its reloaded-plugin smoke passed.
-Baseline: `3b98e45` on `codex/native-integration` (Crew 0.86.0; marketplace 0.46.0).
-The optional SDK 1.51.0 runtime, engine bridge, command entry point and tests are
-in `plugins/crew/adapters/openhands`. See [evidence](phase-6-openhands-evidence.md).
-Live provider verification, sandboxed command tools and cross-action executor
-continuation remain open. This increment does not claim full Phase 6 completion.
+Status: corrected scope, 2026-10-05; implementation pending.
+Delivery branch: `codex/multi-harness-engine`. Use an isolated worktree for edits
+so active sessions and uncommitted files in the original checkout stay intact.
 
-## Outcome and boundary
+## Outcome
 
-Run review, council/debate, measure-twice, and build through Crew's existing
-Python engine using native OpenHands agents for every requested role. Each agent
-can have its configured model provider; host identity does not select the model.
-OpenHands owns agent execution. Crew owns prompts, action ordering, panels,
-quorum, budgets, retries, human decisions, and workflow completion.
+Install Crew through Agent Canvas's Plugins UI, enable or attach it to a new
+conversation, and run review, debate, measure-twice, and build from that
+conversation. Reviewers, panelists, advisors, and executors run as native
+OpenHands agents using the backend's configured models, tools, and workspace.
+Crew's existing Python engine retains workflow decisions, prompts, quorum,
+budgets, retries, action identity, and completion.
 
-The initial surface is a local, code-driven Software Agent SDK adapter. A thin
-OpenHands tool or command may invoke it and display results. A parent model does
-not dispatch individual seats or copy their outputs. Remote Agent Server and
-product UI integration can follow only when needed; neither is an initial gate.
-Wrapping provider CLIs through ACP does not satisfy the native-agent outcome.
+The standalone SDK adapter introduced in `b9d21fe` did not satisfy this outcome.
+Its runner, dependencies, runtime-specific engine changes, and offline evidence
+are reverted. The implementation remains recoverable from Git history for
+selective reuse after the Canvas integration seam is verified. Crew 0.87.0's SDK
+tests are not evidence of Agent Canvas support. The Codex integration remains.
 
-Preserve current seats, panels, explicit routes, external providers, and shipped
-Claude/Cursor behavior. Add only the explicit runtime selection needed to pair
-an OpenHands agent with a model. Do not reinterpret existing `via` values, infer
-native routing from a provider name, silently substitute models, or change global
-defaults. A CLI-only seat cannot become an SDK seat until a supported model and
-authentication route are explicitly configured. Validate the mapping before launch.
+## Product boundary
 
-Migration, legacy formats, upgrade guidance, special restart machinery, a general
-runtime registry, remaining Cursor expansion, and rebranding are out of scope.
+- The user installs a plugin and invokes Crew inside an OpenHands conversation.
+  Ordinary use must not require launching a separate Python runner, supplying a
+  second model credentials file, or manually transporting agent reports.
+- Use native OpenHands agents for the native workflow. Running Claude Code,
+  Codex, or another provider CLI through ACP is a different capability.
+- Resolve explicit seat choices against OpenHands' model/profile configuration.
+  Record requested and resolved identities. Do not silently substitute models,
+  translate CLI aliases into unrelated model IDs, or change existing defaults.
+- Use the host's workspace and tools, including command execution needed for
+  builds and tests. Declare actual access guarantees; a prompt asking for
+  read-only behavior does not establish enforcement.
+- Preserve Claude, Codex, Cursor, and existing external routes. Keep Crew's
+  Python 3.11 stdlib core independent of optional host libraries.
 
-## Evidence informing the design
+The first supported target is Agent Canvas with a local backend. Record the
+exact Canvas/backend versions exercised. Remote and cloud support need their
+own observed installation and execution gates. A separate Canvas dashboard App,
+new orchestration framework, general runtime registry, and rebranding are out
+of scope.
 
-Primary sources checked 2026-10-03; pin and recheck the chosen release at implementation:
+## Verified host contracts and open questions
 
-- The [SDK](https://github.com/OpenHands/software-agent-sdk) exposes agents and
-  conversations for programmatic execution. Its current
-  [package metadata](https://github.com/OpenHands/software-agent-sdk/blob/main/openhands-sdk/pyproject.toml)
-  requires Python 3.12+. Keep SDK dependencies in an optional adapter environment;
-  Crew's Python 3.11+ stdlib core must still import and run without them.
+Primary documentation checked 2026-10-05:
+
+- [Plugins in Agent Canvas](https://docs.openhands.dev/openhands/usage/agent-canvas/plugins)
+  describes backend-scoped installation from source, enablement, and attaching
+  plugins to conversations. Test that full path, including command discovery.
+- [Plugin format](https://docs.openhands.dev/overview/plugins) describes bundled
+  commands, skills, agents, hooks, and MCP configuration. Verify the chosen
+  format with the actual backend loader before changing shared packaging.
 - [Task Tool Set](https://docs.openhands.dev/sdk/guides/task-tool-set) documents
-  sequential blocking delegation. It is not evidence of concurrent panels. Run
-  engine-issued independent conversations concurrently in adapter code, using
-  the SDK's [async execution surface](https://docs.openhands.dev/sdk/guides/convo-async)
-  as appropriate to the pinned version, and verify actual overlap.
-- [Persistence](https://docs.openhands.dev/sdk/guides/convo-persistence) restores
-  conversations by ID and persistence directory. Bind those identifiers to
-  existing Crew action receipts; SDK persistence is not a transaction with
-  Crew's workflow state.
-- [Pause/resume](https://docs.openhands.dev/sdk/guides/convo-pause-and-resume)
-  provides execution control, while
-  [confirmation policies](https://docs.openhands.dev/sdk/guides/security) control
-  approvals. Neither alone proves read-only filesystem access or that cancelled
-  tools and their descendants have stopped writing. Those require adapter gates.
+  sequential blocking delegation and task-ID resume. That is not evidence of
+  concurrent panels or an arbitrary per-call model argument. Inspect the host's
+  available delegation and model-profile interfaces before selecting transport.
+
+Resolve plugin-root expansion, project/session identity, native role loading,
+model/profile resolution, result capture, lifecycle events, and cancellation
+against the pinned host. Existing Claude command syntax and hook environment
+must not be assumed compatible merely because the manifest loads.
 
 ## Implementation sequence
 
-1. **Prove the adapter seam.** Pin the SDK version and inspect the current native
-   action/result and channel interfaces. Exercise two explicit model routes,
-   direct final-result capture, concurrent conversations, access restrictions,
-   and cancellation in a disposable workspace. Select the smallest routing
-   extension and record its resolved host/runtime/provider/model identities.
-   If SDK model access is unavailable, record the missing prerequisite; do not
-   substitute an installed CLI and report a native pass.
-2. **Ship review and council/debate.** Consume existing engine-issued actions,
-   bind each conversation to its action and frozen target, and return exact raw
-   reports plus typed status/identity through existing validation. Use a fresh
-   conversation for each new reviewer action. The adapter persists results
-   directly, with no scribe. Prove read-only tools or workspace enforcement,
-   independent failure handling, concurrent seats, and unchanged quorum policy.
-3. **Ship measure-twice.** Add the native advisor using engine-rendered prompts.
-   Preserve existing action replay, budgets, human-question binding, and explicit
-   resume. Reconcile a completed conversation with its pending Crew receipt
-   without launching duplicate work. Use existing uncertainty handling when
-   settlement cannot be established; do not invent a restart service.
-4. **Ship build.** Add the native executor with workspace-limited write access.
-   Continue only the engine-authorized executor conversation on revision;
-   reviewers remain fresh. Gate branch/index/target drift, exact report capture,
-   failure, interruption, and cancellation before accepting a result. Cancellation
-   must settle owned tools and writers before review or replacement execution.
+1. **Install and run one native action.** Package Crew so Canvas can install it
+   from the delivery branch. Enable/attach it in a new native OpenHands
+   conversation, discover a Crew command, and execute one engine-issued review
+   action with the actual host's model and tools. Capture its exact return and
+   bind its task/conversation identifier to the Crew action. Use this vertical
+   slice to choose the smallest transport seam before expanding engine routes.
+2. **Review and debate.** Drive engine-issued native roles from the conversation;
+   keep prompts and policy in the engine. Resolve multiple configured models,
+   capture raw reports without a scribe, handle independent failures, and prove
+   real reviewer overlap before claiming concurrency. If the host only offers
+   sequential delegation, report the limitation and resolve it explicitly.
+3. **Measure-twice.** Add the native advisor and plan promotion through existing
+   actions. Preserve budgets, user questions, explicit resume, and receipt
+   replay. Reconcile interrupted actions without launching duplicate work.
+4. **Build.** Add the executor using host editing and command tools. Exercise
+   implementation, tests, review, and revision. Resume only an authorized
+   executor conversation when supported; reviewers stay fresh. Cancellation
+   must settle owned writers before review or replacement execution proceeds.
+5. **Installation guide and evidence.** Document the exact tested source/ref,
+   supported backend versions, model/profile setup, commands, and limits. Keep
+   support claims tied to observed Canvas behavior.
 
-Keep these as small implementation slices using the same adapter. Resolve the
-runtime/routing seam once; do not repeat whole-roadmap reviews for each role.
-The engine owns the outer build loop; OpenHands' agent loop performs one issued
-role action. No second goal-completion loop decides whether Crew should finish.
+Prefer deterministic transport for mechanical binding and capture. Do not add
+bookkeeping agents or a second workflow-completion loop. Review the initial
+packaging/transport design once; use focused checks for subsequent slices.
 
-## Verification and completion
+## Acceptance and regression gates
 
-Use deterministic adapter tests for wrong or duplicate action IDs, late results,
-malformed and missing reports, denied access, provider errors, human waits,
-interrupted result settlement, executor-only continuation, and cancel/write
-races. Reuse existing engine policy tests rather than copy their implementation.
-Run affected engine, host, and provider regression suites with isolated config.
+- Install Crew from source in Canvas, inspect its contents, enable/attach it,
+  and invoke the discovered workflows in a new native OpenHands conversation.
+- Complete review, multi-round debate, a plan revision, and a disposable
+  implementation/test/review/revision build through the same Crew engine.
+- Record source and host versions, resolved models, native task/action IDs,
+  exact reports, tool/access behavior, and concurrent reviewer timing.
+- Exercise partial failure, malformed returns, duplicate/late results, human
+  waits, interruption, explicit resume, and cancellation while work is active.
+  Keep uncertain writers fenced until their termination is established.
+- Run affected engine, host, provider, Codex, and lifecycle regression suites
+  using disposable workspaces and isolated configuration.
 
-Run one bounded disposable end-to-end gate covering a concurrent native
-multi-model panel, debate, a plan revision, and an implementation/review/revision
-build. Record source and SDK versions, resolved routes, conversation/action IDs,
-enforced access, raw-result evidence, cancellation, and explicit resume. Keep
-secret-bearing SDK persistence private; export only necessary sanitized evidence.
-Each claimed capability must be exercised; unrun UI, remote, and automatic-resume
-surfaces remain unclaimed. Repeat a live gate only when a relevant change or
-failure invalidates its evidence.
-
-Measure orchestration calls, bookkeeping model calls (expected zero), reviewer
-overlap, wall time, model time, and token/cost metrics where available. Compare
-only runs with equivalent targets, panels, and models; a different runtime or
-model mix is descriptive evidence, not a speedup claim. Completion means all four
-workflows work through one engine with native OpenHands roles and no regression
-to shipped routes. Codex is the preceding roadmap increment, per the operator's
-updated sequencing; phase numbers are retained.
-
-## Seam findings to carry into implementation
-
-SDK 1.51.0 can run concurrent native conversations and expose exact finish text.
-Its interrupt acknowledgement does not prove tool quiescence: the offline probe
-observed a write after the conversation stopped. Preserve writer fences until
-owned tools and descendants actually settle. Ambient plugin discovery also needs
-isolation; explicit `tools=[]` alone cannot establish a production read-only
-boundary when user/project plugins can add hooks and MCP tools.
-
-Keep SDK configuration and persistence in a dedicated adapter process using
-`OH_PERSISTENCE_DIR` set before imports. Offline implementation and regression
-work can proceed while credentials are pending; live model-route verification
-remains a release/admission gate, not a reason to stop implementation.
-
-## Current implementation and next increments
-
-- Explicit `openhands` host/channel and provider-qualified model pins; current
-  seats, defaults, external providers and Codex routes remain intact.
-- Concurrent native SDK conversations, shared role instructions, exact finish
-  capture, independent failures, multi-round debate, advisor staging and a
-  file-writing executor all pass through the existing Crew engine.
-- Read-only and staging-only tools, no ambient plugins/skills, confined executor
-  file writes, immutable action receipts, settled-result replay and cancellation
-  that joins active writes are implemented. Unknown execution is never relaunched.
-- A dedicated runner consumes explicit SDK routes and returns engine JSON. Human
-  waits and explicit resume retain the existing engine policy.
-- The first executor uses fresh conversations for each authorized action. The
-  next execution slice needs a sandbox/process boundary for command tools and
-  proof of safe executor-only continuation before either is advertised.
-- The bounded live multi-model gate awaits operator-selected SDK models/auth.
-  Existing CLI credentials are not reused or translated implicitly.
+Offline loader and adapter tests support these gates but cannot replace the
+Canvas installation and in-conversation run. Missing access to a suitable
+Canvas backend leaves the live gate pending; it must never be replaced with a
+standalone SDK run and reported as complete.

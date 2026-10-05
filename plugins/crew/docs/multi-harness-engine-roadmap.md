@@ -35,7 +35,7 @@ At completion:
   exercised there. Shipped Cursor behavior keeps regression coverage; remaining
   Cursor expansion is outside this roadmap (see "Deferred: Cursor work");
 - Codex receives the next adapter over the existing protocols, followed by
-  OpenHands native SDK agents and deterministic orchestration;
+  OpenHands Agent Canvas plugin installation and native agent execution;
 - review seats remain fresh, executor continuation remains executor-only, and
   current frozen-target, quorum, failure-isolation, route, and loop-state
   invariants remain enforced; and
@@ -93,11 +93,13 @@ results, real Claude CLI gates, exact source epochs and evidence limits are in
 The final planning synthesis is retained under
 `.crew/reviews/01a0f9e3-b687-7e63-b9e5-d1e8a07774b5/run-1887652ecf97/`.
 
-Next is the [Phase 7 Codex plan](phase-7-codex-plan.md). Its source adapter
-is implemented in the isolated dirty worktree; the [live native gates](phase-7-codex-evidence.md)
-passed. Implementation review closed minor-only without overrides. The follow-up fixes,
-installed skill discovery and automatic hook re-entry gate are now complete. The [Phase 6 OpenHands plan](phase-6-openhands-plan.md)
-follows Codex and remains a planning pivot, not an implemented adapter or a passed gate.
+The [Phase 7 Codex adapter](phase-7-codex-plan.md) is implemented and its
+[live native and installed gates](phase-7-codex-evidence.md) passed. Its commits
+are retained on `codex/multi-harness-engine`. The [Phase 6 OpenHands
+plan](phase-6-openhands-plan.md) now targets installation and use inside Agent
+Canvas. The standalone SDK implementation from `b9d21fe` was reverted because
+it targeted the wrong product surface; its tests do not establish Canvas
+support. Phase 6 implementation and its Canvas gate remain pending.
 
 The older machine-local `chunk-c-measure-twicemd-shim-refactor-*` and
 `chunk-c-buildmd-shim-refactor-*` plans describe an earlier prose-reduction
@@ -265,7 +267,7 @@ role either. `docs/engine-notes.md` carries the reasoning.
 | Workflow recipes embedded in hooks | Move into Python in the owning loop phase |
 | Claude agent definitions | Retain only as thin native-role adapters where needed |
 | Cursor agent surface | DONE for review and debate: `agents-cursor/` ships four thin roles (reviewer, panelist, scribe, formatter). Review is app-verified, debate is not yet. Advisor and executor roles are deferred |
-| OpenHands SDK agents | Add after Codex through a deterministic adapter; native roles may use different model providers |
+| OpenHands Agent Canvas | Install Crew in Canvas and invoke workflows inside native OpenHands conversations using configured model profiles |
 | Codex skills and native roles | Source adapter and live native gates complete; installed discovery remains separate |
 
 The deletion test governs the result: if the workflow module disappeared,
@@ -616,38 +618,40 @@ implementation executor. Record the installed discovery gate separately; source
 skills alone do not prove app exposure. Preserve Claude, Cursor and external
 regression coverage. OpenHands follows this gate, rather than being a prerequisite.
 
-### Phase 6 — OpenHands native agents through the shared engine
+### Phase 6 — Crew installed in OpenHands Agent Canvas
 
 #### Outcome
 
-OpenHands follows the Codex adapter as a first-class workflow harness. Reviewers,
-panelists, advisors, and executors are native OpenHands SDK agents with explicitly selected
-models. Crew's Python engine drives their work and retains workflow authority.
+Install and enable or attach Crew through Canvas's Plugins UI, then run all
+four workflows from a native OpenHands conversation. Native roles use the
+backend's configured models, tools, and workspace. Crew retains workflow
+authority through the shared Python engine.
 
 #### Scope
 
-- Follow [phase-6-openhands-plan.md](phase-6-openhands-plan.md): prove the runtime
-  seam, then read-only workflows, persistent planning, and native-write build.
-- Use a deterministic driver to launch concurrent independent reviewers and
-  capture their returns directly; no model is needed for bookkeeping.
-- Preserve seat/model/route identity, fresh reviewers, executor-only
-  continuation, existing engine guards, and bound human decisions.
-- Isolate optional SDK dependencies from Crew's stdlib-only core. Verify access,
-  cancellation, result capture, and resume against a pinned SDK version.
-- Preserve shipped Claude, Cursor, and external-provider behavior. Existing CLI
-  providers remain available, but do not count as native OpenHands evidence.
+- Follow [phase-6-openhands-plan.md](phase-6-openhands-plan.md). Prove installation,
+  command discovery, and one native action before expanding the adapter.
+- Verify actual plugin packaging, hook context, role/tool declarations, model
+  profiles, and native task/result transport against the supported backend.
+- Preserve seat/model identity, fresh reviewers, authorized executor resume,
+  engine guards, and bound human decisions. Prove concurrent execution rather
+  than inferring it from the SDK's sequential task tool.
+- Keep ordinary operation inside Canvas using host configuration; no separate
+  SDK runner or second credentials file is required of the user.
+- Preserve shipped Claude, Codex, Cursor, and external-provider behavior.
 
 #### Exit gate
 
-All four workflows complete through the shared engine with native OpenHands
-roles, including a concurrent multi-model panel and a disposable write/review/
-revision build. Route identity, enforced access, cancellation quiescence,
-explicit resume, and direct result capture have recorded evidence. Automatic
-lifecycle claims require a separate observed gate. No second workflow owner or
-bookkeeping agent is introduced.
+Install from the delivery branch in Canvas, start a conversation with Crew,
+then complete review, debate, measure-twice, and a build including command/tool
+execution and revision. Record native model/task identity, direct report
+capture, access behavior, reviewer overlap, cancellation, and explicit resume.
+Offline SDK tests alone cannot clear this gate. Remote/cloud and automatic
+lifecycle claims require observed evidence for those surfaces.
 
-The former Phase 6 Cursor-native executor scope is historical backlog under
-"Deferred: Cursor work" and is not a prerequisite.
+The reverted SDK prototype remains in Git history for selective reuse after
+the Canvas seam is established. The former Cursor-native executor scope remains
+historical backlog under "Deferred: Cursor work" and is not a prerequisite.
 
 ### Phase 8 — Cleanup, rebrand, and release
 
@@ -806,7 +810,7 @@ The roadmap intentionally provides useful stopping points:
 4. **After Phase 7:** Claude and Codex share the core protocols at their observed
    host tiers; installed/native gates must be recorded before claiming this increment.
 5. **After Phase 6:** Claude, Codex and OpenHands share all core workflows, with
-   native OpenHands roles and deterministic orchestration.
+   Crew installed in Agent Canvas and native OpenHands roles running inside conversations.
 6. **After Phase 8A:** one production implementation of each workflow. F3.0, the
    Claude gate on the installed plugin, remains owed if not already completed.
    Cursor expansion is historical backlog outside this roadmap.

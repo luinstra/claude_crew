@@ -437,7 +437,7 @@ def journal_from_dict(value: object) -> BuildJournal:
         )
         or any(not isinstance(p, str) or not p for p in journal.feedback_paths)
         or type(journal.executor.resume_executor) is not bool
-        or journal.executor.host not in {"claude", "codex", "cursor", "openhands", "unknown"}
+        or journal.executor.host not in {"claude", "codex", "cursor", "unknown"}
         or not isinstance(journal.executor.executor, str)
         or not isinstance(journal.executor.channel, str)
         or any(
@@ -504,12 +504,12 @@ def journal_from_dict(value: object) -> BuildJournal:
         frozen.role == "crew:executor"
         and (
             frozen.executor != "crew:executor"
-            or frozen.host not in {"claude", "codex", "openhands"}
+            or frozen.host not in {"claude", "codex"}
             or frozen.channel != frozen.host
-            or (frozen.host in {"codex", "openhands"} and frozen.resume_executor)
-            or frozen.provider is not None or frozen.reasoning is not None
-            or (frozen.host != "openhands" and frozen.model is not None)
-            or (frozen.host == "openhands" and (not isinstance(frozen.model, str) or "/" not in frozen.model))
+            or (frozen.host == "codex" and frozen.resume_executor)
+            or any(
+                v is not None for v in (frozen.provider, frozen.model, frozen.reasoning)
+            )
         )
         or frozen.role is not None
         and frozen.role != "crew:executor"
@@ -722,20 +722,17 @@ def _park(
 def _freeze_executor(selection: execution.ExecutorSelection) -> FrozenExecutor:
     host = channels.current_host()
     if selection.executor == "crew:executor":
-        if host not in {"claude", "codex", "openhands"} or selection.channel != host:
+        if host not in {"claude", "codex"} or selection.channel != host:
             raise review.WorkflowError(
                 "route_unavailable",
-                "crew:executor requires an admitted native executor route",
+                "crew:executor requires an admitted Claude or Codex native executor route",
             )
-        sdk_model = config.openhands_role_model("executor") if host == "openhands" else None
-        if host == "openhands" and sdk_model is None:
-            raise review.WorkflowError("route_unavailable", "[openhands].executor_model must explicitly select the native SDK model")
         return FrozenExecutor(
             selection.executor,
             host,
             host,
             None,
-            sdk_model,
+            None,
             None,
             "crew:executor",
             selection.resume_executor if host == "claude" else False,
@@ -986,7 +983,7 @@ def _item(ref: BuildRef, journal: BuildJournal) -> BuildWorkItem:
         "recover": recovery_argv(ref, action.action_id),
     }
     if not external:
-        for name in (("bind",) if frozen.host in {"codex", "openhands"} else ("bind", "capture")):
+        for name in (("bind",) if frozen.host == "codex" else ("bind", "capture")):
             commands[f"native_{name}"] = (
                 *_owner_argv(ref, f"build-native-{name}"),
                 "--action-id",
@@ -2164,8 +2161,8 @@ def capture_build_return(
                 "invalid_action",
                 "host capture cannot settle an external provider action",
             )
-        if journal.executor.host in {"codex", "openhands"}:
-            from multiagent.native_binding import require_capture
+        if journal.executor.host == "codex":
+            from multiagent.codex_native_transport import require_capture
 
             if launch_refused and journal.action and journal.action.handle is not None:
                 raise review.WorkflowError(
@@ -2230,11 +2227,11 @@ def bind_build_native(
     ref: BuildRef, action_id: str, handle: str, output_file: str | None = None
 ) -> dict[str, object]:
     from multiagent.workflow_transport import native_action_channel
-    if native_action_channel(ref, action_id) in {"codex", "openhands"}:
-        from multiagent.native_binding import NativeLaunch, bind_native_launch
+    if native_action_channel(ref, action_id) == "codex":
+        from multiagent.codex_native_transport import NativeLaunch, bind_native_launch
         if output_file is not None:
-            raise review.WorkflowError("unsupported_native_capture", "This native adapter exposes no output file")
-        return bind_native_launch(NativeLaunch(ref, action_id, handle), channel=native_action_channel(ref, action_id))
+            raise review.WorkflowError("unsupported_native_capture", "Codex exposes no output file")
+        return bind_native_launch(NativeLaunch(ref, action_id, handle))
     from multiagent.claude_native_transport import NativeLaunch, bind_native_launch
 
     if output_file is None:
@@ -2252,8 +2249,8 @@ def capture_build_native(
 ) -> BuildStep:
     from multiagent.claude_native_transport import NativeLaunch, capture_native_return
     from multiagent.workflow_transport import native_action_channel
-    if native_action_channel(ref, action_id) in {"codex", "openhands"}:
-        raise review.WorkflowError("unsupported_native_capture", "This native adapter uses build-capture with its observed final reply")
+    if native_action_channel(ref, action_id) == "codex":
+        raise review.WorkflowError("unsupported_native_capture", "Codex uses build-capture with its observed final reply")
 
     return capture_native_return(
         NativeLaunch(ref, action_id, handle, Path(output_file)),

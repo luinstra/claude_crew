@@ -4476,13 +4476,13 @@ def cmd_measure_protocol(args: argparse.Namespace) -> int:
                 path.unlink()
             value = measure.step_to_dict(step)
         elif command in {"review-native-bind", "review-native-capture"}:
-            if transport.native_action_channel(_review_ref_from_args(args), args.action_id) in {"codex", "openhands"}:
+            if transport.native_action_channel(_review_ref_from_args(args), args.action_id) == "codex":
                 if command.endswith("-capture"):
-                    raise review_workflow.WorkflowError("unsupported_native_capture", "This native adapter uses review-capture with its observed final reply")
-                from multiagent import native_binding as direct_native
+                    raise review_workflow.WorkflowError("unsupported_native_capture", "Codex uses review-capture with its observed final reply")
+                from multiagent import codex_native_transport as codex_native
                 if args.output_file is not None:
-                    raise review_workflow.WorkflowError("unsupported_native_capture", "This native adapter exposes no output file")
-                value = direct_native.bind_native_launch(direct_native.NativeLaunch(_review_ref_from_args(args), args.action_id, args.handle), channel=transport.native_action_channel(_review_ref_from_args(args), args.action_id))
+                    raise review_workflow.WorkflowError("unsupported_native_capture", "Codex exposes no output file")
+                value = codex_native.bind_native_launch(codex_native.NativeLaunch(_review_ref_from_args(args), args.action_id, args.handle))
                 print(json.dumps(value, ensure_ascii=False))
                 return 0
             if args.output_file is None:
@@ -4516,13 +4516,13 @@ def cmd_measure_protocol(args: argparse.Namespace) -> int:
                     status=args.status, diagnostic=args.diagnostic, capture_path=args.returned_file,
                     handle=args.handle, completion_observed=args.completion_observed, launch_refused=args.launch_refused))
             elif command in {"measure-twice-native-bind", "measure-twice-native-capture"}:
-                if transport.native_action_channel(ref, args.action_id) in {"codex", "openhands"}:
+                if transport.native_action_channel(ref, args.action_id) == "codex":
                     if command.endswith("-capture"):
-                        raise review_workflow.WorkflowError("unsupported_native_capture", "This native adapter uses measure-twice-capture with its observed final reply")
-                    from multiagent import native_binding as direct_native
+                        raise review_workflow.WorkflowError("unsupported_native_capture", "Codex uses measure-twice-capture with its observed final reply")
+                    from multiagent import codex_native_transport as codex_native
                     if args.output_file is not None:
-                        raise review_workflow.WorkflowError("unsupported_native_capture", "This native adapter exposes no output file")
-                    value = direct_native.bind_native_launch(direct_native.NativeLaunch(ref, args.action_id, args.handle), channel=transport.native_action_channel(ref, args.action_id))
+                        raise review_workflow.WorkflowError("unsupported_native_capture", "Codex exposes no output file")
+                    value = codex_native.bind_native_launch(codex_native.NativeLaunch(ref, args.action_id, args.handle))
                     print(json.dumps(value, ensure_ascii=False))
                     return 0
                 if args.output_file is None:

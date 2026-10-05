@@ -1969,7 +1969,7 @@ def test_host_detection():
             invalid = channels._detect_host({"CREW_HOST": "wat"})
             repeated = channels._detect_host({"CREW_HOST": "wat"})
         expected_warning = (
-            "crew: CREW_HOST='wat' is not a known host (claude, codex, cursor, openhands); "
+            "crew: CREW_HOST='wat' is not a known host (claude, codex, cursor); "
             "treating the host as unknown (no native channel)\n"
         )
         check("invalid CREW_HOST -> unknown with exact one-time warning",
@@ -2436,7 +2436,6 @@ def test_stage():
               "nonzero + placeholder error", f"rc={proc.returncode} err={proc.stderr[:150]}")
 
 
-@crew_config()
 def test_registry():
     log_section("Provider registry")
     check("get_provider('sol') -> CodexProvider",
@@ -10793,7 +10792,7 @@ def test_dispatch_options():
 
     # --- declarations: registry parity + per-class explicitness + type set ----
     by_kind = dispatch_options_by_kind()
-    registered_kinds = {name for name, kind in _seats.PROVIDER_KINDS.items() if kind.has_executor}
+    registered_kinds = set(_seats.PROVIDER_KINDS)
     check("dispatch_options_by_kind() keys == registered provider kinds (parity)",
           set(by_kind) == registered_kinds,
           str(sorted(registered_kinds)), str(sorted(by_kind)))
@@ -14921,7 +14920,7 @@ def test_via_migration():
     check("via stages 3 and 4 diagnose an unknown-only row",
           "unknown-channel" not in cat
           and "[seats.unknown-channel].via names unknown channel 'bogus' "
-              "(known: agy, claude, codex, cursor, openhands); dropping it" in warn
+              "(known: agy, claude, codex, cursor); dropping it" in warn
           and "[seats.unknown-channel].via lists no usable channel; ignoring the seat" in warn,
           "unknown-channel and empty-usable diagnostics", warn)
 

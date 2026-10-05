@@ -259,8 +259,9 @@ and found one obsolete assertion requiring installed discovery to remain pending
 That assertion was updated to the observed gate status; all seven documentation
 contract checks then passed. No runtime routing failure remained. Both new
 Python files pass Ruff; all 14 changed Python files parse with Python 3.11 grammar,
-and `git diff --check` passes. The deliverable branch is `codex/native-integration`;
-the primary checkout remains on its existing integration branch.
+and `git diff --check` passes. The implementation used the isolated `codex/native-integration` worktree;
+delivery is on `codex/multi-harness-engine` as corrected on 2026-10-05.
+The primary checkout and its uncommitted files remain untouched.
 
 ## Reloaded release smoke, 2026-10-03
 

@@ -400,3 +400,13 @@ the engine-owned build; Stop injected the owner-next instruction, the agent
 re-entered, cancelled the unclaimed test build, and Stop then allowed completion.
 See [installed gate evidence](phase-7-codex-evidence.md). The existing Crew
 installation was untouched; the temporary package was removed after the gate.
+
+## OpenHands Agent Canvas
+
+**Scope correction, 2026-10-05.** Phase 6 means installing Crew through Canvas's
+Plugins UI and invoking it inside native OpenHands conversations. The standalone
+SDK adapter from `b9d21fe` is reverted; its offline tests did not clear this gate.
+Implementation and the live Canvas gate remain pending. Delivery is on
+`codex/multi-harness-engine`; isolated implementation work must not modify the
+operator's active checkout. Follow the [corrected plan](phase-6-openhands-plan.md)
+for the installation, model/profile, workflow, resume, and cancellation evidence.

@@ -83,7 +83,6 @@ class ProviderKind:
 TASK_MODEL_ALIASES = frozenset({"opus", "sonnet", "haiku", "fable"})
 
 PROVIDER_KINDS: dict[str, ProviderKind] = {
-    "openhands":    ProviderKind("openhands", has_executor=False, model_rule="free"),
     "codex":       ProviderKind("codex", has_executor=True, model_rule="free"),
     "cursor":      ProviderKind("cursor", has_executor=True, model_rule="free"),
     "agy":         ProviderKind("agy", has_executor=True, model_rule="free"),
@@ -94,7 +93,6 @@ PROVIDER_KINDS: dict[str, ProviderKind] = {
 # leaf so existing consumers can continue to read ``SeatSpec.provider`` without
 # making the provider registry own config translation.
 LEGACY_PROVIDER_TO_CHANNEL: dict[str, str] = {
-    "openhands": "openhands",
     "codex": "codex",
     "cursor": "cursor",
     "agy": "agy",
