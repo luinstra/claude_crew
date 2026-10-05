@@ -59,8 +59,8 @@ seat pre-run).
 **ALWAYS spill the task to a file and pass `-f`, NEVER positional.** Write the
 raw task text to the ABSOLUTE path
 `<project-root>/.crew/dispatch/<session-id>-task.txt` with the **Write tool**
-(exact bytes, no shell, creates the parent dir; substitute your
-`CLAUDE_PROJECT_DIR` value for `<project-root>`). The spill is UNCONDITIONAL:
+(exact bytes, no shell, creates the parent dir; substitute the
+`crew project-root` output for `<project-root>`). The spill is UNCONDITIONAL:
 a positional task containing `$(…)`, `$VAR`, backticks, or `"` would be
 expanded or mangled by the shell, and the `-f` file also dodges ARG_MAX.
 Exactly ONE task source (`-f`).

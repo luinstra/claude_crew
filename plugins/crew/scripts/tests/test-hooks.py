@@ -62,6 +62,7 @@ def log_section(name: str) -> None:
 # ~/.claude/todos and counts real pending todos into its status messages).
 # Tests that need a populated HOME override env["HOME"] after building the env.
 _NEUTRAL_HOME = tempfile.mkdtemp(prefix="crew-test-neutral-home-")
+os.environ.pop("CREW_PROJECT_DIR", None)
 
 
 # Host markers this suite drops before pinning the host below. The scripts under
@@ -70,6 +71,7 @@ _NEUTRAL_HOME = tempfile.mkdtemp(prefix="crew-test-neutral-home-")
 # the emitted hook shape. Every cursor name observed live is dropped, not just
 # the two in the marker table.
 _AMBIENT_HOST_MARKERS = (
+    "CREW_PROJECT_DIR",
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
     "CODEX_THREAD_ID",

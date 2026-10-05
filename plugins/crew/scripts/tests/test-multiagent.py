@@ -81,6 +81,7 @@ from multiagent.providers.agy import (  # noqa: E402
 # suite run from inside Cursor or Codex inherits that harness's own markers, and
 # an inherited marker would decide the host wherever the override is absent.
 for _ambient_marker in (
+    "CREW_PROJECT_DIR",
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
     "CODEX_THREAD_ID",
@@ -148,6 +149,7 @@ def _neutral_env() -> dict:
     # parent with a one-time stderr advisory. An ambient value from the surrounding
     # session/CI would otherwise anchor `.crew` OUTSIDE the temp tree, so every e2e
     # path assertion below is denominated against cwd, not the ambient.
+    env.pop("CREW_PROJECT_DIR", None)
     env.pop("CLAUDE_PROJECT_DIR", None)
     return env
 

@@ -43,6 +43,7 @@ class CodexNativeTests(unittest.TestCase):
             {
                 "HOME": str(self.home),
                 "CREW_HOST": "codex",
+                "CREW_PROJECT_DIR": "",
                 "CLAUDE_PROJECT_DIR": str(self.root),
                 "CLAUDE_WORKING_DIRECTORY": str(self.root),
             },

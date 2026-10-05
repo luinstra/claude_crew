@@ -61,6 +61,7 @@ class BuildTests(unittest.TestCase):
         self.env = mock.patch.dict(
             os.environ,
             {
+                "CREW_PROJECT_DIR": "",
                 "CLAUDE_PROJECT_DIR": str(self.root),
                 "CREW_HOST": "claude",
                 "CLAUDE_WORKING_DIRECTORY": str(self.root),

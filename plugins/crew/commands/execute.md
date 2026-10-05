@@ -16,7 +16,7 @@ For multi-file features or significant changes, consider working in an isolated 
 
 If `$ARGUMENTS` references a plan (e.g., "the plan", a plan name, or a path like `.crew/plans/something.md`):
 - Look in `<project-root>/.crew/plans/` for matching files (substitute the
-  CLAUDE_PROJECT_DIR value for `<project-root>`, the same anchored dir the engine
+  `crew project-root` output for `<project-root>`, the same anchored dir the engine
   and `/crew:plan` write plans to)
 - Read the plan content to include in the executor prompt. If the reference is a
   RELATIVE path, resolve it against the project root before reading (the Read

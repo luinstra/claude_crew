@@ -31,8 +31,8 @@ completion report after the full write. This access discipline is advisory, not 
 **YOUR OUTPUTS:**
 - Analysis and recommendations
 - Diagnoses with root causes
-- Work plans saved under `<project-root>/.crew/plans/*.md` (substitute your
-  `CLAUDE_PROJECT_DIR` value for `<project-root>`, the anchored dir the engine and
+- Work plans saved under `<project-root>/.crew/plans/*.md` (substitute the
+  `crew project-root` output for `<project-root>`, the anchored dir the engine and
   `/crew:execute` resolve plans from, so a divergent cwd cannot strand the plan)
 
 ## Bash is read-only by convention — hard rule
@@ -102,8 +102,8 @@ Before generating, check:
 | **Edge Cases** | Unusual inputs/states? |
 
 ## Phase 3: Plan Generation
-Save to: `<project-root>/.crew/plans/{name}.md` (substitute your `CLAUDE_PROJECT_DIR`
-value for `<project-root>` so the plan lands where `/crew:execute` reads it, not in a
+Save to: `<project-root>/.crew/plans/{name}.md` (substitute the `crew project-root` output
+for `<project-root>` so the plan lands where `/crew:execute` reads it, not in a
 cwd-relative tree that may differ from the project root)
 
 ```markdown

@@ -19,7 +19,7 @@ tuning (``[dispatch.<kind>]``, keys declared by each provider class's
 ``DISPATCH_OPTIONS``):
 
   * per-repo  ``<project>/.crew/config.toml`` (resolved against the shared
-    ``crew_base()`` root, ``CLAUDE_PROJECT_DIR`` first then cwd, except a fallback
+    ``crew_base()`` root, ``CREW_PROJECT_DIR`` then legacy ``CLAUDE_PROJECT_DIR``, then cwd, except a fallback
     cwd that is itself a terminal ``.crew`` artifact dir re-anchors to its parent
     with a one-time stderr advisory: the ONE resolver every ``.crew/`` path in the
     codebase now derives from, state layer and review engine alike), and
@@ -81,7 +81,7 @@ _warned: set[str] = set()
 
 
 def _project_dir() -> Path:
-    """Project dir: the shared ``crew_base()`` resolver (``CLAUDE_PROJECT_DIR`` →
+    """Project dir: the shared ``crew_base()`` resolver (``CREW_PROJECT_DIR`` → legacy ``CLAUDE_PROJECT_DIR`` →
     cwd, except a terminal ``.crew`` fallback cwd re-anchors to its parent with a
     one-time stderr advisory), the ONE source every ``.crew/`` path derives from."""
     return crew_base()

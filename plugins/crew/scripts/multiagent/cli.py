@@ -4341,7 +4341,7 @@ def cmd_swab(args: argparse.Namespace) -> int:
         print(
             "Error: refusing crew swab --yes because crew_base() was re-anchored "
             "off a .crew cwd, so the artifact root is only a guess. cd to the "
-            "project root or set CLAUDE_PROJECT_DIR, then re-run.",
+            "project root or set CREW_PROJECT_DIR (legacy CLAUDE_PROJECT_DIR), then re-run.",
             file=sys.stderr,
         )
         return 2
@@ -4619,12 +4619,22 @@ def cmd_build_protocol(args: argparse.Namespace) -> int:
         return 2
 
 
+def cmd_project_root(args: argparse.Namespace) -> int:
+    """Expose the shared project root without creating workflow state."""
+    print(crew_base().resolve())
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multiagent",
         description="Multi-model review engine (host-resolved external seats).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
+    project_root = sub.add_parser(
+        "project-root", help="print the resolved project directory without creating state"
+    )
+    project_root.set_defaults(func=cmd_project_root)
     start_build = sub.add_parser("build", help="start or continue an engine-owned build")
     start_build.add_argument("-f", "--file", required=True)
     start_build.add_argument("--session-id", required=True)
@@ -5534,7 +5544,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="actually delete the listed artifacts (default: dry-run, lists only, "
              "deletes nothing; read the list first, like `git clean -n`). Exits "
              "nonzero if any delete failed, and REFUSES (exit 2, deletes nothing) "
-             "when run from a terminal .crew cwd with CLAUDE_PROJECT_DIR unset (the "
+             "when run from a terminal .crew cwd with CREW_PROJECT_DIR and CLAUDE_PROJECT_DIR unset (the "
              "artifact root is only a guess then; cd to the project root or set the "
              "env var). Dry-run still lists.",
     )

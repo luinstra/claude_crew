@@ -30,6 +30,7 @@ _SUITE_HOME = tempfile.TemporaryDirectory()
 os.environ["HOME"] = _SUITE_HOME.name
 for _marker in (
     "CREW_HOST",
+    "CREW_PROJECT_DIR",
     "CLAUDE_PROJECT_DIR",
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",

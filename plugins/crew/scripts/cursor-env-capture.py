@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Capture Cursor hook environment names and a narrow safe value allowlist.
 
-Root selection prefers an inherited ``CLAUDE_PROJECT_DIR`` and then the first
+Root selection prefers ``CREW_PROJECT_DIR``, then legacy ``CLAUDE_PROJECT_DIR``,
+then the first
 existing directory the hook payload names, read by ``crew_base()`` from these
 payload keys in order: a ``workspace_roots`` entry, then ``directory``, then
 ``cwd``. Without either source, the hook skips because its

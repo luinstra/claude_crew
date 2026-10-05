@@ -57,3 +57,16 @@ Build uses the [engine-owned protocol](docs/build-protocol.md) with native Claud
 execution, configured external write routes, explicit writer recovery and bound
 human decisions. [Phase 5 evidence](docs/phase-5-build-evidence.md) records the
 verified source/host epochs and their limits. Cursor native build remains deferred.
+
+## Project directory
+
+Run `crew project-root` through the installed plugin's `crew` executable to print
+its resolved absolute project directory without creating state. Crew resolves
+project paths in this order: nonempty `CREW_PROJECT_DIR`, the legacy
+`CLAUDE_PROJECT_DIR` alias, a usable hook workspace payload, then process cwd.
+An override is optional when the hook payload or cwd already identifies the
+project. `CREW_PROJECT_DIR` takes precedence when both variables are set.
+
+All state, configuration, and relative CLI artifact paths use this shared
+resolver. A fallback cwd or payload root ending in `.crew` is re-anchored to its
+parent project; explicit overrides retain their existing literal semantics.

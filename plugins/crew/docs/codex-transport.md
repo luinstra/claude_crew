@@ -18,6 +18,10 @@ Resolve the plugin root from the physical location of the invoked
 Use that root's `crew` executable in place of the recipes' `${CLAUDE_PLUGIN_ROOT}`.
 No environment variable or global plugin/configuration change is needed. Run
 from the requested project root and use the literal current harness session ID.
+`crew project-root` prints the canonical absolute root without creating state.
+If an explicit override is needed, use `CREW_PROJECT_DIR`; `CLAUDE_PROJECT_DIR`
+remains a compatibility fallback. Neither variable is required when cwd is the
+project root. Hooks can also resolve their workspace from their payload.
 Do not set host-detection variables or alter a live session's owner.
 
 Use the shared request grammar. Preserve user task text as file data for build

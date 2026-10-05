@@ -71,9 +71,8 @@ def _get_project_dir(payload: object | None = None) -> str:
 
     Delegates to ``crew_base`` so the state layer resolves `.crew` through the
     SAME function the review engine and the session-start sweeps do (no
-    models-vs-crew_base pair that can pick different trees). A hook runs with
-    CLAUDE_PROJECT_DIR set and its cwd AT the project root. A hook payload is
-    passed through when the environment does not identify the project root.
+    models-vs-crew_base pair that can pick different trees). Environment overrides are optional; a hook payload is passed through when
+    the environment does not identify the project root.
     """
     return str(crew_base(payload))
 

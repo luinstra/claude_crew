@@ -5,8 +5,8 @@ allowed-tools: Read, Bash
 
 [RESTORE CONTEXT]
 
-Check if `<project-root>/.crew/context-snapshot.md` exists (substitute your
-`CLAUDE_PROJECT_DIR` value for `<project-root>`; the writer, `/crew:save-context`,
+Check if `<project-root>/.crew/context-snapshot.md` exists (substitute the
+`crew project-root` output for `<project-root>`; the writer, `/crew:save-context`,
 anchors the same absolute path). If not, inform the user: "No context snapshot
 found. Use /crew:save-context to create one."
 
@@ -21,7 +21,7 @@ If the snapshot exists:
    - Next steps that were planned
 3. Rename the snapshot to `<project-root>/.crew/context-snapshot.restored.md` to
    prevent re-prompting. `mv` is a shell command with no engine anchoring, so it
-   takes ABSOLUTE paths: substitute your `CLAUDE_PROJECT_DIR` value for
+   takes ABSOLUTE paths: substitute the `crew project-root` output for
    `<project-root>` (the same root steps 1-2 read from), keeping each path a
    double-quoted LITERAL. `${…}` expansions are banned in these recipes (they
    defeat permission allowlisting), but the ban is on expansions, not literals:

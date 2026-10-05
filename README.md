@@ -493,8 +493,8 @@ safety step. `--yes` rmtrees directory candidates and unlinks probe captures.
 
 `--yes` is the only destructive mode (it exits nonzero if any delete failed). It
 also REFUSES (exit 2, deletes nothing) when run from a terminal `.crew` cwd with
-`CLAUDE_PROJECT_DIR` unset: the project root is only a guess there, so cd back to
-the project root or set the env var (the dry-run listing still works). A review
+`CREW_PROJECT_DIR` and its legacy `CLAUDE_PROJECT_DIR` alias unset: the project
+root is only a guess there, so cd back to the project root or set `CREW_PROJECT_DIR` (the dry-run listing still works). A review
 run is protected while an active loop, a current-run, current-standalone-review,
 or current-standalone-debate pointer, or a nonterminal standalone workflow names
 or protects it. A standalone

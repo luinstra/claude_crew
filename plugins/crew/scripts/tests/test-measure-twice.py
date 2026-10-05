@@ -36,7 +36,7 @@ class MeasureTests(unittest.TestCase):
         self.addCleanup(self.project.cleanup)
         self.addCleanup(self.home.cleanup)
         self.root = Path(self.project.name).resolve()
-        self.env = mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(self.root), "HOME": self.home.name,
+        self.env = mock.patch.dict(os.environ, {"CREW_PROJECT_DIR": "", "CLAUDE_PROJECT_DIR": str(self.root), "HOME": self.home.name,
                                                 "CREW_HOST": "claude"})
         self.env.start()
         self.addCleanup(self.env.stop)

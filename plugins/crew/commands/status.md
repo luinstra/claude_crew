@@ -61,8 +61,8 @@ or invoke `measure-twice-next` merely to inspect them.
 - If inactive: the terminal `exit_kind` (`approved`/`cancelled`/`review_failed`/`force_exit`) and, when set, `consecutive_review_failures`, so a terminally FAILED loop is not shown as a plain clean finish. An inactive loop may instead have an EMPTY `exit_kind` (a legacy or never-reviewed state): render it plainly, without implying a terminal outcome it lacks
 
 **Context Snapshot:**
-- Check if `<project-root>/.crew/context-snapshot.md` exists (substitute your
-  `CLAUDE_PROJECT_DIR` value for `<project-root>`, matching where
+- Check if `<project-root>/.crew/context-snapshot.md` exists (substitute the
+  `crew project-root` output for `<project-root>`, matching where
   `/crew:save-context` writes and session-start reads it)
 - If yes, report its age in days
 

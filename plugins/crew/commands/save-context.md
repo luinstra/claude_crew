@@ -11,8 +11,8 @@ date -u +"%Y-%m-%dT%H:%M:%SZ"
 ```
 
 Save a context snapshot to the ABSOLUTE anchored path
-`<project-root>/.crew/context-snapshot.md` (substitute your `CLAUDE_PROJECT_DIR`
-value for `<project-root>`) with the **Write tool**. Anchor it because the reader
+`<project-root>/.crew/context-snapshot.md` (substitute the `crew project-root` output
+for `<project-root>`) with the **Write tool**. Anchor it because the reader
 (session-start's restore banner and `/crew:restore-context`) resolves this file
 against the project root, so a cwd-relative write from a shell cwd that is not the
 project root would land where the reader never looks. The snapshot has the

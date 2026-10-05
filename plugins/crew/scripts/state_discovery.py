@@ -29,10 +29,15 @@ def _should_reanchor(explicit: str | None, cwd: Path) -> bool:
     return not explicit and cwd.name == ".crew"
 
 
+def _explicit_project_dir() -> str | None:
+    """Prefer Crew's override while retaining the Claude host compatibility alias."""
+    return os.environ.get("CREW_PROJECT_DIR") or os.environ.get("CLAUDE_PROJECT_DIR")
+
+
 def cwd_reanchored() -> bool:
     """Return whether ``crew_base()`` would re-anchor the current cwd right now."""
     return _should_reanchor(
-        os.environ.get("CLAUDE_PROJECT_DIR"),
+        _explicit_project_dir(),
         Path(os.getcwd()),
     )
 
@@ -83,13 +88,11 @@ def crew_base(
     """THE one project-root resolver every `.crew` path derives from, so the
     state layer and the review engine cannot resolve `.crew` to different trees.
 
-    Three tiers, in order. First ``CLAUDE_PROJECT_DIR`` when set (an empty value
-    counts as unset). Then the payload tier: the first existing directory a hook
-    payload names under ``workspace_roots``, ``directory``, or ``cwd``, which is
-    how a Cursor hook finds the workspace when its shell inherits no env var and
-    its cwd is the plugin install dir. Then the process cwd when
-    ``fallback_to_cwd`` is true; the env var is NOT set in the Bash-tool
-    subprocess, so cwd is the real fallback for every crew CLI call.
+    Prefer ``CREW_PROJECT_DIR``, then the legacy ``CLAUDE_PROJECT_DIR`` alias;
+    empty values count as unset. Next use the first existing directory a hook
+    payload names under ``workspace_roots``, ``directory``, or ``cwd``. Finally
+    use the process cwd when ``fallback_to_cwd`` is true. Hosts do not need to
+    export either variable when their payload or cwd already identifies the project.
     ``fallback_to_cwd=False`` reserves a fail-closed ``None`` for callers that
     require an explicit root, with no second root knob for the state and review
     layers to disagree on.
@@ -102,7 +105,7 @@ def crew_base(
     """
     # EMPTY string is treated as UNSET (falls to the cwd branch), preserving the
     # old `... or os.getcwd()` truthiness exactly; only a truthy value short-circuits.
-    explicit = os.environ.get("CLAUDE_PROJECT_DIR")
+    explicit = _explicit_project_dir()
     if explicit:
         return Path(explicit)
     payload_root = _payload_root(payload)
@@ -122,9 +125,9 @@ def crew_base(
             cwd = cwd.parent
         _warn_once(
             str(drifted),
-            f"cwd {drifted} ends in .crew and CLAUDE_PROJECT_DIR is unset or empty; using "
+            f"cwd {drifted} ends in .crew and CREW_PROJECT_DIR/CLAUDE_PROJECT_DIR are unset or empty; using "
             f"{cwd} as the project root. cd back to the project root or set "
-            f"CLAUDE_PROJECT_DIR to silence this.",
+            f"CREW_PROJECT_DIR to silence this.",
         )
     return cwd
 
