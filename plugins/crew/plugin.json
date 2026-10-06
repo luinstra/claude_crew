@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "crew",
-  "version": "0.87.2",
+  "version": "0.88.0",
   "description": "Crew engine workflows with native OpenHands roles",
   "extensions": {
     "dev.openhands": {
