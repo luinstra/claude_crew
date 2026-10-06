@@ -93,7 +93,7 @@ def resolve_executor(session_id: str, explicit: str | None = None) -> ExecutorSe
             else config.build_resume_executor()
         )
     else:
-        configured = config.build_executor()
+        configured = None if channels.current_host() == "openhands" else config.build_executor()
         executor = explicit if explicit is not None else configured or "crew:executor"
         source = (
             "flag"
@@ -104,9 +104,11 @@ def resolve_executor(session_id: str, explicit: str | None = None) -> ExecutorSe
         )
         resume = config.build_resume_executor()
     host = channels.current_host()
-    channel = (channels.native_channel(host) if executor == "crew:executor" and host == "codex"
+    if host == "openhands" and executor != "crew:executor":
+        raise ExecutionError("OpenHands builds require the native crew:executor; external CLI fallback is disabled")
+    channel = (channels.native_channel(host) if executor == "crew:executor" and host in {"codex", "openhands"}
                else channels.task_native_channel(host))
-    if executor == "crew:executor" and host == "codex":
+    if executor == "crew:executor" and host in {"codex", "openhands"}:
         resume = False
     if executor != "crew:executor":
         spec = seats.seat_spec(executor)

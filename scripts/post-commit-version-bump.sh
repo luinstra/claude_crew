@@ -280,6 +280,7 @@ has_directory_changes() {
         local plugin_json="$dir/.claude-plugin/plugin.json"
         local cursor_json="$dir/.cursor-plugin/plugin.json"
         local codex_json="$dir/.codex-plugin/plugin.json"
+        local openhands_json="$dir/plugin.json"
         if [ -f "$plugin_json" ] && ! has_substantive_changes "$plugin_json" "$last_bump"; then
             changes=$(echo "$changes" | grep -F -x -v "$plugin_json" || true)
         fi
@@ -289,6 +290,9 @@ has_directory_changes() {
         # never appear in that diff.
         if [ -f "$cursor_json" ]; then
             changes=$(echo "$changes" | grep -F -x -v "$cursor_json" || true)
+        fi
+        if [ "$dir" = "plugins/crew" ] && [ -f "$openhands_json" ]; then
+            changes=$(echo "$changes" | grep -F -x -v "$openhands_json" || true)
         fi
         if [ "$dir" = "plugins/crew" ] && [ -f "$codex_json" ]; then
             changes=$(echo "$changes" | grep -F -x -v "$codex_json" || true)
@@ -338,6 +342,7 @@ rollback() {
         plugins/crew/.claude-plugin/plugin.json \
         plugins/crew/.cursor-plugin/plugin.json \
         plugins/crew/.codex-plugin/plugin.json \
+        plugins/crew/plugin.json \
         plugins/sk/.claude-plugin/plugin.json \
         plugins/sk/.cursor-plugin/plugin.json 2>/dev/null || true
 }
@@ -370,6 +375,7 @@ main() {
     local crew_json="plugins/crew/.claude-plugin/plugin.json"
     local crew_cursor_json="plugins/crew/.cursor-plugin/plugin.json"
     local crew_codex_json="plugins/crew/.codex-plugin/plugin.json"
+    local crew_openhands_json="plugins/crew/plugin.json"
     local sk_json="plugins/sk/.claude-plugin/plugin.json"
     local sk_cursor_json="plugins/sk/.cursor-plugin/plugin.json"
 
@@ -386,7 +392,8 @@ main() {
 
     if has_directory_changes "plugins/crew" "$last_bump" \
        || has_twin_substantive_changes "$crew_cursor_json" "$last_bump" plugin \
-       || has_twin_substantive_changes "$crew_codex_json" "$last_bump" plugin; then
+       || has_twin_substantive_changes "$crew_codex_json" "$last_bump" plugin \
+       || has_twin_substantive_changes "$crew_openhands_json" "$last_bump" plugin; then
         do_crew=true
         crew_current=$(read_version "$crew_json") || fail "cannot read version from $crew_json"
         crew_new=$(bump_version "$crew_current" "$bump_type") || fail "cannot bump non-semver crew version '$crew_current'"
@@ -420,6 +427,9 @@ main() {
         snapshot_file "$crew_json" || fail "cannot snapshot $crew_json"
         if is_tracked_at_head "$crew_cursor_json"; then
             snapshot_file "$crew_cursor_json" || fail "cannot snapshot $crew_cursor_json"
+        fi
+        if is_tracked_at_head "$crew_openhands_json"; then
+            snapshot_file "$crew_openhands_json" || fail "cannot snapshot $crew_openhands_json"
         fi
         if is_tracked_at_head "$crew_codex_json"; then
             snapshot_file "$crew_codex_json" || fail "cannot snapshot $crew_codex_json"
@@ -458,6 +468,10 @@ main() {
         if is_tracked_at_head "$crew_cursor_json"; then
             write_version "$crew_cursor_json" "$crew_new" || fail "cannot write version to $crew_cursor_json"
             bumped_paths+=("$crew_cursor_json")
+        fi
+        if is_tracked_at_head "$crew_openhands_json"; then
+            write_version "$crew_openhands_json" "$crew_new" || fail "cannot write version to $crew_openhands_json"
+            bumped_paths+=("$crew_openhands_json")
         fi
         if is_tracked_at_head "$crew_codex_json"; then
             write_version "$crew_codex_json" "$crew_new" || fail "cannot write version to $crew_codex_json"

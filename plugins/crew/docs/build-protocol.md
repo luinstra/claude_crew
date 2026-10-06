@@ -2,8 +2,8 @@
 
 Python owns implementation, revision, review, retry and completion. Commands and
 hooks transport issued actions. The state is schema 5 with `bl_workflow` version 1;
-reading state never upgrades it. Native Claude and Codex `crew:executor` roles
-and external write routes retain their selection precedence. Codex native rounds
+reading state never upgrades it. Native Claude, Codex and OpenHands `crew:executor` roles
+and external write routes retain their selection precedence. Codex and OpenHands native rounds
 are fresh with `resume_executor=false`. Native requested model attribution
 is inherit; no runtime model observation is invented. Cursor build review seats
 remain external. Cursor native execution/lifecycle support is deferred.

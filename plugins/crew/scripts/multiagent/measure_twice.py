@@ -240,8 +240,11 @@ def work_to_dict(item: MeasureWorkItem, *, transport: bool = False) -> dict[str,
     value["review_item"] = review.work_item_to_dict(item.review_item) if item.review_item else None
     if transport and item.review_item and item.review_item.native_transport:
         value["native_transport"] = item.review_item.native_transport
-    elif transport and item.kind == "advisor" and item.channel == "codex":
-        from multiagent.codex_native_transport import launch_metadata
+    elif transport and item.kind == "advisor" and item.channel in {"codex", "openhands"}:
+        if item.channel == "openhands":
+            from multiagent.openhands_native_transport import launch_metadata
+        else:
+            from multiagent.codex_native_transport import launch_metadata
         value["native_transport"] = launch_metadata(item.owner, item.action_id, item.role,
             item.model, None, item.prompt_path, item.returned_path)
     return value
@@ -258,10 +261,14 @@ def issued_argv(item: MeasureWorkItem) -> dict[str, tuple[str, ...]]:
                 "capture": (executable, "measure-twice-capture", *flags),
                 "native_bind": (executable, "measure-twice-native-bind", *flags),
                 "recover": (executable, "measure-twice-recover", *flags)}
-        if item.channel != "codex":
+        if item.channel == "openhands":
+            from multiagent.openhands_native_transport import issued_commands
+            commands = issued_commands(item.owner, item.action_id)
+        if item.channel not in {"codex", "openhands"}:
             commands["native_capture"] = (executable, "measure-twice-native-capture", *flags)
     commands["next"] = (executable, "measure-twice-next", *owner)
-    return commands
+    from multiagent.openhands_native_transport import owner_command
+    return {name: owner_command(item.owner, argv) for name, argv in commands.items()}
 
 
 def issued_commands(item: MeasureWorkItem) -> dict[str, str]:
@@ -284,6 +291,11 @@ def step_to_dict(step: MeasureStep) -> dict[str, object]:
         value["in_flight"] = list(step.in_flight)
     if step.outcome:
         value["outcome"] = step.outcome
+    if step.ref:
+        from multiagent.openhands_native_transport import owner_commands
+        commands = owner_commands(step.ref, ("measure-twice-next", "measure-twice-resume", "measure-twice-cancel", "measure-twice-decide"))
+        if commands:
+            value["commands"] = commands
     return value
 
 
@@ -729,6 +741,9 @@ def _write_once(path: Path, content: bytes, root: Path) -> None:
 
 
 def _issue_advisor(data: dict[str, object], journal: MeasureJournal, ref: MeasureRef) -> MeasureAction:
+    if journal.advisor_channel == "openhands":
+        from multiagent.openhands_native_transport import freeze_context
+        freeze_context(ref)
     journal.action_ordinal += 1
     action_id = f"action-{journal.action_ordinal:04d}"
     root = _namespace(ref, journal)
@@ -952,13 +967,16 @@ def next_measure_twice(ref: MeasureRef) -> MeasureStep:
 def claim_measure_action(ref: MeasureRef, action_id: str) -> dict[str, object]:
     def claim(data: dict[str, object], journal: MeasureJournal) -> dict[str, object]:
         if loop_state.bound_reason(data) or journal.question:
-            raise review.WorkflowError("work_not_admitted", "bound or human wait prevents new advisor work")
+            raise review.ClaimRefused("work_not_admitted", "bound or human wait prevents new advisor work")
         action = journal.action
         if action is None or action.item.action_id != action_id:
             raise review.WorkflowError("invalid_action", "advisor action was not issued")
         if action.status != "ready":
             return {"authorization": "do_not_spawn", "action_status": action.status}
-        _verify_advisor_route(journal)
+        try:
+            _verify_advisor_route(journal)
+        except review.WorkflowError as exc:
+            raise review.ClaimRefused(exc.code, exc.message, exc.error) from exc
         action.status = "claimed"
         data["awaiting_input"] = False
         return {"authorization": "spawn", "action_status": "claimed", "work_item": work_to_dict(action.item, transport=True)}
@@ -1001,8 +1019,8 @@ def submit_measure_action(request: MeasureSubmission) -> MeasureStep:
             raise review.WorkflowError("invalid_submission", "advisor action is not actively claimed")
         root = _namespace(result.ref, journal)
         transport_receipt = _safe_path(root / "transport-receipts" / f"{result.action_id}.json", root)
-        if journal.advisor_channel == "codex" and not transport_receipt.exists():
-            raise review.WorkflowError("invalid_submission", "Codex advisor returns require owned host-written capture")
+        if journal.advisor_channel in {"codex", "openhands"} and not transport_receipt.exists():
+            raise review.WorkflowError("invalid_submission", "Native advisor returns require owned host-written capture")
         if transport_receipt.exists():
             try:
                 record = json.loads(transport_receipt.read_bytes())
@@ -1034,12 +1052,12 @@ def submit_measure_action(request: MeasureSubmission) -> MeasureStep:
     return next_measure_twice(result.ref)
 
 
-def recover_measure_action(request: MeasureRecovery) -> MeasureStep:
+def recover_measure_action(request: MeasureRecovery, *, reserved: bool = False) -> MeasureStep:
     if request.confirmation != "not_running":
         raise review.WorkflowError("not_confirmed", "lost advisor recovery requires not_running")
     def recover(data: dict[str, object], journal: MeasureJournal) -> None:
         action = journal.action
-        if action is None or action.item.action_id != request.action_id or action.status != "claimed":
+        if action is None or action.item.action_id != request.action_id or action.status not in ({"ready", "claimed"} if reserved else {"claimed"}):
             raise review.WorkflowError("invalid_recovery", "advisor claim is not outstanding")
         action.status = "settled"
         _park(data, journal, _bound_question(request.ref, "advisor_retry", "Confirmed lost advisor; retry or cancel?"))
@@ -1182,6 +1200,10 @@ def decide_measure_twice(ref: MeasureRef, decision: MeasureDecision) -> MeasureS
         if decision.kind == "legacy_work_not_running" and question.kind == decision.kind:
             _legacy_confirm(data, journal, decision)
             return
+        if decision.kind in {"retry_synthesis", "retry_review"} and journal.advisor_channel == "openhands":
+            from multiagent.openhands_native_transport import validate_context
+            validate_context(ref)
+            validate_context(journal.review_ref)
         if decision.kind == "retry_review" and question.kind == "completion_advisory" and any(
                 advisory in question.advisories for advisory in ("target-drift", "target-no-longer-resolves")):
             try:

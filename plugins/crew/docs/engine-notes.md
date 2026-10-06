@@ -529,7 +529,7 @@ The stage machine lives in measure_twice.py because interview identity, advisor
 promotion, review generation and human decisions must survive host re-entry.
 Advisor admission belongs in HostRoles metadata so the workflow does not become
 a Claude-specific state machine. Claude and Codex admit the advisor/inherit route;
-Cursor and OpenHands planning remain deferred.
+Cursor planning remains deferred. OpenHands planning uses the native advisor task/event bridge; see `openhands-transport.md` for the supported backend contract and pending live validation.
 
 Loop-bound review identity, accepted-action evidence and loop-before-review lock
 order keep mutable standalone/build pointers from selecting a plan's verdict.

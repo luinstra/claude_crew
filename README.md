@@ -751,3 +751,10 @@ Independent builds need separate workspaces. Real CLI resume evidence applies to
 its recorded ID/version/source epoch; another harness session is a different owner.
 See [Phase 5 evidence](plugins/crew/docs/phase-5-build-evidence.md) for verification
 limits. Cursor native build and its lifecycle gate remain deferred.
+
+### Native OpenHands / Agent Canvas
+
+Crew now includes an OpenHands portable plugin and native engine transport.
+The SDK 1.51.0 loader and disposable workflow fixtures are tested; live Canvas
+installation and model-backed gates remain pending. See the [OpenHands guide](plugins/crew/docs/openhands-transport.md)
+for installation, readable backend event-store prerequisites, profiles, and explicit resume.

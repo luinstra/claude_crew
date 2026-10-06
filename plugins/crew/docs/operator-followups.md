@@ -406,7 +406,8 @@ installation was untouched; the temporary package was removed after the gate.
 **Scope correction, 2026-10-05.** Phase 6 means installing Crew through Canvas's
 Plugins UI and invoking it inside native OpenHands conversations. The standalone
 SDK adapter from `b9d21fe` is reverted; its offline tests did not clear this gate.
-Implementation and the live Canvas gate remain pending. Delivery is on
+Implementation and fixture/SDK verification are present in the isolated worktree;
+the live Canvas gate remains pending. Delivery is on
 `codex/multi-harness-engine`; isolated implementation work must not modify the
 operator's active checkout. Follow the [corrected plan](phase-6-openhands-plan.md)
 for the installation, model/profile, workflow, resume, and cancellation evidence.

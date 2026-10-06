@@ -1971,7 +1971,7 @@ def test_host_detection():
             invalid = channels._detect_host({"CREW_HOST": "wat"})
             repeated = channels._detect_host({"CREW_HOST": "wat"})
         expected_warning = (
-            "crew: CREW_HOST='wat' is not a known host (claude, codex, cursor); "
+            "crew: CREW_HOST='wat' is not a known host (claude, codex, cursor, openhands); "
             "treating the host as unknown (no native channel)\n"
         )
         check("invalid CREW_HOST -> unknown with exact one-time warning",
@@ -10794,7 +10794,7 @@ def test_dispatch_options():
 
     # --- declarations: registry parity + per-class explicitness + type set ----
     by_kind = dispatch_options_by_kind()
-    registered_kinds = set(_seats.PROVIDER_KINDS)
+    registered_kinds = {name for name, kind in _seats.PROVIDER_KINDS.items() if kind.has_executor}
     check("dispatch_options_by_kind() keys == registered provider kinds (parity)",
           set(by_kind) == registered_kinds,
           str(sorted(registered_kinds)), str(sorted(by_kind)))
@@ -14922,7 +14922,7 @@ def test_via_migration():
     check("via stages 3 and 4 diagnose an unknown-only row",
           "unknown-channel" not in cat
           and "[seats.unknown-channel].via names unknown channel 'bogus' "
-              "(known: agy, claude, codex, cursor); dropping it" in warn
+              "(known: agy, claude, codex, cursor, openhands); dropping it" in warn
           and "[seats.unknown-channel].via lists no usable channel; ignoring the seat" in warn,
           "unknown-channel and empty-usable diagnostics", warn)
 
@@ -19692,7 +19692,8 @@ def main():
     test_stage()
     test_stage_all()
     test_dispatcher()
-    test_registry()
+    with crew_config():
+        test_registry()
     test_codex()
     test_codex_continuation()
     test_cursor_continuation()

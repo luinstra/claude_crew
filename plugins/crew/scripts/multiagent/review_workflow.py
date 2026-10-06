@@ -34,7 +34,7 @@ from multiagent.providers import (
 )
 
 SCHEMA = 1
-HOSTS = frozenset({"claude", "cursor", "codex", "unknown"})
+HOSTS = frozenset({"claude", "cursor", "codex", "openhands", "unknown"})
 CODEX_NATIVE_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
 ACTION_RE = re.compile(r"^attempt-[0-9]{4}:(reviewer|formatter|synthesis):[0-9]{4}$")
 ATTEMPT_RE = re.compile(r"^attempt-[0-9]{4}$")
@@ -244,6 +244,10 @@ class WorkflowError(Exception):
         self.message = message
 
 
+class ClaimRefused(WorkflowError):
+    """Source-proven refusal raised before changing an action to claimed."""
+
+
 def _public_workflow_boundary(function):
     """Translate persistence failures at every public standalone entrypoint."""
 
@@ -365,11 +369,15 @@ def issued_review_commands(ref: ReviewRef, item: WorkItem, *, loop_owned: bool =
     commands = {"claim": (executable, "review-claim", *flags), "capture": (executable, "review-capture", *flags),
                 **({} if loop_owned else {"next": next_command}),
                 "recover": (executable, "review-recover", *flags, "--diagnostic-code", recovery_code)}
-    if item.native_transport:
+    if item.channel == "openhands" and item.driver == "native":
+        from multiagent.openhands_native_transport import issued_commands, owner_command
+        return {**issued_commands(ref, item.action_id), **({} if loop_owned else {"next": owner_command(ref, next_command)})}
+    if item.native_transport and item.channel != "openhands":
         commands["native_bind"] = (executable, "review-native-bind", *flags)
-    elif item.driver == "native" and item.role == "crew:reviewer":
+    elif item.driver == "native" and item.role == "crew:reviewer" and item.channel != "openhands":
         commands.update(native_bind=(executable, "review-native-bind", *flags), native_capture=(executable, "review-native-capture", *flags))
-    return commands
+    from multiagent.openhands_native_transport import owner_command
+    return {name: owner_command(ref, argv) for name, argv in commands.items()}
 
 
 def parse_work_item(value: object) -> WorkItem:
@@ -979,6 +987,9 @@ def _resolve_seats(
 ) -> list[tuple[str, object, object]]:
     from multiagent import cli
 
+    if policy.host == "openhands":
+        from multiagent.openhands_native_transport import resolve_roster
+        return resolve_roster(request, policy)
     try:
         # The ROSTER resolver still declares the narrow Task-recipe route: it
         # answers which names are in the panel, and every name reaches the
@@ -1763,6 +1774,14 @@ class HostRoles:
 
 
 _HOST_ROLES: dict[str, HostRoles] = {
+    "openhands": HostRoles(
+        channel="openhands", scribe_role=None, scribe_model=None,
+        formatter_role=None, formatter_model=None,
+        reviewer_role_name="crew:reviewer", panelist_role_name="crew:panelist",
+        native_pin_field="model", single_seat_per_native_pin=False,
+        reviewer_access=ACCESS_ADVISORY, formatter_access=ACCESS_ADVISORY,
+        advisor_role="crew:advisor", advisor_model="inherit",
+    ),
     "codex": HostRoles(
         channel="codex", scribe_role=None, scribe_model=None,
         formatter_role=None, formatter_model=None,
@@ -1821,6 +1840,7 @@ _HOST_ROLES: dict[str, HostRoles] = {
 # "External" is not itself a tier: what decides one is the posture the adapter
 # argv establishes, and the adapters do not all establish the same one.
 _CHANNEL_ACCESS: dict[str, str] = {
+    "openhands": ACCESS_ADVISORY,
     # `providers/codex.py` runs review seats at `--sandbox read-only`.
     "codex": ACCESS_ENFORCED,
     # `providers/cursor.py` runs review seats under `--mode plan`, which applies
@@ -2039,7 +2059,7 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
             roles.seat_role_name(prompt_mode) if roles is not None else None,
             kind="reviewer", seat=seat, model=model, host=policy.host,
         )
-    if native and policy.host != "codex":
+    if native and policy.host not in {"codex", "openhands"}:
         _require_native_role(
             roles.scribe_role if roles is not None else None,
             # The SCRIBE's own model: the transport is what would fail to spawn,
@@ -2059,7 +2079,7 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
     result_path = root / "results" / f"{ordinal:04d}.json"
     submission_path = root / "submissions" / f"{digest}.json"
     descendants = [(prompt_path, f"reviewer action {action_id} prompt")]
-    if native and policy.host != "codex":
+    if native and policy.host not in {"codex", "openhands"}:
         descendants.extend((
             (transport_prompt, f"reviewer action {action_id} scribe prompt"),
             (primary_ingress, f"reviewer action {action_id} scribe ingress"),
@@ -2079,7 +2099,7 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
             create_parents=True,
         )
     _write_run_text(run, prompt_path, prompt, f"reviewer action {action_id} prompt")
-    if native and policy.host != "codex":
+    if native and policy.host not in {"codex", "openhands"}:
         _write_run_text(
             run,
             transport_prompt,
@@ -2102,7 +2122,7 @@ def _reviewer_action(run: Path, ref: ReviewRef, *, ordinal: int, seat: str,
         "return_transport": ({
             "primary": {"kind": "host_write", "ingress_path": str(fallback_ingress)},
             "fallback": {"kind": "host_write", "ingress_path": str(fallback_ingress)},
-        } if policy.host == "codex" else {
+        } if policy.host in {"codex", "openhands"} else {
             # Reached only when the mint above found a role, which it cannot do
             # without a role table, so there is no roleless case to guard here.
             "primary": {"kind": "scribe",
@@ -2760,14 +2780,23 @@ def _host_result_template(ref: ReviewRef, action: dict) -> dict | None:
     }
 
 
+def _validate_host_context(wf: Mapping, ref: ReviewRef) -> None:
+    if wf["workflow_identity"]["host"] == "openhands":
+        from multiagent.openhands_native_transport import validate_context
+        validate_context(ref)
+
+
 def _work_item(action: dict, ref: ReviewRef, *, loop_owned: bool = False) -> WorkItem:
     native_transport = None
-    if action["driver"] == "native" and action["channel"] == "codex":
-        from multiagent.codex_native_transport import launch_metadata
+    if action["driver"] == "native" and action["channel"] in {"codex", "openhands"}:
+        if action["channel"] == "openhands":
+            from multiagent.openhands_native_transport import launch_metadata
+        else:
+            from multiagent.codex_native_transport import launch_metadata
         run = _guard_review_path(session_segment=ref.session_segment, run_id=ref.run_id, create=False)
         signature = review_runs.read_run_json(run)["seat_signatures"][action["seat"]]
         native_transport = launch_metadata(ref, action["action_id"], action["role"],
-            action["model"], signature["reasoning_effort"], action["prompt_path"],
+            action["model"], signature["reasoning_effort"] if action["channel"] == "codex" else None, action["prompt_path"],
             action["return_transport"]["primary"]["ingress_path"])
     item = WorkItem(action["action_id"], str(action["kind"]), str(action["driver"]),
                     action.get("seat"), action.get("role"), action.get("model"),
@@ -2913,7 +2942,8 @@ def _validate_issued_path(
 
 def _read_authoritative_prompt(path: Path, expected: str, label: str) -> None:
     try:
-        actual = path.read_text(encoding="utf-8")
+        # Universal-newline reads would erase differences in the frozen prompt bytes.
+        actual = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise WorkflowError(
             "corrupt_workflow",
@@ -3369,7 +3399,7 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
                 primary_ingress = root / "ingress" / "scribe" / f"{digest}.md"
                 fallback_ingress = root / "ingress" / "host-write" / f"{digest}.md"
                 transport_prompt = root / "transport" / f"scribe-{ordinal:04d}.txt"
-                if identity["host"] == "codex":
+                if identity["host"] in {"codex", "openhands"}:
                     expected = {"kind": "host_write", "ingress_path": str(fallback_ingress)}
                     if transport != {"primary": expected, "fallback": expected}:
                         _corrupt_workflow(f"native reviewer action {action_id!r} has invalid host transport")
@@ -3391,7 +3421,7 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
                     or transport["fallback"].get("kind") != "host_write"
                 ):
                     _corrupt_workflow(f"native reviewer action {action_id!r} has invalid transport")
-                if identity["host"] != "codex":
+                if identity["host"] not in {"codex", "openhands"}:
                     _validate_issued_path(run, transport["primary"]["prompt_template_path"], transport_prompt,
                                           f"reviewer action {action_id} scribe prompt", required_file=True)
                     _validate_issued_path(run, transport["primary"]["ingress_path"], primary_ingress,
@@ -3539,7 +3569,7 @@ def _validate_workflow(wf: dict, run: Path, record: dict, snapshot: Path) -> Non
                 expected,
                 f"reviewer action {action_id} prompt",
             )
-            if action["driver"] == ActionDriver.NATIVE and identity["host"] != "codex":
+            if action["driver"] == ActionDriver.NATIVE and identity["host"] not in {"codex", "openhands"}:
                 ingress = action["return_transport"]["primary"]["ingress_path"]
                 _read_authoritative_prompt(
                     expected_transport_prompts[action_id],
@@ -3662,6 +3692,13 @@ def _successor_seed(ref: ReviewRef) -> _SuccessorSeed:
 
 
 def _mint_successor_locked(seed: _SuccessorSeed) -> tuple[ReviewStep, bool]:
+    retained = _guard_review_path(session_segment=seed.session_segment, run_id=seed.run_id,
+        create=False, allow_missing=True)
+    source_context = None
+    if seed.identity["host"] == "openhands" and not (retained / "workflow.json").is_file():
+        from multiagent.openhands_native_transport import validate_context
+        source_context = validate_context(ReviewRef(seed.session_segment, seed.predecessor_run_id,
+            "attempt-0001", seed.record["target_sha256"]))
     run = _guard_review_path(
         session_segment=seed.session_segment,
         run_id=seed.run_id,
@@ -3691,6 +3728,10 @@ def _mint_successor_locked(seed: _SuccessorSeed) -> tuple[ReviewStep, bool]:
                 pointer_expected=(_POINTER_ABSENT, seed.predecessor_run_id),
             ), closed
 
+        if source_context is not None:
+            from multiagent.openhands_native_transport import admit_review_context
+            admit_review_context(ReviewRef(seed.session_segment, seed.run_id, "attempt-0001",
+                seed.record["target_sha256"]), run, source_context)
         successor = {
             key: seed.record[key]
             for key in (
@@ -4018,6 +4059,8 @@ def _start_run(
                     "standalone run identity differs; start a new run",
                     "conflict",
                 )
+            if (_derive_step(wf, run).outcome or {}).get("status") == "synthesis_failed":
+                _validate_host_context(wf, parse_review_ref(wf["ref"]))
             closed = _round_closed(_derive_step(wf, run)) if kind == "standalone_debate" else False
             step = _advance_locked(
                 wf,
@@ -4034,6 +4077,9 @@ def _start_run(
                 )
                 return step, closed
             return step, closed
+        if host == "openhands":
+            from multiagent.openhands_native_transport import admit_review_context
+            admit_review_context(ref, run)
         snapshot_path = run / snapshot_name
         record = {
             "run_id": run_id,
@@ -4228,7 +4274,11 @@ def claim_review_action(request: ClaimRequest) -> ClaimResponse:
             raise WorkflowError("invalid_action", "external reviewer actions are executed by review-execute")
         claimed_now = action.get("status") == "ready"
         if claimed_now:
-            _admit_loop_work(wf, request.ref)
+            try:
+                _validate_host_context(wf, request.ref)
+                _admit_loop_work(wf, request.ref)
+            except WorkflowError as exc:
+                raise ClaimRefused(exc.code, exc.message, exc.error) from exc
             action["status"] = "claimed"
             action["claim_id"] = hashlib.sha256(f"{request.action_id}:{time.time_ns()}".encode()).hexdigest()[:16]
         elif action.get("status") not in {"claimed", "settled"}:
@@ -4599,6 +4649,8 @@ def _validate_submission_locked(
     run: Path,
     *, observed_bytes: bytes | None = None,
 ) -> _SubmissionAdmission:
+    if action.get("status") != "settled":
+        _validate_host_context(wf, result.ref)
     if result.status != HostStatus.OK:
         valid_failure = (
             result.artifact is None
@@ -4743,8 +4795,8 @@ def submit_review(request: SubmissionRequest) -> ReviewStep:
                 "typed HostResult does not match the issued submission file",
             )
         capture_receipt = run / "attempts" / result.ref.attempt_id / "transport-receipts" / f"{_hash_action(result.action_id)}.json"
-        if action["driver"] == "native" and action["channel"] == "codex" and not capture_receipt.exists():
-            raise WorkflowError("invalid_submission", "Codex native returns require owned host-written capture")
+        if action["driver"] == "native" and action["channel"] in {"codex", "openhands"} and not capture_receipt.exists():
+            raise WorkflowError("invalid_submission", "Native returns require owned host-written capture")
         if capture_receipt.exists():
             try:
                 capture_receipt = _prepare_run_descendant(run, capture_receipt, "capture receipt",
@@ -4804,7 +4856,7 @@ def submit_review(request: SubmissionRequest) -> ReviewStep:
 
 
 @_public_workflow_boundary
-def recover_review_action(request: RecoveryRequest) -> ReviewStep:
+def recover_review_action(request: RecoveryRequest, *, reserved: bool = False) -> ReviewStep:
     if request.confirmation != "not_running":
         raise WorkflowError("not_confirmed", "recovery requires not_running confirmation")
     run = _guard_review_path(
@@ -4821,12 +4873,14 @@ def recover_review_action(request: RecoveryRequest) -> ReviewStep:
             (action.get("kind"), action.get("driver")),
         )
         if (
-            action.get("status") != "claimed"
+            action.get("status") not in ({"ready", "claimed"} if reserved else {"claimed"})
             or request.diagnostic_code != expected_diagnostic
         ):
             raise WorkflowError("invalid_recovery", "diagnostic code does not match the claimed action")
+        if reserved and action.get("status") == "ready":
+            action["claim_id"] = hashlib.sha256(f"{request.action_id}:{time.time_ns()}".encode()).hexdigest()[:16]
         _reconcile_external_results_locked(wf, run)
-        if action.get("status") == "claimed":
+        if action.get("status") in {"ready", "claimed"}:
             if _reroute_lost_formatter(action):
                 return _advance_locked(wf, run)
             extra = {}
@@ -4896,6 +4950,7 @@ def _create_synthesis_restart_locked(
     source_ref: ReviewRef,
     receipts: dict,
 ) -> ReviewStep:
+    _validate_host_context(wf, source_ref)
     source_attempt = source_ref.attempt_id
     if _source_receipt(receipts, source_attempt) is not None:
         raise WorkflowError("conflict", "source attempt already has a retry receipt", "conflict")
@@ -4963,6 +5018,7 @@ def _retry_review_locked(request: RetryRequest, run: Path) -> ReviewStep:
             raise WorkflowError("conflict", "retry request conflicts with its receipt", "conflict")
         return _advance_locked(wf, run)
     # Refusing a retry must not reconcile, render, or persist anything.
+    _validate_host_context(wf, request.ref)
     source_step = _derive_step(wf, run)
     if source_step.type != StepType.TERMINAL:
         raise WorkflowError("active_attempt", "the source attempt is still active", "not_retryable")
@@ -5241,6 +5297,10 @@ def prepare_loop_review(request: ReviewRequest, binding: LoopReviewBinding, *, e
     target = targets.resolve(request.target_input, base=request.base)
     if target.kind != ("code" if binding.loop == "bl" else "plan"):
         raise WorkflowError("target_error", "loop review target kind differs from its owner")
+    if host == "openhands":
+        from multiagent.openhands_native_transport import validate_context, build, measure
+        owner = (build.BuildRef if binding.loop == "bl" else measure.MeasureRef)(binding.session_segment, binding.loop_instance_id)
+        validate_context(owner)
     resolved = _resolve_seats(request, policy, default_panel=None, seats_over_panel=True)
     if binding.loop == "bl":
         timeout = request.timeout_seconds or config.default_timeout() or 600
@@ -5314,6 +5374,10 @@ def _start_loop_review_under_owner_lock(prepared: PreparedLoopReview) -> ReviewS
             if wf["workflow_identity"] != record["workflow_identity"]:
                 raise WorkflowError("conflict", "prepared review identity differs", "conflict")
             return _advance_locked(wf, run)
+        if record["host"] == "openhands":
+            from multiagent.openhands_native_transport import admit_review_context, validate_context, build, measure
+            owner = (build.BuildRef if binding.loop == "bl" else measure.MeasureRef)(binding.session_segment, binding.loop_instance_id)
+            admit_review_context(ref, run, validate_context(owner))
         review_runs.write_run_json_once(run, record)
         _write_run_text(run, run / record["snapshot"], prepared.content, "loop target snapshot")
         identity = record["workflow_identity"]

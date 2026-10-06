@@ -17,6 +17,8 @@ This directory contains the Python backend for crew's persistence features. Hook
 
 ```
 scripts/
+├── openhands.py          # local backend context generations and native task-event bridge
+├── openhands-package.py  # content-derived role generation and standalone package export
 ├── crew-state.py        # CLI for loop state management (reached via `crew state …`)
 ├── models.py            # Dataclasses, schema-5 state and shared safety predicate
 ├── loop_state.py        # Loop transactions and common verdict guard
@@ -27,7 +29,7 @@ scripts/
 ├── cursor-env-capture.py # In-process capture helper called by session-start.py: records Cursor hook env names, the safe-value allowlist, and probe metadata
 ├── host_detect.py       # Stdlib host detector for the hook entry points
 ├── artifact_prune.py    # ENUMERATE-only stale-artifact finder (single source shared by `crew swab` + the session-start reporter); never deletes
-├── tests/               # Unit tests (test-codex-native.py, test-build-workflow.py, test-measure-twice.py, test-review-workflow.py, test-hooks.py, test-multiagent.py, fixtures/)
+├── tests/               # Unit tests (test-openhands-native.py, test-openhands-loader.py, test-codex-native.py, test-build-workflow.py, test-measure-twice.py, test-review-workflow.py, test-hooks.py, test-multiagent.py, fixtures/)
 └── multiagent/          # Multi-model review and council engine (see below)
 ```
 
@@ -63,7 +65,9 @@ the field and the one-time app badge check, then is DROPPED before the freeze.
 later seat in resolution order. The role names, support-role model, and each
 host's channel come from the one `_HOST_ROLES` table beside `_reviewer_action`;
 Codex has a native reviewer/panelist/advisor row but uses parent-context
-formatter/synthesis and host-written capture, with no scribe. An unknown host
+formatter/synthesis and host-written capture, with no scribe. OpenHands has a native
+reviewer/panelist/advisor row, configured profile references and persisted task-event
+capture, with parent formatter/synthesis and no scribe. An unknown host
 drives no native work and uses parent-context formatter/synthesis. The drop is one shared predicate (`has_no_route_here`, a
 routing POLICY, not a claim that the channel's CLI is absent): roster resolution
 drops on it and drift reconstruction refuses on it, so a seat with no native pin
@@ -156,6 +160,8 @@ a null synthesis judgment, and renders the advisory NOT MET line.
 
 Host selection is explicit when needed: `CREW_HOST=claude` selects the native
 Claude Task channel, `CREW_HOST=codex` selects the Codex collaboration adapter,
+`CREW_HOST=openhands` selects the native OpenHands task/event bridge through
+`scripts/openhands.py run` (validated local backend context required),
 and `CREW_HOST=cursor` selects the Cursor host (native cursor-channel seats for
 standalone review, external for everything else). With no override,
 detection falls through the shipped marker tables in a DELIBERATE order,
@@ -173,6 +179,7 @@ multiagent/
 ├── build_workflow.py    # build actions, receipts, executor/review decisions and owner binding
 ├── execution.py         # write execution and guards with a per-call canonical workspace
 ├── measure_twice.py     # planning decisions, requirements, promotion, human questions and loop binding
+├── openhands_native_transport.py # durable reservation/settlement, frozen context and persisted event capture
 ├── codex_native_transport.py # frozen native launch metadata, handle binding and prompt integrity
 ├── workflow_transport.py # deterministic capture and injected notification-driven native runner
 ├── review_workflow.py   # shared review authority: exact schema transport, snapshot, lock/advance transaction, attempt history, repair, retry, and synthesis readiness
@@ -231,8 +238,9 @@ Per-subcommand one-liners (do NOT regress the behavior each names):
   sentinel OR a catalog seat whose resolved execution is engine-runnable and
   supports workspace-write; a native-only seat, group token, unknown,
   unresolved, or read-only seat exits 2 naming the reason. Runs NOTHING.
-  The builtin sentinel emits ``channel: claude`` on Claude and ``channel: codex``
-  on Codex. Codex built-in execution sets ``resume_executor: false``.
+  The builtin sentinel emits ``channel: claude`` on Claude, ``channel: codex``
+  on Codex, and ``channel: openhands`` through the OpenHands wrapper. Codex and
+  OpenHands built-in execution set ``resume_executor: false``.
 - `render` — build/stage a seat prompt; `--stage-all` collapses N stages into one call.
 - `seats`: resolve/print the subprocess seats for a panel.
 - `collect` — fold per-seat `<seat>.json` into a digest; `--group`/`--full`/`--report-unparsed`.
@@ -931,7 +939,7 @@ The normative public types, request-file grammar, exact document detection,
 question identities and CLI examples are in
 [measure-twice-protocol.md](../docs/measure-twice-protocol.md). Python owns all mt
 decisions; Markdown transports four MeasureStep responses. Advisor admission is
-static HostRoles metadata (Claude and Codex advisor/inherit/advisory access), not a
+static HostRoles metadata (Claude, Codex and OpenHands advisor/inherit/advisory access), not a
 host-specific stage machine. Unsupported advisor hosts refuse before activation.
 
 One optional `LoopState.mt_workflow` journal stores progress, actions and receipts;
@@ -1369,6 +1377,9 @@ old delete path also retired the three data-loss bugs the review-run sweep carri
 
 ```bash
 # Run all tests (Python 3.11+, with subprocess PATH resolving that interpreter)
+python3 plugins/crew/scripts/tests/test-openhands-native.py
+# Requires an interpreter with openhands-sdk==1.51.0:
+python3 plugins/crew/scripts/tests/test-openhands-loader.py
 python3 plugins/crew/scripts/tests/test-codex-native.py
 python3 plugins/crew/scripts/tests/test-build-workflow.py
 python3 plugins/crew/scripts/tests/test-measure-twice.py

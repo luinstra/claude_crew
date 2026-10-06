@@ -815,6 +815,55 @@ def test_codex_manifest_bump_behavior() -> None:
                       expected, str(read_version(manifests[1])))
 
 
+def test_openhands_manifest_bump_behavior() -> None:
+    log_section("OpenHands version mirror")
+    for scenario in ("source", "manifest", "version-only", "untracked", "rollback"):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            repo = make_repo(tmp, twins=True)
+            openhands = repo / "plugins/crew/plugin.json"
+            openhands.parent.mkdir(exist_ok=True)
+            body = json.loads(CREW_PLUGIN_JSON)
+            body["extensions"] = {"dev.openhands": {"entry_command": "review"}}
+            openhands.write_text(json.dumps(body, indent=2) + "\n")
+            if scenario != "untracked":
+                _git(repo, "add", "-A")
+                _git(repo, "commit", "-q", "-m", "chore: bump versions")
+            if scenario in {"source", "untracked", "rollback"}:
+                (repo / "plugins/crew/src.txt").write_text("v1\n")
+                _git(repo, "add", "plugins/crew/src.txt")
+            else:
+                body["skills" if scenario == "manifest" else "version"] = (
+                    "./different-skills/" if scenario == "manifest" else "9.9.9"
+                )
+                openhands.write_text(json.dumps(body, indent=2) + "\n")
+                _git(repo, "add", str(openhands.relative_to(repo)))
+            _git(repo, "commit", "-q", "-m", "fix: exercise openhands mirror")
+            before = openhands.read_bytes()
+            manifests = [openhands, repo / "plugins/crew/.claude-plugin/plugin.json",
+                         repo / "plugins/crew/.cursor-plugin/plugin.json"]
+            snapshots = [p.read_bytes() for p in manifests]
+            env = env_with_fake_git(make_fake_git_dir(tmp)) if scenario == "rollback" else None
+            proc = run_hook(repo, env=env)
+            if scenario == "rollback":
+                check("OpenHands mirror participates in rollback",
+                      proc.returncode != 0 and snapshots == [p.read_bytes() for p in manifests]
+                      and not _git(repo, "diff", "--cached", "--name-only").stdout.strip(),
+                      "all manifests restored and nothing staged", proc.stderr)
+            elif scenario in {"source", "manifest"}:
+                check(f"OpenHands {scenario} change mirrors the canonical bump",
+                      proc.returncode == 0 and all(read_version(p) == "0.40.1" for p in manifests),
+                      "all three versions at 0.40.1", proc.stderr)
+            else:
+                check(f"OpenHands {scenario} mirror remains untouched",
+                      proc.returncode == 0 and openhands.read_bytes() == before,
+                      "byte-identical OpenHands manifest", proc.stderr)
+                expected = "0.40.1" if scenario == "untracked" else "0.40.0"
+                check(f"OpenHands {scenario} does not cause an extra version bump",
+                      read_version(manifests[1]) == expected,
+                      expected, str(read_version(manifests[1])))
+
+
 def test_cursor_snapshot_rollback():
     log_section("Cursor mirror rollback")
     with tempfile.TemporaryDirectory() as td:
@@ -930,6 +979,7 @@ def main():
     test_cursor_mirror_bump_behavior()
     test_cursor_snapshot_rollback()
     test_codex_manifest_bump_behavior()
+    test_openhands_manifest_bump_behavior()
     test_format_stability_synthetic()
     test_real_repo_inputs()
 

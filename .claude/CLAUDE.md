@@ -10,7 +10,8 @@
 > a stdlib-only, old-parseable guard placed BEFORE its real imports, degrading
 > to a visible no-op (exit 0 + a loud diagnostic) rather than a traceback: the
 > shebang resolves to whatever `python3` PATH hands over, which on macOS can
-> still be the system 3.9.
+> still be the system 3.9. Direct OpenHands wrapper/export CLIs are not hooks:
+> they report unsupported Python as a nonzero error.
 
 ## Overview
 
@@ -65,7 +66,7 @@ Use scopes to indicate what changed:
 
 The workflow is smart about what it bumps:
 - **Marketplace version:** Only if `.claude-plugin/marketplace.json`, a substantive `.cursor-plugin/marketplace.json`, `README.md`, or `docs/` changed
-- **Plugin versions:** Only plugins with actual file changes, including substantive `plugins/crew/.cursor-plugin/plugin.json` or `plugins/crew/.codex-plugin/plugin.json` changes, get bumped
+- **Plugin versions:** Only plugins with actual file changes, including root `plugins/crew/plugin.json` and substantive `plugins/crew/.cursor-plugin/plugin.json` or `plugins/crew/.codex-plugin/plugin.json` changes, get bumped
 
 ### Examples
 
@@ -90,6 +91,8 @@ git commit -m "ci: update workflow permissions"
 | Command | Purpose |
 |---------|---------|
 | `/plugin` | Install plugin from current directory (run from `plugins/crew/` or `plugins/sk/`) |
+| `python plugins/crew/scripts/tests/test-openhands-native.py` | Run native OpenHands persisted-event fixtures |
+| `python plugins/crew/scripts/tests/test-openhands-loader.py` | Run SDK 1.51.0 loader contracts (requires SDK) |
 | `python plugins/crew/scripts/tests/test-codex-native.py` | Run Codex transport and host-isolation tests |
 | `python plugins/crew/scripts/tests/test-build-workflow.py` | Run build workflow contract tests |
 | `python plugins/crew/scripts/tests/test-hooks.py` | Run hook unit tests |
@@ -114,6 +117,8 @@ This enables automatic version bumping after each commit based on conventional c
 .cursor-plugin/marketplace.json     ← Cursor marketplace registry
 plugins/
 ├── crew/                           ← Core plugin
+│   ├── plugin.json                 ← portable OpenHands manifest, version mirror
+│   ├── dev.openhands/              ← generated native roles and workflow entry points
 │   ├── agents/                     ← execution contexts
 │   ├── agents-cursor/              ← Cursor role adapters (reviewer/panelist/formatter/scribe)
 │   ├── commands/                   ← slash commands
@@ -162,6 +167,11 @@ advertising an sk skill for days after sk deleted it).
    - Don't put `#` comment lines inside frontmatter — document optional MCP tools in the agent body instead.
 3. Write system prompt instructions below frontmatter
 4. Reference with `Task(subagent_type="crew:my-agent", ...)`
+5. After adding or editing `plugins/crew/agents/*.md`, regenerate native OpenHands
+   definitions with `python3 plugins/crew/scripts/openhands-package.py`, then run
+   `python3 plugins/crew/scripts/openhands-package.py --check` and
+   `python3 plugins/crew/scripts/tests/test-openhands-native.py`. Include the generated
+   roles/routes with the source change; their content names change with their prompts.
 
 **Tool access patterns:**
 - `advisor`: All tools (analysis needs everything)

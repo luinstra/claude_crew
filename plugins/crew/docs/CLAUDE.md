@@ -71,7 +71,7 @@ The matching-pointer timeout adoption above is silent only when standalone
 `--timeout` is omitted. An explicitly supplied timeout re-resolves normally and
 may re-warn; only a different effective value creates a new identity.
 
-For `[seats.<name>]`, `via = ["<channel>"]` is the current execution key and must name exactly one known channel (`codex`, `cursor`, `agy`, or `claude`); `provider` is accepted as the legacy spelling. A declared seat also needs an explicit `model`. Do not put both `provider` and `via` in the same table: that row is ignored with a migration warning. A legacy `provider` in a user layer may legally override a shipped seat's `via`; it translates mechanically to the equivalent one-element channel.
+For `[seats.<name>]`, `via = ["<channel>"]` is the current execution key and must name exactly one known channel (`codex`, `cursor`, `agy`, `claude`, or `openhands`); `provider` is accepted as the legacy spelling. A declared seat also needs an explicit `model`. Do not put both `provider` and `via` in the same table: that row is ignored with a migration warning. A legacy `provider` in a user layer may legally override a shipped seat's `via`; it translates mechanically to the equivalent one-element channel.
 
 **Onboarding:** `/crew:init` detects which provider CLIs are installed and writes a commented config file, never clobbering an existing one silently. A fresh scaffold (`~/.crew-config.toml`, or `.crew/config.toml` with `--repo` when no global exists) gets cost-safe defaults + honest per-seat `available` flags; with `--repo` AND an existing global `~/.crew-config.toml`, the per-repo file is instead seeded from that global verbatim (comments preserved), then lightly adjusted. (Distinct from `/crew:crew-config`, which copies this `CLAUDE.md`, not the engine-tuning `.toml`.)
 
@@ -90,7 +90,7 @@ For `[seats.<name>]`, `via = ["<channel>"]` is the current execution key and mus
 For tasks requiring multi-model panel verification before completion:
 
 1. Start with `/crew:build "your task description"`
-2. Python issues implementation and revision actions through the native Claude/Codex executor or the configured external write route
+2. Python issues implementation and revision actions through the native Claude/Codex/OpenHands executor or the configured external write route
 3. A fresh multi-model panel verifies the completed executor report. Python applies the verdict and issues the next `work_batch`, `waiting`, `needs_input` or `terminal` step; completion advisories require the exact bound human decision
 4. Use `/crew:cancel-build` to exit early if needed
 

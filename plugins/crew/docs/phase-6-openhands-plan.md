@@ -1,6 +1,8 @@
 # Phase 6: Crew inside OpenHands Agent Canvas
 
-Status: corrected scope, 2026-10-05; implementation pending.
+Status: historical scope document, 2026-10-05. Native plugin implementation and
+fixture/source-contract tests are present; live Canvas validation remains pending.
+See [current transport](openhands-transport.md) and [evidence](openhands-canvas-evidence.md).
 Delivery branch: `codex/multi-harness-engine`. Use an isolated worktree for edits
 so active sessions and uncommitted files in the original checkout stay intact.
 

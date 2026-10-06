@@ -35,7 +35,7 @@ def _detect_host(env: Mapping[str, str]) -> str:
     because its markers ride in a terminal a human can launch another harness
     from; multiagent/channels.py holds the full rule this mirrors.
     """
-    known_hosts = ("claude", "codex", "cursor")
+    known_hosts = ("claude", "codex", "cursor", "openhands")
     override = env.get("CREW_HOST", "")
     if override:
         normalized = override.casefold()
@@ -43,7 +43,7 @@ def _detect_host(env: Mapping[str, str]) -> str:
             return normalized
         _warn_once(
             "invalid-crew-host",
-            f"crew: CREW_HOST={override!r} is not a known host (claude, codex, cursor); "
+            f"crew: CREW_HOST={override!r} is not a known host (claude, codex, cursor, openhands); "
             "treating the host as unknown (no native channel)",
         )
         return "unknown"

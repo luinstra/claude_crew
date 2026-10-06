@@ -190,6 +190,11 @@ def step_to_dict(step: BuildStep) -> dict[str, object]:
         data["question"]["review_ref"] = review.review_ref_to_dict(
             step.question.review_ref
         )
+    if step.ref:
+        from multiagent.openhands_native_transport import owner_commands
+        commands = owner_commands(step.ref, ("build-next", "build-resume", "build-cancel", "build-decide"))
+        if commands:
+            data["commands"] = commands
     return data
 
 
@@ -437,7 +442,7 @@ def journal_from_dict(value: object) -> BuildJournal:
         )
         or any(not isinstance(p, str) or not p for p in journal.feedback_paths)
         or type(journal.executor.resume_executor) is not bool
-        or journal.executor.host not in {"claude", "codex", "cursor", "unknown"}
+        or journal.executor.host not in {"claude", "codex", "cursor", "openhands", "unknown"}
         or not isinstance(journal.executor.executor, str)
         or not isinstance(journal.executor.channel, str)
         or any(
@@ -504,9 +509,9 @@ def journal_from_dict(value: object) -> BuildJournal:
         frozen.role == "crew:executor"
         and (
             frozen.executor != "crew:executor"
-            or frozen.host not in {"claude", "codex"}
+            or frozen.host not in {"claude", "codex", "openhands"}
             or frozen.channel != frozen.host
-            or (frozen.host == "codex" and frozen.resume_executor)
+            or (frozen.host in {"codex", "openhands"} and frozen.resume_executor)
             or any(
                 v is not None for v in (frozen.provider, frozen.model, frozen.reasoning)
             )
@@ -722,10 +727,10 @@ def _park(
 def _freeze_executor(selection: execution.ExecutorSelection) -> FrozenExecutor:
     host = channels.current_host()
     if selection.executor == "crew:executor":
-        if host not in {"claude", "codex"} or selection.channel != host:
+        if host not in {"claude", "codex", "openhands"} or selection.channel != host:
             raise review.WorkflowError(
                 "route_unavailable",
-                "crew:executor requires an admitted Claude or Codex native executor route",
+                "crew:executor requires an admitted native executor route",
             )
         return FrozenExecutor(
             selection.executor,
@@ -801,17 +806,21 @@ def park_review_timeout(ref: BuildRef, diagnostic: str) -> None:
 
 
 def _owner_argv(ref: BuildRef, verb: str) -> tuple[str, ...]:
-    return (
+    from multiagent.openhands_native_transport import owner_command
+    return owner_command(ref, (
         str(Path(__file__).resolve().parents[2] / "crew"),
         verb,
         "--session-segment",
         ref.session_segment,
         "--loop-instance-id",
         ref.loop_instance_id,
-    )
+    ))
 
 
 def recovery_argv(ref: BuildRef, action_id: str) -> tuple[str, ...]:
+    from multiagent.openhands_native_transport import owner_commands, issued_commands
+    if owner_commands(ref, ("build-next",)):
+        return issued_commands(ref, action_id)["recover"]
     return writer_recovery_argv(ref.session_segment, ref.loop_instance_id, action_id)
 
 
@@ -973,32 +982,39 @@ def _feedback_references(journal: BuildJournal) -> list[str]:
 def _item(ref: BuildRef, journal: BuildJournal) -> BuildWorkItem:
     action, frozen = journal.action, journal.executor
     external = frozen.role is None
-    commands = {
-        "execute" if external else "claim": (
-            *_owner_argv(ref, "build-execute" if external else "build-claim"),
-            "--action-id",
-            action.action_id,
-        ),
-        "next": _owner_argv(ref, "build-next"),
-        "recover": recovery_argv(ref, action.action_id),
-    }
-    if not external:
-        for name in (("bind",) if frozen.host == "codex" else ("bind", "capture")):
-            commands[f"native_{name}"] = (
-                *_owner_argv(ref, f"build-native-{name}"),
+    if not external and frozen.host == "openhands":
+        from multiagent.openhands_native_transport import issued_commands
+        commands = {**issued_commands(ref, action.action_id), "next": _owner_argv(ref, "build-next")}
+    else:
+        commands = {
+            "execute" if external else "claim": (
+                *_owner_argv(ref, "build-execute" if external else "build-claim"),
                 "--action-id",
                 action.action_id,
+            ),
+            "next": _owner_argv(ref, "build-next"),
+            "recover": recovery_argv(ref, action.action_id),
+        }
+        if not external:
+            for name in (("bind",) if frozen.host == "codex" else ("bind", "capture")):
+                commands[f"native_{name}"] = (
+                    *_owner_argv(ref, f"build-native-{name}"),
+                    "--action-id",
+                    action.action_id,
+                )
+            commands["capture"] = (
+                *_owner_argv(ref, "build-capture"),
+                "--action-id",
+                action.action_id,
+                "--return-file",
+                str(_root(ref) / "host-return" / f"{action.action_id}.txt"),
             )
-        commands["capture"] = (
-            *_owner_argv(ref, "build-capture"),
-            "--action-id",
-            action.action_id,
-            "--return-file",
-            str(_root(ref) / "host-return" / f"{action.action_id}.txt"),
-        )
     native_transport = None
-    if not external and frozen.host == "codex":
-        from multiagent.codex_native_transport import launch_metadata
+    if not external and frozen.host in {"codex", "openhands"}:
+        if frozen.host == "openhands":
+            from multiagent.openhands_native_transport import launch_metadata
+        else:
+            from multiagent.codex_native_transport import launch_metadata
         native_transport = launch_metadata(ref, action.action_id, frozen.role,
             frozen.model, frozen.reasoning, action.prompt_path,
             str(_root(ref) / "host-return" / f"{action.action_id}.txt"))
@@ -1174,9 +1190,12 @@ def start_build(request: BuildRequest) -> BuildStep:
                     fresh.update(
                         schema=SCHEMA_VERSION, bl_workflow=journal_to_dict(journal)
                     )
+                    ref = BuildRef(session, fresh["loop_instance_id"])
+                    if frozen.host == "openhands":
+                        from multiagent.openhands_native_transport import freeze_context
+                        freeze_context(ref)
                     continuations.invalidate(session, "build-executor")
                     atomic_write_json(path, fresh)
-                    ref = BuildRef(session, fresh["loop_instance_id"])
         except continuations.ContinuationLockError:
             return BuildStep(
                 review.StepType.WAITING,
@@ -1612,12 +1631,15 @@ def _claim(
     *,
     external: bool,
     observed: BuildJournal | None = None,
-) -> BuildWorkItem:
-    def claim(data: dict, journal: BuildJournal) -> BuildWorkItem:
+) -> BuildWorkItem | None:
+    def claim(data: dict, journal: BuildJournal) -> BuildWorkItem | None:
         action = journal.action
         if observed is not None and not _same_execution_probe(journal, observed):
             raise _AlreadyClaimed()
-        _admit(data, journal)
+        try:
+            _admit(data, journal)
+        except review.WorkflowError as exc:
+            raise review.ClaimRefused(exc.code, exc.message, exc.error) from exc
         if (
             action is None
             or action.action_id != action_id
@@ -1630,7 +1652,7 @@ def _claim(
         if action.status != "ready":
             raise _AlreadyClaimed()
         if not _route_matches(journal.executor):
-            raise review.WorkflowError(
+            raise review.ClaimRefused(
                 "route_unavailable", "frozen executor route changed before claim"
             )
         if not before.complete or before != journal.baseline:
@@ -1641,7 +1663,7 @@ def _claim(
                 "workspace_guard",
                 "Cannot claim work over changed or unknown HEAD/index/branch",
             )
-            return _item(ref, journal)
+            return None
         try:
             _feedback_references(journal)
             _round_prompt_content(journal, ref)
@@ -1653,7 +1675,7 @@ def _claim(
                 "feedback_recovery",
                 f"Retained feedback cannot be read: {exc}",
             )
-            return _item(ref, journal)
+            return None
         _action_prompt_content(journal, ref)
         journal.action = replace(action, status="claimed", before=before)
         journal.outstanding_writer = action_id
@@ -1672,6 +1694,9 @@ def claim_build_action(ref: BuildRef, action_id: str) -> dict[str, object]:
         )
     except _AlreadyClaimed:
         return {"authorization": "wait", "action_id": action_id}
+    if item is None:
+        step = next_build(ref)
+        return {"authorization": step.type, "step": step_to_dict(step), "claim_state": "unclaimed"}
     claimed = _transaction(
         ref, lambda _data, journal: journal.outstanding_writer == action_id
     )
@@ -2161,6 +2186,9 @@ def capture_build_return(
                 "invalid_action",
                 "host capture cannot settle an external provider action",
             )
+        if journal.executor.host == "openhands":
+            from multiagent.openhands_native_transport import require_event_capture
+            require_event_capture(ref, action_id, content, status)
         if journal.executor.host == "codex":
             from multiagent.codex_native_transport import require_capture
 
@@ -2258,7 +2286,7 @@ def capture_build_native(
     )
 
 
-def recover_build_action(ref: BuildRef, action_id: str, confirmation: str) -> BuildStep:
+def recover_build_action(ref: BuildRef, action_id: str, confirmation: str, *, reserved: bool = False) -> BuildStep:
     if confirmation != "not_running":
         raise review.WorkflowError(
             "not_confirmed",
@@ -2266,12 +2294,15 @@ def recover_build_action(ref: BuildRef, action_id: str, confirmation: str) -> Bu
         )
 
     def recover(data: dict, journal: BuildJournal) -> None:
-        if journal.outstanding_writer != action_id or journal.action is None:
+        unclaimed = (reserved and journal.action is not None and journal.action.action_id == action_id
+                     and journal.action.status == "ready" and journal.outstanding_writer is None)
+        if not unclaimed and (journal.outstanding_writer != action_id or journal.action is None):
             raise review.WorkflowError(
                 "invalid_recovery", "no matching outstanding writer"
             )
         journal.outstanding_writer = None
-        journal.action = replace(journal.action, status="recovered")
+        journal.action = replace(journal.action, status="recovered",
+                                 before=journal.baseline if unclaimed else journal.action.before)
         if is_active_value(data.get("active")):
             _park(
                 data,
@@ -2493,6 +2524,10 @@ def decide_build(decision: BuildDecision) -> BuildStep:
                 "invalid_decision",
                 "answer must be nonblank and applicable only to answer_executor",
             )
+        if decision.kind in {"retry_synthesis", "retry_review"} and journal.executor.host == "openhands":
+            from multiagent.openhands_native_transport import validate_context
+            validate_context(ref)
+            validate_context(journal.review_ref)
         if _workspace_digest() != question.workspace_sha256 and not (
             decision.kind == "recheck_workspace" and _guard_clean(journal)
         ):

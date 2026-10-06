@@ -101,6 +101,9 @@ def capture_review_return(ref: review.ReviewRef, action_id: str, content: bytes,
                 / "native-transport" / "anchor", "native capture", create_parents=True).parent
             require_capture(root, action_id, handle, completion_observed, status=status, diagnostic=diagnostic,
                             launch_refused=launch_refused, ref=ref)
+        if action["driver"] == "native" and action["channel"] == "openhands":
+            from multiagent.openhands_native_transport import require_event_capture
+            require_event_capture(ref, action_id, content, status)
         issued_paths = review._issued_artifact_paths(action)
         path_value = capture_path or (action["return_transport"]["fallback"]["ingress_path"]
             if action["kind"] == "reviewer" else action["ingress_path"])
@@ -169,6 +172,9 @@ def capture_measure_return(ref: measure.MeasureRef, action_id: str, content: byt
             require_capture(measure._safe_path(root / "native-transport", root), action_id,
                             handle, completion_observed, status=status, diagnostic=diagnostic,
                             launch_refused=launch_refused, ref=ref)
+        if journal.advisor_channel == "openhands":
+            from multiagent.openhands_native_transport import require_event_capture
+            require_event_capture(ref, action_id, content, status)
         primary = str(root / "ingress" / f"{action_id}.txt")
         fallback = str(root / "host-return" / f"{action_id}.txt")
         if capture_path is not None and capture_path not in {primary, fallback}:

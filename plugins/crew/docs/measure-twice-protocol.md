@@ -169,10 +169,11 @@ accepted-outcome digest derived from verified accepted action bytes and judgment
 certify loop evidence. The guard preserves strict majority, all-failed symmetry,
 target drift checks, revision counts, advisory collection and forced audit stamps.
 
-Advisor actions are fresh, with no build executor continuation. Static Claude and
-Codex host-role metadata admit planning (`crew:advisor`, `inherit`, advisory
+Advisor actions are fresh, with no build executor continuation. Static Claude, Codex and
+OpenHands host-role metadata admit planning (`crew:advisor`, `inherit`, advisory
 access). Codex uses the shared role prompt and owned host-written capture through
-the [Codex transport](codex-transport.md). Cursor and unknown hosts fail with
+the [Codex transport](codex-transport.md). OpenHands uses frozen backend context and
+persisted native task events through the [OpenHands transport](openhands-transport.md). Cursor and unknown hosts fail with
 `unsupported_planning_host` before new activation. The stage machine is
 host-neutral.
 

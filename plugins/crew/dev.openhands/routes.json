@@ -1,0 +1,14 @@
+{
+  "inherit": {
+    "roles": {
+      "crew:advisor": "crew-advisor-b933b5c8b4f3228abc9d5814fb772b466030e166aa153964b3848e690a6c7527",
+      "crew:document-writer": "crew-document-writer-9b1722c53516cf8977252291634cd93e5ad5077c35eb713ab4a15055c374e65d",
+      "crew:executor": "crew-executor-9368e8df87be302bbb1ccfdf3c0e777c8ff943a708a47838926fe08b50164291",
+      "crew:formatter": "crew-formatter-648e325b6bf530dfda420eead4e44711d5b384c6c2eb0916b0bd37a30a0727cd",
+      "crew:panelist": "crew-panelist-f586791c85276f31a848c3d6558fdf00eeb44f17877526f04b147df28ba02075",
+      "crew:reader": "crew-reader-bf29cb2fd3beb8510db919d8903775f8a177bcbcb16f4b6846d23649816b8efa",
+      "crew:reviewer": "crew-reviewer-954a8ad264be6c35b7651b2bd8e4619eff2da26a93b2fb56a423e869e9366e0a",
+      "crew:scribe": "crew-scribe-5609e80370853f60655e29aa2414fd69efeb0ad29e188147374ad2b7be6000e0"
+    }
+  }
+}
