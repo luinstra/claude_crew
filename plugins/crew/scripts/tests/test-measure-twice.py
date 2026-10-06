@@ -25,6 +25,8 @@ import artifact_prune
 import models
 from multiagent import config, seats, measure_twice as mt, review_workflow as rw, workflow_transport as transport
 from multiagent import claude_native_transport as native
+from multiagent import codex_native_transport as codex_native
+from multiagent.providers import ProviderResult
 
 VALID = b"## VERDICT\nAPPROVED\n\n## FINDINGS\nnone\n"
 
@@ -858,6 +860,82 @@ class MeasureTests(unittest.TestCase):
                 self.start()
             self.assertEqual(caught.exception.code, "unsupported_planning_host")
             self.assertFalse(loop_state.resolve("mt", "isolated").exists())
+
+    def test_codex_detected_planning_revises_and_completes_with_external_panel(self) -> None:
+        def draft(step: mt.MeasureStep) -> mt.MeasureStep:
+            item = step.work_items[0]
+            mt.claim_measure_action(step.ref, item.action_id)
+            handle = f"advisor-{item.action_id}"
+            codex_native.bind_native_launch(codex_native.NativeLaunch(step.ref, item.action_id, handle))
+            Path(item.staging_path).write_bytes(b"# Plan\nWrite a harmless text file.\n")
+            return transport.capture_measure_return(step.ref, item.action_id, b"plan written",
+                handle=handle, completion_observed=True)
+
+        with mock.patch.dict(os.environ, {"CREW_HOST": "", "CODEX_THREAD_ID": "codex-planning"}):
+            step = self.start()
+            advisor = step.work_items[0]
+            self.assertEqual((advisor.driver, advisor.role, advisor.model, advisor.channel, advisor.access),
+                             ("native", "crew:advisor", "inherit", "codex", rw.ACCESS_ADVISORY))
+            self.assertEqual(mt.start_measure_twice(self.request), step)
+            panel = draft(step)
+            for verdict in ("REVISE", "APPROVED"):
+                self.assertEqual(len(panel.work_items), 2)
+                for item in panel.work_items:
+                    self.assertEqual(item.driver, "external")
+                    self.assertEqual(item.channel, "claude")
+                    provider = mock.Mock()
+                    provider.is_available.return_value = (True, "available")
+                    provider.run.return_value = ProviderResult(
+                        item.review_item.seat, item.model, True,
+                        VALID.decode().replace("APPROVED", verdict), None, 0.01)
+                    with mock.patch.object(rw, "_frozen_external_provider", return_value=provider):
+                        rw.execute_external_review(item.review_ref, item.action_id)
+                    provider.run.assert_called_once()
+                synthesis = mt.next_measure_twice(panel.ref)
+                item = synthesis.work_items[0]
+                self.assertEqual((item.kind, item.driver), ("synthesis", "parent"))
+                rw.claim_review_action(rw.ClaimRequest(item.review_ref, item.action_id))
+                transport.capture_review_return(item.review_ref, item.action_id,
+                    b"Synthesis\nBLOCKING_CAUSES: 1\n", judgment=transport.SynthesisJudgment(verdict))
+                step = mt.next_measure_twice(panel.ref)
+                if verdict == "REVISE":
+                    self.assertEqual(step.work_items[0].channel, "codex")
+                    self.assertEqual(self.state()["revision_round"], 1)
+                    panel = draft(step)
+            self.assertEqual(step.type, "terminal")
+            self.assertEqual(step.outcome["status"], "approved")
+            self.assertFalse(self.state()["active"])
+            self.assertEqual(self.start(), step)
+
+    def test_codex_cli_task_admission_asks_requirements_without_host_override(self) -> None:
+        spill = self.root / "request.json"
+        spill.write_text(json.dumps({"schema": 1, "raw_arguments":
+            "Plan a settings update to disable discussions for a particular root via configuration.",
+            "requirements": None}))
+        with mock.patch.dict(os.environ, {"CREW_HOST": "", "CODEX_THREAD_ID": "codex-planning"}):
+            result = self.cli("measure-twice", "-f", str(spill), "--session-id", "isolated", "--consume")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["type"], "needs_input")
+        self.assertFalse(loop_state.resolve("mt", "isolated").exists())
+
+    def test_codex_advisor_once_only_claim_cancellation_and_frozen_host(self) -> None:
+        with mock.patch.dict(os.environ, {"CREW_HOST": "", "CODEX_THREAD_ID": "codex-planning"}):
+            step = self.start()
+            item = step.work_items[0]
+            before = loop_state.resolve("mt", "isolated").read_bytes()
+            with mock.patch.dict(os.environ, {"CREW_HOST": "claude"}), self.assertRaises(rw.WorkflowError) as refused:
+                mt.claim_measure_action(step.ref, item.action_id)
+            self.assertEqual(refused.exception.code, "unsupported_planning_host")
+            self.assertEqual(loop_state.resolve("mt", "isolated").read_bytes(), before)
+            self.assertEqual(mt.claim_measure_action(step.ref, item.action_id)["authorization"], "spawn")
+            self.assertEqual(mt.claim_measure_action(step.ref, item.action_id)["authorization"], "do_not_spawn")
+            self.assertEqual(mt.next_measure_twice(step.ref).type, "waiting")
+            terminal = mt.cancel_measure_twice(step.ref, "cancel Codex advisor")
+            self.assertEqual(terminal.outcome["status"], "cancelled")
+            Path(item.staging_path).write_bytes(b"# Late plan")
+            with self.assertRaises(rw.WorkflowError):
+                transport.capture_measure_return(step.ref, item.action_id, b"late completion")
+            self.assertEqual(mt.next_measure_twice(step.ref), terminal)
 
     def test_once_only_claim_and_waiting(self) -> None:
         step = self.start()

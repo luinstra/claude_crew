@@ -98,3 +98,22 @@ separate current gate; planning uses the same lifecycle hooks. This does not
 claim a second installed end-to-end planning run. See the
 [protocol](measure-twice-protocol.md), [transport](codex-transport.md), and
 [Claude CLI gate evidence](phase-4-measure-twice-evidence.md).
+
+## Planning compatibility regression evidence
+
+Three additional deterministic checks cover automatic Codex detection, the
+original settings task reaching ordered requirements questions, and an inherited
+advisor with an external Claude review panel progressing through revision and
+approval. They also retain once-only claims, frozen-host admission, cancellation
+and rejection of late returns. The advisor fixture uses the current owned launch
+binding and completion-observed capture contract.
+
+Before integrating the newer native adapter, an installed Crew 0.85.0 local
+repair was exercised on 2026-10-05 without `CREW_HOST`. A fresh native advisor
+wrote its staging plan and returned its completion report; the configured
+external Sol reviewer (requested `gpt-6.1-sol`, requested-only attribution)
+completed run `run-c3ae4374dfb4`. The loop reached APPROVED with one usable seat,
+quorum met and no overrides. Terminal replay was identical, the loop was
+inactive, and no implementation file was created. That check is historical
+explicit-flow evidence for the local repair, not a gate for the newer native
+transport or automatic Stop/compaction behavior.
